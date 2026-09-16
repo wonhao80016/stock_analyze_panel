@@ -358,6 +358,15 @@ class TaiwanDailyUpdateService:
             margin_stats.status = "failed"
             margin_stats.failed_dates.append({"error": str(e)})
 
+        # 4b. Publish indicators and signals for the engines that read the enriched table.
+        if refresh_daily and daily_stats.status in {"success", "skipped"}:
+            try:
+                from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+
+                TaiwanEnrichedRefreshService().refresh_recent()
+            except Exception as e:
+                logger.warning("Taiwan enriched publish failed: %s", e)
+
         # 5. Evaluate Freshness and Overall Status
         run_finish = taipei_now()
         freshness = self.get_freshness(target_date=target)
