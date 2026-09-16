@@ -514,7 +514,8 @@ class DepthService:
         rpm = (lim.rpm if lim and lim.rpm else 30)
 
         # ① 套餐范围 clamp
-        tier = tier_label().split()[0].split("+")[0].strip().lower()
+        # Taiwan official mode has no tier, so tier_label() is empty.
+        tier = (tier_label().split() or [""])[0].split("+")[0].strip().lower()
         lo, hi = TIER_INTERVAL_RANGE.get(tier, DEFAULT_RANGE)
         raw_user = preferences.get_depth_polling_interval()
         user_interval = max(lo, min(hi, raw_user))

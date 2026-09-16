@@ -416,7 +416,8 @@ class QuoteService:
     def _current_tier() -> str:
         """获取当前档位名（小写）。"""
         from app.tickflow.policy import tier_label
-        return tier_label().split()[0].split("+")[0].strip().lower()
+        # Taiwan official mode has no tier, so tier_label() is empty.
+        return (tier_label().split() or [""])[0].split("+")[0].strip().lower()
 
     @classmethod
     def realtime_mode(cls) -> str:
