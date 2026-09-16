@@ -927,6 +927,9 @@ class QuoteService:
             "amount": "amount",
             "timestamp": "quote_ts",
         }
+        # Taiwan official provider emits "close" where TickFlow emits "last_price".
+        if "last_price" not in df.columns and "close" in df.columns:
+            cols_map["close"] = "close"
         select_exprs = []
         for src, dst in cols_map.items():
             if src in df.columns:
