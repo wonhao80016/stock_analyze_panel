@@ -1,9 +1,9 @@
 
 <div align="center">
 
-# 📈 Nanachi 的台股監控看板
+# 📈 Itoy 的台股監控看板
 
-[![聲明:個人開源](https://img.shields.io/badge/⚠️_聲明-個人開源-green?style=for-the-badge&labelColor=red)](https://github.com/nanachi1212/TWstockfor_tick-stock-panel)
+[![聲明:個人開源](https://img.shields.io/badge/⚠️_聲明-個人開源-green?style=for-the-badge&labelColor=red)](https://github.com/Itoy1212/TWstockfor_tick-stock-panel)
 
 
 
@@ -72,15 +72,15 @@
 
 ### 方式 A:桌面安裝包(最簡單)
 
-到 [Releases](https://github.com/nanachi1212/TWstockfor_tick-stock-panel/releases) 下載對應平台的安裝檔:
+到 [Releases](https://github.com/Itoy1212/TWstockfor_tick-stock-panel/releases) 下載對應平台的安裝檔:
 
 | 平台 | 檔案 |
 | :--- | :--- |
-| Windows x64 | `NanachiStockPanel-Setup-x64.exe` |
-| macOS(Apple Silicon) | `NanachiStockPanel-macos-arm64.dmg` |
-| Linux | `NanachiStockPanel-linux-x64.tar.gz` |
+| Windows x64 | `ItoyStockPanel-Setup-x64.exe` |
+| macOS(Apple Silicon) | `ItoyStockPanel-macos-arm64.dmg` |
+| Linux | `ItoyStockPanel-linux-x64.tar.gz` |
 
-Windows 不需要系統管理員權限,預設裝到 `D:\NanachiStockPanel`。使用者資料在安裝目錄下的 `data/`,覆蓋安裝不會遺失。
+Windows 不需要系統管理員權限,預設裝到 `D:\ItoyStockPanel`。使用者資料在安裝目錄下的 `data/`,覆蓋安裝不會遺失。
 
 ### 方式 B:Docker
 
@@ -189,6 +189,6 @@ AI_API_KEY=                    # 選配;留空 = 關閉 AI 功能
 
 ## 📄 License
 
-[MIT](./LICENSE) © Nanachi 的台股監控看板 contributors
+[MIT](./LICENSE) © Itoy 的台股監控看板 contributors
 
 本專案由 [tick-stock-panel](https://github.com/shy3130/tick-stock-panel) 改作而來,原專案為 A 股面板,本分支已改為台股定位。

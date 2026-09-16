@@ -22,7 +22,7 @@ export function Logo({ className, size = 32, style }: LogoProps) {
       className={className}
       style={style}
       role="img"
-      aria-label="Nanachi 的台股監控看板"
+      aria-label="Itoy 的台股監控看板"
     >
       {/* 左方括號 */}
       <path

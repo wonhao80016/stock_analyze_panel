@@ -1,13 +1,13 @@
 ; ===========================================================================
 ; Tick Stock Panel — Inno Setup 安裝包腳本
 ; ===========================================================================
-; 用途: 把 PyInstaller 產出的 dist/NanachiStockPanel/ 文件夾封裝成
+; 用途: 把 PyInstaller 產出的 dist/ItoyStockPanel/ 文件夾封裝成
 ;       單個 Setup.exe 安裝程序 (雙擊→安裝精靈→快捷方式→可卸載)。
 ;
 ; 構建 (本地):
 ;   1. 先跑 PyInstaller: cd backend && uv run pyinstaller ../packaging/tickflow.spec
 ;   2. 再跑 Inno Setup:   ISCC.exe packaging\tickflow.iss
-;   3. 產物: packaging\Output\NanachiStockPanel-Setup-x.x.x.exe
+;   3. 產物: packaging\Output\ItoyStockPanel-Setup-x.x.x.exe
 ;
 ; 設計決策:
 ;   - 裝到用戶目錄 {localappdata}\Programs\ (不彈 UAC, 不需管理員)
@@ -18,10 +18,10 @@
 ;   - 卸載入口 (控制面板可見)
 ; ===========================================================================
 
-#define MyAppName          "Nanachi 的台股監控看板"
-#define MyAppNameEN       "Nanachi Stock Panel"
-#define MyAppExeName      "NanachiStockPanel.exe"
-#define MyAppPublisher    "Nanachi"
+#define MyAppName          "Itoy 的台股監控看板"
+#define MyAppNameEN       "Itoy Stock Panel"
+#define MyAppExeName      "ItoyStockPanel.exe"
+#define MyAppPublisher    "Itoy"
 
 ; 版本號: 從 frontend/package.json 讀取, 與 Release tag 保持一致
 ; 手動指定更可靠 (CI 傳入 /DMyAppVersion)
@@ -37,11 +37,11 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 ; 默認裝到 D 盤 (非系統盤), 用戶可在精靈中改任意位置
 ; 若 D 盤不存在, [Code] 段 InitializeWizard 會自動回退到用戶目錄
-DefaultDirName=D:\NanachiStockPanel
+DefaultDirName=D:\ItoyStockPanel
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=Output
-OutputBaseFilename=NanachiStockPanel-Setup-{#MyAppVersion}
+OutputBaseFilename=ItoyStockPanel-Setup-{#MyAppVersion}
 
 ; 關鍵: 不需要管理員權限, 永不彈 UAC
 ; 裝到 D 盤普通目錄 (非 Program Files) 不需要管理員權限
@@ -78,7 +78,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; 把 PyInstaller 產出的整個文件夾搬進安裝目錄
 ; Source 路徑相對於 .iss 文件所在目錄
-Source: "..\backend\dist\NanachiStockPanel\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\backend\dist\ItoyStockPanel\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 ; 開始菜單
@@ -140,7 +140,7 @@ begin
   // D 盤存在 → 用 D 盤; 否則回退用戶目錄 (無需管理員權限)
   if not DirExists('D:\') then
   begin
-    DefaultDir := ExpandConstant('{localappdata}\Programs\NanachiStockPanel');
+    DefaultDir := ExpandConstant('{localappdata}\Programs\ItoyStockPanel');
     WizardForm.DirEdit.Text := DefaultDir;
   end;
 end;

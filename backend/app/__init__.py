@@ -1,4 +1,4 @@
-"""Nanachi 的台股監控看板 backend."""
+"""Itoy 的台股監控看板 backend."""
 
 import sys
 from pathlib import Path

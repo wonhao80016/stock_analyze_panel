@@ -303,7 +303,7 @@ AI 必須按以下順序工作：
 ### 6.1 可直接使用的任務模板
 
 ```text
-請在 Nanachi 的台股監控看板 當前倉庫中實現：[具體需求]。
+請在 Itoy 的台股監控看板 當前倉庫中實現：[具體需求]。
 
 開始前完整閱讀 AGENTS.md、CONTRIBUTING.md 和
 docs/secondary-development.md，並先檢查 git status、真實調用鏈和現有測試。

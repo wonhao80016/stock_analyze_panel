@@ -25,12 +25,12 @@ interface Variant {
   glow?: string                       // 名字下方的發光線條 hex
 }
 
-// 同一個名字 "Nanachi 的台股監控看板" 在 4 種風格語言裡的呈現
+// 同一個名字 "Itoy 的台股監控看板" 在 4 種風格語言裡的呈現
 // 長字符串自動用更小字號 + 更窄字距,免得撐爆卡片;但風格語言(字體/字重/配色/圖標)保持不變
 const VARIANTS: Variant[] = [
   {
     id: 'pulsar',
-    name: 'Nanachi 的台股監控看板',
+    name: 'Itoy 的台股監控看板',
     tagline: 'TAIWAN STOCK · SIGNAL TERMINAL',
     hint: '脈衝星、雷達波紋 — 青綠強調色,字重黑體,中等字距',
     icon: RadioTower,
@@ -40,7 +40,7 @@ const VARIANTS: Variant[] = [
   },
   {
     id: 'vanta',
-    name: 'Nanachi 的台股監控看板',
+    name: 'Itoy 的台股監控看板',
     tagline: 'MARKET · INTELLIGENCE',
     hint: 'Vantablack — 純白單色,字重最重,字距最寬,monochrome 高級感',
     icon: Square,
@@ -50,7 +50,7 @@ const VARIANTS: Variant[] = [
   },
   {
     id: 'helix',
-    name: 'Nanachi 的台股監控看板',
+    name: 'Itoy 的台股監控看板',
     tagline: 'QUANT · TERMINAL',
     hint: 'DNA 螺旋 — 紫色強調,等寬字體,賽博朋克經典意象',
     icon: GitFork,
@@ -60,7 +60,7 @@ const VARIANTS: Variant[] = [
   },
   {
     id: 'aurora',
-    name: 'Nanachi 的台股監控看板',
+    name: 'Itoy 的台股監控看板',
     tagline: 'TAIWAN STOCK · DASHBOARD',
     hint: '極光 — 青色強調,細字優雅,適中字距,與漲跌語義色不衝突',
     icon: Sparkles,
@@ -85,7 +85,7 @@ export function Branding() {
     <>
       <PageHeader
         title="視覺風格預覽"
-        subtitle="名字保持 Nanachi 的台股監控看板,4 種賽博朋克 + 高級感的視覺處理 — 字重、字距、配色、圖標各不同。挑你最喜歡的告訴我。"
+        subtitle="名字保持 Itoy 的台股監控看板,4 種賽博朋克 + 高級感的視覺處理 — 字重、字距、配色、圖標各不同。挑你最喜歡的告訴我。"
       />
 
       <div className="px-8 py-6">

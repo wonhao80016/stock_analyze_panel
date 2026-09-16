@@ -82,7 +82,7 @@ if not getattr(sys, "frozen", False):
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
     logger.info(
-        "Nanachi 的台股監控看板 v%s starting (mode=%s)",
+        "Itoy 的台股監控看板 v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
 
@@ -378,7 +378,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Nanachi 的台股監控看板",
+    title="Itoy 的台股監控看板",
     version=__version__,
     description="台股選股、監控與回測面板",
     lifespan=lifespan,

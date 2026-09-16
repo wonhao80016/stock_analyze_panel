@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Nanachi 的台股監控看板 — 一鍵啟動前後端
+# Itoy 的台股監控看板 — 一鍵啟動前後端
 #
 # 用法:
 #   ./dev.sh                          # 默認 backend:3018  frontend:3011
@@ -164,7 +164,7 @@ prefix_awk() {
 
 echo
 echo -e "${BLUE}╭──────────────────────────────────────────────╮${NC}"
-echo -e "${BLUE}│${NC}  ${GREEN}Nanachi 的台股監控看板${NC}                      ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  ${GREEN}Itoy 的台股監控看板${NC}                      ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  backend   ${YELLOW}http://$DISPLAY_HOST:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  frontend  ${YELLOW}http://$DISPLAY_HOST:$FRONTEND_PORT${NC}          ${BLUE}│${NC}"

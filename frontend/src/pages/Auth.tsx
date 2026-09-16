@@ -89,7 +89,7 @@ export function Auth() {
         {/* Logo */}
         <div className="mb-6 flex flex-col items-center gap-2">
           <Logo className="h-10 w-10" />
-          <h1 className="text-lg font-semibold text-foreground">Nanachi 的台股監控看板</h1>
+          <h1 className="text-lg font-semibold text-foreground">Itoy 的台股監控看板</h1>
         </div>
 
         <div className="rounded-card border border-border bg-surface/90 p-6 shadow-2xl backdrop-blur">
@@ -173,7 +173,7 @@ export function Auth() {
               <p>
                 詳細配置說明見{' '}
                 <a
-                  href="https://github.com/nanachi1212/TWstockfor_tick-stock-panel/blob/main/docs/deploy-password.md"
+                  href="https://github.com/Itoy1212/TWstockfor_tick-stock-panel/blob/main/docs/deploy-password.md"
                   target="_blank"
                   rel="noreferrer"
                   className="text-accent underline-offset-2 hover:underline"

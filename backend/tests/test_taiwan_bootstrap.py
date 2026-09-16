@@ -61,7 +61,7 @@ def test_empty_taiwan_data_status(tmp_path: Path):
     assert status.trading_days == 0
     assert status.earliest_date is None
     assert status.latest_date is None
-    assert status.asset_info["repo"] == "nanachi1212/TWstockfor_tick-stock-panel"
+    assert status.asset_info["repo"] == "Itoy1212/TWstockfor_tick-stock-panel"
 
 
 def test_existing_taiwan_data_status(tmp_path: Path):

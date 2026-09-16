@@ -387,7 +387,7 @@ export function Layout() {
                 className="font-bold text-[11px] uppercase tracking-[0.14em] text-foreground whitespace-nowrap"
                 style={{ textShadow: `0 0 10px ${BRAND}44` }}
               >
-                Nanachi 的台股監控看板
+                Itoy 的台股監控看板
               </div>
             )}
             {/* 收起/展開 按鈕 */}

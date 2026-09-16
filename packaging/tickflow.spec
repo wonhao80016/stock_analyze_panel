@@ -10,7 +10,7 @@
 
 構建 (在項目根目錄):
   cd frontend && pnpm build                     # 先構建前端到 frontend/dist
-  pyinstaller packaging/tickflow.spec           # 產物在 dist/NanachiStockPanel/
+  pyinstaller packaging/tickflow.spec           # 產物在 dist/ItoyStockPanel/
 """
 import sys
 from importlib.util import find_spec
@@ -160,7 +160,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="NanachiStockPanel",
+    name="ItoyStockPanel",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -182,7 +182,7 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="NanachiStockPanel",
+    name="ItoyStockPanel",
 )
 
 # ── macOS: 封裝成 .app 包 ────────────────────────────────────────────
@@ -199,13 +199,13 @@ if _IS_MACOS:
 
     app = BUNDLE(
         coll,
-        name="NanachiStockPanel.app",
+        name="ItoyStockPanel.app",
         icon=APP_ICON,
-        bundle_identifier="com.nanachi.stockpanel",
+        bundle_identifier="com.Itoy.stockpanel",
         version=APP_VERSION,   # → CFBundleShortVersionString / CFBundleVersion
         info_plist={
-            "CFBundleName": "Nanachi 的台股監控看板",
-            "CFBundleDisplayName": "Nanachi 的台股監控看板",
+            "CFBundleName": "Itoy 的台股監控看板",
+            "CFBundleDisplayName": "Itoy 的台股監控看板",
             "CFBundleVersion": APP_VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13",

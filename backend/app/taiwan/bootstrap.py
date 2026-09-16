@@ -29,9 +29,9 @@ from app.taiwan.data_root import taiwan_data_root
 logger = logging.getLogger(__name__)
 
 # Canonical GitHub Release metadata
-GITHUB_REPO = "nanachi1212/TWstockfor_tick-stock-panel"
+GITHUB_REPO = "Itoy1212/TWstockfor_tick-stock-panel"
 RELEASE_TAG = "data-daily-2026-09-10"
-ASSET_NAME = "nanachi-tw-daily-2024-01-02_to_2026-09-10.zip"
+ASSET_NAME = "Itoy-tw-daily-2024-01-02_to_2026-09-10.zip"
 EXPECTED_SHA256 = "42e9535214197309f515750e3bc69c58eb6a81b7d8f4eed06e1d363216fa8358"
 DOWNLOAD_URL = f"https://github.com/{GITHUB_REPO}/releases/download/{RELEASE_TAG}/{ASSET_NAME}"
 ASSET_APPROX_SIZE_MB = 31
@@ -261,7 +261,7 @@ class TaiwanBootstrapService:
 
     def _run_job(self, job_id: str, force: bool = False) -> None:
         logger.info("Starting Taiwan historical bootstrap job %s", job_id)
-        with tempfile.TemporaryDirectory(prefix="nanachi_tw_bootstrap_") as tmp_dir_str:
+        with tempfile.TemporaryDirectory(prefix="Itoy_tw_bootstrap_") as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
             zip_file_path = tmp_dir / ASSET_NAME
             extract_dir = tmp_dir / "extracted"
