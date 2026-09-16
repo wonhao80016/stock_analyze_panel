@@ -144,6 +144,10 @@ def test_service_partial_failure_tolerance():
     mock_daily.get_daily.return_value = pl.DataFrame()
     svc.hybrid_provider = mock_daily
 
+    mock_store = MagicMock()
+    mock_store.scan_range.return_value = pl.DataFrame()
+    svc.daily_store = mock_store
+
     mock_inst = MagicMock()
     mock_inst.fetch_live_day.side_effect = RuntimeError("TWSE T86 timeout")
     svc.institutional_provider = mock_inst

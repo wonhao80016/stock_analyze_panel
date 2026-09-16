@@ -236,6 +236,31 @@ class TaiwanDailyStore:
             return pl.DataFrame(schema=_schema())
         return pl.concat(frames, how="diagonal_relaxed").select(TAIWAN_DAILY_COLUMNS)
 
+    def scan_range(
+        self,
+        symbols: list[str] | None,
+        start: date | None,
+        end: date | None,
+    ) -> pl.DataFrame:
+        """Same rows as :meth:`read_range`, but pushes the filters into the parquet scan.
+
+        read_range collects every partition in the window before filtering, which is
+        costly over multi-year ranges. Falls back to read_range if the scan fails.
+        """
+        pattern = str(self._data_dir / "date=*" / "part.parquet")
+        try:
+            lf = pl.scan_parquet(pattern, missing_columns="insert", extra_columns="ignore")
+            if symbols is not None:
+                lf = lf.filter(pl.col("symbol").is_in(symbols))
+            if start is not None:
+                lf = lf.filter(pl.col("date") >= start)
+            if end is not None:
+                lf = lf.filter(pl.col("date") <= end)
+            return lf.select(TAIWAN_DAILY_COLUMNS).sort(["symbol", "date"]).collect()
+        except Exception as exc:
+            logger.warning("scan_range fell back to read_range: %s", exc)
+            return self.read_range(symbols, start, end)
+
     def available_dates(self) -> list[date]:
         """Return all partition dates present in storage."""
         dates: list[date] = []

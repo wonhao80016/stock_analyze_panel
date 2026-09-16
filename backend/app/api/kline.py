@@ -401,6 +401,44 @@ def _get_previous_closes(
     return result
 
 
+_TAIWAN_INDICATOR_WARMUP_DAYS = 150
+
+
+def _needs_local_history(df, start: date) -> bool:
+    """Enriched rows may cover only the live candle, which cannot satisfy a range query."""
+    if df.is_empty():
+        return True
+    if "date" not in df.columns:
+        return False
+    earliest = df["date"].min()
+    if earliest is None:
+        return True
+    try:
+        return earliest > start
+    except TypeError:
+        return False
+
+
+def _read_taiwan_local_daily(symbol: str, start: date, end: date):
+    """Read daily bars from TaiwanDailyStore, extended back to warm up indicator windows.
+
+    Returns None when the store is unreadable so the caller falls back to a live fetch.
+    """
+    from app.taiwan.benchmarks import get_benchmark
+    from app.taiwan.daily_store import TaiwanDailyStore
+
+    warmup_start = start - timedelta(days=_TAIWAN_INDICATOR_WARMUP_DAYS)
+    try:
+        if (bench := get_benchmark(symbol)) is not None:
+            from app.taiwan.index_daily import get_index_daily_service
+
+            return get_index_daily_service().read_range(bench.symbol, warmup_start, end)
+        return TaiwanDailyStore().scan_range([symbol], warmup_start, end)
+    except Exception as e:
+        logger.debug("taiwan local daily read failed %s: %s", symbol, e)
+        return None
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -432,6 +470,16 @@ def get_daily(
 
     # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
     df = repo.get_daily_asset(asset_type, symbol, start, end)
+
+    if _needs_local_history(df, start):
+        local = _read_taiwan_local_daily(symbol, start, end)
+        if local is not None and not local.is_empty():
+            enriched = compute_enriched(local, factors=pl.DataFrame())
+            rows = enriched.filter(pl.col("date") >= start).to_dicts()
+            rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
+            resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info,
+                    "rows": rows, "source": "taiwan_local"}
+            return _attach_ext(resp, repo, symbol, ext_columns)
 
     if df.is_empty():
         try:

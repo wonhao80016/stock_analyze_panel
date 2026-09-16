@@ -34,6 +34,9 @@ from app.taiwan.detail_models import (
     TaiwanStockPriceLimit,
     TaiwanStockRealtime,
 )
+from app.taiwan.benchmarks import get_benchmark, is_benchmark
+from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.index_daily import get_index_daily_service
 from app.taiwan.enrichment.index import TaiwanIndexProvider
 from app.taiwan.enrichment.institutional import TaiwanInstitutionalProvider
 from app.taiwan.enrichment.margin import TaiwanMarginProvider
@@ -57,7 +60,9 @@ class TaiwanStockDetailService:
         institutional_provider: TaiwanInstitutionalProvider | None = None,
         margin_provider: TaiwanMarginProvider | None = None,
         index_provider: TaiwanIndexProvider | None = None,
+        daily_store: TaiwanDailyStore | None = None,
     ) -> None:
+        self.daily_store = daily_store or TaiwanDailyStore()
         self.hybrid_provider = hybrid_provider or TaiwanHybridProvider()
         self.institutional_provider = institutional_provider or TaiwanInstitutionalProvider()
         self.margin_provider = margin_provider or TaiwanMarginProvider()
@@ -75,6 +80,11 @@ class TaiwanStockDetailService:
         canonical_sym = parse_symbol(raw_symbol)
         symbol_str = canonical_sym.canonical
 
+        # Benchmark codes are case sensitive downstream (MIS channels, store keys).
+        if (bench := get_benchmark(symbol_str)) is not None and symbol_str != bench.symbol:
+            symbol_str = bench.symbol
+            canonical_sym = parse_symbol(bench.symbol)
+
         # 1. Identity from Security Master
         master_item = self.security_master.get_instrument(symbol_str)
         if master_item is not None:
@@ -90,6 +100,15 @@ class TaiwanStockDetailService:
                 industry=master_item.industry,
                 cfi_code=master_item.cfi_code,
                 etf_category=master_item.etf_category if master_item.etf_category else None,
+            )
+        elif (benchmark := get_benchmark(symbol_str)) is not None:
+            identity = TaiwanStockIdentity(
+                symbol=benchmark.symbol,
+                code=benchmark.code,
+                name=benchmark.name,
+                exchange=benchmark.exchange,
+                instrument_type="index",
+                is_supported=True,
             )
         else:
             # Fallback identity for unindexed or mock symbols
@@ -121,10 +140,18 @@ class TaiwanStockDetailService:
         daily_data = self._aggregate_daily(symbol_str, days)
 
         # 5. Institutional Investors (Three Major Institutional Flow)
-        institutional_data = self._aggregate_institutional(canonical_sym)
+        # Chip datasets are reported per listed instrument, so an index has no row to fetch.
+        benchmark_symbol = is_benchmark(symbol_str)
+        institutional_data = (
+            self._empty_institutional() if benchmark_symbol
+            else self._aggregate_institutional(canonical_sym)
+        )
 
         # 6. Margin Trading & Short Selling
-        margin_data = self._aggregate_margin(canonical_sym)
+        margin_data = (
+            self._empty_margin() if benchmark_symbol
+            else self._aggregate_margin(canonical_sym)
+        )
 
         # 7. Factors
         factors_data = self._aggregate_factors(institutional_data, margin_data)
@@ -232,10 +259,27 @@ class TaiwanStockDetailService:
             meta=SectionMeta(source="realtime_service", status="unavailable", is_stale=False),
         )
 
+    def _local_daily(self, symbol_str: str, days: int):
+        """Widen the window before tailing, since trading days are sparser than calendar days."""
+        end = taipei_now().date()
+        start = end - timedelta(days=days * 2 + 30)
+        if is_benchmark(symbol_str):
+            return get_index_daily_service().read_range(symbol_str, start, end)
+        return self.daily_store.scan_range([symbol_str], start, end)
+
     def _aggregate_daily(self, symbol_str: str, days: int) -> TaiwanHistoricalDaily:
-        """Fetch historical daily bars from Hybrid provider."""
+        """Fetch historical daily bars, preferring the local store over a live fetch.
+
+        The live provider returns only the current calendar month, so it cannot serve
+        the requested range on its own.
+        """
+        source = "taiwan_index_store" if is_benchmark(symbol_str) else "taiwan_daily_store"
         try:
-            df = self.hybrid_provider.get_daily([symbol_str])
+            df = self._local_daily(symbol_str, days)
+            # The stock provider cannot serve an index, so there is nothing to fall back to.
+            if df.is_empty() and not is_benchmark(symbol_str):
+                df = self.hybrid_provider.get_daily([symbol_str])
+                source = "hybrid_daily"
             if not df.is_empty():
                 rows: list[TaiwanDailyRow] = []
                 # Sort ascending by date
@@ -258,7 +302,7 @@ class TaiwanStockDetailService:
                     )
                 latest_date = rows[-1].date if rows else None
                 meta = SectionMeta(
-                    source=str(df.get_column("source")[0]) if "source" in df.columns else "hybrid_daily",
+                    source=str(df.get_column("source")[0]) if "source" in df.columns else source,
                     trade_date=latest_date,
                     status="available",
                     is_stale=False,
@@ -326,6 +370,22 @@ class TaiwanStockDetailService:
         return TaiwanInstitutionalData(
             status="unavailable",
             meta=SectionMeta(source="twse:t86", status="unavailable", is_stale=False),
+        )
+
+    @staticmethod
+    def _empty_institutional() -> TaiwanInstitutionalData:
+        """An index has no chip flows; report it as not applicable rather than a fetch failure."""
+        return TaiwanInstitutionalData(
+            status="unavailable",
+            meta=SectionMeta(source="not_applicable", status="unavailable", is_stale=False),
+        )
+
+    @staticmethod
+    def _empty_margin() -> TaiwanMarginData:
+        """An index has no margin balances; report it as not applicable rather than a fetch failure."""
+        return TaiwanMarginData(
+            status="unavailable",
+            meta=SectionMeta(source="not_applicable", status="unavailable", is_stale=False),
         )
 
     def _aggregate_margin(self, sym: TaiwanSymbol) -> TaiwanMarginData:
