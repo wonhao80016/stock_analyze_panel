@@ -3,11 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Zap, Settings2, Lock } from 'lucide-react'
 import { api, type CustomSignal } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { BUILTIN_SIGNAL_DEFINITIONS, type SignalKind } from '@/lib/signals'
+import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS, type SignalKind } from '@/lib/signals'
 import { CustomSignalDialog } from '@/components/signals/CustomSignalDialog'
 import { Skeleton } from '@/components/data/Skeleton'
 
-type SignalSection = 'builtin' | 'custom'
+type SignalSection = 'builtin' | 'abnormal' | 'custom'
 
 const KIND_LABEL: Record<SignalKind, string> = { entry: '入場', exit: '出場', both: '出入通用' }
 const KIND_CLASS: Record<SignalKind, string> = {
@@ -32,6 +32,7 @@ export function SettingsCustomSignalsPanel() {
   const enabledCustomSignals = signals.filter(sig => sig.enabled).length
   const tabs = [
     { key: 'builtin' as const, label: '內建訊號', count: BUILTIN_SIGNAL_DEFINITIONS.length, hint: '系統提供,唯讀' },
+    { key: 'abnormal' as const, label: '異動診斷訊號', count: ABNORMAL_SIGNAL_DEFINITIONS.length, hint: '盤後計算,唯讀' },
     { key: 'custom' as const, label: '自訂訊號', count: signals.length, hint: `${enabledCustomSignals} 個已啟用` },
   ]
 
@@ -105,14 +106,15 @@ export function SettingsCustomSignalsPanel() {
           </button>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-4">
           <StatCard label="內建訊號" value={BUILTIN_SIGNAL_DEFINITIONS.length} hint="系統提供,唯讀" />
+          <StatCard label="異動診斷訊號" value={ABNORMAL_SIGNAL_DEFINITIONS.length} hint="盤後計算,唯讀" />
           <StatCard label="自訂訊號" value={signals.length} hint="使用者建立,可編輯" />
           <StatCard label="已啟用自訂" value={enabledCustomSignals} hint="會注入 csg_* 欄" />
         </div>
 
         <div className="mt-5 rounded-card border border-border bg-base/60 p-1.5">
-          <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-1.5 md:grid-cols-3">
             {tabs.map(tab => {
               const active = activeSection === tab.key
               return (
@@ -158,6 +160,40 @@ export function SettingsCustomSignalsPanel() {
                         {KIND_LABEL[sig.kind]}
                       </span>
                     </div>
+                    <p className="mt-1 text-[11px] text-muted font-mono truncate">{sig.id}</p>
+                  </div>
+                  <span className="shrink-0 rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{sig.category}</span>
+                </div>
+                <p className="mt-3 text-xs leading-5 text-secondary">{sig.description}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {activeSection === 'abnormal' && (
+        <section className="rounded-card border border-border bg-surface p-5 space-y-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <Zap className="h-4 w-4 text-amber-400" />
+                <h3 className="text-sm font-medium text-foreground">異動診斷訊號</h3>
+                <Lock className="h-3.5 w-3.5 text-muted" />
+              </div>
+              <p className="mt-1 text-xs text-muted">
+                盤後由日線、三大法人與融資融券資料計算,於台股選股頁的異常異動診斷區使用。
+              </p>
+            </div>
+            <div className="text-[11px] text-muted">
+              籌碼類訊號需要先下載三大法人與融資融券資料
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {ABNORMAL_SIGNAL_DEFINITIONS.map(sig => (
+              <div key={sig.id} className="rounded-card border border-border bg-base p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h4 className="text-sm font-medium text-foreground truncate">{sig.name}</h4>
                     <p className="mt-1 text-[11px] text-muted font-mono truncate">{sig.id}</p>
                   </div>
                   <span className="shrink-0 rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{sig.category}</span>

@@ -14,8 +14,8 @@ import {
   cnSignal,
 } from './signals'
 
-// 這份原始 id 清單抄自 audit 報告記錄的「先前約 20 個內建訊號」，用來鎖定
-// id 集合本身不因本次 wording 變更而增減/改名。
+// 這份 id 清單鎖定內建訊號集合不被意外增減/改名。漲跌停四訊號已移除:
+// 其上游計算需要 A 股標的表提供漲跌停價，台股標的一律被跳過。
 const EXPECTED_BUILTIN_IDS = [
   'signal_ma_golden_5_20',
   'signal_ma_dead_5_20',
@@ -33,10 +33,6 @@ const EXPECTED_BUILTIN_IDS = [
   'signal_boll_breakout_upper',
   'signal_boll_breakdown_lower',
   'signal_volume_surge',
-  'signal_limit_up',
-  'signal_limit_down',
-  'signal_limit_down_recovery',
-  'signal_broken_limit_up',
 ]
 
 // 已知在 audit 中發現、且本批次應已處理掉的簡體字/A股慣用語彙（用「連續漲停」
@@ -48,7 +44,7 @@ const KNOWN_SIMPLIFIED_OR_A_SHARE_TERMS = [
 ]
 
 describe('BUILTIN_SIGNAL_DEFINITIONS — ids unchanged', () => {
-  it('has exactly the same 20 built-in signal ids as before (backend contract / saved rule identifiers)', () => {
+  it('has exactly the 16 built-in signal ids that Taiwan data can produce', () => {
     expect(BUILTIN_SIGNAL_DEFINITIONS.map(s => s.id).sort()).toEqual([...EXPECTED_BUILTIN_IDS].sort())
   })
 
@@ -80,15 +76,16 @@ describe('BUILTIN_SIGNAL_DEFINITIONS — Traditional Chinese wording', () => {
     expect(categories.has('均線')).toBe(true)
     expect(categories.has('趨勢')).toBe(true)
     expect(categories.has('量價')).toBe(true)
-    expect(categories.has('漲跌停')).toBe(true)
     expect(categories.has('均线')).toBe(false)
     expect(categories.has('趋势')).toBe(false)
   })
 
-  it('signal_limit_up description uses natural Taiwan wording and the corrected "連續漲停" term, without gaining investment-advice tone', () => {
-    const sig = BUILTIN_SIGNAL_DEFINITIONS.find(s => s.id === 'signal_limit_up')!
-    expect(sig.description).toContain('連續漲停')
-    expect(sig.description).not.toMatch(/建議|買入|賣出|進場|出場/)
+  it('drops the four limit-board signals, which are never computed for Taiwan symbols', () => {
+    const removed = ['signal_limit_up', 'signal_limit_down', 'signal_limit_down_recovery', 'signal_broken_limit_up']
+    for (const id of removed) {
+      expect(BUILTIN_SIGNAL_DEFINITIONS.find(s => s.id === id)).toBeUndefined()
+      expect(SIGNAL_OPTIONS).not.toContain(id)
+    }
   })
 
   it('every signal still has a non-empty description (semantics preserved, not just deleted)', () => {
@@ -107,7 +104,7 @@ describe('MONITOR_INTRADAY_SIGNAL_LABELS and cnSignal — Traditional Chinese', 
   })
 
   it('cnSignal resolves a built-in signal id to its Traditional Chinese name', () => {
-    expect(cnSignal('signal_limit_up')).toBe('漲停')
+    expect(cnSignal('signal_volume_surge')).toBe('放量')
   })
 
   it('cnSignal resolves a technical field id to Traditional Chinese (e.g. consecutive_limit_ups)', () => {

@@ -135,34 +135,8 @@ export const BUILTIN_SIGNAL_DEFINITIONS: BuiltinSignalDefinition[] = [
     category: '量價',
     description: '成交量顯著放大，可作為入場確認、出場確認或告警條件。',
   },
-  {
-    id: 'signal_limit_up',
-    name: '漲停',
-    kind: 'entry',
-    category: '漲跌停',
-    description: '收盤封住漲停，用於觀察強勢股、連續漲停與市場情緒監控。',
-  },
-  {
-    id: 'signal_limit_down',
-    name: '跌停',
-    kind: 'exit',
-    category: '漲跌停',
-    description: '收盤觸及跌停，用於風險控制與弱勢監控。',
-  },
-  {
-    id: 'signal_limit_down_recovery',
-    name: '跌停翹板',
-    kind: 'entry',
-    category: '漲跌停',
-    description: '盤中觸及跌停後回升，常用於短線情緒修復觀察。',
-  },
-  {
-    id: 'signal_broken_limit_up',
-    name: '炸板',
-    kind: 'exit',
-    category: '漲跌停',
-    description: '盤中觸及漲停但收盤未封住，用於強轉弱或分歧監控。',
-  },
+  // The four limit-board signals were dropped: their upstream computation needs the
+  // A-share instrument table for limit prices and is skipped for Taiwan symbols.
 ]
 
 export const MONITOR_INTRADAY_SIGNAL_LABELS: Record<string, string> = {
@@ -211,3 +185,85 @@ export function cnSignal(name: string, customNames?: Record<string, string>): st
   if (customNames && name in customNames) return customNames[name]
   return SIGNAL_LABELS[name] ?? FIELD_LABELS[name] ?? name
 }
+
+export interface AbnormalSignalDefinition {
+  id: string
+  name: string
+  category: string
+  description: string
+}
+
+/** Abnormal move and capital flow diagnostics.
+ *
+ * Computed per trading day from the daily, institutional and margin stores, so
+ * these are post-close statistics rather than the technical signals above. The
+ * ids must match the backend's signal type strings.
+ */
+export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
+  {
+    id: 'VOLUME_SPIKE',
+    name: '爆量',
+    category: '量能',
+    description: '成交量達前 5 個交易日均量的 2 倍以上。',
+  },
+  {
+    id: 'TURNOVER_SPIKE',
+    name: '成交額放大',
+    category: '量能',
+    description: '成交金額達前 5 個交易日均額的 2 倍以上。',
+  },
+  {
+    id: 'PRICE_MOVE',
+    name: '價格異動',
+    category: '價格',
+    description: '單日漲跌幅絕對值達 5% 以上，槓桿型 ETF 會先除以槓桿倍數再判定。',
+  },
+  {
+    id: 'FOREIGN_FLOW_SPIKE',
+    name: '外資異常買賣超',
+    category: '籌碼',
+    description: '外資買賣超達前 20 日平均的 3 倍，且絕對量至少 10 萬股。',
+  },
+  {
+    id: 'TRUST_FLOW_SPIKE',
+    name: '投信異常買賣超',
+    category: '籌碼',
+    description: '投信買賣超達前 20 日平均的 3 倍，且絕對量至少 5 萬股。',
+  },
+  {
+    id: 'MARGIN_SURGE',
+    name: '融資激增',
+    category: '籌碼',
+    description: '融資增減至少 50 萬股，且達前 20 日中位數的 3 倍。',
+  },
+  {
+    id: 'SHORT_SURGE',
+    name: '融券激增',
+    category: '籌碼',
+    description: '融券增減至少 10 萬股，且達前 20 日中位數的 3 倍。',
+  },
+  {
+    id: 'SHORT_MARGIN_RATIO_SPIKE',
+    name: '券資比驟升',
+    category: '籌碼',
+    description: '券資比較前 20 日中位數上升 5 個百分點以上。',
+  },
+  {
+    id: 'PRICE_FLOW_DIVERGENCE',
+    name: '價量與法人背離',
+    category: '背離',
+    description: '漲跌幅達 3% 以上，但法人資金流向與價格方向相反。',
+  },
+  {
+    id: 'RELATIVE_STRENGTH_OUTLIER',
+    name: '產業相對強弱異常',
+    category: '相對強弱',
+    description: '個股與所屬產業的 5 日報酬率差距達 10 個百分點以上。',
+  },
+]
+
+export const ABNORMAL_SIGNAL_LABELS: Record<string, string> =
+  ABNORMAL_SIGNAL_DEFINITIONS.reduce<Record<string, string>>((acc, sig) => {
+    acc[sig.id] = sig.name
+    return acc
+  }, {})
