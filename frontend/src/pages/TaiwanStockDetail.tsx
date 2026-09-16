@@ -575,7 +575,8 @@ export function TaiwanStockDetail() {
             </div>
           </div>
 
-          {/* 區塊 3: 三大法人、融資融券與因子卡片 */}
+          {/* 區塊 3: 三大法人、融資融券與因子卡片 (指數無籌碼資料, 整段隱藏) */}
+          {data.identity.instrument_type !== 'index' && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {/* 1. 三大法人 */}
             <div className="rounded-2xl border border-border bg-surface p-4">
@@ -715,6 +716,7 @@ export function TaiwanStockDetail() {
               )}
             </div>
           </div>
+          )}
 
           <TaiwanReferenceData
             response={currentDataQuery.data}

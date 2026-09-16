@@ -4,6 +4,7 @@ import { Plus, ListChecks, BellRing, Globe } from 'lucide-react'
 import { api, type TaiwanMonitorRule, type TaiwanRealtimeQuote } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { markSeen, leaveMonitorPage } from '@/lib/monitorBadge'
+import { TaiwanIndexBar } from '@/components/monitor/TaiwanIndexBar'
 import { TaiwanQuotePanel } from '@/components/monitor/TaiwanQuotePanel'
 import { TaiwanRuleEditorDialog } from '@/components/monitor/TaiwanRuleEditorDialog'
 import { TaiwanAlertsList } from '@/components/monitor/TaiwanAlertsList'
@@ -64,6 +65,9 @@ export function Monitor() {
       <div className="flex-1 min-h-0 px-5 py-4">
         {/* ===== 台股即時監控區塊 ===== */}
         <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
+          {/* Benchmarks: TWSE weighted index and TPEx index */}
+          <TaiwanIndexBar />
+
           {/* 上部: 台股即時行情 + 五檔盤口 */}
           <div className="h-auto">
             <TaiwanQuotePanel
