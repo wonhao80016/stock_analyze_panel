@@ -158,9 +158,10 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const [strategyCategory, setStrategyCategory] = useState<'all' | 'builtin' | 'custom' | 'ai' | 'composite'>('all')
   // 標的搜索資產類型: ETF 一併搜股票; 指數只搜指數; 否則只搜股票。
   const symbolAssetTypes = assetType === 'etf' ? 'stock,etf' : assetType === 'index' ? 'index' : 'stock'
+  // Without the market the backend searches the A-share instrument table, which is empty here.
   const symbolSearch = useQuery({
-    queryKey: QK.instrumentSearch(symbolQuery, symbolAssetTypes),
-    queryFn: () => api.instrumentSearch(symbolQuery, 20, symbolAssetTypes),
+    queryKey: QK.instrumentSearch(symbolQuery, symbolAssetTypes, 'taiwan'),
+    queryFn: () => api.instrumentSearch(symbolQuery, 20, symbolAssetTypes, 'taiwan'),
     enabled: symbolQuery.length > 0,
   })
 
