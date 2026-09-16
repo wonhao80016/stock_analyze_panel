@@ -37,7 +37,13 @@ const RANGE_OPTIONS = [
   { label: '1 年', days: 360 },
 ]
 
-export function TaiwanStockDetail() {
+interface TaiwanStockDetailProps {
+  /** Renders inside the preview dialog, which supplies its own chrome and chart. */
+  embeddedSymbol?: string
+}
+
+export function TaiwanStockDetail({ embeddedSymbol }: TaiwanStockDetailProps = {}) {
+  const embedded = Boolean(embeddedSymbol)
   const { symbol: routeSymbol } = useParams<{ symbol: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -47,7 +53,7 @@ export function TaiwanStockDetail() {
   // (最常見的個股研究起點)。
   const goBack = useSafeBack('/taiwan-screener')
 
-  const rawSymbol = routeSymbol || '2330.TWSE'
+  const rawSymbol = embeddedSymbol || routeSymbol || '2330.TWSE'
   const symbol = rawSymbol.toUpperCase()
 
   const [selectedRange, setSelectedRange] = useState<number>(180)
@@ -158,8 +164,9 @@ export function TaiwanStockDetail() {
   }
 
   return (
-    <div className="flex flex-col min-h-screen bg-base text-foreground pb-12">
+    <div className={cn('flex flex-col bg-base text-foreground', embedded ? 'pb-4' : 'min-h-screen pb-12')}>
       {/* 頂部導航列與搜尋 */}
+      {!embedded && (
       <div className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-surface/90 px-4 py-2.5 backdrop-blur-md">
         <div className="flex items-center gap-3">
           <button
@@ -301,6 +308,7 @@ export function TaiwanStockDetail() {
           </button>
         </div>
       </div>
+      )}
 
       {/* 載入與錯誤處理 */}
       {isLoading && (
@@ -336,8 +344,11 @@ export function TaiwanStockDetail() {
             </div>
           )}
 
+          {/* Without the chart the dialog has room to sit the header beside the order book. */}
+          <div className={cn(embedded ? 'grid grid-cols-1 lg:grid-cols-3 gap-4' : 'space-y-4')}>
+
           {/* 區塊 1: 核心即時報價、身分與漲跌幅限制 Header */}
-          <div className="rounded-2xl border border-border bg-surface p-4 shadow-sm">
+          <div className={cn('rounded-2xl border border-border bg-surface p-4 shadow-sm', embedded && 'lg:col-span-2')}>
             <div className="flex flex-wrap items-start justify-between gap-4">
               {/* 左側: 名稱、代號、價格 */}
               <div>
@@ -422,6 +433,9 @@ export function TaiwanStockDetail() {
                     按鈕 —— 該回測工作台的標的選擇器目前仍呼叫 A 股 instrumentSearch,
                     無法真正選取台股標的,留著會是誤導使用者的死路連結。route/component
                     本身未刪除,待台股回測真正可用後再視情況加回。 */}
+                {/* Every entry point into the rule editor is gated, so the dialog
+                    never opens a modal inside itself; it has its own monitor action. */}
+                {!embedded && (
                 <div className="flex flex-col gap-1.5">
                   <button
                     onClick={() => setIsRuleEditorOpen(true)}
@@ -431,6 +445,7 @@ export function TaiwanStockDetail() {
                     <span>新增監控</span>
                   </button>
                 </div>
+                )}
               </div>
             </div>
 
@@ -474,8 +489,9 @@ export function TaiwanStockDetail() {
           </div>
 
           {/* 區塊 2: K 線圖表與五檔盤口 (兩欄佈局) */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* 左側 2 欄: K 線圖表 */}
+          <div className={cn(embedded ? 'contents' : 'grid gap-4 grid-cols-1 lg:grid-cols-3')}>
+            {/* 左側 2 欄: K 線圖表 — the dialog keeps its own chart, so it is dropped here */}
+            {!embedded && (
             <div className="lg:col-span-2 rounded-2xl border border-border bg-surface p-4">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
@@ -521,6 +537,7 @@ export function TaiwanStockDetail() {
                 </div>
               )}
             </div>
+            )}
 
             {/* 右側 1 欄: 五檔即時盤口 */}
             <div className="rounded-2xl border border-border bg-surface p-4 flex flex-col justify-between">
@@ -573,6 +590,7 @@ export function TaiwanStockDetail() {
                 <span>{data.realtime.meta?.is_stale ? '⚠️ 資料已過期' : '即時更新正常'}</span>
               </div>
             </div>
+          </div>
           </div>
 
           {/* 區塊 3: 三大法人、融資融券與因子卡片 (指數無籌碼資料, 整段隱藏) */}
@@ -737,12 +755,14 @@ export function TaiwanStockDetail() {
                     {data.monitor_summary.rule_count} 條
                   </span>
                 </div>
+                {!embedded && (
                 <button
                   onClick={() => setIsRuleEditorOpen(true)}
                   className="text-xs text-accent hover:underline cursor-pointer"
                 >
                   + 新增規則
                 </button>
+                )}
               </div>
 
               {data.monitor_summary.rules.length > 0 ? (

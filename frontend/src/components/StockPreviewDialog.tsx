@@ -20,6 +20,7 @@ import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
+import { TaiwanStockDetail } from '@/pages/TaiwanStockDetail'
 
 interface Props {
   symbol: string | null
@@ -455,6 +456,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
             {/* 圖表內容 */}
             <div className="flex-1 overflow-auto p-4">
               {view === 'daily' ? (
+                <>
                 <StockPanel
                   symbol={symbol}
                   height={420}
@@ -463,6 +465,13 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}
                 />
+                {/* Research workbench below the chart; it brings its own data queries. */}
+                {isTaiwanSymbol && symbol && (
+                  <div className="mt-4 border-t border-border pt-2">
+                    <TaiwanStockDetail embeddedSymbol={symbol} />
+                  </div>
+                )}
+                </>
               ) : (
                 <>
                 <StockPanel
