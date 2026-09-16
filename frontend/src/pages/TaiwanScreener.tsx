@@ -36,6 +36,7 @@ import { QK } from '@/lib/queryKeys'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { TaiwanRuleEditorDialog } from '@/components/monitor/TaiwanRuleEditorDialog'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
+import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS } from '@/lib/signals'
 
 export function TaiwanScreener() {
   const navigate = useNavigate()
@@ -79,6 +80,7 @@ export function TaiwanScreener() {
   const [rsiMax, setRsiMax] = useState<string>('')
   const [momentumMin, setMomentumMin] = useState<string>('')
   const [volRatioMin, setVolRatioMin] = useState<string>('')
+  const [selectedSignals, setSelectedSignals] = useState<string[]>([])
   const [aboveMa5, setAboveMa5] = useState<boolean | null>(null)
   const [aboveMa20, setAboveMa20] = useState<boolean | null>(null)
   const [nearUpperLimit, setNearUpperLimit] = useState<boolean>(false)
@@ -218,6 +220,7 @@ export function TaiwanScreener() {
       margin_balance_change_min: marginBalanceChangeMinLots ? parseFloat(marginBalanceChangeMinLots) * 1000.0 : null,
       short_balance_min: shortBalanceMinLots ? parseFloat(shortBalanceMinLots) * 1000.0 : null,
       short_margin_ratio_min: shortMarginRatioMin ? parseFloat(shortMarginRatioMin) : null,
+      signals: selectedSignals.length ? selectedSignals : null,
       sort_by: sortBy,
       sort_order: sortOrder,
       page,
@@ -228,6 +231,7 @@ export function TaiwanScreener() {
     exchange, instrument, industry, priceMin, priceMax, changePctMin, changePctMax,
     volumeMinLots, amountMinMln, rsiMin, rsiMax, momentumMin, volRatioMin,
     aboveMa5, aboveMa20, nearUpperLimit, nearLowerLimit,
+    selectedSignals,
     foreignNetMinLots, foreignNetMaxLots, investmentTrustNetMinLots, dealerNetMinLots,
     marginBalanceChangeMinLots, shortBalanceMinLots, shortMarginRatioMin,
     sortBy, sortOrder, page,
@@ -795,16 +799,10 @@ export function TaiwanScreener() {
                 className="bg-zinc-950 border border-zinc-800 rounded px-2 py-0.5 text-zinc-200 focus:outline-none"
               >
                 <option value="ALL">全部異常訊號</option>
-                <option value="VOLUME_SPIKE">爆量 (&gt;= 2x)</option>
-                <option value="TURNOVER_SPIKE">成交額放大 (&gt;= 2x)</option>
-                <option value="PRICE_MOVE">價格異動 (&gt;= 5%)</option>
-                <option value="FOREIGN_FLOW_SPIKE">外資異常買賣超</option>
-                <option value="TRUST_FLOW_SPIKE">投信異常買賣超</option>
-                <option value="MARGIN_SURGE">融資激增</option>
-                <option value="SHORT_SURGE">融券激增</option>
-                <option value="SHORT_MARGIN_RATIO_SPIKE">券資比驟升</option>
-                <option value="PRICE_FLOW_DIVERGENCE">價量/法人背離</option>
-                <option value="RELATIVE_STRENGTH_OUTLIER">產業相對強弱異常</option>
+                {/* Driven by the signal library so the two lists cannot drift apart. */}
+                {ABNORMAL_SIGNAL_DEFINITIONS.map(sig => (
+                  <option key={sig.id} value={sig.id}>{sig.name}</option>
+                ))}
               </select>
             </div>
           </div>
@@ -1234,6 +1232,42 @@ export function TaiwanScreener() {
                       onChange={e => { setVolRatioMin(e.target.value); setPage(1) }}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
                     />
+                  </div>
+                </div>
+
+                <div className="sm:col-span-2 md:col-span-4">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] text-zinc-400">訊號篩選（多選為且）</span>
+                    {selectedSignals.length > 0 && (
+                      <button
+                        onClick={() => { setSelectedSignals([]); setPage(1) }}
+                        className="text-[11px] text-zinc-400 hover:text-zinc-200"
+                      >
+                        清除
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {BUILTIN_SIGNAL_DEFINITIONS.map(sig => {
+                      const on = selectedSignals.includes(sig.id)
+                      return (
+                        <button
+                          key={sig.id}
+                          title={sig.description}
+                          onClick={() => {
+                            setSelectedSignals(prev => on ? prev.filter(s => s !== sig.id) : [...prev, sig.id])
+                            setPage(1)
+                          }}
+                          className={`px-2 py-1 text-[11px] font-medium rounded-md border transition-all ${
+                            on
+                              ? 'bg-purple-600 border-purple-500 text-white'
+                              : 'bg-zinc-800/80 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+                          }`}
+                        >
+                          {sig.name}
+                        </button>
+                      )
+                    })}
                   </div>
                 </div>
 

@@ -946,6 +946,7 @@ export interface TaiwanScreenerRequest {
   momentum_5d_max?: number | null
   vol_ratio_5d_min?: number | null
   vol_ratio_5d_max?: number | null
+  signals?: string[] | null
   above_ma5?: boolean | null
   above_ma20?: boolean | null
   foreign_net_min?: number | null
@@ -976,6 +977,7 @@ export interface ScreenerResultItem {
   exchange: string
   instrument_type: string
   industry?: string | null
+  signals?: string[]
   close?: number | null
   change_pct?: number | null
   volume?: number | null

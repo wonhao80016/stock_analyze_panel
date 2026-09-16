@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
@@ -82,6 +83,9 @@ class TaiwanScreenerRequest(BaseModel):
     dealer_net_min: float | None = None
     dealer_net_max: float | None = None
 
+    # Built-in signals: a row must carry every requested signal.
+    signals: list[str] | None = None
+
     # Margin & Short
     margin_balance_change_min: float | None = None
     margin_balance_change_max: float | None = None
@@ -111,6 +115,8 @@ class ScreenerResultItem(BaseModel):
     exchange: str
     instrument_type: str
     industry: str | None = None
+    # Built-in signal ids that fired on the quote date.
+    signals: list[str] = []
 
     # Quotes & Volumes
     close: float | None = None
@@ -217,6 +223,9 @@ class TaiwanScreenerService:
             combined = combined.join(df_indicators, on="symbol", how="left")
         else:
             combined = self._add_null_cols(combined, ["change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"])
+
+        # Built-in signals, as published by TaiwanEnrichedRefreshService.
+        combined = self._join_signals(combined, daily_as_of)
 
         # Step 5: MarketProfile Price Limits & Distance Calculation
         combined = self._enrich_price_limits(combined)
@@ -552,6 +561,12 @@ class TaiwanScreenerService:
         if req.short_margin_ratio_max is not None:
             df = df.filter(pl.col("short_margin_ratio") <= req.short_margin_ratio_max)
 
+        # Signals: an unknown or unpublished id matches nothing rather than everything.
+        for sig in req.signals or []:
+            if sig not in df.columns:
+                return df.clear()
+            df = df.filter(pl.col(sig).fill_null(False))
+
         return df
 
     def _apply_sort(self, df: pl.DataFrame, sort_by: str, sort_order: str) -> pl.DataFrame:
@@ -565,10 +580,36 @@ class TaiwanScreenerService:
             return df.sort("symbol", descending=descending)
         return df.sort([sort_by, "symbol"], descending=[descending, False])
 
+    @staticmethod
+    def _signal_columns(df: pl.DataFrame) -> list[str]:
+        return [c for c in df.columns if c.startswith("signal_")]
+
+    def _join_signals(self, combined: pl.DataFrame, as_of: str | None) -> pl.DataFrame:
+        """Attach the published signal columns for the quote date, if they exist."""
+        if not as_of:
+            return combined
+        from app.config import settings
+
+        part = Path(settings.data_dir) / "kline_daily_enriched" / f"date={as_of}" / "part.parquet"
+        if not part.exists():
+            logger.debug("no published signals for %s", as_of)
+            return combined
+        try:
+            frame = pl.read_parquet(part)
+        except Exception as exc:
+            logger.warning("signal partition unreadable for %s: %s", as_of, exc)
+            return combined
+        cols = ["symbol", *self._signal_columns(frame)]
+        if len(cols) == 1:
+            return combined
+        return combined.join(frame.select(cols), on="symbol", how="left")
+
     def _build_items(self, df: pl.DataFrame) -> list[ScreenerResultItem]:
         items = []
+        signal_cols = self._signal_columns(df)
         for r in df.iter_rows(named=True):
             items.append(ScreenerResultItem(
+                signals=[c for c in signal_cols if r.get(c)],
                 symbol=r["symbol"],
                 name=r.get("name") or r["symbol"],
                 exchange=r.get("exchange") or "TWSE",
