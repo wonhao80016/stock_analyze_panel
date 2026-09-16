@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -20,6 +20,7 @@ interface TaiwanQuotePanelProps {
   onAddRuleForSymbol?: (quote: TaiwanRealtimeQuote) => void
 }
 
+// Shown only until the user has a watchlist of their own.
 const PRESET_SYMBOLS = [
   '2330.TWSE',
   '0050.TWSE',
@@ -28,6 +29,9 @@ const PRESET_SYMBOLS = [
   '00646.TWSE',
   '8069.TPEX',
 ]
+
+// The quote strip queries every symbol on each refresh, so keep it bounded.
+const MAX_PANEL_SYMBOLS = 12
 
 /** 格式化金額為易讀的 萬 / 億 或原始數值 */
 function formatAmount(amt: number | null | undefined): string {
@@ -167,19 +171,36 @@ function FiveLevelBook({
 }
 
 export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQuotePanelProps) {
-  const [selectedSymbol, setSelectedSymbol] = useState<string>('2330.TWSE')
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [volUnit, setVolUnit] = useState<'shares' | 'lots'>('lots')
+
+  const watchlistQuery = useQuery({
+    queryKey: QK.watchlist,
+    queryFn: () => api.watchlistList(),
+    staleTime: 60_000,
+  })
+
+  const panelSymbols = useMemo(() => {
+    const mine = (watchlistQuery.data?.symbols || [])
+      .map(entry => (entry.symbol || '').trim())
+      .filter(Boolean)
+    return mine.length ? mine.slice(0, MAX_PANEL_SYMBOLS) : PRESET_SYMBOLS
+  }, [watchlistQuery.data])
 
   // 1. 即時行情 Query (受 QK.taiwanQuotes 驅動，SSE 廣播時自動 Invalidate)
   const quotesQuery = useQuery({
-    queryKey: QK.taiwanQuotes(PRESET_SYMBOLS.join(',')),
-    queryFn: () => api.taiwanQuotes(PRESET_SYMBOLS),
+    queryKey: QK.taiwanQuotes(panelSymbols.join(',')),
+    queryFn: () => api.taiwanQuotes(panelSymbols),
     staleTime: 3000,
   })
 
 
   const quotes = quotesQuery.data?.quotes || []
-  const currentQuote = quotes.find(q => q.symbol === selectedSymbol) || quotes[0]
+  // Removing the selected symbol from the watchlist must not blank the panel.
+  const activeSymbol = selectedSymbol && panelSymbols.includes(selectedSymbol)
+    ? selectedSymbol
+    : panelSymbols[0]
+  const currentQuote = quotes.find(q => q.symbol === activeSymbol) || quotes[0]
 
   const isUp = (currentQuote?.change || 0) > 0
   const isDown = (currentQuote?.change || 0) < 0
@@ -191,9 +212,9 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
       {/* 頂部: 標的切換與搜尋列 */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-1">
-          {PRESET_SYMBOLS.map(sym => {
+          {panelSymbols.map(sym => {
             const q = quotes.find(item => item.symbol === sym)
-            const active = sym === selectedSymbol
+            const active = sym === activeSymbol
             const qUp = (q?.change || 0) > 0
             const qDown = (q?.change || 0) < 0
             return (
