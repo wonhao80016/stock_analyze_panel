@@ -1,4 +1,4 @@
-"""时区契约测试 — 分时拉取窗口必须按北京时间解释, 与服务器本地时区无关。
+"""时区契约测试 — 分时拉取窗口必须按交易所挂钟时间解释, 与服务器本地时区无关。
 
 fetch_minute_single 构造的 naive datetime 会被 _datetime_to_ms 的 .timestamp()
 按服务器本地时区解释: UTC 容器 (Docker 默认) 上窗口偏移 8 小时, 补拉必为空。
@@ -27,6 +27,11 @@ def test_fetch_minute_single_window_is_beijing_wall_clock(monkeypatch):
     class _FakeClient:
         klines = _FakeKlines
 
+    # fetch_minute_single short-circuits for the taiwan/tickflow minute providers,
+    # so the window-construction branch under test only runs for a custom source.
+    monkeypatch.setattr(
+        "app.services.preferences.get_minute_data_provider", lambda: "custom_source"
+    )
     monkeypatch.setattr(kline_sync, "_try_custom_minute", _fake_try_custom_minute)
     monkeypatch.setattr(kline_sync, "get_client", lambda: _FakeClient())
 

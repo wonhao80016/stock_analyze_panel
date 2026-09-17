@@ -232,7 +232,13 @@ def test_api_taiwan_data_status_endpoint():
     assert "scheduler_enabled" in data
     assert "scheduled_update_time" in data
     assert "scheduled_timezone" in data
-    assert data["daily_as_of"] == "2026-08-28"
+    # The endpoint reports whatever the local store holds, so assert the contract
+    # (it mirrors the store) rather than a literal date that expires on the next
+    # daily update.
+    from app.taiwan.daily_update import TaiwanDailyUpdateService
+
+    store_dates = TaiwanDailyUpdateService().daily_store.available_dates()
+    assert data["daily_as_of"] == (str(max(store_dates)) if store_dates else None)
     assert data["scheduler_enabled"] is True
     assert data["scheduled_update_time"] == "16:30"
     assert data["scheduled_timezone"] == "Asia/Taipei"

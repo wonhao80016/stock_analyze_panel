@@ -331,7 +331,11 @@ async def test_zero_is_not_missing_or_unavailable():
 
     real_ctx = svc.research_svc.get_research_context("2330.TWSE", target_date=target_d)
     zero_ctx = real_ctx.model_copy(deep=True)
-    # Inject exact zero values
+    # Inject exact zero values. Both sections are only emitted when their status
+    # is "current", so pin that too: this asserts how zero is encoded, and must
+    # not depend on whether the local store happens to cover target_d.
+    zero_ctx.institutional_context.status = "current"
+    zero_ctx.margin_context.status = "current"
     zero_ctx.institutional_context.foreign_net_1d = 0
     zero_ctx.margin_context.margin_balance_change_1d = 0
 

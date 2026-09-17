@@ -161,7 +161,11 @@ def test_intraday_support_uses_capability_limits(monkeypatch):
 
 
 def test_intraday_batch_provider_is_normalized_without_network(monkeypatch):
-    monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "tickflow")
+    # fetch_intraday_monitor_batch short-circuits for the taiwan/tickflow minute
+    # providers, so the intraday_batch branch under test only runs for a custom
+    # source. (This test used to declare "tickflow", which the implementation
+    # later added to that short-circuit list.)
+    monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "custom_source")
 
     class FakeKlines:
         def intraday_batch(self, symbols, count, as_dataframe, show_progress, batch_size):

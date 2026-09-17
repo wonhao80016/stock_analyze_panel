@@ -5,7 +5,9 @@ from __future__ import annotations
 import time
 
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
-from app.tickflow.rate_limits import (
+# app.tickflow.rate_limits is an `import *` compatibility shim, which never
+# re-exports underscore names; import the canonical module instead.
+from app.rate_limits import (
     SAFETY_RPM_FACTOR,
     _next_slot,
     _slot_lock,
