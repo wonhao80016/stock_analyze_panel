@@ -4,11 +4,12 @@ import { api, type TaiwanRealtimeQuote } from '@/lib/api'
 
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
+import { BENCHMARK_SYMBOLS } from '@/lib/benchmarks'
 import { useStockPreview } from '@/components/StockPreviewProvider'
 import { DataQualityBadge, formatQuoteTime } from '@/components/taiwan/TaiwanDataQuality'
 
 // MIS channel codes for the two benchmarks: tse_t00.tw and otc_o00.tw.
-const INDEX_SYMBOLS = ['t00.TWSE', 'o00.TPEX']
+const INDEX_SYMBOLS = [...BENCHMARK_SYMBOLS]
 
 const FALLBACK_NAMES: Record<string, string> = {
   't00.TWSE': '加權指數',

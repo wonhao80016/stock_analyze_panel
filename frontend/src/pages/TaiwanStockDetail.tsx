@@ -23,6 +23,7 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
+import { isBenchmarkSymbol } from '@/lib/benchmarks'
 import { Modal } from '@/components/Modal'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { conditionSummary } from '@/components/monitor/GenericRulesList'
@@ -59,6 +60,8 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
 
   const rawSymbol = embeddedSymbol || routeSymbol || '2330.TWSE'
   const symbol = rawSymbol.toUpperCase()
+  // 指數只有日K/分時, 個股專屬端點 (即時資料/研究脈絡) 對它回 404。
+  const isIndex = isBenchmarkSymbol(symbol)
 
   const [selectedRange, setSelectedRange] = useState<number>(180)
   const [isRuleEditorOpen, setIsRuleEditorOpen] = useState<boolean>(false)
@@ -103,6 +106,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
     queryKey: QK.taiwanCurrentData(symbol),
     queryFn: () => api.taiwanCurrentData(symbol),
     staleTime: 5 * 60_000,
+    enabled: !isIndex,
   })
 
   // Phase 7C: Structured Research Context Query
@@ -110,6 +114,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
     queryKey: ['taiwanStockResearchContext', symbol],
     queryFn: () => api.taiwanStockResearchContext(symbol),
     staleTime: 5 * 60_000,
+    enabled: !isIndex,
   })
 
   // Phase 7E: Grounded AI Stock Research Report state (MANUAL ONLY, NEVER AUTO-TRIGGER)
@@ -302,7 +307,9 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
           <button
             onClick={() => {
               detailQuery.refetch()
-              currentDataQuery.refetch()
+              // refetch() ignores `enabled`, so guarding here keeps indices from
+              // re-hitting the stock-only endpoint.
+              if (!isIndex) currentDataQuery.refetch()
             }}
             disabled={detailQuery.isFetching || currentDataQuery.isFetching}
             className="flex items-center gap-1 rounded-lg border border-border bg-surface px-2 py-1 text-xs text-muted hover:text-foreground cursor-pointer transition-colors"
@@ -737,6 +744,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
           </div>
           )}
 
+          {!isIndex && (
           <TaiwanReferenceData
             response={currentDataQuery.data}
             isLoading={currentDataQuery.isLoading}
@@ -744,6 +752,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             isFetching={currentDataQuery.isFetching}
             onRetry={() => currentDataQuery.refetch()}
           />
+          )}
 
           {/* 區塊 4: 監控規則與最近警報 */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

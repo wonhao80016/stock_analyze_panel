@@ -108,12 +108,17 @@ def instruments_names(request: Request, symbols: list[str]):
     """
     if not symbols:
         return {"names": {}}
+    from app.taiwan.benchmarks import get_benchmark
     from app.taiwan.universe import get_security_master
 
     master = get_security_master()
     names: dict[str, str] = {}
     unresolved: list[str] = []
     for sym in symbols:
+        benchmark = get_benchmark(sym)
+        if benchmark is not None:
+            names[sym] = benchmark.name
+            continue
         inst = master.get_instrument(sym)
         if inst is not None and inst.name:
             names[sym] = inst.name
