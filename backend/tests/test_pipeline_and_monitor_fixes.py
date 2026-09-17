@@ -103,7 +103,7 @@ def test_apply_scope_sector_fails_closed():
     assert picked.height == 1
 
 
-def test_ladder_notification_uses_chinese_title_without_brand(monkeypatch):
+def test_sector_notification_uses_chinese_title_without_brand(monkeypatch):
     calls = []
 
     class CaptureExecutor:
@@ -117,19 +117,19 @@ def test_ladder_notification_uses_chinese_title_without_brand(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_telegram_chat_id", lambda: "telegram-chat")
 
     engine = type("Engine", (), {
-        "rules": {"r_ladder": {"webhook_channels": ["line", "telegram"]}},
+        "rules": {"r_sector": {"webhook_channels": ["line", "telegram"]}},
     })()
     QuoteService._maybe_send_webhook(
         object.__new__(QuoteService),
         [{
-            "rule_id": "r_ladder",
-            "source": "ladder",
+            "rule_id": "r_sector",
+            "source": "sector",
             "symbol": "600000.SH",
             "name": "浦发银行",
-            "message": "炸板预警",
+            "message": "板塊異動預警",
         }],
         engine,
     )
 
-    assert [args[2] for _, args in calls] == ["連續漲停梯隊", "連續漲停梯隊"]
+    assert [args[2] for _, args in calls] == ["板塊", "板塊"]
     assert all("TickFlow" not in args[2] for _, args in calls)

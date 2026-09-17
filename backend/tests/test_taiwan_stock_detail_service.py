@@ -9,20 +9,23 @@ Verifies:
   - Handling of Foreign Equity ETF (00646.TWSE, NO_LIMIT).
   - Handling of TPEx equity (8069.TPEX, TPEx exchange and context).
   - Partial data tolerance when one or more providers fail/empty.
+  - Monitor summary sourced from the unified MonitorRuleEngine rule store
+    (symbols/all scope inclusion, watchlist_group exclusion, enabled/active counts).
 """
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
 
+from app.strategy import monitor_rules as mr_store
 from app.taiwan.detail_models import TaiwanStockDetailResponse
 from app.taiwan.detail_service import TaiwanStockDetailService
 from app.taiwan.enrichment.models import InstitutionalFlow, MarginTrading, MarketIndex, SourceMeta
 from app.taiwan.realtime.models import RealtimeStatus, TaiwanRealtimeQuote
-from app.taiwan.realtime.monitor_models import TaiwanAlertSeverity, TaiwanMonitorRule, TaiwanRuleType
 from app.taiwan.universe.models import TaiwanInstrument
 
 
@@ -166,3 +169,60 @@ def test_service_partial_failure_tolerance():
     assert res.institutional.status == "unavailable"
     assert res.margin.status == "unavailable"
     assert res.overall_data_quality == "degraded"
+
+
+def _rule(rid: str, **overrides) -> dict:
+    rule = {
+        "id": rid, "name": rid, "type": "price", "scope": "symbols",
+        "symbols": ["2330.TWSE"], "logic": "and",
+        "conditions": [{"field": "close", "op": ">", "value": 10}],
+    }
+    rule.update(overrides)
+    return mr_store.normalize(rule)
+
+
+class TestMonitorSummaryFromUnifiedEngine:
+    """monitor_summary 现由 B 引擎的规则存储聚合 (Step 6 迁移, 取代已删除的引擎 A)。"""
+
+    def test_symbol_scoped_rule_included(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        mr_store.save_one(tmp_path, _rule("r1", symbols=["2330.TWSE"]))
+
+        svc = TaiwanStockDetailService()
+        summary = svc._aggregate_monitor_summary("2330.TWSE")  # noqa: SLF001
+
+        assert summary.rule_count == 1
+        assert summary.rules[0]["rule_id"] == "r1"
+
+    def test_market_wide_rule_included_and_flagged(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        mr_store.save_one(tmp_path, _rule("r_all", scope="all", symbols=[]))
+
+        svc = TaiwanStockDetailService()
+        summary = svc._aggregate_monitor_summary("2330.TWSE")  # noqa: SLF001
+
+        assert summary.rule_count == 1
+        assert summary.rules[0]["scope"] == "all"
+
+    def test_watchlist_group_scoped_rule_excluded(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        mr_store.save_one(
+            tmp_path,
+            _rule("r_group", scope="watchlist_group", symbols=[], group_id="g1"),
+        )
+
+        svc = TaiwanStockDetailService()
+        summary = svc._aggregate_monitor_summary("2330.TWSE")  # noqa: SLF001
+
+        assert summary.rule_count == 0
+
+    def test_disabled_rule_counts_toward_rule_count_but_not_active_count(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        mr_store.save_one(tmp_path, _rule("r_on", enabled=True))
+        mr_store.save_one(tmp_path, _rule("r_off", enabled=False))
+
+        svc = TaiwanStockDetailService()
+        summary = svc._aggregate_monitor_summary("2330.TWSE")  # noqa: SLF001
+
+        assert summary.rule_count == 2
+        assert summary.active_count == 1

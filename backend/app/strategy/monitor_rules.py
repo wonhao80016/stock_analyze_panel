@@ -28,17 +28,17 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
-RULE_TYPES = {"strategy", "signal", "price", "market", "ladder", "sector"}
+RULE_TYPES = {"strategy", "signal", "price", "market", "sector"}
 SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
 DIRECTIONS = {"entry", "exit", "both"}
 STRATEGY_NOTIFY_EVENTS = {"buy_signal", "sell_signal", "pool_entry", "pool_exit"}
 SEVERITIES = {"info", "warn", "critical"}
 OPS = {">", ">=", "<", "<=", "==", "!="}
-# ladder 规则: 封单监控的指标 (量=手, 额=元)
-LADDER_METRICS = {"sealed_vol", "sealed_amount"}
-# ladder 规则: 方向 (up=涨停炸板预警, down=跌停翘板预警)
-LADDER_DIRECTIONS = {"up", "down"}
+# edge: 仅条件由未命中转为命中时触发一次 (防抖); level: 命中期间每 cooldown 重播 (旧行为)
+TRIGGER_MODES = {"edge", "level"}
+# sector 规则: 方向 (up=向上突破预警, down=向下突破预警)
+SECTOR_DIRECTIONS = {"up", "down"}
 SECTOR_KINDS = {"index", "concept", "industry"}
 SECTOR_TRIGGERS = {"change_pct", "momentum"}
 SECTOR_WINDOWS = {1, 3, 5, 10, 15}
@@ -144,15 +144,6 @@ def validate(rule: dict) -> None:
                 raise ValueError(f"{label}必須是 0 到 100 之間的數字")
         if score_min is not None and score_max is not None and score_min > score_max:
             raise ValueError("評分下限不能大於評分上限")
-    elif rule.get("type") == "ladder":
-        # 连板梯队封单监控: 需 metric + threshold + direction(up/down), 不用 conditions
-        if rule.get("metric", "sealed_vol") not in LADDER_METRICS:
-            raise ValueError(f"metric 必須是 {LADDER_METRICS} 之一")
-        if rule.get("direction", "up") not in LADDER_DIRECTIONS:
-            raise ValueError(f"direction 必須是 {LADDER_DIRECTIONS} 之一 (up=漲停炸板, down=跌停翹板)")
-        thr = rule.get("threshold")
-        if not isinstance(thr, (int, float)) or thr < 0:
-            raise ValueError("threshold 必須是非負數字 (封單 ≤ 此值時報警)")
     elif rule.get("type") == "sector":
         kind = rule.get("sector_kind")
         if kind not in SECTOR_KINDS:
@@ -169,7 +160,7 @@ def validate(rule: dict) -> None:
                 raise ValueError("板塊監控對象類型必須一致")
         if rule.get("sector_trigger") not in SECTOR_TRIGGERS:
             raise ValueError(f"sector_trigger 必須是 {SECTOR_TRIGGERS} 之一")
-        if rule.get("direction") not in LADDER_DIRECTIONS:
+        if rule.get("direction") not in SECTOR_DIRECTIONS:
             raise ValueError("板塊監控 direction 必須是 up 或 down")
         threshold_pct = rule.get("threshold_pct")
         if not isinstance(threshold_pct, (int, float)) or not 0 < threshold_pct <= 20:
@@ -202,6 +193,12 @@ def validate(rule: dict) -> None:
                     raise ValueError(f"第 {i+1} 個條件: value 必須是數字")
             else:
                 raise ValueError(f"第 {i+1} 個條件: op {op!r} 非法 (應為 truth 或 {OPS})")
+            rearm_value = c.get("rearm_value")
+            if rearm_value is not None:
+                if op == "truth":
+                    raise ValueError(f"第 {i+1} 個條件: op=truth 不支援 rearm_value")
+                if isinstance(rearm_value, bool) or not isinstance(rearm_value, (int, float)) or not math.isfinite(rearm_value):
+                    raise ValueError(f"第 {i+1} 個條件: rearm_value 必須是數字")
 
     # scope 校验
     if rule.get("scope", "symbols") not in SCOPES:
@@ -232,6 +229,8 @@ def validate(rule: dict) -> None:
     cd = rule.get("cooldown_seconds", 3600)
     if not isinstance(cd, int) or cd < 0:
         raise ValueError("cooldown_seconds 必須是非負整數")
+    if rule.get("trigger_mode", "edge") not in TRIGGER_MODES:
+        raise ValueError(f"trigger_mode 必須是 {TRIGGER_MODES} 之一")
 
 
 def normalize(rule: dict) -> dict:
@@ -255,11 +254,8 @@ def normalize(rule: dict) -> dict:
     r.setdefault("threshold_pct", 1.0)
     r.setdefault("window_minutes", 5)
     r.setdefault("strategy_id", None)
-    # direction 默认值: ladder/sector 用 "up", 其余用 "entry"
-    r.setdefault(
-        "direction",
-        "up" if r.get("type") in {"ladder", "sector"} else "entry",
-    )
+    # direction 默认值: sector 用 "up", 其余用 "entry"
+    r.setdefault("direction", "up" if r.get("type") == "sector" else "entry")
     if r.get("type") == "strategy":
         r.setdefault("score_min", None)
         r.setdefault("score_max", None)
@@ -273,15 +269,16 @@ def normalize(rule: dict) -> dict:
         r.pop("score_min", None)
         r.pop("score_max", None)
     r.setdefault("conditions", [])
-    # ladder 专属默认字段
-    r.setdefault("metric", "sealed_vol")
-    r.setdefault("threshold", 0)
     if r.get("type") == "sector":
         r["scope"] = "all"
         r["symbols"] = []
         r["group_id"] = None
     r.setdefault("logic", "and")
+    r.setdefault("trigger_mode", "edge")
     r.setdefault("cooldown_seconds", 3600)
+    # 兼容旧引擎 (台股 A) 的 severity 取值: warning → warn (正本取值见 SEVERITIES)
+    if r.get("severity") == "warning":
+        r["severity"] = "warn"
     r.setdefault("severity", "info")
     r.setdefault("message", "")
     r.setdefault("webhook_url", "")

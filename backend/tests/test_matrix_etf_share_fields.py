@@ -36,13 +36,17 @@ def _engine() -> StrategyEngine:
 
 def _resolve_research_plan(engine: StrategyEngine, asset_type: str = "stock"):
     research = engine.get("factor_rank_research")
+    # DEFAULT_BASIC_FILTER no longer carries a market_cap_min (Taiwan has no
+    # total_shares data); force one here so this test still exercises the
+    # ETF/stock share-field neutralization path it is named for.
+    basic_filter = {**research.basic_filter, "market_cap_min": 10e8}
     return StrategyDependencyResolver().resolve(
         research,
         params={
             "scoring": {"turnover_rate": 1.0},
             "directions": {"turnover_rate": "high"},
         },
-        basic_filter=dict(research.basic_filter),
+        basic_filter=basic_filter,
         entry_signals=research.entry_signals,
         exit_signals=research.exit_signals,
         overrides={},
@@ -52,7 +56,6 @@ def _resolve_research_plan(engine: StrategyEngine, asset_type: str = "stock"):
 
 def test_etf_plan_does_not_require_share_fields():
     engine = _engine()
-    assert engine.get("factor_rank_research").basic_filter.get("market_cap_min") is not None
 
     etf_plan = _resolve_research_plan(engine, asset_type="etf")
     assert "total_shares" not in etf_plan.instrument_columns

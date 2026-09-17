@@ -102,10 +102,7 @@ export function AlertToastContainer() {
   const [items, setItems] = useState<Item[]>([])
   const navigate = useNavigate()
   const { data: prefs } = usePreferences()
-  const extFields = prefs?.monitor_ext_fields ?? {
-    concept: { field: 'ext_gn_ths.所屬概念' },
-    industry: { field: 'ext_hy_ths.所屬同花順行業' },
-  }
+  const extFields = prefs?.monitor_ext_fields ?? { concept: null, industry: null }
 
   const sub = useCallback(() => {
     _listeners.add(setItems)

@@ -34,7 +34,8 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
-import { TaiwanRuleEditorDialog } from '@/components/monitor/TaiwanRuleEditorDialog'
+import { Modal } from '@/components/Modal'
+import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
 import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS } from '@/lib/signals'
 import { useStockPreview } from '@/components/StockPreviewProvider'
@@ -1777,14 +1778,22 @@ export function TaiwanScreener() {
         )}
       </div>
 
-      {/* Phase 8C-A: 結果 row「監控」— 重用 TaiwanStockDetail 已使用的同一個
-          rule editor dialog, 不另做第二套 Monitor form。 */}
-      <TaiwanRuleEditorDialog
-        open={monitorSymbol != null}
-        rule={null}
-        presetSymbol={monitorSymbol}
-        onClose={() => setMonitorSymbol(null)}
-      />
+      {/* 結果 row「監控」— 與其他個股情境入口共用同一個 RuleEditor(simple 模式)。 */}
+      {monitorSymbol != null && (
+        <Modal
+          onClose={() => setMonitorSymbol(null)}
+          ariaLabel="加入監控"
+          panelClassName="w-[92vw] max-w-lg max-h-[90vh] overflow-y-auto"
+        >
+          <RuleEditor
+            rule={null}
+            simple
+            preset={{ scope: 'symbols', symbols: [monitorSymbol], type: 'signal', logic: 'or' }}
+            onClose={() => setMonitorSymbol(null)}
+            onSaved={() => setMonitorSymbol(null)}
+          />
+        </Modal>
+      )}
     </div>
   )
 }

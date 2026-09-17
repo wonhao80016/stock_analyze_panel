@@ -1,16 +1,11 @@
-"""修正 / 补全日K数据 — 完全复用盘后管道,只是日期范围由用户传入。
+"""修正 / 补全 A 股日K数据(kline_daily / kline_etf_daily / kline_index_daily)。
 
-典型场景: 昨天没看盘 / 服务挂了一天,本地日K缺了若干天。
-
-设计原则: 不重复盘后管道的任何逻辑。直接调用 daily_pipeline.run_now(),
-通过 override_start_date 参数把"自动算日期"换成"用户指定起点",
-其余 (维表 / A股日K / 除权因子 / enriched / 指数 / ETF / 错误兜底) 全部原样复用。
-这样修正功能与盘后管道永远保持一致,不会出现遗漏。
-
-落盘是 merge-upsert (按 symbol+date 去重 keep="last"), 新数据天然覆盖旧值,
-不会产生重复。日K/指数/ETF 族无需先删分区; 股票 enriched 例外 — 增量重算
-只算 enriched 里不存在的日期, "分区已存在但内容是盘中快照"的场景由管道内
-的 prune_enriched_partitions 先删坏分区再重算 (run_now 内处理, 此处无需关心)。
+其后端 daily_pipeline.run_now() 随 A 股盘后管道一并下线。这些表 Taiwan
+部署从不写入(Taiwan 数据走 taiwan/daily_store.py + enriched_refresh.py,
+直接发布到 kline_daily_enriched, 不经过这几张表), 且调用方
+data_integrity.launch_integrity_repair() 本就以 Cap.KLINE_DAILY_BATCH
+(A 股批量能力) 为前置门禁, Taiwan 部署不会持有该能力, 故此函数实际不会
+被触发。保留为显式软失败, 避免残留 import 造成难以定位的运行期错误。
 """
 from __future__ import annotations
 
@@ -31,26 +26,6 @@ def run_repair_daily(
     end_date: date | None = None,
     on_progress: Callable | None = None,
 ) -> dict:
-    """修正 / 补全数据 — 复用盘后管道,日期范围由用户指定。
-
-    通过 run_now(override_start_date=start_date) 把日K/除权/指数的拉取起点
-    统一设为 start_date (到今天),其余流程与盘后管道完全一致。
-
-    Args:
-        repo:        数据仓库
-        capset:      权限集
-        start_date:  用户选定的起始日期
-        end_date:    保留参数(目前盘后管道固定拉到今天, 此值未使用, 为接口兼容保留)
-        on_progress: 进度回调
-
-    Returns:
-        run_now() 的完整结果 dict。
-    """
-    today = date.today()
-    if start_date > today:
-        return {"error": "起始日期不能晚于今天"}
-
-    logger.info("repair_daily: run pipeline with override_start_date=%s", start_date)
-
-    from app.jobs.daily_pipeline import run_now
-    return run_now(repo, capset, on_progress=on_progress, override_start_date=start_date)
+    """A 股日K修正管道已下线, 直接软失败。"""
+    logger.warning("repair_daily: A-share daily pipeline has been removed, skipping")
+    return {"error": "A 股日K修正管道已下线"}

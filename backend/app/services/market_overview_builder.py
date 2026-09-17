@@ -4,10 +4,10 @@
 等无 Request 的调用方(定时任务、复盘服务)也能复用同一套聚合逻辑。
 
 行为与原 `_build_overview` 完全一致,仅把对 `request.app.state.{repo,
-quote_service,depth_service}` 的依赖改为显式参数。
+quote_service}` 的依赖改为显式参数。
 
 公共入口:
-    build_market_overview(repo, quote_service, depth_service, as_of)
+    build_market_overview(repo, quote_service, as_of)
 """
 from __future__ import annotations
 
@@ -359,7 +359,6 @@ def _pct_band_rows(values: list[float]) -> list[dict]:
 def build_market_overview(
     repo,
     quote_service=None,
-    depth_service=None,
     as_of: date | None = None,
 ) -> dict:
     """装配市场总览(与原 overview._build_overview 行为一致)。
@@ -367,7 +366,6 @@ def build_market_overview(
     Args:
         repo: KlineRepository(必填)。
         quote_service: QuoteService(可选;实时指数行情来源)。
-        depth_service: DepthService(可选;五档封板修正)。
         as_of: 指定日期,None 则取最新有数据日。
     """
     svc = ScreenerService(repo)
@@ -441,21 +439,11 @@ def build_market_overview(
     limit_down = sum(1 for r in rows if bool(r.get("signal_limit_down")))
     max_boards = max([int(_finite(r.get("consecutive_limit_ups")) or 0) for r in rows], default=0)
 
-    # 五档 sealed 修正: 假涨停/假跌停不计入(需 Pro+ depth5.batch 能力)
+    # 五档 sealed 修正(假涨停/假跌停剔除)已随 depth_service 一并下线,
+    # 固定回传未就绪状态, 前端按既有 sealed_ready=False 展示逻辑降级。
     sealed_ready = False
     fake_up = 0
     fake_down = 0
-    if depth_service:
-        up_map = depth_service.get_sealed_map(as_of, is_down=False)
-        down_map = depth_service.get_sealed_map(as_of, is_down=True)
-        sealed_ready = bool(up_map or down_map) and depth_service.is_sealed_ready(as_of)
-        if up_map:
-            fake_up = sum(1 for v in up_map.values() if v.get("sealed") is False)
-        if down_map:
-            fake_down = sum(1 for v in down_map.values() if v.get("sealed") is False)
-    if sealed_ready:
-        limit_up = max(0, limit_up - fake_up)
-        limit_down = max(0, limit_down - fake_down)
 
     seal_rate = limit_up / (limit_up + broken) * 100 if (limit_up + broken) > 0 else 0
 

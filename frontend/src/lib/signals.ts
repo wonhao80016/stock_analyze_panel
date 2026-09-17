@@ -200,6 +200,7 @@ const FIELD_LABELS: Record<string, string> = {
   momentum_5d: '5日動量', momentum_20d: '20日動量', momentum_60d: '60日動量',
   atr_14: 'ATR14', annual_vol_20d: '20日年化波動',
   consecutive_limit_ups: '連續漲停', consecutive_limit_downs: '連續跌停',
+  distance_to_upper_limit: '距漲停距離', distance_to_lower_limit: '距跌停距離',
 }
 
 /**

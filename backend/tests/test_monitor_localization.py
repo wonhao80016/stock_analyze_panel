@@ -42,9 +42,10 @@ def test_signal_cn_internal_keys_unchanged():
         "ma5", "ma10", "ma20", "ma30", "ma60", "ema5", "ema10", "ema20",
         "macd_dif", "macd_dea", "macd_hist", "boll_upper", "boll_lower",
         "kdj_k", "kdj_d", "kdj_j", "rsi_6", "rsi_14", "rsi_24",
-        "vol_ratio_5d", "vol_ratio_20d", "vol_ma5", "vol_ma10",
+        "vol_ratio_5d", "vol_ma5", "vol_ma10",
         "high_60d", "low_60d", "momentum_5d", "momentum_20d", "momentum_60d",
         "atr_14", "annual_vol_20d", "consecutive_limit_ups", "consecutive_limit_downs",
+        "distance_to_upper_limit", "distance_to_lower_limit",
         *INTRADAY_SIGNAL_LABELS.keys(),
     }
     assert set(_SIGNAL_CN.keys()) == expected_keys
@@ -127,13 +128,12 @@ def test_quote_service_source_labels_keys_unchanged_values_traditional():
     import inspect
 
     src = inspect.getsource(quote_service.QuoteService._maybe_send_webhook)
-    assert '"ladder": "連續漲停梯隊"' in src
     assert '"signal": "訊號"' in src
     assert '"price": "價格"' in src
     assert '"market": "異動"' in src
     assert '"sector": "板塊"' in src
     # source 這一側 (dict key) 完全未變, 供規則反查
-    for key in ("strategy", "signal", "price", "market", "ladder", "sector"):
+    for key in ("strategy", "signal", "price", "market", "sector"):
         assert f'"{key}":' in src
 
     src2 = inspect.getsource(quote_service.QuoteService._maybe_send_system_notifications)

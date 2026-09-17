@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, RefreshCw, Clock, LineChart, Star, RadioTower, Maximize2, Minimize2, Scale, ChevronDown } from 'lucide-react'
 import { api } from '@/lib/api'
+import { boardTag } from '@/components/stock-table/primitives'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
@@ -57,13 +58,6 @@ function loadIntradayDays(): number {
   return INTRADAY_DAY_OPTIONS.includes(saved as typeof INTRADAY_DAY_OPTIONS[number])
     ? saved
     : 10
-}
-
-function boardTag(symbol: string): { label: string; color: string } | null {
-  if (/^(300|301)/.test(symbol)) return { label: '創', color: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
-  if (/^688/.test(symbol))       return { label: '科', color: 'text-purple-400 bg-purple-400/12 border-purple-400/25' }
-  if (/^[48]/.test(symbol))      return { label: '北', color: 'text-cyan-400 bg-cyan-400/12 border-cyan-400/25' }
-  return null
 }
 
 export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props) {

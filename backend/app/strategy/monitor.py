@@ -60,12 +60,13 @@ _SIGNAL_CN: dict[str, str] = {
     "kdj_k": "KDJ-K", "kdj_d": "KDJ-D", "kdj_j": "KDJ-J",
     "rsi_6": "RSI6", "rsi_14": "RSI14", "rsi_24": "RSI24",
     # 量能 / 动量 / 波动
-    "vol_ratio_5d": "5日量比", "vol_ratio_20d": "20日量比",
+    "vol_ratio_5d": "5日量比",
     "vol_ma5": "5日均量", "vol_ma10": "10日均量",
     "high_60d": "60日最高", "low_60d": "60日最低",
     "momentum_5d": "5日動量", "momentum_20d": "20日動量", "momentum_60d": "60日動量",
     "atr_14": "ATR14", "annual_vol_20d": "20日年化波動",
     "consecutive_limit_ups": "連續漲停", "consecutive_limit_downs": "連續跌停",
+    "distance_to_upper_limit": "距漲停距離", "distance_to_lower_limit": "距跌停距離",
 }
 
 
@@ -282,6 +283,25 @@ def _is_signal_field(field: str) -> bool:
     return any(field.startswith(p) for p in _SIGNAL_PREFIXES)
 
 
+def _condition_mask_expr(cols: set[str], conditions: list[dict], logic: str) -> pl.Expr | None:
+    """构建 conditions + logic 的命中判定表达式。字段缺失或无合法条件时返回 None。"""
+    parts: list[pl.Expr] = []
+    for c in conditions:
+        field = c["field"]
+        if field not in cols:
+            return None
+        op = c["op"]
+        if op == "truth":
+            parts.append(pl.col(field).fill_null(False))
+        elif op in _OP_BUILDERS:
+            parts.append(_OP_BUILDERS[op](pl.col(field), c["value"]))
+        else:
+            return None
+    if not parts:
+        return None
+    return pl.any_horizontal(parts) if logic == "or" else pl.all_horizontal(parts)
+
+
 def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) -> pl.DataFrame:
     """根据 conditions + logic 构建过滤后的命中 DataFrame。
 
@@ -289,26 +309,32 @@ def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) 
     logic: "and" | "or"
     返回命中行 (含 symbol/name/close/change_pct + 各信号列)
     """
-    cols = set(df.columns)
-    parts: list[pl.Expr] = []
-    for c in conditions:
-        field = c["field"]
-        if field not in cols:
-            return df.head(0)  # 字段缺失,无法判定 → 空结果
+    expr = _condition_mask_expr(set(df.columns), conditions, logic)
+    if expr is None:
+        return df.head(0)  # 字段缺失或条件非法 → 空结果
+    return df.filter(expr)
+
+
+def _rearm_crossed(row: dict, conditions: list[dict]) -> bool:
+    """判断某行是否已满足所有 rearm_value 门槛的反向穿越 (据此可重新 armed)。
+
+    未设置 rearm_value 的规则退化为纯边缘触发: 条件一旦不命中即视为已穿越。
+    == / != 无「反向」方向语义, 其 rearm_value 恒视为已满足 (不阻塞重新 armed)。
+    """
+    gated = [c for c in conditions if c.get("rearm_value") is not None and c.get("op") in _OP_BUILDERS]
+    if not gated:
+        return True
+    for c in gated:
+        value = row.get(c["field"])
+        if value is None:
+            return False
+        rearm = c["rearm_value"]
         op = c["op"]
-        if op == "truth":
-            parts.append(pl.col(field).fill_null(False))
-        elif op in _OP_BUILDERS:
-            parts.append(_OP_BUILDERS[op](pl.col(field), c["value"]))
-        else:
-            return df.head(0)
-    if not parts:
-        return df.head(0)
-    if logic == "or":
-        mask = pl.any_horizontal(parts)
-    else:
-        mask = pl.all_horizontal(parts)
-    return df.filter(mask)
+        if op in (">", ">=") and value > rearm:
+            return False
+        if op in ("<", "<=") and value < rearm:
+            return False
+    return True
 
 
 class MonitorRuleEngine:
@@ -356,6 +382,9 @@ class MonitorRuleEngine:
         self._latest_strategy_result_ids: set[str] = set()
         self._sector_monitor_service = None
         self._sector_condition_state: dict[tuple[str, str], bool] = {}
+        # (rule_id, symbol, event_type) → 是否已重新 armed (可再次触发)。
+        # 用于 signal/price/market 的边缘触发去重 (trigger_mode="edge"), 键形状比照 _last_fire。
+        self._condition_state: dict[tuple[str, str, str], bool] = {}
 
     def set_strategy_engine(self, engine) -> None:
         """注入 StrategyEngine, type=strategy 规则据此跑选股。"""
@@ -470,6 +499,11 @@ class MonitorRuleEngine:
             for key, value in list(self._sector_condition_state.items())
             if key[0] in active_ids
         }
+        self._condition_state = {
+            key: value
+            for key, value in list(self._condition_state.items())
+            if key[0] in active_ids
+        }
         logger.info("MonitorRuleEngine: 装载 %d 条规则", len(self._rules))
 
     def add_rule(self, rule: dict) -> None:
@@ -493,6 +527,9 @@ class MonitorRuleEngine:
         self._sector_condition_state = {
             k: v for k, v in self._sector_condition_state.items() if k[0] != rule_id
         }
+        self._condition_state = {
+            k: v for k, v in self._condition_state.items() if k[0] != rule_id
+        }
 
     def clear(self) -> None:
         self._rules.clear()
@@ -501,6 +538,7 @@ class MonitorRuleEngine:
         self._strategy_signal_state.clear()
         self._strategy_signal_seen.clear()
         self._sector_condition_state.clear()
+        self._condition_state.clear()
 
     @property
     def rules(self) -> dict[str, dict]:
@@ -843,12 +881,13 @@ class MonitorRuleEngine:
         if rtype == "strategy":
             # 策略类型: 跑策略选股, 同时产出所选的信号和结果池变更事件
             hit_rows = self._match_strategy(scoped, rule)
-        elif rtype == "ladder":
-            # 连板梯队封单监控: 独立处理 (需带预警封单值, 走专属 message)
-            return self._evaluate_ladder(scoped, rule, now)
         else:
             # signal / price / market: 通用条件匹配
-            for sym, name, price, pct, hit_sigs in self._match_conditions(scoped, rule):
+            if rule.get("trigger_mode", "edge") == "edge":
+                matched = self._match_conditions_edge(rule["id"], rtype, scoped, rule)
+            else:
+                matched = self._match_conditions(scoped, rule)
+            for sym, name, price, pct, hit_sigs in matched:
                 hit_rows.append((rtype, sym, name, price, pct, hit_sigs))
 
         if not hit_rows:
@@ -1227,84 +1266,44 @@ class MonitorRuleEngine:
             results.append((sym, name, price, pct, hit_sigs))
         return results
 
-    def _evaluate_ladder(self, scoped: pl.DataFrame, rule: dict, now: float) -> list[dict]:
-        """评估连板梯队封单监控规则。
+    def _match_conditions_edge(
+        self, rule_id: str, ev_type: str, df: pl.DataFrame, rule: dict,
+    ) -> list[tuple[str, Any, Any, Any, list[str]]]:
+        """边缘触发版 _match_conditions: 仅命中状态由「未命中」转为「命中」时才返回该行。
 
-        封单量从注入的临时列 _sealed_vol (手) 读取 (由 quote_service 评估前注入)。
-        命中条件: 封单比较值 <= threshold (且封单 > 0, 排除无 depth 数据的股票)。
-        涨停(direction=up) → 炸板预警; 跌停(direction=down) → 翘板预警。
+        必须遍历 scope 内的全部行 (命中与未命中), 而不能只看命中列 —
+        否则未命中的 symbol 状态永远无法归零, 规则会在触发一次后永久失效。
         """
-        if "_sealed_vol" not in scoped.columns:
-            return []  # 无封单数据 (depth 未拉取), 安全降级
-
-        metric = rule.get("metric", "sealed_vol")
-        threshold = rule.get("threshold", 0)
-        direction = rule.get("direction", "up")
-        cooldown = rule.get("cooldown_seconds", 600)
-        severity = rule.get("severity", "warn")
-
-        # 比较值: sealed_vol 直接用 (手), sealed_amount = 手 × 100股 × close
-        if metric == "sealed_amount":
-            cmp_expr = pl.col("_sealed_vol") * 100 * pl.col("close")
-            unit = "元"
-        else:
-            cmp_expr = pl.col("_sealed_vol")
-            unit = "手"
-
-        # 命中: 封单 > 0 (有数据) 且 比较值 <= 阈值
-        hit = scoped.filter(
-            pl.col("_sealed_vol").is_not_null()
-            & (pl.col("_sealed_vol") > 0)
-            & (cmp_expr <= threshold)
-        )
-        if hit.is_empty():
+        conditions = rule.get("conditions", [])
+        logic = rule.get("logic", "and")
+        if not conditions:
             return []
-
-        warn_label = "炸板預警" if direction == "up" else "翹板預警"
-        events: list[dict] = []
-        for row in hit.iter_rows(named=True):
+        expr = _condition_mask_expr(set(df.columns), conditions, logic)
+        if expr is None:
+            return []
+        annotated = df.with_columns(expr.alias("_cond_hit"))
+        results: list[tuple[str, Any, Any, Any, list[str]]] = []
+        for row in annotated.iter_rows(named=True):
             sym = row.get("symbol", "")
-            key = (rule["id"], sym, "ladder")
-            last = self._last_fire.get(key)
-            if last is not None and (now - last) < cooldown:
+            hit = bool(row.get("_cond_hit"))
+            key = (rule_id, sym, ev_type)
+            armed = self._condition_state.get(key, True)
+            fire = False
+            if hit:
+                if armed:
+                    fire = True
+                    armed = False
+            elif not armed and _rearm_crossed(row, conditions):
+                armed = True
+            self._condition_state[key] = armed
+            if not fire:
                 continue
-            self._last_fire[key] = now
-
-            name = row.get("name") or self._name_map.get(sym) or sym
-            price = row.get("close")
-            pct = row.get("change_pct")
-            sealed_vol = row.get("_sealed_vol")
-            # 预警封单值 (展示用)
-            sealed_value = sealed_vol * 100 * (price or 0) if metric == "sealed_amount" else sealed_vol
-
-            # message 体现预警封单量 + 阈值
-            if metric == "sealed_amount":
-                sv_text = f"{sealed_value / 1e4:.0f}萬{unit}"
-                th_text = f"{threshold / 1e4:.0f}萬{unit}"
-            else:
-                sv_text = f"{sealed_value:,.0f} {unit}"
-                th_text = f"{threshold:,.0f} {unit}"
-            message = f"{warn_label} · 封單 {sv_text} ≤ {th_text}"
-
-            events.append({
-                "ts": int(now * 1000),
-                "rule_id": rule["id"],
-                "rule_name": rule.get("name", ""),
-                "source": "ladder",
-                "type": warn_label,
-                "symbol": sym,
-                "name": name,
-                "message": message,
-                "price": price,
-                "change_pct": pct,
-                "signals": [],
-                "severity": severity,
-                "conditions": [],
-                "logic": "and",
-                "sealed_value": sealed_value,   # 预警封单量/额 (外部推播+记录展示)
-                "sealed_metric": metric,
-            })
-        return events
+            hit_sigs = [
+                c["field"] for c in conditions
+                if c.get("op") == "truth" and row.get(c["field"])
+            ]
+            results.append((sym, row.get("name"), row.get("close"), row.get("change_pct"), hit_sigs))
+        return results
 
     def _default_message(self, rule: dict, ev_type: str = "", sym: str = "",
                           name: str = "", pct: Any = None, price: Any = None,

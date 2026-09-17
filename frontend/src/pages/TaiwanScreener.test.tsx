@@ -2,7 +2,7 @@
 // 涵蓋：異常訊號面板列連結指向真實已註冊路由 /stocks/:symbol（保留交易所後綴），
 // 不再指向不存在的 /taiwan/stocks/:symbol；主篩選表格既有正確連結行為不受影響。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useSearchParams } from 'react-router-dom'
 import { QueryClientProvider, QueryClient } from '@tanstack/react-query'
 import { TaiwanScreener } from './TaiwanScreener'
@@ -21,7 +21,26 @@ vi.mock('@/lib/api', () => ({
     watchlistRemove: vi.fn(),
     watchlistGroups: vi.fn(),
     taiwanSearch: vi.fn(),
+    // 監控規則合併: 結果 row「監控」改開統一的 RuleEditor(simple 模式), 依賴通用
+    // 監控規則的選項/偏好等查詢 —— 全部回傳最小可用形狀, 本檔測試不驗證其內容。
+    monitorRuleOptions: vi.fn().mockResolvedValue({
+      threshold_fields: [],
+      builtin_signals: [],
+      custom_signals: [],
+      operators: ['>', '>=', '<', '<=', '==', '!='],
+      types: [],
+      scopes: [],
+      logics: [],
+      severities: [],
+      directions: [],
+      intraday_signal_support: { available: true, source: null, max_symbols: 0, reason: '' },
+      sector_targets: { index: [], concept: [], industry: [] },
+    }),
+    preferences: vi.fn().mockResolvedValue({}),
+    customSignalsList: vi.fn().mockResolvedValue({ signals: [] }),
+    instrumentNames: vi.fn().mockResolvedValue({ names: {} }),
   },
+  genRuleId: () => 'mr_test',
 }))
 
 function buildScreenerResponse() {
@@ -240,8 +259,9 @@ describe('Main results row direct actions (Phase 8C-A)', () => {
     renderScreener()
     const monitorButton = await screen.findByRole('button', { name: '為 2330.TWSE 新增監控' })
     fireEvent.click(monitorButton)
-    expect(await screen.findByText('監控標的 (Security Master)')).toBeInTheDocument()
-    expect(screen.getByDisplayValue('2330.TWSE')).toBeInTheDocument()
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('heading', { name: '加入監控' })).toBeInTheDocument()
+    expect(within(dialog).getByText('2330.TWSE')).toBeInTheDocument()
   })
 })
 

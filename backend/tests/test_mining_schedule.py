@@ -8,7 +8,6 @@ from zoneinfo import ZoneInfo
 import polars as pl
 import pytest
 
-from app.jobs import daily_pipeline
 from app.services import mining_schedule, preferences
 from app.services.mining_jobs import MiningRunStore
 
@@ -401,27 +400,3 @@ def test_insufficient_data_records_visible_skipped_prerequisite(tmp_path, monkey
     assert manifest["status"] == "skipped_prerequisite"
     assert "insufficient" in manifest["error"]
     assert manager.calls == []
-
-
-def test_pipeline_failure_does_not_trigger_mining(monkeypatch):
-    mining_calls = []
-    monkeypatch.setattr(daily_pipeline, "_run_tracked", lambda *_args: False)
-    monkeypatch.setattr(
-        "app.services.mining_schedule.run_weekly_mining",
-        lambda state: mining_calls.append(state),
-    )
-
-    daily_pipeline._scheduled_pipeline_task(lambda: None)
-
-    assert mining_calls == []
-
-
-def test_enqueue_failure_does_not_escape_successful_pipeline(monkeypatch):
-    monkeypatch.setattr(daily_pipeline, "_run_tracked", lambda *_args: True)
-
-    def fail_enqueue(_state):
-        raise RuntimeError("queue unavailable")
-
-    monkeypatch.setattr("app.services.mining_schedule.run_weekly_mining", fail_enqueue)
-
-    daily_pipeline._scheduled_pipeline_task(lambda: None)

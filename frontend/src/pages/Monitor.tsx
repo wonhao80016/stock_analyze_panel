@@ -1,15 +1,15 @@
 import { useState, useRef, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Plus, ListChecks, BellRing, Globe } from 'lucide-react'
-import { api, type TaiwanMonitorRule, type TaiwanRealtimeQuote } from '@/lib/api'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Plus, ListChecks, BellRing, Globe, Trash2 } from 'lucide-react'
+import { api, type MonitorRule, type TaiwanRealtimeQuote } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { markSeen, leaveMonitorPage } from '@/lib/monitorBadge'
 import { TaiwanIndexBar } from '@/components/monitor/TaiwanIndexBar'
 import { TaiwanQuotePanel } from '@/components/monitor/TaiwanQuotePanel'
-import { TaiwanRuleEditorDialog } from '@/components/monitor/TaiwanRuleEditorDialog'
 import { TaiwanAlertsList } from '@/components/monitor/TaiwanAlertsList'
-import { TaiwanRulesList } from '@/components/monitor/TaiwanRulesList'
 import { GenericRulesList } from '@/components/monitor/GenericRulesList'
+import { RuleEditor } from '@/components/monitor/RuleEditor'
+import { Modal } from '@/components/Modal'
 
 // Phase 8C-D — Legacy Product Removal: 「A 股策略監控」分頁與其專屬觸發記錄/
 // 規則管理 UI (含行業/概念標籤設定) 已隨產品介面正式移除。strategy_alert SSE、
@@ -17,25 +17,38 @@ import { GenericRulesList } from '@/components/monitor/GenericRulesList'
 // (monitorRuleSave/monitorRuleDelete/monitorRulesList, 由 components/monitor/
 // RuleEditor.tsx 經 StockPreviewDialog 等處繼續重用)、Taiwan quote/monitor
 // merge 完全未動。Monitor 最終只剩台股即時監控一種畫面, 不再需要市場切換分頁。
+//
+// 監控規則合併(2026-09): 原本並排的「台股即時規則」「訊號規則」兩組列表/編輯器
+// 已合併為單一 GenericRulesList + RuleEditor —— 兩者過去欄位/後端儲存不同,
+// 使用者無從判斷該用哪個; 通用引擎(monitor.py)現已能表達台股引擎原本的全部
+// 規則型態(價格/漲跌幅/量能/漲跌停距離/訊號), 不再需要兩套。
 export function Monitor() {
-  const [rulesTab, setRulesTab] = useState<'taiwan' | 'signal'>('taiwan')
-  const [twEditorOpen, setTwEditorOpen] = useState(false)
-  const [editingTwRule, setEditingTwRule] = useState<TaiwanMonitorRule | null>(null)
-  const [presetTwQuote, setPresetTwQuote] = useState<TaiwanRealtimeQuote | null>(null)
+  const qc = useQueryClient()
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editingRule, setEditingRule] = useState<MonitorRule | null>(null)
+  const [rulePreset, setRulePreset] = useState<Partial<MonitorRule> | undefined>(undefined)
 
-  // 台灣監控規則 Query
-  const twRulesQuery = useQuery({
-    queryKey: QK.taiwanRules,
-    queryFn: () => api.taiwanRulesList(),
-  })
-  const twRules = twRulesQuery.data?.rules || []
-
-  // 同一個 query key, 與訊號分頁列表共用快取, 不會多打一次。
-  const genericRulesQuery = useQuery({
+  const rulesQuery = useQuery({
     queryKey: QK.monitorRules,
     queryFn: () => api.monitorRulesList(),
   })
-  const genericRuleCount = genericRulesQuery.data?.rules?.length ?? 0
+  const ruleCount = rulesQuery.data?.rules?.length ?? 0
+
+  const openNewRule = (preset?: Partial<MonitorRule>) => {
+    setEditingRule(null)
+    setRulePreset(preset)
+    setEditorOpen(true)
+  }
+  const openEditRule = (rule: MonitorRule) => {
+    setEditingRule(rule)
+    setRulePreset(undefined)
+    setEditorOpen(true)
+  }
+  const closeEditor = () => {
+    setEditorOpen(false)
+    setEditingRule(null)
+    setRulePreset(undefined)
+  }
 
   // 台股觸發記錄 (與 strategy_alert SSE 共用同一份 alertsQuery/api.alertsList,
   // 只是 Monitor 頁面級的兜底輪詢 — 未讀徽標/即時刷新走既有 monitorBadge/SSE)
@@ -45,6 +58,13 @@ export function Monitor() {
     refetchInterval: 10000,
   })
   const total = alertsQuery.data?.total ?? 0
+
+  // Clearing only removes the stored alert history; rule cooldown and dedup state
+  // live in the engine's memory and are intentionally left untouched.
+  const clearAlertsMut = useMutation({
+    mutationFn: () => api.alertsClear(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.alerts(undefined) }),
+  })
 
   // 進入監控頁: 清零未讀徽標 + 記錄"進入時刻", 之後新增的記錄會閃爍
   // 離開監控頁: 停止同步, 之後新增才計入未讀
@@ -80,11 +100,12 @@ export function Monitor() {
           {/* 上部: 台股即時行情 + 五檔盤口 */}
           <div className="h-auto">
             <TaiwanQuotePanel
-              onAddRuleForSymbol={(q) => {
-                setPresetTwQuote(q)
-                setEditingTwRule(null)
-                setTwEditorOpen(true)
-              }}
+              onAddRuleForSymbol={(q: TaiwanRealtimeQuote) => openNewRule({
+                name: `${q.name} 監控`,
+                type: 'price',
+                scope: 'symbols',
+                symbols: [q.symbol],
+              })}
             />
           </div>
 
@@ -99,6 +120,18 @@ export function Monitor() {
                   <span className="rounded-md bg-elevated/50 px-1.5 py-0.5 text-[10px] font-medium text-muted">
                     {total} 筆事件
                   </span>
+                  <button
+                    onClick={() => {
+                      if (window.confirm(`確定清空全部 ${total} 筆觸發記錄?\n\n此操作無法復原。規則本身與冷卻狀態不受影響。`)) {
+                        clearAlertsMut.mutate()
+                      }
+                    }}
+                    disabled={total === 0 || clearAlertsMut.isPending}
+                    title={total === 0 ? '目前沒有觸發記錄' : '清空全部觸發記錄'}
+                    className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-border/60 bg-surface text-muted transition-all hover:border-danger/40 hover:text-danger hover:shadow-sm cursor-pointer disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-border/60 disabled:hover:text-muted"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               </div>
               <div className="min-h-0 flex-1 overflow-auto p-3.5">
@@ -106,73 +139,45 @@ export function Monitor() {
               </div>
             </section>
 
-            {/* 右欄: 台股監控規則管理 */}
+            {/* 右欄: 監控規則管理 — 統一列表 + 統一編輯器, 不再區分「台股/訊號」兩組引擎 */}
             <section className="flex min-h-0 w-full flex-col overflow-hidden rounded-xl border border-border bg-surface/40 shadow-lg shadow-black/5 lg:w-[420px] lg:shrink-0">
               <div className="flex items-center justify-between border-b border-border/60 bg-surface/60 px-4 py-2.5">
                 <div className="flex items-center gap-1.5">
-                  <SectionHeader icon={ListChecks} title="規則管理" />
-                  <button
-                    onClick={() => setRulesTab('taiwan')}
-                    className={`cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                      rulesTab === 'taiwan'
-                        ? 'border-accent/50 bg-accent/15 text-accent'
-                        : 'border-border/60 bg-surface text-muted hover:border-accent/40 hover:text-foreground'
-                    }`}
-                  >
-                    台股 {twRules.length}
-                  </button>
-                  <button
-                    onClick={() => setRulesTab('signal')}
-                    className={`cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                      rulesTab === 'signal'
-                        ? 'border-accent/50 bg-accent/15 text-accent'
-                        : 'border-border/60 bg-surface text-muted hover:border-accent/40 hover:text-foreground'
-                    }`}
-                  >
-                    訊號 {genericRuleCount}
-                  </button>
+                  <SectionHeader icon={ListChecks} title="監控規則" />
+                  <span className="rounded-md bg-elevated/50 px-1.5 py-0.5 text-[10px] font-medium text-muted">
+                    {ruleCount} 條
+                  </span>
                 </div>
-                <div className="flex items-center gap-1">
-                  {rulesTab === 'taiwan' && (
-                  <button
-                    onClick={() => {
-                      setEditingTwRule(null)
-                      setPresetTwQuote(null)
-                      setTwEditorOpen(true)
-                    }}
-                    title="新建台股規則"
-                    className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-border/60 bg-surface text-muted transition-all hover:border-accent/40 hover:text-accent hover:shadow-sm cursor-pointer"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                  </button>
-                  )}
-                </div>
+                <button
+                  onClick={() => openNewRule()}
+                  title="新建監控規則"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-lg border border-border/60 bg-surface text-muted transition-all hover:border-accent/40 hover:text-accent hover:shadow-sm cursor-pointer"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
               </div>
               <div className="min-h-0 flex-1 overflow-auto p-3.5">
-                {rulesTab === 'taiwan' ? (
-                <TaiwanRulesList
-                  rules={twRules}
-                  onEdit={(r) => {
-                    setEditingTwRule(r)
-                    setPresetTwQuote(null)
-                    setTwEditorOpen(true)
-                  }}
-                />
-                ) : (
-                  <GenericRulesList />
-                )}
+                <GenericRulesList onEdit={openEditRule} />
               </div>
             </section>
           </div>
         </div>
       </div>
 
-      <TaiwanRuleEditorDialog
-        open={twEditorOpen}
-        rule={editingTwRule}
-        presetQuote={presetTwQuote}
-        onClose={() => { setTwEditorOpen(false); setEditingTwRule(null); setPresetTwQuote(null) }}
-      />
+      {editorOpen && (
+        <Modal
+          onClose={closeEditor}
+          ariaLabel={editingRule ? '編輯監控規則' : '新建監控規則'}
+          panelClassName="w-[92vw] max-w-2xl max-h-[90vh] overflow-y-auto"
+        >
+          <RuleEditor
+            rule={editingRule}
+            preset={rulePreset}
+            onClose={closeEditor}
+            onSaved={closeEditor}
+          />
+        </Modal>
+      )}
     </div>
   )
 }

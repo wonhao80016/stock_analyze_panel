@@ -23,7 +23,9 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
-import { TaiwanRuleEditorDialog } from '@/components/monitor/TaiwanRuleEditorDialog'
+import { Modal } from '@/components/Modal'
+import { RuleEditor } from '@/components/monitor/RuleEditor'
+import { conditionSummary } from '@/components/monitor/GenericRulesList'
 import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
 import { TaiwanReferenceData } from '@/components/taiwan/TaiwanReferenceData'
 import { DataQualityBadge, formatQuoteSource } from '@/components/taiwan/TaiwanDataQuality'
@@ -772,8 +774,11 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                         <div className="flex items-center gap-2">
                           <span className="font-semibold text-foreground">{r.name}</span>
                           <span className={cn('h-2 w-2 rounded-full', r.enabled ? 'bg-emerald-500' : 'bg-muted')} />
+                          {r.scope === 'all' && (
+                            <span className="rounded bg-elevated px-1.5 py-0.5 text-[9px] text-muted">全市場</span>
+                          )}
                         </div>
-                        <p className="text-[11px] text-muted mt-0.5">門檻: {r.threshold}</p>
+                        <p className="text-[11px] text-muted mt-0.5">{conditionSummary(r)}</p>
                       </div>
                       <span className="text-[10px] font-mono uppercase bg-elevated px-2 py-0.5 rounded text-muted">
                         {r.severity}
@@ -1048,16 +1053,22 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
         )}
       </div>
 
-      {/* 新增台股監控規則彈窗 */}
-      <TaiwanRuleEditorDialog
-        open={isRuleEditorOpen}
-        rule={null}
-        presetSymbol={symbol}
-        onClose={() => {
-          setIsRuleEditorOpen(false)
-          detailQuery.refetch()
-        }}
-      />
+      {/* 新增監控規則彈窗 */}
+      {isRuleEditorOpen && (
+        <Modal
+          onClose={() => { setIsRuleEditorOpen(false); detailQuery.refetch() }}
+          ariaLabel="加入監控"
+          panelClassName="w-[92vw] max-w-lg max-h-[90vh] overflow-y-auto"
+        >
+          <RuleEditor
+            rule={null}
+            simple
+            preset={{ scope: 'symbols', symbols: [symbol], type: 'signal', logic: 'or' }}
+            onClose={() => { setIsRuleEditorOpen(false); detailQuery.refetch() }}
+            onSaved={() => { setIsRuleEditorOpen(false); detailQuery.refetch() }}
+          />
+        </Modal>
+      )}
     </div>
   )
 }

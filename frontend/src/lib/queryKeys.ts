@@ -34,8 +34,8 @@ export const QK = {
   // 不用 watchlist- 前綴: 避免被 SSE quotes_updated 高頻失效(expert 1s/pro 2s)
   // 導致每次都拉 TickFlow 觸限流。分時圖用固定 refetchInterval 刷新即可。
   minuteBatch:          (symbols: string) => ['minute-batch', symbols] as const,
-  instrumentSearch:     (q: string, assetTypes?: string, market?: 'ashare' | 'taiwan' | 'all') =>
-    ['instrument-search', q, assetTypes ?? 'stock', market ?? 'ashare'] as const,
+  instrumentSearch:     (q: string, assetTypes?: string) =>
+    ['instrument-search', q, assetTypes ?? 'stock'] as const,
 
   // Screener
   screener:             ['screener'] as const,
@@ -87,7 +87,6 @@ export const QK = {
   monitorRules:         ['monitor-rules'] as const,
   monitorRuleOptions:   ['monitor-rule-options'] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
-  taiwanRules:          ['taiwan-rules'] as const,
   taiwanQuotes:         (symbols: string) => ['taiwan-quotes', symbols] as const,
   taiwanSearch:         (q: string) => ['taiwan-search', q] as const,
   taiwanStockDetail:    (symbol: string, days?: number) => ['taiwan-stock-detail', symbol, days ?? 120] as const,

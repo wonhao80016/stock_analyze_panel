@@ -15,7 +15,7 @@ import polars as pl
 
 from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
-from app.market_time import CN_TZ, cn_now, cn_today
+from app.market_time import CN_TZ, cn_now
 from app.services import preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
@@ -275,59 +275,6 @@ def sync_and_persist_daily_batch(
         logger.warning("refresh view failed: %s", e)
 
     return df.height
-
-
-def sync_daily_by_quotes(repo: KlineRepository) -> int:
-    """用实时行情接口拉全市场当日数据,覆写 kline_daily 今天分区。
-
-    一个请求覆盖 ~5500 只股票,比 batch K-line 快几个数量级。
-    返回写入的行数。
-    """
-    if preferences.get_daily_data_provider() in ("taiwan", "tickflow"):
-        return 0
-
-    from datetime import date as _date
-
-    try:
-        from app.tickflow.client import get_client
-        tf = get_client()
-        resp = tf.quotes.get_by_universes(universes=["CN_Equity_A"])
-    except Exception as e:
-        logger.warning("get_by_universes failed: %s", e)
-        return 0
-
-    if not resp:
-        logger.warning("get_by_universes returned empty")
-        return 0
-
-    records = []
-    for q in resp:
-        ext = q.get("ext") or {}
-        records.append({
-            "symbol": q.get("symbol"),
-            "open": q.get("open"),
-            "high": q.get("high"),
-            "low": q.get("low"),
-            "close": q.get("last_price"),
-            "volume": q.get("volume"),
-            "amount": q.get("amount"),
-        })
-
-    df = pl.DataFrame(records)
-    if df.is_empty():
-        return 0
-
-    # 分区日期用北京交易日 (与 quote_service._build_daily 的 cn_today 一致),
-    # 避免 UTC 服务器在盘中把日分区写成服务器本地日期。
-    today = cn_today()
-    daily_df = df.with_columns(pl.lit(today).cast(pl.Date).alias("date"))
-
-    # 过滤停牌 (open/high 为 0; close 可能被填充为前收盘价, 不能用全零判断)
-    daily_df = filter_halt_days(daily_df)
-
-    repo.flush_live_daily(daily_df)
-    logger.info("sync_daily_by_quotes: %d symbols flushed for %s", daily_df.height, today)
-    return daily_df.height
 
 
 def _normalize_adj_factor(raw) -> pl.DataFrame:

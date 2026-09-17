@@ -43,7 +43,6 @@ from app.taiwan.enrichment.margin import TaiwanMarginProvider
 from app.taiwan.universe.models import MarketProfileBridge
 from app.taiwan.providers.hybrid_provider import TaiwanHybridProvider
 from app.taiwan.realtime.calendar import taipei_now
-from app.taiwan.realtime.monitor_engine import get_monitor_engine
 from app.taiwan.realtime.service import get_realtime_service
 from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 from app.taiwan.universe import get_security_master
@@ -69,7 +68,6 @@ class TaiwanStockDetailService:
         self.index_provider = index_provider or TaiwanIndexProvider()
         self.security_master = get_security_master()
         self.realtime_service = get_realtime_service()
-        self.monitor_engine = get_monitor_engine()
 
     def get_stock_detail(
         self,
@@ -513,22 +511,43 @@ class TaiwanStockDetailService:
         )
 
     def _aggregate_monitor_summary(self, symbol_str: str) -> TaiwanMonitorSummary:
-        """Find active rules configured for this symbol."""
+        """Find rules (from the unified monitor engine) that cover this symbol.
+
+        A rule covers the symbol when scope=symbols and the symbol is listed,
+        or when scope=all (market-wide rules apply to every symbol). Sector
+        and watchlist_group scoped rules are excluded: membership can't be
+        resolved cheaply here, and including them would misleadingly imply
+        the rule specifically watches this symbol.
+        """
+        from app.strategy import monitor_rules as mr_store
+        from app.config import Settings
+
         try:
-            all_rules = self.monitor_engine.list_rules()
-            matched = [r for r in all_rules if r.symbol == symbol_str]
-            active = [r for r in matched if r.enabled]
+            settings = Settings()
+            data_dir = settings.data_dir if hasattr(settings, "data_dir") else None
+            if not data_dir:
+                from pathlib import Path
+                data_dir = Path("data")
+
+            matched = [
+                r for r in mr_store.load_all(data_dir)
+                if (r.get("scope") == "symbols" and symbol_str in r.get("symbols", []))
+                or r.get("scope") == "all"
+            ]
+            active = [r for r in matched if r.get("enabled", True)]
             return TaiwanMonitorSummary(
                 rule_count=len(matched),
                 active_count=len(active),
                 rules=[
                     {
-                        "rule_id": r.rule_id,
-                        "name": r.name,
-                        "rule_type": r.rule_type.value,
-                        "threshold": r.threshold,
-                        "enabled": r.enabled,
-                        "severity": r.severity.value,
+                        "rule_id": r.get("id"),
+                        "name": r.get("name"),
+                        "type": r.get("type"),
+                        "scope": r.get("scope"),
+                        "enabled": r.get("enabled", True),
+                        "severity": r.get("severity", "info"),
+                        "conditions": r.get("conditions", []),
+                        "logic": r.get("logic", "and"),
                     }
                     for r in matched
                 ],

@@ -30,7 +30,6 @@ block_cipher = None
 # ── 資源路徑基準: 項目根 (spec 文件在 packaging/ 下) ──────────────────
 ROOT = Path(SPECPATH).parent
 FRONTEND_DIST = str(ROOT / "frontend" / "dist")
-TIERS_YAML = str(ROOT / "tiers.yaml")
 VERSION_FILE = str(ROOT / "VERSION")
 BUILTIN_STRATEGIES = str(ROOT / "backend" / "app" / "strategy" / "builtin")
 # 圖標按平台選: Windows 用 .ico, macOS 用 .icns (PyInstaller 對 .ico 在
@@ -112,8 +111,6 @@ for pkg in (
 # ── 隨包資源 (只讀, 放進 _MEIPASS) ────────────────────────────────────
 # 前端 dist → static/ (config.py frozen 模式讀 _MEIPASS/static)
 datas += [(FRONTEND_DIST, "static")]
-# tiers.yaml → 包根 (config.py frozen 模式讀 _MEIPASS/tiers.yaml)
-datas += [(TIERS_YAML, ".")]
 # VERSION → 包根 (app.__version__ 與 UI 的唯一版本來源)
 datas += [(VERSION_FILE, ".")]
 # 內置策略 → app/strategy/builtin/ (importlib 動態加載, 不能進 PYZ)

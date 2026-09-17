@@ -167,6 +167,10 @@ class QuoteService:
 
     CORE_INDEX_SYMBOLS = ("000001.SH", "399001.SZ", "399006.SZ", "000680.SH")
 
+    # TWSE MIS builds one unbounded query string (no server-side batching); cap the
+    # merged watchlist+monitor-rule symbol pool to keep that URL bounded.
+    TAIWAN_REALTIME_MAX_SYMBOLS = 300
+
     # 档位 → 最小轮询间隔 (秒)
     TIER_MIN_INTERVAL = {
         "expert": 1.0,
@@ -216,6 +220,9 @@ class QuoteService:
         # before the poll loop is allowed to go idle for the day.
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
+        # Whether this round's quote records came from a live source. None = no
+        # status signal (non-Taiwan providers today) -> gate does not apply.
+        self._quote_source_realtime: bool | None = None
 
     # ================================================================
     # 生命周期
@@ -586,10 +593,34 @@ class QuoteService:
                 symbols = watchlist.list_symbols()
                 sym_list = [str((s or {}).get("symbol") or "").strip() for s in symbols]
                 sym_list = [s for s in sym_list if s]
+                # Monitor rules may target symbols outside the watchlist; without merging
+                # them in, such a symbol never receives a live quote and its rule can
+                # never fire (mirrors the index-symbol merge below).
+                engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+                if engine:
+                    seen = set(sym_list)
+                    for _r in list(engine.rules.values()):
+                        if _r.get("enabled", True) and _r.get("scope") == "symbols":
+                            for _s in _r.get("symbols", []):
+                                if _s and _s not in seen:
+                                    seen.add(_s)
+                                    sym_list.append(_s)
+                if len(sym_list) > self.TAIWAN_REALTIME_MAX_SYMBOLS:
+                    logger.warning(
+                        "台股实时标的池超限 (%d > %d), 已截断; MIS 端点单次请求无内建分批",
+                        len(sym_list), self.TAIWAN_REALTIME_MAX_SYMBOLS,
+                    )
+                    sym_list = sym_list[: self.TAIWAN_REALTIME_MAX_SYMBOLS]
                 if not sym_list:
                     return
                 df = provider.get_realtime(symbols=sym_list)
                 if not df.is_empty():
+                    if "change_pct" in df.columns:
+                        # mis/yahoo/enrichment providers report change_pct as a percentage
+                        # number (1.30 = 1.30%); the enriched pipeline is decimal-scale
+                        # (0.05 = 5%, see ENRICHED_COLUMNS in pipeline.py). Normalize here
+                        # so quote_extra/enriched/rules/alerts all agree.
+                        df = df.with_columns((pl.col("change_pct") / 100.0).alias("change_pct"))
                     records = df.to_dicts()
                     self._record_minute_bars(records)
                     self._process_full_market_records(records, t0=t0, now_ts=now_ts)
@@ -695,6 +726,11 @@ class QuoteService:
     def _process_full_market_records(self, records: list[dict], *, t0: float, now_ts: float) -> None:
         """把全市场 records 写盘并增量计算 enriched。"""
         from app.services import preferences
+        # TaiwanHybridProvider.get_realtime() falls back to official.fetch_quote /
+        # get_daily (status != "realtime") when no live quote exists; that batch
+        # must not be evaluated by monitor rules (see _evaluate_monitors), so the
+        # status is captured here before quote_extra drops the column.
+        self._quote_source_realtime = self._records_realtime_status(records)
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
         core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
         all_index_symbols.update(core_index_symbols)
@@ -897,6 +933,9 @@ class QuoteService:
             self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=True)
 
         self._broadcast_quote_updated()
+        # This path never goes through _process_full_market_records, so clear any
+        # stale flag left by a previous Taiwan-provider round.
+        self._quote_source_realtime = None
         self._evaluate_monitors(daily_df, quote_extra)
 
     # ================================================================
@@ -961,6 +1000,17 @@ class QuoteService:
                     .alias(col)
                 )
         return result
+
+    @staticmethod
+    def _records_realtime_status(records: list[dict]) -> bool | None:
+        """整批 records 是否全部来自即时来源 (status=="realtime")。
+
+        None = 本轮 records 不带 status 信号 (非 Taiwan hybrid provider), 门槛不适用。
+        """
+        statuses = {r.get("status") for r in records if r.get("status")}
+        if not statuses:
+            return None
+        return statuses == {"realtime"}
 
     @staticmethod
     def _build_quote_extra(records: list[dict]) -> pl.DataFrame:
@@ -1100,6 +1150,12 @@ class QuoteService:
             # carries executable prices.
             if not self._is_continuous_trading():
                 return
+            if getattr(self, "_quote_source_realtime", None) is False:
+                logger.debug(
+                    "跳过监控评估: 本轮行情来源非即时回退 (status!=realtime), "
+                    "避免用官方回退/昨收数据误发告警",
+                )
+                return
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
             # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,
@@ -1126,12 +1182,9 @@ class QuoteService:
                             engine.set_name_map(name_map)
                     except Exception as e:  # noqa: BLE001
                         logger.debug("name_map 构建失败 (不影响监控): %s", e)
-                    # 股票轮: 快照未就绪时跳过 (ladder 封单也依赖股票快照日期, 一并跳过)
+                    # 股票轮: 快照未就绪时跳过
                     if stock_ready:
-                        eval_df = enriched_today
-                        if engine.has_rule_type("ladder"):
-                            eval_df = self._inject_sealed_vol(enriched_today, enriched_date)
-                        eval_df = self._inject_intraday_signals(eval_df, engine, "stock")
+                        eval_df = self._inject_intraday_signals(enriched_today, engine, "stock")
                         rule_events = engine.evaluate(eval_df, asset_type="stock")
                         if engine.consume_strategy_result_updates():
                             self.notify_strategy_results_updated()
@@ -1167,17 +1220,6 @@ class QuoteService:
                                 )
                         except Exception as e:  # noqa: BLE001
                             logger.warning("指数监控评估失败 (不影响股票/ETF 告警): %s", e)
-
-                    # 台湾市场实时规则轮: 独立评估 TaiwanMonitorEngine 并汇总告警
-                    try:
-                        from app.taiwan.realtime.monitor_engine import get_monitor_engine
-                        tw_engine = get_monitor_engine()
-                        if tw_engine.list_rules():
-                            tw_alerts = tw_engine.evaluate_all()
-                            if tw_alerts:
-                                rule_events.extend([a.to_dict() for a in tw_alerts])
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("台股监控评估失败 (不影响其他告警): %s", e)
 
                     if rule_events:
                         rule_events = self._format_extension_notifications(rule_events)
@@ -1385,42 +1427,6 @@ class QuoteService:
         except Exception as e:  # noqa: BLE001
             logger.warning("minute bar flush failed: %s", e)
 
-    def _inject_sealed_vol(self, enriched_today: pl.DataFrame, enriched_date) -> pl.DataFrame:
-        """从 depth_service 取封单量, 作为临时列 _sealed_vol 注入 enriched 副本。
-
-        涨停封单(买一量) + 跌停封单(卖一量)合并, 供 ladder 规则评估。
-        depth 未就绪时返回原 df (不注入, ladder 规则安全降级不触发)。
-        """
-        try:
-            depth_svc = getattr(self._app_state, "depth_service", None)
-            if not depth_svc:
-                return enriched_today
-            # enriched_date 可能是 date 或字符串, 统一为 date
-            from datetime import date as date_cls
-            target_date = enriched_date if isinstance(enriched_date, date_cls) else date_cls.fromisoformat(str(enriched_date))
-            # 取涨停 + 跌停封单, 合并 {symbol: vol}
-            up_map = depth_svc.get_sealed_map(target_date, is_down=False)
-            down_map = depth_svc.get_sealed_map(target_date, is_down=True)
-            sealed: dict[str, int] = {}
-            for m in (up_map, down_map):
-                for sym, info in m.items():
-                    vol = (info or {}).get("vol")
-                    if vol and vol > 0:
-                        sealed[sym] = vol  # 后者覆盖前者 (同 symbol 不可能在涨跌停都封单)
-            if not sealed:
-                return enriched_today
-            # 构造 (symbol, _sealed_vol) DataFrame, join 到 enriched 副本
-            sealed_df = pl.DataFrame({
-                "symbol": list(sealed.keys()),
-                "_sealed_vol": list(sealed.values()),
-            })
-            # 若已有残留列先移除 (避免重复 join 报错)
-            df = enriched_today.drop("_sealed_vol") if "_sealed_vol" in enriched_today.columns else enriched_today
-            return df.join(sealed_df, on="symbol", how="left")
-        except Exception as e:  # noqa: BLE001
-            logger.debug("封单注入失败 (ladder 规则将不触发): %s", e)
-            return enriched_today
-
     def _maybe_send_webhook(self, rule_events: list[dict], engine) -> None:
         """把告警推送到外部 IM (由规则 webhook_channels 指定渠道)。
 
@@ -1446,7 +1452,7 @@ class QuoteService:
             # 反查规则, 过滤出启用推送的事件
             source_labels = {
                 "strategy": "策略", "signal": "訊號",
-                "price": "價格", "market": "異動", "ladder": "連續漲停梯隊",
+                "price": "價格", "market": "異動",
                 "sector": "板塊",
             }
             rules = engine.rules if engine is not None else {}

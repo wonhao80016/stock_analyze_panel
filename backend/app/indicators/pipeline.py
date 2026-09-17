@@ -127,6 +127,8 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "change_pct":              "日涨跌幅(小数, 如 0.05 = 5%)",
     "change_amount":           "日涨跌额",
     "amplitude":               "日振幅 (最高-最低)/昨收",
+    "distance_to_upper_limit": "距涨停距离(小数, 台股)",
+    "distance_to_lower_limit": "距跌停距离(小数, 台股)",
     # ── 均线 MA ──────────────────────────────────────────
     "ma5":                     "5日简单均线",
     "ma10":                    "10日简单均线",
@@ -765,9 +767,19 @@ def compute_limit_signals(
         .alias("_prev_raw_close")
     )
 
+    tw_profile = taiwan_limit_profile(df["symbol"].unique().to_list())
+    df = df.join(
+        tw_profile.select("symbol", pl.col("limit_pct").alias("_tw_limit_pct")),
+        on="symbol",
+        how="left",
+    )
+
     is_risk_warning = pl.col("_is_st") if "_is_st" in df.columns else pl.lit(False)
     df = df.with_columns(
-        polars_price_limit_pct(pl.col("symbol"), pl.col("date"), is_risk_warning)
+        pl.coalesce(
+            pl.col("_tw_limit_pct"),
+            polars_price_limit_pct(pl.col("symbol"), pl.col("date"), is_risk_warning),
+        )
         .alias("_limit_pct")
     )
 
@@ -919,7 +931,7 @@ def compute_limit_signals(
         )
 
     # 清理临时列 + JOIN 引入的 instruments 列 (不存入 enriched)
-    cleanup = ["_prev_raw_close", "_limit_pct",
+    cleanup = ["_prev_raw_close", "_limit_pct", "_tw_limit_pct",
                "_theoretical_limit_up", "_theoretical_limit_down",
                "_effective_limit_up", "_effective_limit_down",
                "_grp_up", "_grp_down", "_instrument_as_of"]
@@ -1928,6 +1940,9 @@ def compute_enriched_today(
     if instruments is not None and not instruments.is_empty():
         df = _compute_limit_signals_today(df, instruments)
 
+    # ---- 距涨跌停距离 (台股法定涨跌幅, 用于监控规则 near_upper/lower_limit) ----
+    df = add_limit_distance_columns(df)
+
     # ---- 清理内部列 ----
     drop_cols = [
         "close_right", "high_right", "low_right", "_prev_close_raw",
@@ -2016,12 +2031,18 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         prev_raw = pl.col("close_right")
     else:
         prev_raw = pl.col("raw_close")
+    tw_profile = taiwan_limit_profile(df["symbol"].unique().to_list())
+    df = df.join(
+        tw_profile.select("symbol", pl.col("limit_pct").alias("_tw_limit_pct")),
+        on="symbol",
+        how="left",
+    )
+
     is_risk_warning = pl.col("_is_st") if "_is_st" in df.columns else pl.lit(False)
     trade_date = pl.col("date") if "date" in df.columns else pl.lit(cn_today())
-    limit_pct = polars_price_limit_pct(
-        pl.col("symbol"),
-        trade_date,
-        is_risk_warning,
+    limit_pct = pl.coalesce(
+        pl.col("_tw_limit_pct"),
+        polars_price_limit_pct(pl.col("symbol"), trade_date, is_risk_warning),
     ).alias("_limit_pct")
 
     limit_up_price = polars_limit_price(prev_raw, limit_pct, up=True)
@@ -2129,7 +2150,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     ])
 
     # 清理
-    cleanup = ["_limit_pct", "_is_st", "limit_up", "limit_down", "_instrument_as_of"]
+    cleanup = ["_limit_pct", "_tw_limit_pct", "_is_st", "limit_up", "limit_down", "_instrument_as_of"]
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
@@ -2139,3 +2160,102 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     df = df.drop([c for c in cleanup if c in df.columns])
 
     return df
+
+
+# 台股法定涨跌幅逐 symbol 缓存: Security Master 不随盘中轮询变动,
+# 避免每轮都重新查 get_instrument + get_price_limit_pct。
+_taiwan_limit_profile_cache: dict[str, tuple[float | None, bool]] = {}
+
+
+def invalidate_taiwan_limit_profile_cache() -> None:
+    """清空台股涨跌幅缓存 (Security Master 重新加载后调用)。"""
+    _taiwan_limit_profile_cache.clear()
+
+
+def taiwan_limit_profile(symbols: list[str]) -> pl.DataFrame:
+    """按 symbol 查询台股法定涨跌幅比例与跳动单位分类 (逐 symbol 缓存)。
+
+    非台股 symbol (Security Master 查无) 或 ETF underlying_scope 未确认
+    (MarketProfileBridge.get_price_limit_pct 抛 ValueError) 一律记为
+    limit_pct=None, 由调用方按 NO_LIMIT 处理 (对应列置 null)。
+    """
+    from app.taiwan.universe import get_security_master
+    from app.taiwan.universe.models import MarketProfileBridge
+
+    missing = [s for s in symbols if s not in _taiwan_limit_profile_cache]
+    if missing:
+        master = get_security_master()
+        for sym in missing:
+            inst = master.get_instrument(sym)
+            if inst is None:
+                _taiwan_limit_profile_cache[sym] = (None, False)
+                continue
+            try:
+                pct = MarketProfileBridge.get_price_limit_pct(inst)
+            except ValueError:
+                pct = None
+            _taiwan_limit_profile_cache[sym] = (pct, inst.instrument_type == "etf")
+
+    if not symbols:
+        return pl.DataFrame(schema={"symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean})
+    return pl.DataFrame([
+        {"symbol": s, "limit_pct": _taiwan_limit_profile_cache[s][0], "is_etf_tick": _taiwan_limit_profile_cache[s][1]}
+        for s in symbols
+    ])
+
+
+def _taiwan_tick_size_expr(price: pl.Expr, is_etf: pl.Expr) -> pl.Expr:
+    """台股跳动单位阶梯, 镜像 TickSizeModel.get_tick_size。"""
+    etf_tick = pl.when(price < 50.0).then(0.01).otherwise(0.05)
+    stock_tick = (
+        pl.when(price < 10.0).then(0.01)
+        .when(price < 50.0).then(0.05)
+        .when(price < 100.0).then(0.10)
+        .when(price < 500.0).then(0.50)
+        .when(price < 1000.0).then(1.00)
+        .otherwise(5.00)
+    )
+    return pl.when(is_etf).then(etf_tick).otherwise(stock_tick)
+
+
+def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
+    """新增 distance_to_upper_limit / distance_to_lower_limit (小数制, 0.01 = 1%)。
+
+    基准价一律用 prev_close (法定口徑), 与 screener.py 用 close 的既有 bug 不同。
+    NO_LIMIT 标的 (外资成分/债券 ETF、underlying_scope 未确认) 两列皆为 null;
+    Polars 对 null 的比较结果为 null, df.filter() 会自然剔除, 天然 fail-closed。
+    """
+    out_cols = ("distance_to_upper_limit", "distance_to_lower_limit")
+    if df.is_empty() or "symbol" not in df.columns or "close" not in df.columns or "prev_close" not in df.columns:
+        return df.with_columns([pl.lit(None).cast(pl.Float64).alias(c) for c in out_cols])
+
+    profile = taiwan_limit_profile(df["symbol"].unique().to_list())
+    df = df.join(profile, on="symbol", how="left")
+
+    ref = pl.col("prev_close")
+    up_raw = ref * (1.0 + pl.col("limit_pct"))
+    down_raw = pl.max_horizontal(pl.lit(0.01), ref * (1.0 - pl.col("limit_pct")))
+    is_etf = pl.col("is_etf_tick").fill_null(False)
+    up_tick = _taiwan_tick_size_expr(up_raw, is_etf)
+    down_tick = _taiwan_tick_size_expr(down_raw, is_etf)
+    limit_up = ((up_raw / up_tick + 1e-9).floor() * up_tick).round(4)
+    limit_down = ((down_raw / down_tick - 1e-9).ceil() * down_tick).round(4)
+
+    usable = (
+        pl.col("limit_pct").is_not_null()
+        & ref.is_not_null() & (ref > 0)
+        & pl.col("close").is_not_null()
+    )
+    raw_up_dist = (limit_up - pl.col("close")) / limit_up
+    raw_down_dist = (pl.col("close") - limit_down) / limit_down
+    df = df.with_columns([
+        pl.when(usable & (limit_up > 0))
+          .then(pl.when(raw_up_dist > 0).then(raw_up_dist).otherwise(0.0))
+          .otherwise(None)
+          .alias("distance_to_upper_limit"),
+        pl.when(usable & (limit_down > 0))
+          .then(pl.when(raw_down_dist > 0).then(raw_down_dist).otherwise(0.0))
+          .otherwise(None)
+          .alias("distance_to_lower_limit"),
+    ])
+    return df.drop(["limit_pct", "is_etf_tick"])

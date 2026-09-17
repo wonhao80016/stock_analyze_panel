@@ -152,12 +152,12 @@ def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
     宽度类指标(涨跌家数)同样只统计非 ST 标的 — 同一 df 统一过滤。
     关闭开关(preferences)后恢复全市场口径。
     """
-    from app.services import market_mainline, preferences
+    from app.services import preferences
 
     instruments = tmp_path / "instruments" / "part.parquet"
     instruments.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({"symbol": ["A", "B"], "name": ["*ST甲", "正常乙"]}).write_parquet(instruments)
-    monkeypatch.setattr(market_mainline, "_ST_SYMBOLS_CACHE", None)
+    monkeypatch.setattr(regime_builder, "_ST_SYMBOLS_CACHE", None)
     monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: True)
     monkeypatch.setattr(regime_builder, "_load_index_pct", lambda *a, **k: {})
 
@@ -181,6 +181,33 @@ def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
     r1_all = out_all.filter(pl.col("date") == date(2026, 1, 2)).row(0, named=True)
     assert r1_all["limit_up"] == 1      # A 计入
     assert r1_all["up_count"] == 2      # A,C 上涨
+
+
+def _write_instruments(tmp_path, names: dict[str, str]) -> None:
+    part = tmp_path / "instruments" / "part.parquet"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": list(names),
+        "name": list(names.values()),
+    }).write_parquet(part)
+
+
+def test_load_risk_warning_symbols(tmp_path, monkeypatch):
+    monkeypatch.setattr(regime_builder, "_ST_SYMBOLS_CACHE", None)
+    _write_instruments(tmp_path, {
+        "s1.SH": "*ST环保", "S2.SH": "ST万邦", "S3.SZ": "正常股",
+        "s4.BJ": "S*ST京", "S5.SH": "斯太尔",  # 中文名含"斯"不含 ST 标记
+    })
+    got = regime_builder.load_risk_warning_symbols(tmp_path)
+    assert got == frozenset({"S1.SH", "S2.SH", "S4.BJ"})  # 大写归一
+    # 缓存命中: 再次读取不重扫磁盘
+    _write_instruments(tmp_path, {"S9.SH": "ST新增"})
+    assert regime_builder.load_risk_warning_symbols(tmp_path) == got
+
+
+def test_load_risk_warning_symbols_empty_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(regime_builder, "_ST_SYMBOLS_CACHE", None)
+    assert regime_builder.load_risk_warning_symbols(tmp_path) == frozenset()
 
 
 # ───────────────────────── 持久化(upsert) ─────────────────────────

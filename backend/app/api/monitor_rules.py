@@ -40,6 +40,36 @@ def _reconcile_index_asset_type(rule: dict, repo) -> dict:
     return rule
 
 
+def _validate_taiwan_symbols(symbols: list[str]) -> None:
+    """驗證 scope=symbols 規則綁定的台股標的存在且可交易。
+
+    只覆蓋能解析成台股 canonical 格式 (`{code}.{TWSE|TPEX}`) 的 symbol;
+    其他市場格式 (如 A 股 `600000.SH`) 不受 Security Master 管轄, 略過。
+    """
+    from app.taiwan.symbol import parse_symbol
+    from app.taiwan.universe import get_security_master
+
+    sec_master = get_security_master()
+    for sym in symbols:
+        if not sym:
+            continue
+        try:
+            parse_symbol(sym)
+        except Exception:
+            continue
+        inst = sec_master.get_instrument(sym)
+        if inst is None:
+            raise HTTPException(status_code=400, detail=f"标的 {sym} 在证券主档中不存在")
+        if not inst.is_supported:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"标的 {sym} 目前不可交易 "
+                    f"(类型: {inst.instrument_type}, 上市状态: {inst.listing_status})"
+                ),
+            )
+
+
 def _sync_engine(request: Request) -> None:
     """保存/删除后,把最新规则集 reload 到引擎内存态。"""
     engine = getattr(request.app.state, "monitor_engine", None)
@@ -57,6 +87,8 @@ class ConditionModel(BaseModel):
     field: str
     op: str            # truth | > >= < <= == !=
     value: float | None = None   # op 非 truth 时必填
+    # 遲滯重新啟用門檻: 命中後需等 field 反向穿越此值才重新允許觸發; None 退化為純邊緣觸發
+    rearm_value: float | None = None
 
 
 class SectorTargetModel(BaseModel):
@@ -90,21 +122,19 @@ class RuleModel(BaseModel):
     threshold_pct: float = 1.0
     window_minutes: int = 5
     strategy_id: str | None = None
-    direction: str = "entry"  # entry | exit | both | (sector/ladder: up|down|both)
+    direction: str = "entry"  # entry | exit | both | (sector: up|down)
     notify_events: list[str] | None = None
     score_min: float | None = None
     score_max: float | None = None
     conditions: list[ConditionModel] = []
     logic: str = "and"        # and | or
+    trigger_mode: str = "edge"  # edge=未命中转命中才触发 | level=命中期间每 cooldown 重播
     cooldown_seconds: int = 3600
     severity: str = "info"    # info | warn | critical
     webhook_url: str = ""     # Webhook 推送地址 (推送到 QMT 等外部软件, 待定)
     webhook_enabled: bool = False  # 兼容老规则 (已由 webhook_channels 取代, 仅做向后兼容读)
     webhook_channels: list[str] = []  # 命中时推播的外部渠道 (合法值 'line' | 'telegram')
     message: str = ""
-    # ladder 专属 (连板梯队封单监控)
-    metric: str = "sealed_vol"   # sealed_vol=封单量(手) | sealed_amount=封单额(元)
-    threshold: float = 0         # 封单 <= 此值时报警 (原始单位: 量=手, 额=元)
 
 
 # ── 字段选项 ─────────────────────────────────────────────
@@ -249,16 +279,6 @@ def list_rules(request: Request):
 def save_rule(req: RuleModel, request: Request):
     rule = monitor_rules.normalize(req.model_dump())
     rule = _reconcile_index_asset_type(rule, request.app.state.repo)
-    # 连板梯队封单监控 (type=ladder) 依赖五档盘口数据, 需 Pro+ (DEPTH5_BATCH 能力)。
-    # 无能力时拒绝创建, 避免规则存了却永远无法触发。
-    if rule.get("type") == "ladder":
-        from app.tickflow.capabilities import Cap
-        capset = getattr(request.app.state, "capabilities", None)
-        if capset is None or not capset.has(Cap.DEPTH5_BATCH):
-            raise HTTPException(
-                status_code=403,
-                detail="封单监控需要 Pro+ 套餐 (批量五档能力),请升级后在「设置」页配置",
-            )
     if rule.get("type") == "strategy":
         from app.strategy.engine import StrategyDataContext
 
@@ -285,6 +305,8 @@ def save_rule(req: RuleModel, request: Request):
         monitor_rules.validate(rule)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if rule.get("scope") == "symbols":
+        _validate_taiwan_symbols(rule.get("symbols", []))
     if rule.get("scope") == "watchlist_group":
         # 绑定的分组必须存在 (strategy 层校验形状, 存在性在本层校验)
         from app.services import watchlist as watchlist_service
@@ -340,483 +362,4 @@ def delete_rule(rule_id: str, request: Request):
         raise HTTPException(status_code=404, detail="规则不存在")
     _sync_engine(request)
     return {"ok": True}
-
-
-# ── 演示数据生成 (仅 Dev 页用) ─────────────────────────
-
-import time as _time
-
-
-def _demo_rule(rule_id: str, name: str, rtype: str, scope: str, symbols: list[str],
-               conditions: list[dict], logic: str = "or", cooldown: int = 3600,
-               severity: str = "info", message: str = "",
-               strategy_id: str | None = None, direction: str = "entry") -> dict:
-    rule = monitor_rules.normalize({
-        "id": rule_id,
-        "name": name,
-        "type": rtype,
-        "scope": scope,
-        "symbols": symbols,
-        "conditions": conditions,
-        "logic": logic,
-        "cooldown_seconds": cooldown,
-        "severity": severity,
-        "message": message,
-        "enabled": True,
-    })
-    if rtype == "strategy":
-        rule["strategy_id"] = strategy_id
-        rule["direction"] = direction
-    return rule
-
-
-_DEMO_RULES_TEMPLATE = [
-    ("个股信号 · 茅台放量突破", "signal", "symbols", ["600519.SH"],
-     [{"field": "signal_volume_surge", "op": "truth"},
-      {"field": "signal_n_day_high", "op": "truth"}], "or", "info"),
-    ("个股信号 · 宁德金叉", "signal", "symbols", ["300750.SZ"],
-     [{"field": "signal_ma_golden_5_20", "op": "truth"}], "or", "info"),
-    ("价格 · 平安跌幅监控", "price", "symbols", ["000001.SZ"],
-     [{"field": "change_pct", "op": "<", "value": -0.03}], "or", "warn", "warn"),
-    ("价格 · 比亚迪RSI超卖", "price", "symbols", ["002594.SZ"],
-     [{"field": "rsi_14", "op": "<", "value": 30}], "and", "warn", "warn"),
-    ("市场异动 · 全市场涨停", "market", "all", [],
-     [{"field": "signal_limit_up", "op": "truth"}], "or", "critical", "critical"),
-    ("市场异动 · 全市场炸板", "market", "all", [],
-     [{"field": "signal_broken_limit_up", "op": "truth"}], "or", "warn", "warn"),
-    ("市场异动 · 跌幅超5%", "market", "all", [],
-     [{"field": "change_pct", "op": "<", "value": -0.05}], "or", "warn", "warn"),
-    ("个股信号 · 茅台跌破MA20", "signal", "symbols", ["600519.SH"],
-     [{"field": "signal_ma20_breakdown", "op": "truth"}], "or", "info"),
-]
-
-# 策略类型单独声明 (格式不同: 含 strategy_id + direction)
-_DEMO_STRATEGY_RULES: list[dict] = [
-    {"name": "策略监控 · 趋势突破", "strategy_id": "trend_breakout", "direction": "entry"},
-    {"name": "策略监控 · MACD金叉", "strategy_id": "macd_golden", "direction": "both"},
-]
-
-
-@router.post("/seed")
-def seed_demo_rules(request: Request):
-    """生成演示监控规则 (Dev 页用)。覆盖 signal/price/market/strategy 四类。"""
-    ts = int(_time.time() * 1000)
-    created = []
-    i = 0
-    for (name, rtype, scope, symbols, conditions, logic, severity, sev) in _DEMO_RULES_TEMPLATE:
-        rule_id = f"demo_{ts}_{i}"
-        rule = _demo_rule(rule_id, name, rtype, scope, symbols, conditions, logic, 3600, sev)
-        monitor_rules.save_one(_data_dir(request), rule)
-        created.append(rule_id)
-        i += 1
-    # 策略类型规则
-    for sr in _DEMO_STRATEGY_RULES:
-        rule_id = f"demo_{ts}_{i}"
-        rule = _demo_rule(
-            rule_id, sr["name"], "strategy", "all", [], [], "and", 3600, "info",
-            strategy_id=sr["strategy_id"], direction=sr.get("direction", "entry"),
-        )
-        monitor_rules.save_one(_data_dir(request), rule)
-        created.append(rule_id)
-        i += 1
-    _sync_engine(request)
-    return {"ok": True, "generated": len(created), "ids": created}
-
-
-# ── 封单监控模拟触发 (Dev 调试用) ─────────────────────
-@router.post("/test-ladder")
-def test_ladder(request: Request):
-    """模拟触发所有 ladder 规则, 返回命中结果 (不落盘、不送出外部推播)。
-
-    用当前 depth_service 的封单数据 + enriched 最新日 close 构造 mock DataFrame,
-    跑 _evaluate_ladder 判断哪些规则会触发。供 Dev 页面调试验证。
-    """
-    import polars as pl
-
-    repo = request.app.state.repo
-    depth_svc = getattr(request.app.state, "depth_service", None)
-    engine = getattr(request.app.state, "monitor_engine", None)
-
-    if not depth_svc:
-        raise HTTPException(status_code=503, detail="depth 服务未初始化")
-    if not engine or not engine.has_rule_type("ladder"):
-        raise HTTPException(status_code=400, detail="无 ladder 类型监控规则")
-
-    # 最新交易日
-    latest = repo.enriched_latest_date()
-    if not latest:
-        raise HTTPException(status_code=400, detail="无 enriched 数据")
-
-    # 取涨停+跌停封单 {symbol: vol}
-    sealed: dict[str, int] = {}
-    for is_down in (False, True):
-        m = depth_svc.get_sealed_map(latest, is_down=is_down)
-        for sym, info in m.items():
-            vol = (info or {}).get("vol")
-            if vol and vol > 0:
-                sealed[sym] = vol
-
-    if not sealed:
-        raise HTTPException(status_code=400, detail="无封单数据 (depth 未拉取或无涨停/跌停股)")
-
-    # 取这些 symbol 的 close (算封单额用)
-    enriched_today, _ = repo.get_enriched_latest()
-    cols = ["symbol", "close", "change_pct"]
-    avail = [c for c in cols if c in enriched_today.columns]
-    mock = enriched_today.select(avail).filter(pl.col("symbol").is_in(list(sealed.keys())))
-
-    # 注入 _sealed_vol
-    sealed_df = pl.DataFrame({
-        "symbol": list(sealed.keys()),
-        "_sealed_vol": list(sealed.values()),
-    })
-    mock = mock.join(sealed_df, on="symbol", how="inner")
-
-    # 取所有 ladder 规则, 逐条纯条件判断 (绕过引擎 cooldown, 不污染 _last_fire)
-    ladder_rules = [r for r in engine.rules.values() if r.get("type") == "ladder" and r.get("enabled", True)]
-    all_events = []
-    not_triggered = []
-
-    for rule in ladder_rules:
-        syms = rule.get("symbols", [])
-        sym = syms[0] if syms else None
-        metric = rule.get("metric", "sealed_vol")
-        thr = rule.get("threshold", 0)
-        direction = rule.get("direction", "up")
-        warn_label = "炸板预警" if direction == "up" else "翘板预警"
-
-        # 取该 symbol 的封单数据
-        cur_vol = sealed.get(sym) if sym else None
-        row = mock.filter(pl.col("symbol") == sym) if sym else mock.clear()
-        cur_close = row["close"][0] if len(row) and "close" in row.columns else None
-        cur_amt = (cur_vol * 100 * cur_close) if (cur_vol and cur_close) else None
-        cur_val = cur_amt if metric == "sealed_amount" else cur_vol
-
-        # 条件判断: 封单 > 0 且 比较值 <= 阈值
-        if cur_val is not None and cur_val > 0 and cur_val <= thr:
-            if metric == "sealed_amount":
-                sv_text = f"{cur_val / 1e4:.0f}万元"
-                th_text = f"{thr / 1e4:.0f}万元"
-            else:
-                sv_text = f"{cur_val:,.0f} 手"
-                th_text = f"{thr:,.0f} 手"
-            all_events.append({
-                "rule_id": rule["id"],
-                "rule_name": rule.get("name", ""),
-                "symbol": sym,
-                "name": sym,
-                "type": warn_label,
-                "message": f"{warn_label} · 封单 {sv_text} ≤ {th_text}",
-                "severity": rule.get("severity", "warn"),
-                "sealed_value": cur_val,
-                "sealed_metric": metric,
-                "current_sealed_vol": cur_vol,
-                "current_sealed_amount": cur_amt,
-            })
-        else:
-            reason = "封单数据缺失" if cur_val is None else (
-                f"封单 {cur_val:,.0f} > 阈值 {thr:,.0f}" if cur_val > thr else "封单为 0"
-            )
-            not_triggered.append({
-                "rule_id": rule["id"],
-                "rule_name": rule.get("name", ""),
-                "symbol": sym,
-                "metric": metric,
-                "threshold": thr,
-                "current_value": cur_val,
-                "current_sealed_vol": cur_vol,
-                "current_sealed_amount": cur_amt,
-                "reason": reason,
-            })
-
-    return {
-        "ok": True,
-        "as_of": str(latest),
-        "sealed_count": len(sealed),
-        "triggered": all_events,
-        "not_triggered": not_triggered,
-    }
-
-
-@router.post("/trigger-ladder")
-def trigger_ladder(request: Request):
-    """真实触发一次 ladder 预警 (落盘 + 外部推播 + SSE), 供 Dev 调试验证完整效果。
-
-    与 test-ladder 区别: 本端点会真的把预警写入 alerts.jsonl、送出外部推播、触发 SSE,
-    让用户看到真实的预警通知。绕过 cooldown 强制触发。
-    """
-    import time
-    from app.services import alert_store
-
-    repo = request.app.state.repo
-    depth_svc = getattr(request.app.state, "depth_service", None)
-    engine = getattr(request.app.state, "monitor_engine", None)
-    quote_svc = getattr(request.app.state, "quote_service", None)
-
-    if not depth_svc:
-        raise HTTPException(status_code=503, detail="depth 服务未初始化")
-    if not engine or not engine.has_rule_type("ladder"):
-        raise HTTPException(status_code=400, detail="无 ladder 类型监控规则")
-
-    latest = repo.enriched_latest_date()
-    if not latest:
-        raise HTTPException(status_code=400, detail="无 enriched 数据")
-
-    # 取封单
-    sealed: dict[str, int] = {}
-    for is_down in (False, True):
-        m = depth_svc.get_sealed_map(latest, is_down=is_down)
-        for sym, info in m.items():
-            vol = (info or {}).get("vol")
-            if vol and vol > 0:
-                sealed[sym] = vol
-    if not sealed:
-        raise HTTPException(status_code=400, detail="无封单数据")
-
-    # 构造真实 rule_events (与 _evaluate_ladder 产出格式一致)
-    import polars as pl
-    enriched_today, _ = repo.get_enriched_latest()
-    cols = [c for c in ["symbol", "close", "change_pct"] if c in enriched_today.columns]
-    mock = enriched_today.select(cols).filter(pl.col("symbol").is_in(list(sealed.keys())))
-    sealed_df = pl.DataFrame({"symbol": list(sealed.keys()), "_sealed_vol": list(sealed.values())})
-    mock = mock.join(sealed_df, on="symbol", how="inner")
-
-    now = time.time()
-    rule_events: list[dict] = []
-    name_map = {}
-    try:
-        inst = repo.get_instruments()
-        if not inst.is_empty() and "name" in inst.columns:
-            name_map = {r["symbol"]: r["name"] for r in inst.select(["symbol", "name"]).iter_rows(named=True) if r.get("name")}
-    except Exception:  # noqa: BLE001
-        pass
-
-    for rule in engine.rules.values():
-        if rule.get("type") != "ladder" or not rule.get("enabled", True):
-            continue
-        sym = rule.get("symbols", [""])[0] if rule.get("symbols") else ""
-        metric = rule.get("metric", "sealed_vol")
-        thr = rule.get("threshold", 0)
-        direction = rule.get("direction", "up")
-        warn_label = "炸板预警" if direction == "up" else "翘板预警"
-
-        row = mock.filter(pl.col("symbol") == sym)
-        if row.is_empty():
-            continue
-        cur_vol = row["_sealed_vol"][0]
-        close_v = row["close"][0] if "close" in row.columns else None
-        cur_val = cur_vol * 100 * close_v if metric == "sealed_amount" else cur_vol
-        if not cur_val or cur_val <= 0 or cur_val > thr:
-            continue  # 不满足条件, 跳过
-
-        if metric == "sealed_amount":
-            sv_text = f"{cur_val / 1e4:.0f}万元"
-            th_text = f"{thr / 1e4:.0f}万元"
-        else:
-            sv_text = f"{cur_val:,.0f} 手"
-            th_text = f"{thr:,.0f} 手"
-
-        rule_events.append({
-            "ts": int(now * 1000),
-            "rule_id": rule["id"],
-            "rule_name": rule.get("name", ""),
-            "source": "ladder",
-            "type": warn_label,
-            "symbol": sym,
-            "name": name_map.get(sym, sym),
-            "message": f"{warn_label} · 封单 {sv_text} ≤ {th_text}",
-            "price": close_v,
-            "change_pct": row["change_pct"][0] if "change_pct" in row.columns else None,
-            "signals": [],
-            "severity": rule.get("severity", "warn"),
-            "conditions": [],
-            "logic": "and",
-            "sealed_value": cur_val,
-            "sealed_metric": metric,
-        })
-
-    if not rule_events:
-        raise HTTPException(status_code=400, detail="当前无 ladder 规则满足触发条件 (封单均 > 阈值)")
-
-    # 1. 落盘到 alerts.jsonl
-    try:
-        alert_store.append_many(repo.store.data_dir, rule_events)
-    except Exception:  # noqa: BLE001
-        pass  # 落盘失败不阻断推送
-
-    # 2. SSE 推送 (入 pending_alerts 队列)
-    if quote_svc:
-        sse_alerts = [{
-            "source": ev["source"], "type": ev["type"], "rule_id": ev["rule_id"],
-            "strategy_id": None, "symbol": ev["symbol"], "name": ev["name"],
-            "message": ev["message"], "price": ev["price"], "change_pct": ev["change_pct"],
-            "signals": ev["signals"], "severity": ev["severity"],
-            "conditions": ev["conditions"], "logic": ev["logic"],
-        } for ev in rule_events]
-        try:
-            quote_svc.push_alerts(sse_alerts)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # 3. 外部推播
-    if quote_svc:
-        try:
-            quote_svc._maybe_send_webhook(rule_events, engine)
-        except Exception:  # noqa: BLE001
-            pass
-
-    return {
-        "ok": True,
-        "triggered": len(rule_events),
-        "events": [{"symbol": ev["symbol"], "name": ev["name"], "message": ev["message"]} for ev in rule_events],
-    }
-
-
-# ================================================================
-# ── Taiwan Realtime Monitor Rules API (Phase 5B) ────────────────
-# ================================================================
-
-class TaiwanMonitorRuleCreate(BaseModel):
-    rule_id: str | None = None
-    name: str
-    symbol: str
-    rule_type: str
-    threshold: float
-    enabled: bool = True
-    cooldown_seconds: int = 300
-    hysteresis: float | None = None
-    reference_volume: int | None = None
-    signals: list[str] = []
-    severity: str = "warning"
-
-
-class TaiwanMonitorRuleUpdate(BaseModel):
-    name: str | None = None
-    threshold: float | None = None
-    enabled: bool | None = None
-    cooldown_seconds: int | None = None
-    hysteresis: float | None = None
-    reference_volume: int | None = None
-    signals: list[str] | None = None
-    severity: str | None = None
-
-
-@router.get("/taiwan")
-def list_taiwan_rules():
-    """获取所有台股即时监控规则。"""
-    from app.taiwan.realtime.monitor_engine import get_monitor_engine
-    engine = get_monitor_engine()
-    rules = engine.list_rules()
-    return {"rules": [r.to_dict() for r in rules], "total": len(rules)}
-
-
-@router.post("/taiwan")
-def create_taiwan_rule(req: TaiwanMonitorRuleCreate):
-    """新增台股即时监控规则 (带 Security Master 与参数合法性校验)。"""
-    import uuid
-    from app.taiwan.realtime.monitor_engine import get_monitor_engine
-    from app.taiwan.realtime.monitor_models import TaiwanMonitorRule
-
-    rule_id = req.rule_id or f"tw_rule_{uuid.uuid4().hex[:10]}"
-    rule = TaiwanMonitorRule(
-        rule_id=rule_id,
-        name=req.name,
-        symbol=req.symbol,
-        rule_type=req.rule_type,
-        threshold=req.threshold,
-        enabled=req.enabled,
-        cooldown_seconds=req.cooldown_seconds,
-        hysteresis=req.hysteresis,
-        reference_volume=req.reference_volume,
-        signals=req.signals,
-        severity=req.severity,
-    )
-    engine = get_monitor_engine()
-    try:
-        engine.add_rule(rule)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    return {"ok": True, "rule": rule.to_dict()}
-
-
-@router.patch("/taiwan/{rule_id}")
-def update_taiwan_rule(rule_id: str, req: TaiwanMonitorRuleUpdate):
-    """更新或启用/停用指定台股监控规则。"""
-    from app.taiwan.realtime.monitor_engine import get_monitor_engine
-
-    engine = get_monitor_engine()
-    rule = engine.get_rule(rule_id)
-    if not rule:
-        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
-
-    if req.name is not None:
-        rule.name = req.name
-    if req.threshold is not None:
-        rule.threshold = req.threshold
-    if req.enabled is not None:
-        rule.enabled = req.enabled
-    if req.cooldown_seconds is not None:
-        rule.cooldown_seconds = req.cooldown_seconds
-    if req.hysteresis is not None:
-        rule.hysteresis = req.hysteresis
-    if req.reference_volume is not None:
-        rule.reference_volume = req.reference_volume
-    if req.signals is not None:
-        rule.signals = req.signals
-    if req.severity is not None:
-        rule.severity = req.severity
-
-    try:
-        engine.add_rule(rule)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    return {"ok": True, "rule": rule.to_dict()}
-
-
-@router.delete("/taiwan/{rule_id}")
-def delete_taiwan_rule(rule_id: str):
-    """删除指定台股监控规则。"""
-    from app.taiwan.realtime.monitor_engine import get_monitor_engine
-    engine = get_monitor_engine()
-    deleted = engine.delete_rule(rule_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Rule {rule_id} not found")
-    return {"ok": True, "deleted": rule_id}
-
-
-@router.post("/taiwan/evaluate")
-def evaluate_taiwan_rules(request: Request):
-    """执行一轮台股实时规则评估，并将告警落盘与推送到 SSE。"""
-    from app.taiwan.realtime.monitor_engine import get_monitor_engine
-    from app.services import alert_store
-
-    engine = get_monitor_engine()
-    alerts = engine.evaluate_all()
-
-    if alerts:
-        # 1. 落盘持久化
-        alert_dicts = [a.to_dict() for a in alerts]
-        try:
-            repo = getattr(request.app.state, "repo", None)
-            if repo:
-                alert_store.append_many(repo.store.data_dir, alert_dicts)
-        except Exception as e:
-            logger.warning("Failed to persist Taiwan alerts: %s", e)
-
-        # 2. 推送至现有 SSE 广播通道
-        quote_svc = getattr(request.app.state, "quote_service", None)
-        if quote_svc:
-            try:
-                quote_svc.push_alerts(alert_dicts)
-            except Exception as e:
-                logger.warning("Failed to push Taiwan alerts to SSE: %s", e)
-
-    return {
-        "ok": True,
-        "evaluated_rules": len(engine.list_rules()),
-        "alerts_count": len(alerts),
-        "alerts": [a.to_dict() for a in alerts],
-    }
 

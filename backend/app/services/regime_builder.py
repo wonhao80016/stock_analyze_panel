@@ -14,12 +14,40 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 from pathlib import Path
 
 import polars as pl
 
 logger = logging.getLogger(__name__)
+
+_ST_SYMBOLS_CACHE: tuple[float, frozenset[str]] | None = None
+
+
+def load_risk_warning_symbols(data_dir: Path) -> frozenset[str]:
+    """当前维表快照中名称含 ST 标记的 symbol 集合(大写), 供 regime 情绪统计剔除。
+
+    判定与 indicators 涨跌停口径共用同一权威实现(price_limits.polars_is_risk_warning_name,
+    即名称含 "ST", 覆盖 ST/*ST/S*ST)。维表是快照无历史版本。600s 进程内缓存。
+    """
+    global _ST_SYMBOLS_CACHE
+    now = time.time()
+    if _ST_SYMBOLS_CACHE is not None and now - _ST_SYMBOLS_CACHE[0] < 600:
+        return _ST_SYMBOLS_CACHE[1]
+    from app.price_limits import polars_is_risk_warning_name
+
+    syms: frozenset[str] = frozenset()
+    inst_dir = data_dir / "instruments"
+    if inst_dir.exists():
+        try:
+            df = pl.read_parquet(inst_dir / "**" / "*.parquet").select(["symbol", "name"])
+            st = df.filter(polars_is_risk_warning_name(pl.col("name")))
+            syms = frozenset(s.upper() for s in st["symbol"].to_list())
+        except Exception as e:
+            logger.warning("load risk-warning symbols failed: %s", e)
+    _ST_SYMBOLS_CACHE = (now, syms)
+    return syms
 
 # ───────────────────────── 状态分类阈值(可调) ─────────────────────────
 # 评分模型对齐看板情绪分(market_overview_builder): 采用 _score(low,high) 归一化
@@ -458,8 +486,6 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
     except Exception:
         exclude_st = True
     if exclude_st:
-        from app.services.market_mainline import load_risk_warning_symbols
-
         st_syms = load_risk_warning_symbols(repo.store.data_dir)
         if st_syms and "symbol" in df.columns:
             df = df.filter(

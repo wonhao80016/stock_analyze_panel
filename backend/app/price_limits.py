@@ -1,4 +1,13 @@
-"""A-share price-limit rules shared by indicators, backtests, and APIs."""
+"""Price-limit rules shared by indicators, backtests, and APIs.
+
+Covers A-share board rates directly; Taiwan symbols are delegated to
+``app.taiwan.market_rules.PriceLimitModel`` (see ``taiwan_price_limit_pct``,
+``board_limit_pct``, ``price_limit_pct``). ``polars_price_limit_pct`` is the
+lone exception: as a pure Polars expression it cannot reach Security Master
+data, so it returns null for Taiwan symbols and relies on callers to
+coalesce with an authoritative source (see
+``app.indicators.pipeline.taiwan_limit_profile``).
+"""
 
 from __future__ import annotations
 
@@ -79,7 +88,15 @@ def polars_price_limit_pct(
     trade_date: pl.Expr,
     is_risk_warning: pl.Expr,
 ) -> pl.Expr:
-    """Return a vectorized Polars expression for the effective daily limit."""
+    """Return a vectorized Polars expression for the effective daily limit.
+
+    Taiwan symbols (``.TWSE``/``.TPEX``) return null: this expression has no
+    access to Security Master ETF leverage/underlying-scope data, so it
+    cannot derive a correct percentage here. Callers must coalesce with an
+    authoritative Taiwan source (e.g. ``taiwan_limit_profile``) and treat
+    null as fail-closed (NO_LIMIT), never as a silent 10%.
+    """
+    is_taiwan = symbol.str.ends_with(".TWSE") | symbol.str.ends_with(".TPEX")
     is_growth = symbol.str.starts_with("300") | symbol.str.starts_with("301")
     is_star = symbol.str.starts_with("688") | symbol.str.starts_with("689")
     is_beijing = symbol.str.ends_with(".BJ")
@@ -94,9 +111,10 @@ def polars_price_limit_pct(
         & ~is_non_main
         & (trade_date < pl.lit(MAIN_BOARD_ST_LIMIT_CHANGE_DATE))
     )
+    a_share_pct = pl.when(legacy_main_st).then(LEGACY_MAIN_BOARD_ST_LIMIT).otherwise(base)
     return (
-        pl.when(legacy_main_st).then(LEGACY_MAIN_BOARD_ST_LIMIT)
-        .otherwise(base)
+        pl.when(is_taiwan).then(pl.lit(None, dtype=pl.Float64))
+        .otherwise(a_share_pct)
         .cast(pl.Float64)
     )
 

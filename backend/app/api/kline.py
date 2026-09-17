@@ -33,8 +33,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import date, datetime, timedelta
-from functools import lru_cache
-from typing import Annotated, Literal, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -62,53 +61,6 @@ def _minute_allowed(capset) -> bool:
     return not fallback
 
 
-@lru_cache(maxsize=8192)
-def _name_pinyin_keys(name: str) -> tuple[str, ...]:
-    """返回中文名称所有可能的拼音首字母串 (多音字展开为笛卡尔积)。
-
-    '平安银行' -> ('PAYH',); '重庆百货' -> ('CQBH', 'CQMH', 'ZQBH', 'ZQMH')。
-    非汉字字符原样保留: '万科A' -> ('WKA',)。
-    股票名总量有限且不变, lru_cache 命中后单次查询 ≈ dict 查找, 全市场遍历 < 1ms。
-    """
-    from pypinyin import pinyin, Style
-    if not name:
-        return ()
-    keys = [""]
-    for group in pinyin(name, style=Style.FIRST_LETTER, heteronym=True):
-        keys = [k + g.upper() for k in keys for g in group]
-    return tuple(keys)
-
-
-def _init_pinyin_dict() -> None:
-    """加载 A 股高频多音字地名/词组词典, 使常见误读也能命中。
-
-    pypinyin 默认词典对部分地名取常见读音 (如「重」→ chóng), 补充后「重庆」
-    同时接受 zhòng/qìng (zq) 与 chóng/qīng (cq) 两种首字母, 与同花顺行为一致。
-    幂等: 多次调用安全。
-    """
-    try:
-        from pypinyin import load_phrases_dict
-        # value 用二维 list: 每个字给一个或多个读音
-        load_phrases_dict({
-            "重庆": [["zhòng", "chóng"], ["qīng"]],
-            "长安": [["cháng", "zhǎng"], ["ān"]],
-            "长春": [["cháng", "zhǎng"], ["chūn"]],
-            "长沙": [["cháng", "zhǎng"], ["shā"]],
-            "长城": [["cháng", "zhǎng"], ["chéng"]],
-            "长江": [["cháng", "zhǎng"], ["jiāng"]],
-        })
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("pypinyin phrases dict load failed (polyphone coverage may degrade): %s", exc)
-
-
-_init_pinyin_dict()
-
-
-def _match_pinyin(name: str, keyword: str) -> bool:
-    """keyword 是否匹配 name 任一拼音首字母串的前缀 (支持多音字)。"""
-    return any(k.startswith(keyword) for k in _name_pinyin_keys(name))
-
-
 def _search_taiwan_instruments(q: str, limit: int) -> list[dict]:
     """仅查 TaiwanSecurityMaster, 不触碰 repo.get_instruments*() 的 legacy A 股缓存。
 
@@ -132,131 +84,44 @@ def _search_taiwan_instruments(q: str, limit: int) -> list[dict]:
     ][:limit]
 
 
-def _search_ashare_instruments(request: Request, q: str, limit: int, asset_types: str) -> list[dict]:
-    """既有 legacy A 股搜索逻辑 (代码/名称/拼音首字母), 从 repo 内存 instruments 缓存查。"""
-    repo = request.app.state.repo
-    import polars as pl
-
-    types = [t.strip() for t in asset_types.split(",") if t.strip()]
-    parts: list[pl.DataFrame] = []
-    for t in types:
-        df_t = repo.get_instruments_asset(t)
-        if df_t.is_empty() or "symbol" not in df_t.columns:
-            continue
-        # dtype 全部归一到 Utf8: 股票/ETF 两份缓存来源不同 (ETF 含 legacy 合并), 防 concat SchemaError
-        parts.append(df_t.with_columns([
-            pl.col("symbol").cast(pl.Utf8).alias("symbol"),
-            (pl.col("name").cast(pl.Utf8) if "name" in df_t.columns else pl.lit("")).alias("name"),
-            (pl.col("code").cast(pl.Utf8) if "code" in df_t.columns else pl.lit("")).alias("code"),
-            pl.lit(t).alias("asset_type"),
-        ]).select(["symbol", "name", "code", "asset_type"]))
-    if not parts:
-        return []
-    df = pl.concat(parts, how="vertical")
-
-    keyword = q.strip().upper()
-    is_pinyin_query = keyword.isalpha() and keyword.isascii()
-
-    # code/symbol 前缀优先，再 name 包含匹配
-    prefix_mask = (
-        pl.col("code").str.starts_with(keyword)
-        | pl.col("symbol").str.to_uppercase().str.starts_with(keyword)
-    )
-    contains_mask = (
-        pl.col("code").str.contains(keyword, literal=True)
-        | pl.col("symbol").str.to_uppercase().str.contains(keyword, literal=True)
-        | pl.col("name").str.contains(keyword, literal=True)
-    )
-
-    # 分层匹配: ① code/symbol 前缀 → ② 拼音首字母前缀(纯字母输入) → ③ 包含匹配
-    prefix_hits = df.filter(prefix_mask).head(limit)
-    if prefix_hits.height >= limit:
-        matched = prefix_hits
-    else:
-        collected = [prefix_hits] if prefix_hits.height else []
-        seen = set(prefix_hits["symbol"].to_list()) if prefix_hits.height else set()
-        remaining = limit - prefix_hits.height
-
-        # ② 拼音首字母前缀: 仅纯字母输入触发 (如 payh → 平安银行); 中文/代码输入零开销跳过
-        if is_pinyin_query and remaining > 0:
-            pinyin_rows = []
-            for row in df.filter(~pl.col("symbol").is_in(seen)).iter_rows(named=True):
-                if _match_pinyin(row["name"], keyword):
-                    pinyin_rows.append(row)
-                    if len(pinyin_rows) >= remaining:
-                        break
-            if pinyin_rows:
-                collected.append(pl.DataFrame(pinyin_rows))
-                seen.update(r["symbol"] for r in pinyin_rows)
-                remaining -= len(pinyin_rows)
-
-        # ③ 包含匹配补充
-        if remaining > 0:
-            contain_hits = df.filter(contains_mask & ~pl.col("symbol").is_in(seen)).head(remaining)
-            if contain_hits.height:
-                collected.append(contain_hits)
-
-        matched = (
-            pl.concat(collected, how="vertical") if len(collected) > 1
-            else (collected[0] if collected else df.head(0))
-        )
-    rows = matched.select(["symbol", "name", "code", "asset_type"]).to_dicts()
-    for row in rows:
-        row["market"] = "ashare"
-    return rows
-
-
 @router.get("/instruments/search")
 def search_instruments(
-    request: Request,
     q: str = Query("", min_length=0, max_length=50, description="搜索关键词"),
     limit: int = Query(20, ge=1, le=50),
     asset_types: str = Query("stock", description="逗号分隔的资产类型: stock,etf"),
-    # 用 Annotated 而非 `= Query(None, ...)`: 后者的默认值是 Query() 返回的 FieldInfo
-    # 对象本身(真值), 直接调用本函数(不经 FastAPI 路由层解析, 如
-    # test_instrument_search.py 的用法)时若不显式传参会被当成非 None。Annotated 形式
-    # 的默认值就是字面量 None, 两种调用方式行为一致。
-    market: Annotated[
-        Optional[Literal["ashare", "taiwan", "all"]],
-        Query(
-            description=(
-                "市场路由。省略(向后兼容既有调用方: Financials 搜索/A 股监控规则编辑器/"
-                "A 股回测标的选择器)=仅 A 股 legacy repository; taiwan=仅 TaiwanSecurityMaster"
-                "(自选股搜索用); all=两者都搜, 仅供未来兼容保留, 自选股不应使用。"
-                "未来新增市场(如 us)只需在此扩充。"
-            )
-        ),
-    ] = None,
 ):
-    """模糊搜索标的 (代码 / 名称)。
+    """模糊搜索台股标的 (代码 / 繁体中文名称), 查 TaiwanSecurityMaster。
 
-    market 省略或 market=ashare: 从内存 A 股 instruments 缓存中查 (SH/SZ/BJ), 保持
-    既有调用方行为不变; asset_types=stock,etf 可一并搜出 ETF。
-    market=taiwan: 只查 TaiwanSecurityMaster, 完全不碰 A 股 repo, 结果不会混入
-    .SH/.SZ/.BJ; symbol 形如 2330.TWSE / 6488.TPEX。
-    结果统一附带 market: "ashare" | "taiwan" 字段, 供前端区分 —— 不用空字串表示
-    A 股, 避免"缺省值隐含语意"这种不透明的 contract。
+    结果统一附带 market: "taiwan" 字段, symbol 形如 2330.TWSE / 6488.TPEX。
     """
     if not q.strip():
         return {"results": []}
-
-    if market == "taiwan":
-        return {"results": _search_taiwan_instruments(q, limit)}
-
-    ashare_rows = _search_ashare_instruments(request, q, limit, asset_types)
-    if market == "all":
-        combined = ashare_rows + _search_taiwan_instruments(q, limit)
-        return {"results": combined[:limit]}
-    return {"results": ashare_rows}
+    return {"results": _search_taiwan_instruments(q, limit)}
 
 
 @router.post("/instruments/names")
 def instruments_names(request: Request, symbols: list[str]):
-    """批量查标的名称 (股票 + ETF + 指数)。传入 symbol 列表, 返回 {symbol: name}。"""
+    """批量查标的名称 (股票 + ETF + 指数)。传入 symbol 列表, 返回 {symbol: name}。
+
+    台股名称的正本是 TaiwanSecurityMaster; repo.get_name_map() 读的是 legacy
+    A 股 instruments 维表, 对 .TWSE/.TPEX 一律查不到, 只作为其余 symbol 的兜底。
+    """
     if not symbols:
         return {"names": {}}
-    repo = request.app.state.repo
-    return {"names": repo.get_name_map(symbols)}
+    from app.taiwan.universe import get_security_master
+
+    master = get_security_master()
+    names: dict[str, str] = {}
+    unresolved: list[str] = []
+    for sym in symbols:
+        inst = master.get_instrument(sym)
+        if inst is not None and inst.name:
+            names[sym] = inst.name
+        else:
+            unresolved.append(sym)
+    if unresolved:
+        names.update(request.app.state.repo.get_name_map(unresolved))
+    return {"names": names}
 
 
 def _get_stock_info(repo, symbol: str) -> dict:

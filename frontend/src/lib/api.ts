@@ -527,6 +527,8 @@ export interface MonitorCondition {
   field: string
   op: string              // truth | > >= < <= == !=
   value?: number | null   // op 非 truth 時必填
+  /** 遲滯重新啟用門檻: 命中後需等 field 反向穿越此值才重新允許觸發; 留空 = 純邊緣觸發 */
+  rearm_value?: number | null
 }
 
 export type StrategyNotifyEvent = 'buy_signal' | 'sell_signal' | 'pool_entry' | 'pool_exit'
@@ -551,7 +553,7 @@ export interface MonitorRule {
   id: string
   name: string
   enabled: boolean
-  type: 'strategy' | 'signal' | 'price' | 'market' | 'ladder' | 'sector'
+  type: 'strategy' | 'signal' | 'price' | 'market' | 'sector'
   asset_type?: 'stock' | 'etf' | 'index'
   scope: 'symbols' | 'all' | 'sector' | 'watchlist_group'
   symbols: string[]
@@ -570,6 +572,8 @@ export interface MonitorRule {
   score_max?: number | null
   conditions: MonitorCondition[]
   logic: 'and' | 'or'
+  /** edge=未命中轉命中才觸發(建議) | level=命中期間每 cooldown 重播 */
+  trigger_mode?: 'edge' | 'level'
   cooldown_seconds: number
   severity: 'info' | 'warn' | 'critical'
   message: string
@@ -578,9 +582,6 @@ export interface MonitorRule {
   webhook_channels?: string[]  // 命中時推送的外部渠道 (合法值 'feishu' | 'wecom')
   created_at?: string
   runtime_warning?: string
-  // ladder 專屬: 封單監控
-  metric?: 'sealed_vol' | 'sealed_amount'  // 量(手) / 額(元)
-  threshold?: number                        // 封單 <= 此值時報警
 }
 
 export interface MonitorRuleOptions {
@@ -687,53 +688,29 @@ export interface TaiwanRealtimeQuote {
   is_no_limit?: boolean
 }
 
-export type TaiwanRuleType =
-  | 'price_above'
-  | 'price_below'
-  | 'change_pct_above'
-  | 'change_pct_below'
-  | 'volume_above'
-  | 'volume_spike'
-  | 'near_upper_limit'
-  | 'near_lower_limit'
-  | 'signal'
-
-export interface TaiwanMonitorRule {
-  rule_id: string
-  name: string
-  symbol: string
-  rule_type: TaiwanRuleType
-  threshold: number
-  enabled: boolean
-  cooldown_seconds: number
-  hysteresis?: number | null
-  reference_volume?: number | null     // In SHARES (股)
-  /** rule_type=signal 時要求全部命中的內建訊號 id */
-  signals?: string[]
-  severity: 'info' | 'warning' | 'critical'
-  created_at?: string
-  updated_at?: string
-}
-
+/** Legacy shape of an alert once emitted by the now-removed Taiwan engine A
+ * (`taiwan/realtime/monitor_engine.py`). Kept only so TaiwanAlertsList can
+ * still render pre-merge rows persisted in data/user_data/alerts.jsonl;
+ * fields are optional since no code writes this shape anymore. */
 export interface TaiwanAlertEvent {
-  alert_id: string
-  rule_id: string
-  rule_name: string
-  symbol: string
-  name: string
-  rule_type: string
-  triggered_at: string
+  alert_id?: string
+  rule_id?: string
+  rule_name?: string
+  symbol?: string
+  name?: string
+  rule_type?: string
+  triggered_at?: string
   quote_time?: string | null
-  trigger_value: number
-  threshold: number
-  message: string
-  source: string
-  source_status: string
-  market_status: string
-  severity: 'info' | 'warning' | 'critical' | string
-  field_name: string
-  dedup_key: string
-  ts: number
+  trigger_value?: number
+  threshold?: number
+  message?: string
+  source?: string
+  source_status?: string
+  market_status?: string
+  severity?: 'info' | 'warning' | 'critical' | string
+  field_name?: string
+  dedup_key?: string
+  ts?: number
   price?: number | null
   change_pct?: number | null
 }
@@ -2432,14 +2409,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, date }),
     }),
-  /**
-   * market 省略 = 既有 A 股 legacy 行為(Financials 搜索 / A 股監控規則編輯器 /
-   * A 股回測標的選擇器等既有調用方不用改)。market='taiwan' 只查
-   * TaiwanSecurityMaster, 不會混入 .SH/.SZ/.BJ 結果 —— 自選股搜索用這個。
-   */
-  instrumentSearch: (q: string, limit = 20, assetTypes?: string, market?: 'ashare' | 'taiwan' | 'all') =>
-    request<{ results: { symbol: string; name: string; code: string; asset_type?: string; market: 'ashare' | 'taiwan' }[] }>(
-      `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}${assetTypes ? `&asset_types=${encodeURIComponent(assetTypes)}` : ''}${market ? `&market=${market}` : ''}`,
+  /** 模糊搜索台股標的(代碼/繁體名稱), 查 TaiwanSecurityMaster, 不含 .SH/.SZ/.BJ 結果。 */
+  instrumentSearch: (q: string, limit = 20, assetTypes?: string) =>
+    request<{ results: { symbol: string; name: string; code: string; asset_type?: string; market: 'taiwan' }[] }>(
+      `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}${assetTypes ? `&asset_types=${encodeURIComponent(assetTypes)}` : ''}`,
     ),
 
   /** 批量查股票名稱 (傳入 symbol 列表, 返回 {symbol: name}) */
@@ -2792,9 +2765,6 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  pipelineRun: () => request<{ job_id: string; reused: boolean }>(
-    '/api/pipeline/run', { method: 'POST' },
-  ),
   pipelineJob: (id: string) => request<PipelineJob>(`/api/pipeline/jobs/${id}`),
   pipelineJobs: (limit = 20) =>
     request<{ active_id: string | null; jobs: PipelineJobSummary[] }>(
@@ -3044,77 +3014,6 @@ export const api = {
     )
   },
 
-  taiwanRulesList: () =>
-    request<{ rules: TaiwanMonitorRule[]; total: number }>('/api/monitor-rules/taiwan'),
-
-  taiwanRuleSave: (rule: {
-    rule_id?: string
-    name: string
-    symbol: string
-    rule_type: string
-    threshold: number
-    enabled?: boolean
-    cooldown_seconds?: number
-    hysteresis?: number | null
-    reference_volume?: number | null
-    signals?: string[]
-    severity?: string
-  }) =>
-    request<{ ok: boolean; rule: TaiwanMonitorRule }>('/api/monitor-rules/taiwan', {
-      method: 'POST',
-      body: JSON.stringify(rule),
-    }),
-
-  taiwanRuleUpdate: (ruleId: string, updates: Partial<TaiwanMonitorRule>) =>
-    request<{ ok: boolean; rule: TaiwanMonitorRule }>(`/api/monitor-rules/taiwan/${encodeURIComponent(ruleId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(updates),
-    }),
-
-  taiwanRuleDelete: (ruleId: string) =>
-    request<{ ok: boolean; deleted: string }>(`/api/monitor-rules/taiwan/${encodeURIComponent(ruleId)}`, {
-      method: 'DELETE',
-    }),
-
-  taiwanEvaluateRules: () =>
-    request<{ ok: boolean; evaluated_rules: number; alerts_count: number; alerts: TaiwanAlertEvent[] }>(
-      '/api/monitor-rules/taiwan/evaluate',
-      { method: 'POST' },
-    ),
-
-
-  /** 模擬觸發 ladder 封單監控 (Dev 調試, 不落盤不推送) */
-  monitorRuleTestLadder: () =>
-    request<{
-      ok: boolean
-      as_of: string
-      sealed_count: number
-      triggered: Array<{
-        rule_id: string; rule_name: string; symbol: string; name?: string
-        type: string; message: string; severity: string
-        sealed_value: number; sealed_metric: string
-        current_sealed_vol?: number; current_sealed_amount?: number
-      }>
-      not_triggered: Array<{
-        rule_id: string; rule_name: string; symbol: string
-        metric: string; threshold: number; current_value: number | null
-        current_sealed_vol?: number; current_sealed_amount?: number | null
-        reason: string
-      }>
-    }>('/api/monitor-rules/test-ladder', { method: 'POST' }),
-
-  /** 真實觸發 ladder 預警 (落盤+飛書+SSE), Dev 調試用 */
-  monitorRuleTriggerLadder: () =>
-    request<{
-      ok: boolean
-      triggered: number
-      events: Array<{ symbol: string; name: string; message: string }>
-    }>('/api/monitor-rules/trigger-ladder', { method: 'POST' }),
-
-  /** 生成演示監控規則 (Dev 頁用) */
-  monitorRuleSeed: () =>
-    request<{ ok: boolean; generated: number }>('/api/monitor-rules/seed', { method: 'POST' }),
-
   // ===== Alerts (觸發記錄) =====
   alertsList: (params?: { days?: number; limit?: number; source?: string; type?: string; extColumns?: string }) => {
     const qs = new URLSearchParams()
@@ -3132,10 +3031,6 @@ export const api = {
 
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),
-
-  /** 生成演示觸發記錄 (Dev 頁用) */
-  alertSeed: (count = 12, recent = true) =>
-    request<{ ok: boolean; generated: number }>(`/api/alerts/seed?count=${count}&recent=${recent}`, { method: 'POST' }),
 
   /** 檢查 AI 配置狀態 */
   strategyAiStatus: () =>

@@ -357,7 +357,6 @@ def _build_overview(request: Request, as_of: date | None = None) -> dict:
     return build_market_overview(
         repo=request.app.state.repo,
         quote_service=getattr(request.app.state, "quote_service", None),
-        depth_service=getattr(request.app.state, "depth_service", None),
         as_of=as_of,
     )
 

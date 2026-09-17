@@ -33,19 +33,24 @@ from app.strategy.scoring import (
 logger = logging.getLogger(__name__)
 
 # 引擎级默认基础过滤 — 策略未定义 BASIC_FILTER 时兜底
+# Taiwan instruments never populate total_shares (see app/taiwan/universe), so a
+# non-None market_cap_min makes close*null resolve to null; polars treats a null
+# filter predicate as false, silently dropping every Taiwan symbol — keep None.
+# exclude_st's "ST|*ST|退" name match is an A-share convention with no Taiwan
+# equivalent data source, so it is disabled rather than left as a no-op default.
 DEFAULT_BASIC_FILTER: dict = {
     "price_min": 3,
-    "price_max": 300,
-    "market_cap_min": 10e8,
+    "price_max": None,
+    "market_cap_min": None,
     "float_cap_min": None,
     "float_cap_max": None,
     "amount_min": 0.2e8,
     "amount_max": None,
     "turnover_min": None,
     "turnover_max": None,
-    "exclude_st": True,
+    "exclude_st": False,
     "exclude_new_days": 30,
-    "boards": ["沪主板", "深主板", "创业板", "科创板", "北交所"],
+    "boards": ["TWSE", "TPEX"],
 }
 
 # 叠加策略硬上限：子策略数量。控制信号计算成本与字段并集膨胀，避免 OOM。
@@ -1436,7 +1441,11 @@ class StrategyEngine:
         if boards and isinstance(boards, list) and len(boards) > 0:
             board_exprs: list[pl.Expr] = []
             for b in boards:
-                if b == "沪主板":
+                if b in ("TWSE", "上市"):
+                    board_exprs.append(pl.col("symbol").str.ends_with(".TWSE"))
+                elif b in ("TPEX", "上櫃", "柜买"):
+                    board_exprs.append(pl.col("symbol").str.ends_with(".TPEX"))
+                elif b == "沪主板":
                     board_exprs.append(pl.col("symbol").str.starts_with("60"))
                 elif b == "深主板":
                     board_exprs.append(

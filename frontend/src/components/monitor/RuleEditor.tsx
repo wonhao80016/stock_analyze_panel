@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Building2, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Eraser, Layers3, ListPlus, Plus, RadioTower, Save, Search, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
+import { Activity, BarChart3, Building2, ChartNoAxesCombined, Check, ChevronDown, ChevronUp, Eraser, Layers3, ListPlus, Plus, RadioTower, Save, Search, Tags, TrendingUp, Waypoints, X } from 'lucide-react'
 import { api, genRuleId, type MonitorRule, type MonitorCondition, type SectorKind, type SectorMonitorTarget, type StrategyNotifyEvent } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS, LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS } from '@/lib/strategyMonitorEvents'
 import { QK } from '@/lib/queryKeys'
@@ -40,6 +40,56 @@ const SECTOR_KIND_OPTIONS: Array<{ key: SectorKind; label: string; icon: typeof 
   { key: 'industry', label: '產業板塊', icon: Building2 },
 ]
 
+// 監控情境: 使用者選的是「要監控什麼」, 不是「規則走哪個引擎」。
+// price/volume 兩種情境都落在後端 type=price (與 market 同路徑, UI 不再暴露 market);
+// signal 情境落在 type=signal 且預設 AND (多選訊號需全部命中, 對齊舊版台股引擎語意);
+// advanced 情境沿用原本的 strategy/sector 專屬表單。
+type MonitorCategory = 'price' | 'volume' | 'signal' | 'advanced'
+
+const CATEGORY_OPTIONS: Array<{ key: MonitorCategory; label: string; icon: typeof TrendingUp }> = [
+  { key: 'price', label: '價格與漲跌', icon: TrendingUp },
+  { key: 'volume', label: '量能', icon: BarChart3 },
+  { key: 'signal', label: '技術訊號', icon: Activity },
+  { key: 'advanced', label: '策略・板塊（進階）', icon: Waypoints },
+]
+
+const VOLUME_FIELD_KEYS = ['volume', 'vol_ratio_5d']
+
+function categoryForRule(rule: MonitorRule): MonitorCategory {
+  if (rule.type === 'strategy' || rule.type === 'sector') return 'advanced'
+  if (rule.conditions.some(c => VOLUME_FIELD_KEYS.includes(c.field))) return 'volume'
+  return rule.type === 'signal' ? 'signal' : 'price'
+}
+
+interface QuickConditionChip {
+  key: string
+  label: string
+  field: string
+  op: string
+  unit: string
+  step: string
+  defaultInput: number
+  /** 使用者輸入(如「%」的 3) → 條件實際儲存值(小數 0.03) */
+  toStored: (input: number) => number
+  /** 條件實際儲存值 → 晶片輸入框顯示值 */
+  fromStored: (value: number) => number
+}
+
+// 漲跌幅/距漲跌停距離一律用小數制存(0.01 = 1%), 對齊後端 ENRICHED_COLUMNS 與
+// custom_signals.ALLOWED_FIELDS 的既有約定; 晶片輸入框則用使用者熟悉的百分比。
+const PRICE_CHIPS: QuickConditionChip[] = [
+  { key: 'price_above', label: '價格高於', field: 'close', op: '>=', unit: '元', step: '0.01', defaultInput: 0, toStored: v => v, fromStored: v => v },
+  { key: 'price_below', label: '價格低於', field: 'close', op: '<=', unit: '元', step: '0.01', defaultInput: 0, toStored: v => v, fromStored: v => v },
+  { key: 'change_pct_above', label: '漲幅高於', field: 'change_pct', op: '>=', unit: '%', step: '0.1', defaultInput: 3, toStored: v => v / 100, fromStored: v => v * 100 },
+  { key: 'change_pct_below', label: '跌幅高於', field: 'change_pct', op: '<=', unit: '%', step: '0.1', defaultInput: 3, toStored: v => -v / 100, fromStored: v => Math.abs(v * 100) },
+  { key: 'near_upper_limit', label: '接近漲停', field: 'distance_to_upper_limit', op: '<=', unit: '%', step: '0.1', defaultInput: 1, toStored: v => v / 100, fromStored: v => v * 100 },
+  { key: 'near_lower_limit', label: '接近跌停', field: 'distance_to_lower_limit', op: '<=', unit: '%', step: '0.1', defaultInput: 1, toStored: v => v / 100, fromStored: v => v * 100 },
+]
+
+const VOL_RATIO_CHIP: QuickConditionChip = {
+  key: 'vol_ratio_spike', label: '量能異常放大', field: 'vol_ratio_5d', op: '>=', unit: '倍', step: '0.1', defaultInput: 2, toStored: v => v, fromStored: v => v,
+}
+
 const STRATEGY_SOURCE_META = {
   builtin: { label: '內建', className: 'border-accent/25 bg-accent/10 text-accent' },
   custom: { label: '自訂', className: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-400' },
@@ -68,6 +118,7 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
   direction: 'entry',
   conditions: [],
   logic: 'or',
+  trigger_mode: 'edge',
   cooldown_seconds: 3600,
   severity: 'info',
   message: '',
@@ -104,6 +155,16 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     return initial
   })
   const assetType = draft.asset_type ?? 'stock'
+  // 監控情境(晶片層) — 純 UI 分類, 實際仍落到 draft.type/conditions。
+  const [category, setCategory] = useState<MonitorCategory>(() => categoryForRule(draft))
+  const [volUnit, setVolUnit] = useState<'lots' | 'shares'>('lots')
+  // 資產類型切到指數/ETF 等會把 type 改成 strategy/sector 以外的值, 這時情境分類要跟著校正,
+  // 否則會停在「進階」卻看不到任何策略/板塊表單。
+  useEffect(() => {
+    if (category === 'advanced' && draft.type !== 'strategy' && draft.type !== 'sector') {
+      setCategory(draft.type === 'signal' ? 'signal' : 'price')
+    }
+  }, [draft.type, category])
   // 策略列表跟隨資產類型: ETF 只列技術類策略。
   const strategies = useQuery({
     queryKey: QK.screenerStrategies(assetType),
@@ -158,10 +219,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const [strategyCategory, setStrategyCategory] = useState<'all' | 'builtin' | 'custom' | 'ai' | 'composite'>('all')
   // 標的搜索資產類型: ETF 一併搜股票; 指數只搜指數; 否則只搜股票。
   const symbolAssetTypes = assetType === 'etf' ? 'stock,etf' : assetType === 'index' ? 'index' : 'stock'
-  // Without the market the backend searches the A-share instrument table, which is empty here.
   const symbolSearch = useQuery({
-    queryKey: QK.instrumentSearch(symbolQuery, symbolAssetTypes, 'taiwan'),
-    queryFn: () => api.instrumentSearch(symbolQuery, 20, symbolAssetTypes, 'taiwan'),
+    queryKey: QK.instrumentSearch(symbolQuery, symbolAssetTypes),
+    queryFn: () => api.instrumentSearch(symbolQuery, 20, symbolAssetTypes),
     enabled: symbolQuery.length > 0,
   })
 
@@ -235,6 +295,65 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     }))
   const removeCond = (idx: number) =>
     setDraft(d => ({ ...d, conditions: d.conditions.filter((_, i) => i !== idx) }))
+
+  // ── 監控情境晶片: 一鍵填好 conditions, 填完仍可在下方逐條編輯/刪除 ──
+  const upsertCondition = (field: string, op: string, value: number) =>
+    setDraft(d => {
+      const idx = d.conditions.findIndex(c => c.field === field && c.op === op)
+      if (idx === -1) return { ...d, conditions: [...d.conditions, { field, op, value }] }
+      return { ...d, conditions: d.conditions.map((c, i) => i === idx ? { ...c, value } : c) }
+    })
+  const removeConditionByField = (field: string, op: string) =>
+    setDraft(d => ({ ...d, conditions: d.conditions.filter(c => !(c.field === field && c.op === op)) }))
+  const chipCondition = (chip: QuickConditionChip) =>
+    draft.conditions.find(c => c.field === chip.field && c.op === chip.op)
+  const chipInputValue = (chip: QuickConditionChip) => {
+    const cond = chipCondition(chip)
+    if (!cond || cond.value == null) return chip.defaultInput
+    return Math.round(chip.fromStored(cond.value) * 100) / 100
+  }
+  const setChipValue = (chip: QuickConditionChip, inputVal: number) =>
+    upsertCondition(chip.field, chip.op, chip.toStored(inputVal))
+  const toggleChip = (chip: QuickConditionChip) => {
+    if (chipCondition(chip)) removeConditionByField(chip.field, chip.op)
+    else setChipValue(chip, chipInputValue(chip))
+  }
+
+  // 成交量高於: 保留張/股切換(1張=1000股), 儲存值一律為股。
+  const volumeCondition = draft.conditions.find(c => c.field === 'volume' && c.op === '>=')
+  const volumeInputValue = (() => {
+    if (!volumeCondition || volumeCondition.value == null) return volUnit === 'lots' ? 1 : 1000
+    return volUnit === 'lots' ? Math.round(volumeCondition.value / 1000) : volumeCondition.value
+  })()
+  const setVolumeValue = (inputVal: number) =>
+    upsertCondition('volume', '>=', volUnit === 'lots' ? inputVal * 1000 : inputVal)
+
+  // 監控情境切換: 只調整分類與相依欄位(type/logic/scope/direction), 不動已填的條件,
+  // 這樣使用者在情境間來回切換時不會弄丟已設定的價位/訊號。
+  const selectCategory = (next: MonitorCategory) => {
+    setCategory(next)
+    setDraft(d => {
+      if (next === 'advanced') {
+        const type = d.type === 'strategy' || d.type === 'sector' ? d.type : 'strategy'
+        return {
+          ...d,
+          type,
+          notify_events: type === 'strategy' ? [...(d.notify_events ?? DEFAULT_STRATEGY_NOTIFY_EVENTS)] : undefined,
+          scope: type === 'sector' ? 'all' : (type === 'strategy' && d.scope === 'symbols' && d.symbols.length === 0 ? 'all' : d.scope),
+          direction: type === 'sector' ? 'up' : (d.type === 'sector' ? 'entry' : d.direction),
+        }
+      }
+      const type = next === 'signal' ? 'signal' : 'price'
+      return {
+        ...d,
+        type,
+        notify_events: undefined,
+        direction: d.type === 'sector' ? 'entry' : d.direction,
+        // 對齊舊版台股引擎的訊號規則語意: 多選訊號需全部命中(AND)才觸發。
+        logic: next === 'signal' ? 'and' : d.logic,
+      }
+    })
+  }
 
   const addSymbol = (sym: string) => {
     if (!draft.symbols.includes(sym)) {
@@ -563,33 +682,21 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </div>
       )}
 
-      {/* 監控類型 */}
+      {/* 監控情境: 選「要監控什麼」, 不是選規則引擎類型 */}
       <div className="space-y-1.5">
-        <span className="text-[11px] text-muted">監控類型</span>
-        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-6">
-          {visibleTypes.map(t => {
-            const Icon = TYPE_ICONS[t.key as keyof typeof TYPE_ICONS] ?? Activity
-            const active = draft.type === t.key
+        <span className="text-[11px] text-muted">監控情境</span>
+        <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+          {CATEGORY_OPTIONS.filter(opt =>
+            opt.key !== 'advanced' || visibleTypes.some(t => t.key === 'strategy' || t.key === 'sector'),
+          ).map(opt => {
+            const Icon = opt.icon
+            const active = category === opt.key
             return (
               <button
-                key={t.key}
+                key={opt.key}
                 type="button"
                 aria-pressed={active}
-                onClick={() => setDraft(d => {
-                  const type = t.key as MonitorRule['type']
-                  return {
-                    ...d,
-                    type,
-                    notify_events: type === 'strategy'
-                      ? [...(d.notify_events ?? DEFAULT_STRATEGY_NOTIFY_EVENTS)]
-                      : undefined,
-                    scope: type === 'sector'
-                      ? 'all'
-                      : type === 'strategy' && d.scope === 'symbols' && d.symbols.length === 0 ? 'all' : d.scope,
-                    direction: type === 'sector' ? 'up'
-                      : d.type === 'sector' ? 'entry' : d.direction,
-                  }
-                })}
+                onClick={() => selectCategory(opt.key)}
                 className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-btn border px-2 text-xs font-medium transition-colors cursor-pointer ${
                   active
                     ? 'border-accent/40 bg-accent/12 text-accent'
@@ -597,11 +704,170 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 }`}
               >
                 <Icon className="h-3.5 w-3.5 shrink-0" />
-                <span>{t.label}</span>
+                <span>{opt.label}</span>
               </button>
             )
           })}
         </div>
+
+        {/* 第二層: 預設條件晶片 — 點一下填好 conditions, 下方「觸發條件」仍可逐條編輯/疊加 */}
+        {category === 'price' && (
+          <div className="flex flex-wrap gap-2 pt-1">
+            {PRICE_CHIPS.map(chip => {
+              const active = !!chipCondition(chip)
+              return (
+                <div
+                  key={chip.key}
+                  className={`flex items-center gap-1.5 rounded-btn border px-2 py-1 transition-colors ${
+                    active ? 'border-accent/40 bg-accent/10' : 'border-border bg-base'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => toggleChip(chip)}
+                    className={`text-[11px] font-medium cursor-pointer ${active ? 'text-accent' : 'text-secondary hover:text-foreground'}`}
+                  >
+                    {chip.label}
+                  </button>
+                  {active && (
+                    <span className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        aria-label={`${chip.label}數值`}
+                        step={chip.step}
+                        value={chipInputValue(chip)}
+                        onChange={e => setChipValue(chip, parseFloat(e.target.value) || 0)}
+                        className="w-16 h-6 px-1 rounded bg-elevated border border-border/60 text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+                      />
+                      <span className="text-[10px] text-muted">{chip.unit}</span>
+                    </span>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {category === 'volume' && (
+          <div className="space-y-1.5 pt-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className={`flex items-center gap-1.5 rounded-btn border px-2 py-1 transition-colors ${
+                volumeCondition ? 'border-accent/40 bg-accent/10' : 'border-border bg-base'
+              }`}
+              >
+                <button
+                  type="button"
+                  aria-pressed={!!volumeCondition}
+                  onClick={() => volumeCondition ? removeConditionByField('volume', '>=') : setVolumeValue(volumeInputValue)}
+                  className={`text-[11px] font-medium cursor-pointer ${volumeCondition ? 'text-accent' : 'text-secondary hover:text-foreground'}`}
+                >
+                  成交量高於
+                </button>
+                {volumeCondition && (
+                  <span className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      aria-label="成交量高於數值"
+                      step="1"
+                      value={volumeInputValue}
+                      onChange={e => setVolumeValue(parseFloat(e.target.value) || 0)}
+                      className="w-20 h-6 px-1 rounded bg-elevated border border-border/60 text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setVolUnit(u => u === 'lots' ? 'shares' : 'lots')}
+                      title="切換張/股單位(1張=1000股), 儲存值固定為股"
+                      className="text-[10px] text-muted hover:text-accent cursor-pointer underline decoration-dotted"
+                    >
+                      {volUnit === 'lots' ? '張' : '股'}
+                    </button>
+                  </span>
+                )}
+              </div>
+              {(() => {
+                const chip = VOL_RATIO_CHIP
+                const active = !!chipCondition(chip)
+                return (
+                  <div className={`flex items-center gap-1.5 rounded-btn border px-2 py-1 transition-colors ${
+                    active ? 'border-accent/40 bg-accent/10' : 'border-border bg-base'
+                  }`}
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => toggleChip(chip)}
+                      className={`text-[11px] font-medium cursor-pointer ${active ? 'text-accent' : 'text-secondary hover:text-foreground'}`}
+                    >
+                      {chip.label}
+                    </button>
+                    {active && (
+                      <span className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          aria-label={`${chip.label}數值`}
+                          step={chip.step}
+                          value={chipInputValue(chip)}
+                          onChange={e => setChipValue(chip, parseFloat(e.target.value) || 0)}
+                          className="w-16 h-6 px-1 rounded bg-elevated border border-border/60 text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+                        />
+                        <span className="text-[10px] text-muted">{chip.unit}</span>
+                      </span>
+                    )}
+                  </div>
+                )
+              })()}
+            </div>
+            <p className="text-[10px] text-muted">
+              例如 2 = 當前量能是近 5 日均量的 2 倍(盤中已按時段進度折算, 盤後為全日量比)。
+            </p>
+          </div>
+        )}
+
+        {category === 'signal' && (
+          <p className="pt-1 text-[10px] text-muted">
+            下方「訊號條件」多選預設需全部命中(AND)才觸發; 如需任一命中即報, 可在下方切換為「任一滿足 (OR)」。
+          </p>
+        )}
+
+        {category === 'advanced' && (
+          <div className="grid grid-cols-2 gap-1.5 pt-1">
+            {visibleTypes.filter(t => t.key === 'strategy' || t.key === 'sector').map(t => {
+              const Icon = TYPE_ICONS[t.key as keyof typeof TYPE_ICONS] ?? Activity
+              const active = draft.type === t.key
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setDraft(d => {
+                    const type = t.key as MonitorRule['type']
+                    return {
+                      ...d,
+                      type,
+                      notify_events: type === 'strategy'
+                        ? [...(d.notify_events ?? DEFAULT_STRATEGY_NOTIFY_EVENTS)]
+                        : undefined,
+                      scope: type === 'sector'
+                        ? 'all'
+                        : type === 'strategy' && d.scope === 'symbols' && d.symbols.length === 0 ? 'all' : d.scope,
+                      direction: type === 'sector' ? 'up'
+                        : d.type === 'sector' ? 'entry' : d.direction,
+                    }
+                  })}
+                  className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-btn border px-2 text-xs font-medium transition-colors cursor-pointer ${
+                    active
+                      ? 'border-accent/40 bg-accent/12 text-accent'
+                      : 'border-border bg-base text-secondary hover:border-accent/25 hover:text-foreground'
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5 shrink-0" />
+                  <span>{t.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       <label className="space-y-1.5">
@@ -1069,6 +1335,15 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                       {operators.map(op => <option key={op} value={op}>{op}</option>)}
                     </select>
                     <input type="number" value={c.value ?? 0} onChange={e => updateCond(realIdx, { value: parseFloat(e.target.value) })} step="any" className="w-24 h-7 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
+                    <input
+                      type="number"
+                      value={c.rearm_value ?? ''}
+                      onChange={e => updateCond(realIdx, { rearm_value: e.target.value === '' ? null : parseFloat(e.target.value) })}
+                      step="any"
+                      placeholder="重置值"
+                      title="命中後需等此欄位反向穿越此值, 才會重新允許觸發; 留空 = 條件轉為不成立即重新允許"
+                      className="w-20 h-7 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center placeholder:text-muted/40 focus:outline-none focus:border-accent/50"
+                    />
                     <button onClick={() => removeCond(realIdx)} className="p-1 rounded text-muted hover:text-danger hover:bg-danger/10 cursor-pointer">
                       <X className="h-3 w-3" />
                     </button>
@@ -1241,7 +1516,20 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       )}
 
       {/* 通知設置 */}
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+      <div className={`grid grid-cols-2 gap-3 ${draft.type !== 'strategy' && draft.type !== 'sector' ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
+        {draft.type !== 'strategy' && draft.type !== 'sector' && (
+          <label className="space-y-1.5">
+            <span className="text-[11px] text-muted">觸發模式</span>
+            <select
+              value={draft.trigger_mode ?? 'edge'}
+              onChange={e => setDraft(d => ({ ...d, trigger_mode: e.target.value as MonitorRule['trigger_mode'] }))}
+              className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs text-foreground"
+            >
+              <option value="edge">狀態轉換時通知（建議）</option>
+              <option value="level">條件持續成立時重複通知</option>
+            </select>
+          </label>
+        )}
         <label className="space-y-1.5">
           <span className="text-[11px] text-muted">冷卻期(秒)</span>
           <input type="number" value={draft.cooldown_seconds} onChange={e => setDraft(d => ({ ...d, cooldown_seconds: parseInt(e.target.value) || 0 }))} min={0} className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs text-foreground" />

@@ -70,7 +70,7 @@ def test_history_strategy_monitor_keeps_live_row_with_exclude_st_enabled(tmp_pat
 META = {
     "id": "history_strategy",
     "name": "历史策略",
-    "basic_filter": {"exclude_st": True},
+    "basic_filter": {"exclude_st": True, "boards": []},
 }
 LOOKBACK_DAYS = 2
 

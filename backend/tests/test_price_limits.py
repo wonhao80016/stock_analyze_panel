@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 import polars as pl
@@ -10,6 +10,7 @@ from app.api import kline
 from app.backtest.matrix import load_market_data_matrix_from_parquet
 from app.indicators import pipeline
 from app.price_limits import (
+    MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
     numpy_limit_price,
     numpy_price_limit_matrix,
     polars_is_risk_warning_name,
@@ -17,6 +18,7 @@ from app.price_limits import (
     polars_price_limit_pct,
     price_limit_pct,
 )
+from app.taiwan.universe.models import TaiwanInstrument
 
 
 @pytest.mark.parametrize(
@@ -254,3 +256,245 @@ def test_limit_down_recovery_uses_raw_low_under_later_ex_div():
     assert day2["signal_limit_down_recovery"][0] is False
     day3 = df.filter(pl.col("date") == date(2024, 1, 4))
     assert day3["signal_limit_down_recovery"][0] is True
+
+
+# ── Taiwan branch of polars_price_limit_pct (Step 7: must not silently fall
+# back to the A-share 10%/20% board logic for .TWSE/.TPEX symbols) ──────────
+
+
+def test_polars_price_limit_pct_returns_null_for_taiwan_symbols():
+    symbols = ["2330.TWSE", "3008.TWSE", "6889.TPEX", "00631L.TWSE"]
+    df = pl.DataFrame({
+        "symbol": symbols,
+        "date": [date(2026, 9, 17)] * len(symbols),
+        "is_st": [False] * len(symbols),
+    })
+
+    out = df.with_columns(
+        polars_price_limit_pct(pl.col("symbol"), pl.col("date"), pl.col("is_st")).alias("pct")
+    )
+
+    assert out["pct"].is_null().all()
+
+
+def test_polars_price_limit_pct_a_share_boards_unchanged_by_taiwan_branch():
+    dates = [MAIN_BOARD_ST_LIMIT_CHANGE_DATE - timedelta(days=1), MAIN_BOARD_ST_LIMIT_CHANGE_DATE]
+    symbols = ["600001.SH", "000001.SZ", "300001.SZ", "301001.SZ", "688001.SH", "689001.SH", "830001.BJ"]
+    rows = [(sym, d, st) for sym in symbols for d in dates for st in (True, False)]
+    df = pl.DataFrame({
+        "symbol": [r[0] for r in rows],
+        "date": [r[1] for r in rows],
+        "is_st": [r[2] for r in rows],
+    })
+
+    out = df.with_columns(
+        polars_price_limit_pct(pl.col("symbol"), pl.col("date"), pl.col("is_st")).alias("pct")
+    ).with_columns(
+        pl.Series(
+            "expected",
+            [price_limit_pct(r[0], r[1], is_risk_warning=r[2]) for r in rows],
+            dtype=pl.Float64,
+        )
+    )
+
+    assert (out["pct"] == out["expected"]).all()
+
+
+# ── Taiwan coalesce in the pipeline call sites (Step 7 §2) ─────────────────
+
+
+def _taiwan_instrument(
+    symbol: str,
+    *,
+    instrument_type: str = "stock",
+    etf_category: str | None = None,
+    classification_source: str | None = None,
+    underlying_scope: str | None = None,
+    leverage_multiplier: float = 1.0,
+) -> TaiwanInstrument:
+    return TaiwanInstrument(
+        symbol=symbol,
+        code=symbol.split(".")[0],
+        exchange="TWSE" if symbol.endswith(".TWSE") else "TPEX",
+        name="測試標的",
+        instrument_type=instrument_type,
+        listing_status="active",
+        listing_date="2020/01/01",
+        isin=None,
+        industry=None,
+        cfi_code=None,
+        raw_category="股票" if instrument_type == "stock" else "ETF",
+        is_supported=True,
+        source="TWSE_ISIN",
+        updated_at="2026-09-17",
+        etf_category=etf_category,
+        classification_source=classification_source,
+        underlying_scope=underlying_scope,
+        leverage_multiplier=leverage_multiplier,
+    )
+
+
+class _TaiwanFakeSecurityMaster:
+    def __init__(self, instruments: dict[str, TaiwanInstrument]):
+        self._instruments = instruments
+
+    def get_instrument(self, symbol: str) -> TaiwanInstrument | None:
+        return self._instruments.get(symbol)
+
+
+def _patch_taiwan_master(monkeypatch, instruments: dict[str, TaiwanInstrument]) -> None:
+    monkeypatch.setattr(
+        "app.taiwan.universe.get_security_master",
+        lambda: _TaiwanFakeSecurityMaster(instruments),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _clear_taiwan_limit_profile_cache():
+    pipeline.invalidate_taiwan_limit_profile_cache()
+    yield
+    pipeline.invalidate_taiwan_limit_profile_cache()
+
+
+def _taiwan_today_rows(prev_close: float, close: float, *, symbol: str) -> pl.DataFrame:
+    return pl.DataFrame({
+        "symbol": [symbol],
+        "date": [date(2026, 9, 17)],
+        "open": [prev_close],
+        "high": [close],
+        "low": [prev_close],
+        "close": [close],
+        "raw_close": [close],
+        "raw_high": [close],
+        "raw_low": [prev_close],
+        "_prev_close_raw": [prev_close],
+        "volume": [1000.0],
+    })
+
+
+def test_compute_limit_signals_today_taiwan_ordinary_stock_uses_10pct(monkeypatch):
+    symbol = "2330.TWSE"
+    _patch_taiwan_master(monkeypatch, {symbol: _taiwan_instrument(symbol)})
+    rows = _taiwan_today_rows(100.0, 111.0, symbol=symbol)
+    instruments = pl.DataFrame({"symbol": [symbol]})
+
+    out = pipeline._compute_limit_signals_today(rows, instruments)
+
+    assert out["signal_limit_up"][0] is True
+
+
+def test_compute_limit_signals_today_taiwan_leveraged_etf_uses_20pct_not_10pct(monkeypatch):
+    symbol = "00631L.TWSE"
+    inst = _taiwan_instrument(
+        symbol,
+        instrument_type="etf",
+        etf_category="leveraged",
+        classification_source="official_metadata",
+        underlying_scope="domestic",
+        leverage_multiplier=2.0,
+    )
+    _patch_taiwan_master(monkeypatch, {symbol: inst})
+    # +15%: above the pre-fix 10% fallback, but still under the real 20% cap.
+    rows = _taiwan_today_rows(100.0, 115.0, symbol=symbol)
+    instruments = pl.DataFrame({"symbol": [symbol]})
+
+    out = pipeline._compute_limit_signals_today(rows, instruments)
+
+    assert out["signal_limit_up"][0] is False
+
+
+def test_compute_limit_signals_today_taiwan_no_limit_etf_stays_null(monkeypatch):
+    symbol = "00646.TWSE"
+    inst = _taiwan_instrument(
+        symbol,
+        instrument_type="etf",
+        etf_category="foreign_equity",
+        classification_source="official_metadata",
+        underlying_scope="foreign",
+    )
+    _patch_taiwan_master(monkeypatch, {symbol: inst})
+    # A move large enough to trip any finite percentage cap.
+    rows = _taiwan_today_rows(100.0, 200.0, symbol=symbol)
+    instruments = pl.DataFrame({"symbol": [symbol]})
+
+    out = pipeline._compute_limit_signals_today(rows, instruments)
+
+    assert out["signal_limit_up"][0] is None
+    assert out["signal_limit_down"][0] is None
+
+
+@pytest.mark.parametrize("symbol", ["3008.TWSE", "6889.TPEX"])
+def test_compute_limit_signals_today_taiwan_growth_star_prefixed_code_not_misjudged(monkeypatch, symbol):
+    _patch_taiwan_master(monkeypatch, {symbol: _taiwan_instrument(symbol)})
+    # +15%: above the real 10% ordinary-stock cap. The pre-fix code matched
+    # these code prefixes against the A-share growth/STAR board (20%) and
+    # silently stayed quiet here.
+    rows = _taiwan_today_rows(100.0, 115.0, symbol=symbol)
+    instruments = pl.DataFrame({"symbol": [symbol]})
+
+    out = pipeline._compute_limit_signals_today(rows, instruments)
+
+    assert out["signal_limit_up"][0] is True
+
+
+def test_compute_limit_signals_batch_taiwan_leveraged_etf_uses_20pct_not_10pct(monkeypatch):
+    symbol = "00631L.TWSE"
+    inst = _taiwan_instrument(
+        symbol,
+        instrument_type="etf",
+        etf_category="leveraged",
+        classification_source="official_metadata",
+        underlying_scope="domestic",
+        leverage_multiplier=2.0,
+    )
+    _patch_taiwan_master(monkeypatch, {symbol: inst})
+    df = pl.DataFrame({
+        "symbol": [symbol, symbol],
+        "date": [date(2026, 9, 16), date(2026, 9, 17)],
+        "open": [100.0, 115.0],
+        "high": [100.0, 115.0],
+        "low": [100.0, 115.0],
+        "close": [100.0, 115.0],
+        "raw_close": [100.0, 115.0],
+        "raw_high": [100.0, 115.0],
+    })
+    instruments = pl.DataFrame({"symbol": [symbol], "name": ["測試ETF"]})
+
+    result = pipeline.compute_limit_signals(df, instruments, needed={"signal_limit_up"})
+
+    assert result["signal_limit_up"][-1] is False
+
+
+def test_compute_limit_signals_batch_mixed_market_a_share_unaffected_by_taiwan_join(monkeypatch):
+    tw_symbol = "00631L.TWSE"
+    a_symbol = "600001.SH"
+    inst = _taiwan_instrument(
+        tw_symbol,
+        instrument_type="etf",
+        etf_category="leveraged",
+        classification_source="official_metadata",
+        underlying_scope="domestic",
+        leverage_multiplier=2.0,
+    )
+    _patch_taiwan_master(monkeypatch, {tw_symbol: inst})
+    df = pl.DataFrame({
+        "symbol": [tw_symbol, tw_symbol, a_symbol, a_symbol],
+        "date": [date(2026, 9, 16), date(2026, 9, 17)] * 2,
+        "open": [100.0, 115.0, 10.0, 11.0],
+        "high": [100.0, 115.0, 10.0, 11.0],
+        "low": [100.0, 115.0, 10.0, 11.0],
+        "close": [100.0, 115.0, 10.0, 11.0],
+        "raw_close": [100.0, 115.0, 10.0, 11.0],
+        "raw_high": [100.0, 115.0, 10.0, 11.0],
+    })
+    instruments = pl.DataFrame({
+        "symbol": [tw_symbol, a_symbol],
+        "name": ["測試ETF", "普通股"],
+    })
+
+    result = pipeline.compute_limit_signals(df, instruments, needed={"signal_limit_up"})
+
+    a_row = result.filter(pl.col("symbol") == a_symbol).sort("date")
+    tw_row = result.filter(pl.col("symbol") == tw_symbol).sort("date")
+    assert a_row["signal_limit_up"][-1] is True
+    assert tw_row["signal_limit_up"][-1] is False

@@ -335,6 +335,9 @@ class KlineRepository:
         # symbol 集合 memo (随对应 instruments 缓存失效): 供每请求资产分流用
         self._index_symbol_set_cache: set[str] | None = None
         self._etf_symbol_set_cache: set[str] | None = None
+        # 三表合并的 symbol → name memo; 只在 clear_cache() 里重置会让
+        # get_name_map 在缓存从未失效过的进程里撞上 AttributeError。
+        self._name_map_cache: dict[str, str] | None = None
         self._index_enriched_cache: pl.DataFrame | None = None
         self._index_enriched_cache_date: date | None = None
 

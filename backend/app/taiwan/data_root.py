@@ -1,7 +1,7 @@
 """Canonical Taiwan data root (Phase 8B-5.0.6).
 
 A single, tiny helper so every Taiwan storage module (TaiwanDailyStore,
-TaiwanSecurityMaster, TaiwanMonitorEngine's rule file, ...) resolves its
+TaiwanSecurityMaster, ...) resolves its
 default path the same way the rest of the app already does for A-share data
 — anchored to ``app.config.settings.data_dir`` (itself anchored to the
 project root in dev mode, or the exe-adjacent directory in a packaged

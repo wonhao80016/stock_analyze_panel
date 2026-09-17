@@ -160,11 +160,10 @@ def get_minute_intraday_refresh_interval() -> int:
                    int(load().get("minute_intraday_refresh_interval", 6))))
 
 
-# 监控中心个股通知 ext 字段默认配置 (与 ext_presets 内置预设对齐)
-_MONITOR_EXT_FIELDS_DEFAULT = {
-    "concept": "ext_gn_ths.所属概念",
-    "industry": "ext_hy_ths.所属同话顺行业",
-}
+# 监控中心个股通知 ext 字段默认配置。
+# 无内置预设 (ext_gn_ths/ext_hy_ths 为 A 股专属, 不再自动建立), 默认留空,
+# 由用户在设置页自行挑选已配置的维度。
+_MONITOR_EXT_FIELDS_DEFAULT: dict = {}
 
 
 def _normalize_ext_field(raw) -> dict | None:
@@ -201,8 +200,8 @@ def get_monitor_ext_fields() -> dict:
     raw = data.get("monitor_ext_fields")
     if raw is None:
         return {
-            "concept": {"field": _MONITOR_EXT_FIELDS_DEFAULT["concept"]},
-            "industry": {"field": _MONITOR_EXT_FIELDS_DEFAULT["industry"]},
+            "concept": _MONITOR_EXT_FIELDS_DEFAULT.get("concept"),
+            "industry": _MONITOR_EXT_FIELDS_DEFAULT.get("industry"),
         }
     return {
         "concept": _normalize_ext_field(raw.get("concept")),
@@ -544,7 +543,7 @@ def get_depth_polling_interval() -> float:
 
 
 def set_depth_polling_interval(interval: float) -> float:
-    """保存 depth 轮询间隔。套餐范围 clamp 由 depth_service 按档位做。"""
+    """保存 depth 轮询间隔。"""
     interval = max(1.0, min(600.0, float(interval)))
     save({"depth_polling_interval": interval})
     return interval

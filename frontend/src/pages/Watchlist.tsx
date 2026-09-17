@@ -53,17 +53,13 @@ import {
 } from '@/lib/watchlist-columns'
 
 // ===== 板塊標識（篩選/卡片用） =====
-// 注: boardTag（創/科/北 標籤）已移至共享 @/components/stock-table/primitives
 
-const BOARDS = ['滬主板', '深主板', '創業板', '科創板', '北交所'] as const
+const BOARDS = ['上市', '上櫃'] as const
 type BoardType = typeof BOARDS[number]
 
 function getBoardType(symbol: string): BoardType | null {
-  if (/^(300|301)/.test(symbol)) return '創業板'
-  if (/^688/.test(symbol))       return '科創板'
-  if (/\.BJ$/.test(symbol))      return '北交所'
-  if (/^60[0135]/.test(symbol))  return '滬主板'
-  if (/^00[012]/.test(symbol))   return '深主板'
+  if (symbol.endsWith('.TWSE')) return '上市'
+  if (symbol.endsWith('.TPEX')) return '上櫃'
   return null
 }
 
@@ -253,8 +249,8 @@ function StockSearchBox({
   const search = useQuery({
     // Taiwan-only 產品方向: 自選搜索只查台股證券主檔(TaiwanSecurityMaster),
     // 不應再出現 A 股 .SH/.SZ/.BJ 結果。2330.TWSE / 6488.TPEX 這類標的可被搜到並加入自選。
-    queryKey: QK.instrumentSearch(query, 'stock,etf,index', 'taiwan'),
-    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf,index', 'taiwan'),
+    queryKey: QK.instrumentSearch(query, 'stock,etf,index'),
+    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf,index'),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })

@@ -1,14 +1,19 @@
 """Phase 8B-5.0.6/7 — canonical Taiwan data root: CWD-independence + override tests.
 
-Root cause under test: TaiwanDailyStore / TaiwanSecurityMaster / TaiwanMonitorEngine
-(Phase 8B-5.0.6), and TaiwanInstitutionalStore / TaiwanMarginStore (Phase 8B-5.0.7)
-used to default to a *bare* relative Path("data/taiwan/...") — resolved against
-whatever the process's current working directory happened to be at first use,
-not the project root. Phase 8B-5.0.5 observed this directly: launching the same
-class from within backend/ wrote data under backend/data/taiwan instead of the
+Root cause under test: TaiwanDailyStore / TaiwanSecurityMaster (Phase 8B-5.0.6),
+and TaiwanInstitutionalStore / TaiwanMarginStore (Phase 8B-5.0.7) used to default
+to a *bare* relative Path("data/taiwan/...") — resolved against whatever the
+process's current working directory happened to be at first use, not the
+project root. Phase 8B-5.0.5 observed this directly: launching the same class
+from within backend/ wrote data under backend/data/taiwan instead of the
 project's real data/taiwan. These tests assert the fix: the default now always
 resolves to settings.data_dir/taiwan/... regardless of process CWD, and explicit
 overrides (used by every existing deterministic test in this repo) still work.
+
+The former TaiwanMonitorEngine coverage of this same behavior was removed with
+engine A (Step 6, monitor engine merge); taiwan_data_root() is the single
+canonical resolver every store (including the removed engine) forwarded to, so
+testing it directly preserves the same protection without depending on A.
 """
 from __future__ import annotations
 
@@ -18,7 +23,6 @@ from app.taiwan.data_root import taiwan_data_root
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
-from app.taiwan.realtime.monitor_engine import TaiwanMonitorEngine
 from app.taiwan.universe.service import TaiwanSecurityMaster
 
 
@@ -73,22 +77,22 @@ def test_taiwan_security_master_default_path_is_cwd_independent(tmp_path, monkey
     assert path_a.is_absolute()
 
 
-def test_taiwan_monitor_engine_default_path_is_cwd_independent(tmp_path, monkeypatch):
+def test_taiwan_data_root_default_resolution_is_cwd_independent(tmp_path, monkeypatch):
+    """taiwan_data_root() 本身的 CWD 独立性 —— 所有具体 store (含已删除的引擎 A)
+    都只是在此基础上拼接子路径, 这是它们共享的唯一保护点。"""
     cwd_a = tmp_path / "cwd_a"
     cwd_b = tmp_path / "cwd_b"
     cwd_a.mkdir()
     cwd_b.mkdir()
 
     monkeypatch.chdir(cwd_a)
-    engine_a = TaiwanMonitorEngine()
-    path_a = engine_a.storage_path
+    root_a = taiwan_data_root()
 
     monkeypatch.chdir(cwd_b)
-    engine_b = TaiwanMonitorEngine()
-    path_b = engine_b.storage_path
+    root_b = taiwan_data_root()
 
-    assert path_a == path_b
-    assert path_a.is_absolute()
+    assert root_a == root_b
+    assert root_a.is_absolute()
 
 
 def test_taiwan_daily_store_explicit_override_still_respected(tmp_path):
@@ -102,12 +106,6 @@ def test_taiwan_security_master_explicit_override_still_respected(tmp_path):
     custom = tmp_path / "my_custom_master.parquet"
     master = TaiwanSecurityMaster(cache_path=custom)
     assert master.cache_path == custom
-
-
-def test_taiwan_monitor_engine_explicit_override_still_respected(tmp_path):
-    custom = tmp_path / "my_custom_rules.json"
-    engine = TaiwanMonitorEngine(storage_path=custom)
-    assert engine.storage_path == custom
 
 
 def test_data_root_matches_ashare_sibling_layout():

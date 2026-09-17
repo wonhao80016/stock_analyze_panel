@@ -1,13 +1,17 @@
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
   AlertTriangle,
   Bell,
   Clock,
   Flame,
+  X,
 } from 'lucide-react'
-import type { AlertEvent, TaiwanAlertEvent } from '@/lib/api'
+import { api, type AlertEvent, type TaiwanAlertEvent } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
 
 import { cn } from '@/lib/cn'
+import { fmtPct } from '@/lib/format'
 
 interface TaiwanAlertsListProps {
   alerts: (AlertEvent | TaiwanAlertEvent)[]
@@ -60,6 +64,12 @@ function formatAlertTime(ts: number | string | undefined): string {
 }
 
 export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListProps) {
+  const qc = useQueryClient()
+  const deleteMut = useMutation({
+    mutationFn: (ts: number) => api.alertDelete(ts),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.alerts(undefined) }),
+  })
+
   if (!alerts || alerts.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center p-12 text-center text-muted">
@@ -125,6 +135,16 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
                       {alert.source}
                     </span>
                   )}
+                  {alert.ts != null && (
+                    <button
+                      onClick={() => deleteMut.mutate(alert.ts!)}
+                      disabled={deleteMut.isPending}
+                      title="刪除這筆記錄"
+                      className="inline-flex h-5 w-5 items-center justify-center rounded border border-transparent text-muted opacity-0 transition-all hover:border-danger/40 hover:text-danger group-hover:opacity-100 cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -147,7 +167,7 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
                   )}
                   {alert.change_pct != null && (
                     <span className={alert.change_pct > 0 ? 'text-rose-500 font-semibold' : 'text-emerald-500 font-semibold'}>
-                      {alert.change_pct > 0 ? `+${alert.change_pct.toFixed(2)}%` : `${alert.change_pct.toFixed(2)}%`}
+                      {fmtPct(alert.change_pct)}
                     </span>
                   )}
                 </div>

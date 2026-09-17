@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { ListChecks, Power, Trash2 } from 'lucide-react'
+import { Edit2, ListChecks, Power, Trash2 } from 'lucide-react'
 
 import { api, type MonitorRule } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -12,7 +12,6 @@ const RULE_TYPE_LABELS: Record<string, string> = {
   signal: '訊號',
   price: '價格',
   market: '大盤',
-  ladder: '封單',
   sector: '板塊',
 }
 
@@ -23,17 +22,37 @@ const SCOPE_LABELS: Record<string, string> = {
   watchlist_group: '自選分組',
 }
 
-function conditionSummary(rule: MonitorRule): string {
+// change_pct / distance_to_* 一律以小數制儲存(0.01 = 1%), 摘要顯示時換算回百分比,
+// 否則使用者看到的會是 0.01 這種難以判讀的原始值。
+const PERCENT_DECIMAL_FIELDS = new Set(['change_pct', 'distance_to_upper_limit', 'distance_to_lower_limit'])
+
+function formatConditionValue(field: string, value: number | null | undefined): string {
+  if (value == null) return ''
+  if (PERCENT_DECIMAL_FIELDS.has(field)) {
+    const pct = value * 100
+    return `${Number(pct.toFixed(2))}%`
+  }
+  if (field === 'volume') {
+    return value >= 1000 ? `${(value / 1000).toLocaleString()}張` : `${value.toLocaleString()}股`
+  }
+  return String(value)
+}
+
+export function conditionSummary(rule: { conditions?: MonitorRule['conditions']; logic?: MonitorRule['logic'] }): string {
   const parts = (rule.conditions || []).map(c => {
     const field = cnSignal(c.field)
     if (c.op === 'truth') return field
-    return `${field} ${c.op} ${c.value ?? ''}`.trim()
+    return `${field} ${c.op} ${formatConditionValue(c.field, c.value)}`.trim()
   })
   if (!parts.length) return '無條件'
   return parts.join(rule.logic === 'or' ? ' 或 ' : ' 且 ')
 }
 
-export function GenericRulesList() {
+interface GenericRulesListProps {
+  onEdit: (rule: MonitorRule) => void
+}
+
+export function GenericRulesList({ onEdit }: GenericRulesListProps) {
   const qc = useQueryClient()
   const rulesQuery = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList })
 
@@ -98,6 +117,13 @@ export function GenericRulesList() {
                 <Power className="h-3 w-3" />
               </button>
               <button
+                onClick={() => onEdit(r)}
+                title="編輯規則"
+                className="p-1.5 rounded-lg border border-border bg-surface text-muted hover:text-accent hover:border-accent/40 transition-colors cursor-pointer"
+              >
+                <Edit2 className="h-3 w-3" />
+              </button>
+              <button
                 onClick={() => deleteMut.mutate(r.id)}
                 title="刪除規則"
                 className="p-1.5 rounded-lg border border-border bg-surface text-muted hover:text-danger hover:border-danger/40 transition-colors cursor-pointer"
@@ -115,6 +141,21 @@ export function GenericRulesList() {
               <span className="font-mono text-accent">{r.symbols.slice(0, 4).join(', ')}{r.symbols.length > 4 ? ` +${r.symbols.length - 4}` : ''}</span>
             )}
             <span className="text-muted">{conditionSummary(r)}</span>
+            {r.cooldown_seconds > 0 && (
+              <span className="rounded bg-surface border border-border/50 px-1 py-0.5 text-[10px] text-muted">
+                冷卻 {r.cooldown_seconds}s
+              </span>
+            )}
+            {r.trigger_mode === 'level' && (
+              <span className="rounded bg-surface border border-border/50 px-1 py-0.5 text-[10px] text-muted">
+                持續觸發
+              </span>
+            )}
+            {r.conditions?.some(c => c.rearm_value != null) && (
+              <span className="rounded bg-surface border border-border/50 px-1 py-0.5 text-[10px] text-muted">
+                含遲滯重置
+              </span>
+            )}
           </div>
         </motion.div>
       ))}
