@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ── 运行环境检测 ──────────────────────────────────────────
@@ -120,8 +120,21 @@ class Settings(BaseSettings):
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
 
+    # 大块临时文件 (历史数据包下载/解压、AI 运行目录) 的落地目录。
+    # 留空 = data_dir/tmp, 跟随 DATA_DIR 一起离开系统盘; 也可单独指向别的磁盘。
+    # 不用 tempfile 默认值的原因: 它指向 %TEMP% (C 盘), 历史数据包解压动辄数百 MB。
+    cache_dir: Path | None = None
+
     # 静态文件(前端 dist) — frozen: 资源目录的 static/; 非 frozen: frontend/dist
     static_dir: Path = _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
+
+    @field_validator("cache_dir", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        """`CACHE_DIR=` 是「不指定」, 不是 Path('.') —— 否则临时文件会落在项目根目录。"""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:
@@ -129,6 +142,10 @@ class Settings(BaseSettings):
         if not self.data_dir.is_absolute():
             # 相对路径基于项目根目录解析，而非 CWD
             self.data_dir = (_PROJECT_ROOT / self.data_dir).resolve()
+        if self.cache_dir is None:
+            self.cache_dir = self.data_dir / "tmp"
+        elif not self.cache_dir.is_absolute():
+            self.cache_dir = (_PROJECT_ROOT / self.cache_dir).resolve()
         if self.backtest_matrix_cache_max_mb <= 0:
             raise ValueError("backtest_matrix_cache_max_mb must be positive")
         if self.backtest_matrix_cache_prewarm_years <= 0:
@@ -147,3 +164,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def temp_root() -> Path:
+    """大块临时文件的根目录 (按需创建)。
+
+    tempfile 的 dir= 参数要求目录已存在, 故调用方一律经由此函数取得。
+    """
+    root = settings.cache_dir or (settings.data_dir / "tmp")
+    root.mkdir(parents=True, exist_ok=True)
+    return root

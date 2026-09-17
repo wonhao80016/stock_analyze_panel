@@ -21,6 +21,7 @@ import httpx
 import polars as pl
 from pydantic import BaseModel, Field
 
+from app.config import temp_root
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import resolve_target_latest_trading_date
@@ -261,7 +262,7 @@ class TaiwanBootstrapService:
 
     def _run_job(self, job_id: str, force: bool = False) -> None:
         logger.info("Starting Taiwan historical bootstrap job %s", job_id)
-        with tempfile.TemporaryDirectory(prefix="Itoy_tw_bootstrap_") as tmp_dir_str:
+        with tempfile.TemporaryDirectory(prefix="Itoy_tw_bootstrap_", dir=str(temp_root())) as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
             zip_file_path = tmp_dir / ASSET_NAME
             extract_dir = tmp_dir / "extracted"

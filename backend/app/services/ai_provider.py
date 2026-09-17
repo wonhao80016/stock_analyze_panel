@@ -17,7 +17,7 @@ from types import TracebackType
 from urllib.parse import urlsplit, urlunsplit
 
 from app import secrets_store
-from app.config import settings
+from app.config import settings, temp_root
 
 OPENAI_COMPAT_PROVIDER = "openai_compat"
 OPENAI_PROVIDER = "openai"
@@ -594,7 +594,7 @@ async def _run_codex_cli(
     timeout: float,
 ) -> str:
     prompt = _codex_prompt(messages, max_tokens=max_tokens)
-    run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-run-"))
+    run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-run-", dir=str(temp_root())))
     try:
         codex_home_path = run_path / "codex-home"
         workspace_path = run_path / "workspace"
