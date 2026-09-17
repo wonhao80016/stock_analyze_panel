@@ -366,7 +366,7 @@ async def _application_lifespan(app: FastAPI):
             ps.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
-            qs.stop()
+            qs.stop(persist=False)
         dsvc = getattr(app.state, "depth_service", None)
         if dsvc:
             dsvc.stop_polling()

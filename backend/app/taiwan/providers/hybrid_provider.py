@@ -162,6 +162,48 @@ class TaiwanHybridProvider:
     ) -> pl.DataFrame:
         return pl.DataFrame()
 
+    def _live_quote_frame(self, symbols: list[str]) -> pl.DataFrame:
+        """Intraday quotes shaped like the daily frame the enrichment pipeline consumes.
+
+        Only quotes the realtime layer marks as live are kept. The official endpoint
+        below publishes the previous session's close during trading hours, so a stale
+        quote that reached this frame would be indistinguishable from a live one and
+        would freeze every price at yesterday's close.
+        """
+        from app.taiwan.realtime.service import get_realtime_service
+
+        quotes = get_realtime_service().get_quotes(symbols)
+        rows: list[dict] = []
+        for canonical, q in quotes.items():
+            if q.last_price is None or not q.source_meta.is_realtime:
+                continue
+            # A quote past its freshness threshold keeps is_realtime set, so it has
+            # to be rejected explicitly or it would be relabelled as live below.
+            if q.source_meta.is_stale:
+                continue
+            quote_time = q.quote_time
+            rows.append({
+                "symbol": canonical,
+                "date": q.trade_date,
+                "open": q.open,
+                "high": q.high,
+                "low": q.low,
+                "close": q.last_price,
+                "volume": float(q.volume) if q.volume is not None else None,
+                "amount": float(q.amount) if q.amount is not None else None,
+                "prev_close": q.prev_close,
+                "change_pct": q.change_pct,
+                "quote_ts": int(quote_time.timestamp() * 1000) if quote_time else None,
+                "timestamp": quote_time,
+                "provider": "twse",
+                "source": q.source_meta.source,
+                "source_url": q.source_meta.source_url,
+                "retrieved_at": q.source_meta.fetched_at,
+                "trade_date": q.trade_date.isoformat() if q.trade_date else None,
+                "status": "realtime",
+            })
+        return pl.DataFrame(rows) if rows else pl.DataFrame()
+
     def get_realtime(
         self,
         universes: list[str] | None = None,
@@ -171,6 +213,12 @@ class TaiwanHybridProvider:
         requested = symbols or []
         if not requested:
             return pl.DataFrame()
+        try:
+            live = self._live_quote_frame(requested)
+            if not live.is_empty():
+                return live
+        except Exception as exc:
+            logger.warning("Taiwan live quote failed: %s", exc)
         try:
             quote = self.official.fetch_quote(requested)
             if not quote.is_empty():

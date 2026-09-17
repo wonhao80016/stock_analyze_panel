@@ -28,7 +28,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import date, time as dt_time
+from datetime import date
 
 import polars as pl
 
@@ -212,7 +212,8 @@ class QuoteService:
         self._index_quotes_cache: pl.DataFrame | None = None
         self._intraday_signal_evaluator = IntradaySignalEvaluator()
         self._intraday_signal_bucket: dict[str, str] = {}
-        # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
+        # Close-boundary sync state: one quote pull must succeed after the close
+        # before the poll loop is allowed to go idle for the day.
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
 
@@ -235,14 +236,20 @@ class QuoteService:
         self._save_enabled(True)
         logger.info("行情服务已启动, 轮询间隔 %.1fs", self._interval)
 
-    def stop(self) -> None:
-        """停止后台行情轮询线程。"""
+    def stop(self, *, persist: bool = True) -> None:
+        """停止后台行情轮询线程。
+
+        persist=False when the process is shutting down: a restart is not the user
+        switching realtime off, and saving it there leaves the feature disabled after
+        every reload until someone flips the toggle by hand.
+        """
         self._running = False
         self._enabled = False
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
-        self._save_enabled(False)
+        if persist:
+            self._save_enabled(False)
         logger.info("行情服务已停止")
 
     def enable(self) -> bool:
@@ -503,7 +510,8 @@ class QuoteService:
             "index_symbol_count": self._index_symbol_count,
             "etf_symbol_count": self._etf_symbol_count,
             "quote_age_ms": round(age, 0) if age >= 0 else None,
-            # 交易时段 = 连续竞价; polling_window 另行返回,避免午休/收盘缓冲误显示为交易中。
+            # Regular session only; polling_window is reported separately so the
+            # pre-open warm-up and the post-close capture do not read as "trading".
             "is_trading_hours": self._is_continuous_trading(),
             "is_polling_window": self._should_poll_for_phase(phase),
             "market_phase": phase,
@@ -529,17 +537,18 @@ class QuoteService:
                 if not self._paused:
                     phase = self._market_phase()
                     if self._should_fetch_for_phase(phase):
-                        is_final = phase in {"morning_final", "close_final"}
+                        is_final = phase == "close_final"
                         ok = self._fetch_quotes(final=is_final)
                         if is_final:
                             key = self._final_sync_key(phase)
                             if key and ok:
                                 self._final_sync_done.add(key)
                                 self._final_sync_failed.pop(key, None)
-                                logger.info("%s 最终行情同步完成, 进入休盘态", "午休" if phase == "morning_final" else "收盘")
+                                self._flush_minute_bars()
+                                logger.info("close final sync completed, entering closed state")
                             elif key:
                                 self._final_sync_failed[key] = "fetch_failed"
-                                logger.warning("%s 最终行情同步失败, 将继续重试", "午休" if phase == "morning_final" else "收盘")
+                                logger.warning("close final sync failed, will keep retrying")
                     else:
                         logger.debug("非轮询阶段(%s), 跳过行情轮询", phase)
             except Exception as e:  # noqa: BLE001
@@ -582,6 +591,7 @@ class QuoteService:
                 df = provider.get_realtime(symbols=sym_list)
                 if not df.is_empty():
                     records = df.to_dicts()
+                    self._record_minute_bars(records)
                     self._process_full_market_records(records, t0=t0, now_ts=now_ts)
                 return
             except Exception as e:
@@ -1016,39 +1026,42 @@ class QuoteService:
 
     @staticmethod
     def _market_phase() -> str:
-        """A股行情轮询阶段(北京时间)。
+        """Taiwan quote polling phase (Asia/Taipei).
 
-        final 阶段用于午休/收盘定版: 需要至少成功拉取一版边界后的行情, 才算进入休盘。
+        The regular session is continuous 09:00-13:30 with no lunch break, so the
+        close is the only final-sync boundary: "close_final" keeps polling until one
+        post-close snapshot has been captured.
         """
-        now = cn_now()
+        from app.taiwan.realtime.calendar import (
+            PRE_OPEN_START,
+            REGULAR_OPEN_END,
+            REGULAR_OPEN_START,
+            taipei_now,
+        )
+
+        now = taipei_now()
         if now.weekday() >= 5:
             return "closed"
         t = now.time()
-        if dt_time(9, 15) <= t < dt_time(9, 30):
+        if PRE_OPEN_START <= t < REGULAR_OPEN_START:
             return "preopen"
-        if dt_time(9, 30) <= t < dt_time(11, 30):
-            return "morning"
-        if dt_time(11, 30) <= t < dt_time(12, 55):
-            return "morning_final"
-        if dt_time(12, 55) <= t < dt_time(13, 0):
-            return "pre_afternoon"
-        if dt_time(13, 0) <= t < dt_time(15, 0):
-            return "afternoon"
-        if t >= dt_time(15, 0):
+        if REGULAR_OPEN_START <= t <= REGULAR_OPEN_END:
+            return "regular"
+        if t > REGULAR_OPEN_END:
             return "close_final"
         return "closed"
 
     @staticmethod
     def _final_sync_key(phase: str) -> tuple[date, str] | None:
-        if phase == "morning_final":
-            return (cn_today(), "morning")
         if phase == "close_final":
-            return (cn_today(), "close")
+            from app.taiwan.realtime.calendar import taipei_today
+
+            return (taipei_today(), "close")
         return None
 
     def _should_poll_for_phase(self, phase: str) -> bool:
         """是否处于会主动拉行情的阶段。final 阶段成功后即停止。"""
-        if phase in {"preopen", "morning", "pre_afternoon", "afternoon"}:
+        if phase in {"preopen", "regular"}:
             return True
         key = self._final_sync_key(phase)
         return bool(key and key not in self._final_sync_done)
@@ -1056,23 +1069,19 @@ class QuoteService:
     def _should_fetch_for_phase(self, phase: str) -> bool:
         return self._should_poll_for_phase(phase)
 
-    def _is_trading_hours(self) -> bool:
-        """行情轮询窗口(兼容旧调用): 包含盘前预热和未完成的午休/收盘定版。"""
-        return self._should_poll_for_phase(self._market_phase())
-
     @staticmethod
     def _is_continuous_trading() -> bool:
-        """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。
+        """Taiwan regular session (Asia/Taipei): 09:00-13:30 on weekdays.
 
-        比 _is_trading_hours 严格: 排除 9:15-9:30 集合竞价(指示价, 非成交价)、
-        午间与 15:00 后收盘缓冲。监控评估只在此窗口进行, 不对竞价/收盘后的陈旧价告警。
-        (节假日由 _evaluate_monitors 里的「快照日期=当日」新鲜度判据兜底, 无需交易日历。)
+        Stricter than the polling window, which also spans the 08:30-09:00 trial
+        matching and the post-close capture: alerts must not fire on indicative or
+        stale prices. Holidays are covered by the "snapshot date == today" freshness
+        check in _evaluate_monitors, so no verified trading calendar is needed here.
         """
-        now = cn_now()
-        t = now.time()
-        morning = dt_time(9, 30) <= t <= dt_time(11, 30)
-        afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
-        return now.weekday() < 5 and (morning or afternoon)
+        from app.taiwan.realtime.calendar import get_market_status
+        from app.taiwan.realtime.models import MarketStatus
+
+        return get_market_status() == MarketStatus.OPEN
 
     @staticmethod
     def _save_enabled(enabled: bool) -> None:
@@ -1086,9 +1095,9 @@ class QuoteService:
     def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
-            # 仅在「交易日 + 连续竞价时段」评估监控 —— 避开集合竞价指示价、盘前/收盘后
-            # 缓冲。轮询窗口(_is_trading_hours)更宽是为盘前预热/收盘捕捉, 但告警不应
-            # 基于这些非连续竞价价格。
+            # Alerts only during the regular session: the polling window is wider so it
+            # can warm up on pre-open trial matching and capture the close, but neither
+            # carries executable prices.
             if not self._is_continuous_trading():
                 return
             # 获取 enriched 数据 (刚算好的)
@@ -1350,6 +1359,32 @@ class QuoteService:
         )
         return self._intraday_signal_evaluator.inject(enriched, signals)
 
+    def _record_minute_bars(self, records: list[dict]) -> None:
+        """Fold live quotes into minute bars — Taiwan has no first-party minute feed.
+
+        Snapshot rows are skipped: the official endpoint publishes the previous
+        close during the session, which would be written as a flat bar at the wrong
+        price for every minute the realtime source is unavailable.
+        """
+        live = [r for r in records if r.get("status") == "realtime"]
+        if not live:
+            return
+        try:
+            from app.taiwan.realtime.minute_recorder import get_minute_recorder
+            resolver = getattr(self._repo, "resolve_asset_type", None) if self._repo else None
+            get_minute_recorder().record(live, resolve_asset_type=resolver)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("minute bar recording skipped: %s", e)
+
+    def _flush_minute_bars(self) -> None:
+        """Persist the bar still open at the close; nothing rolls it over afterwards."""
+        try:
+            from app.taiwan.realtime.minute_recorder import get_minute_recorder
+            resolver = getattr(self._repo, "resolve_asset_type", None) if self._repo else None
+            get_minute_recorder().flush(resolve_asset_type=resolver)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("minute bar flush failed: %s", e)
+
     def _inject_sealed_vol(self, enriched_today: pl.DataFrame, enriched_date) -> pl.DataFrame:
         """从 depth_service 取封单量, 作为临时列 _sealed_vol 注入 enriched 副本。
 
@@ -1519,26 +1554,26 @@ class QuoteService:
 
             if use_incremental:
                 from app.indicators.pipeline import compute_enriched_today
-                from app.market_time import trading_minutes_elapsed_from_ts, trading_minutes_elapsed
+                from app.taiwan.realtime.calendar import session_progress, session_progress_from_ts
                 instruments = self._repo.get_instruments()
                 # 将 API 直接提供的补充字段 JOIN 到 daily_df
                 today_ohlcv = daily_df
                 if quote_extra is not None and not quote_extra.is_empty():
                     today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
                 # 量比时间折算: 优先用行情 quote_ts (真实成交时间), 缺失则兜底服务端时间
-                elapsed_minutes: float | None = None
+                progress: float | None = None
                 if "quote_ts" in daily_df.columns and not daily_df.is_empty():
                     valid_ts = daily_df["quote_ts"].drop_nulls()
                     if not valid_ts.is_empty():
-                        elapsed_minutes = trading_minutes_elapsed_from_ts(valid_ts.median())
-                if elapsed_minutes is None:
-                    elapsed_minutes = trading_minutes_elapsed()
+                        progress = session_progress_from_ts(valid_ts.median())
+                if progress is None:
+                    progress = session_progress()
                 enriched_today = compute_enriched_today(
                     live_agg=live_agg,
                     prev_enriched=prev_enriched,
                     today_ohlcv=today_ohlcv,
                     instruments=instruments,
-                    elapsed_minutes=elapsed_minutes,
+                    session_progress=progress,
                 )
                 if enriched_today.is_empty():
                     logger.warning("增量计算结果为空, 回退到全量计算")

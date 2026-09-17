@@ -135,7 +135,25 @@ class TwseMisRealtimeProvider:
                 continue
 
             name = item.get("n") or item.get("nf") or canonical
+
+            # Parse 5-tier bid / ask depth book
+            bids = _parse_depth_tier(item.get("b"), item.get("g"))
+            asks = _parse_depth_tier(item.get("a"), item.get("f"))
+            bid_p, bid_v = bids[0] if bids else (None, None)
+            ask_p, ask_v = asks[0] if asks else (None, None)
+
+            # MIS fills "z" only for the snapshot in which a match occurred; between
+            # matches it is "-" while the "trade" object still carries the most recent
+            # execution. Falling straight to None there would blank the price for the
+            # great majority of snapshots: sampling six watchlist symbols during the
+            # session put "z" missing in 83-95% of them.
             last_price = _safe_float(item.get("z"))
+            if last_price is None:
+                trade = item.get("trade")
+                if isinstance(trade, dict):
+                    last_price = _safe_float(trade.get("z"))
+            if last_price is None:
+                last_price = bid_p
             prev_close = _safe_float(item.get("y"))
             open_p = _safe_float(item.get("o"))
             high_p = _safe_float(item.get("h"))
@@ -190,12 +208,6 @@ class TwseMisRealtimeProvider:
                     if current_market_status == MarketStatus.OPEN
                     else RealtimeStatus.OFFICIAL_SNAPSHOT.value
                 )
-
-            # Parse 5-tier bid / ask depth book
-            bids = _parse_depth_tier(item.get("b"), item.get("g"))
-            asks = _parse_depth_tier(item.get("a"), item.get("f"))
-            bid_p, bid_v = bids[0] if bids else (None, None)
-            ask_p, ask_v = asks[0] if asks else (None, None)
 
             # Available fields metadata
             avail = ["prev_close"]
