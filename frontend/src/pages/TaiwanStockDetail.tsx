@@ -14,11 +14,14 @@ import {
   Scale,
   Star,
   ChevronDown,
+  History,
 } from 'lucide-react'
 import {
   api,
   type TaiwanSearchResult,
   type TaiwanAIStockResearchReport,
+  type TaiwanInstitutionalHistoryRow,
+  type TaiwanMarginHistoryRow,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -66,6 +69,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const [selectedRange, setSelectedRange] = useState<number>(180)
   const [isRuleEditorOpen, setIsRuleEditorOpen] = useState<boolean>(false)
   const [volUnit, setVolUnit] = useState<'lots' | 'shares'>('lots')
+  const [historyModalType, setHistoryModalType] = useState<'institutional' | 'margin' | null>(null)
 
   // Search state inside stock detail
   const [searchQuery, setSearchQuery] = useState('')
@@ -608,9 +612,20 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             <div className="rounded-2xl border border-border bg-surface p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-bold text-foreground">三大法人買賣超</h3>
-                {data.institutional.meta?.trade_date && (
-                  <span className="text-[10px] text-muted font-mono">{data.institutional.meta.trade_date}</span>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {data.institutional.meta?.trade_date && (
+                    <span className="text-[10px] text-muted font-mono">{data.institutional.meta.trade_date}</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setHistoryModalType('institutional')}
+                    title="查看三大法人歷史資料"
+                    aria-label="查看三大法人歷史資料"
+                    className="flex items-center justify-center rounded-md p-1 text-muted hover:text-accent hover:bg-base transition-colors cursor-pointer"
+                  >
+                    <History className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
               {data.institutional.status === 'available' ? (
                 <div className="space-y-2.5 text-xs">
@@ -652,9 +667,20 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             <div className="rounded-2xl border border-border bg-surface p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-bold text-foreground">融資融券餘額與變化</h3>
-                {data.margin.meta?.trade_date && (
-                  <span className="text-[10px] text-muted font-mono">{data.margin.meta.trade_date}</span>
-                )}
+                <div className="flex items-center gap-1.5">
+                  {data.margin.meta?.trade_date && (
+                    <span className="text-[10px] text-muted font-mono">{data.margin.meta.trade_date}</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setHistoryModalType('margin')}
+                    title="查看融資融券歷史資料"
+                    aria-label="查看融資融券歷史資料"
+                    className="flex items-center justify-center rounded-md p-1 text-muted hover:text-accent hover:bg-base transition-colors cursor-pointer"
+                  >
+                    <History className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
               {data.margin.status === 'available' ? (
                 <div className="space-y-2.5 text-xs">
@@ -1078,6 +1104,160 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
           />
         </Modal>
       )}
+
+      {/* 三大法人 / 融資融券歷史資料彈窗 */}
+      {historyModalType && (
+        <ChipHistoryModal
+          symbol={symbol}
+          name={data?.identity?.name || symbol}
+          type={historyModalType}
+          formatVol={formatVol}
+          onClose={() => setHistoryModalType(null)}
+        />
+      )}
     </div>
+  )
+}
+
+const HISTORY_DAY_OPTIONS = [20, 60, 120]
+
+interface ChipHistoryModalProps {
+  symbol: string
+  name: string
+  type: 'institutional' | 'margin'
+  formatVol: (shares: number | null | undefined) => string
+  onClose: () => void
+}
+
+function ChipHistoryModal({ symbol, name, type, formatVol, onClose }: ChipHistoryModalProps) {
+  const [days, setDays] = useState<number>(60)
+  const isInstitutional = type === 'institutional'
+
+  const instQuery = useQuery({
+    queryKey: QK.taiwanInstitutionalHistory(symbol, days),
+    queryFn: () => api.taiwanInstitutionalHistory(symbol, days),
+    enabled: isInstitutional,
+  })
+  const marginQuery = useQuery({
+    queryKey: QK.taiwanMarginHistory(symbol, days),
+    queryFn: () => api.taiwanMarginHistory(symbol, days),
+    enabled: !isInstitutional,
+  })
+
+  const query = isInstitutional ? instQuery : marginQuery
+  const institutionalRows: TaiwanInstitutionalHistoryRow[] = instQuery.data?.rows ?? []
+  const marginRows: TaiwanMarginHistoryRow[] = marginQuery.data?.rows ?? []
+  const rowCount = isInstitutional ? institutionalRows.length : marginRows.length
+
+  const signClass = (v: number | null | undefined) =>
+    cn('font-mono font-semibold', (v || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')
+  const signPrefix = (v: number | null | undefined) => ((v || 0) >= 0 ? '+' : '')
+
+  return (
+    <Modal
+      onClose={onClose}
+      ariaLabel={isInstitutional ? '三大法人歷史資料' : '融資融券歷史資料'}
+      panelClassName="w-[92vw] max-w-2xl max-h-[85vh] overflow-y-auto bg-surface border border-border rounded-card shadow-xl"
+    >
+      <div className="p-4">
+        <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+          <div>
+            <h3 className="text-sm font-bold text-foreground">
+              {isInstitutional ? '三大法人買賣超歷史' : '融資融券餘額與變化歷史'}
+            </h3>
+            <p className="text-[11px] text-muted font-mono mt-0.5">{symbol} {name}</p>
+          </div>
+          <div className="flex items-center gap-1 rounded-lg bg-base p-1 border border-border">
+            {HISTORY_DAY_OPTIONS.map(d => (
+              <button
+                key={d}
+                type="button"
+                onClick={() => setDays(d)}
+                className={cn(
+                  'rounded-md px-2 py-0.5 text-xs font-medium transition-all cursor-pointer',
+                  days === d ? 'bg-accent text-white shadow-xs' : 'text-muted hover:text-foreground'
+                )}
+              >
+                {d} 日
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <p className="text-[11px] text-muted mb-3">
+          僅顯示已回補的交易日資料，日期若不連續代表該區間尚未回補，非資料異常。
+        </p>
+
+        {query.isLoading ? (
+          <div className="py-10 text-center text-xs text-muted">載入中...</div>
+        ) : query.isError ? (
+          <div className="py-10 text-center text-xs text-rose-500">歷史資料載入失敗，請稍後再試</div>
+        ) : rowCount === 0 ? (
+          <div className="py-10 text-center text-xs text-muted">此區間尚無已回補的歷史資料</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-border text-muted">
+                  <th className="text-left font-medium py-1.5 pr-2">日期</th>
+                  {isInstitutional ? (
+                    <>
+                      <th className="text-right font-medium py-1.5 px-2">外資及陸資</th>
+                      <th className="text-right font-medium py-1.5 px-2">投信基金</th>
+                      <th className="text-right font-medium py-1.5 px-2">自營商合計</th>
+                      <th className="text-right font-medium py-1.5 pl-2">三大法人合計</th>
+                    </>
+                  ) : (
+                    <>
+                      <th className="text-right font-medium py-1.5 px-2">融資餘額</th>
+                      <th className="text-right font-medium py-1.5 px-2">融資增減</th>
+                      <th className="text-right font-medium py-1.5 px-2">融券餘額</th>
+                      <th className="text-right font-medium py-1.5 px-2">融券增減</th>
+                      <th className="text-right font-medium py-1.5 pl-2">券資比</th>
+                    </>
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {isInstitutional
+                  ? institutionalRows.map(r => (
+                      <tr key={r.date} className="border-b border-border/40">
+                        <td className="py-1.5 pr-2 font-mono text-muted">{r.date}</td>
+                        <td className={cn('py-1.5 px-2 text-right', signClass(r.foreign_net))}>
+                          {signPrefix(r.foreign_net)}{formatVol(r.foreign_net)}
+                        </td>
+                        <td className={cn('py-1.5 px-2 text-right', signClass(r.investment_trust_net))}>
+                          {signPrefix(r.investment_trust_net)}{formatVol(r.investment_trust_net)}
+                        </td>
+                        <td className={cn('py-1.5 px-2 text-right', signClass(r.dealer_net))}>
+                          {signPrefix(r.dealer_net)}{formatVol(r.dealer_net)}
+                        </td>
+                        <td className={cn('py-1.5 pl-2 text-right font-bold', signClass(r.total_net))}>
+                          {signPrefix(r.total_net)}{formatVol(r.total_net)}
+                        </td>
+                      </tr>
+                    ))
+                  : marginRows.map(r => (
+                      <tr key={r.date} className="border-b border-border/40">
+                        <td className="py-1.5 pr-2 font-mono text-muted">{r.date}</td>
+                        <td className="py-1.5 px-2 text-right font-mono">{formatVol(r.margin_balance)}</td>
+                        <td className={cn('py-1.5 px-2 text-right', signClass(r.margin_change))}>
+                          {signPrefix(r.margin_change)}{formatVol(r.margin_change)}
+                        </td>
+                        <td className="py-1.5 px-2 text-right font-mono">{formatVol(r.short_balance)}</td>
+                        <td className={cn('py-1.5 px-2 text-right', signClass(r.short_change))}>
+                          {signPrefix(r.short_change)}{formatVol(r.short_change)}
+                        </td>
+                        <td className="py-1.5 pl-2 text-right font-mono text-accent">
+                          {r.short_margin_ratio != null ? `${r.short_margin_ratio.toFixed(2)}%` : '--'}
+                        </td>
+                      </tr>
+                    ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </Modal>
   )
 }

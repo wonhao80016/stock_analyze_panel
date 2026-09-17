@@ -817,6 +817,33 @@ export interface TaiwanMarginDetail {
   meta?: TaiwanSectionMeta | null
 }
 
+export interface TaiwanInstitutionalHistoryRow {
+  date: string
+  foreign_net: number | null
+  investment_trust_net: number | null
+  dealer_net: number | null
+  total_net: number | null
+}
+
+export interface TaiwanInstitutionalHistoryResponse {
+  symbol: string
+  rows: TaiwanInstitutionalHistoryRow[]
+}
+
+export interface TaiwanMarginHistoryRow {
+  date: string
+  margin_balance: number | null
+  margin_change: number | null
+  short_balance: number | null
+  short_change: number | null
+  short_margin_ratio: number | null
+}
+
+export interface TaiwanMarginHistoryResponse {
+  symbol: string
+  rows: TaiwanMarginHistoryRow[]
+}
+
 export interface TaiwanFactorsDetail {
   status: string
   foreign_net_5d?: number | null
@@ -2935,6 +2962,16 @@ export const api = {
 
   taiwanCurrentData: (symbol: string) =>
     request<TaiwanCurrentDataResponse>(`/api/taiwan/data/${encodeURIComponent(symbol)}`),
+
+  taiwanInstitutionalHistory: (symbol: string, days = 60) =>
+    request<TaiwanInstitutionalHistoryResponse>(
+      `/api/taiwan/stocks/${encodeURIComponent(symbol)}/institutional-history?days=${days}`,
+    ),
+
+  taiwanMarginHistory: (symbol: string, days = 60) =>
+    request<TaiwanMarginHistoryResponse>(
+      `/api/taiwan/stocks/${encodeURIComponent(symbol)}/margin-history?days=${days}`,
+    ),
 
   taiwanScreenerRun: (payload: TaiwanScreenerRequest) =>
     request<TaiwanScreenerResponse>('/api/taiwan/screener/run', {

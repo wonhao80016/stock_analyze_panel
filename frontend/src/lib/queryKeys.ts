@@ -92,6 +92,8 @@ export const QK = {
   taiwanSearch:         (q: string) => ['taiwan-search', q] as const,
   taiwanStockDetail:    (symbol: string, days?: number) => ['taiwan-stock-detail', symbol, days ?? 120] as const,
   taiwanCurrentData:    (symbol: string) => ['taiwan-current-data', symbol] as const,
+  taiwanInstitutionalHistory: (symbol: string, days: number) => ['taiwan-institutional-history', symbol, days] as const,
+  taiwanMarginHistory:  (symbol: string, days: number) => ['taiwan-margin-history', symbol, days] as const,
   taiwanCapabilities:   ['taiwan-capabilities'] as const,
 
   // 市場環境(Regime) — 日級離線計算, 不進 SSE 刷新

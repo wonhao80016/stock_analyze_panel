@@ -26,6 +26,11 @@ from app.taiwan.abnormal_diagnostics import (
     TaiwanAbnormalDiagnosticsService,
     TaiwanAbnormalDiagnosticsSnapshot,
 )
+from app.taiwan.chip_history import (
+    TaiwanInstitutionalHistoryResponse,
+    TaiwanMarginHistoryResponse,
+    get_taiwan_chip_history_service,
+)
 from app.taiwan.ai_research import (
     TaiwanAIResearchRequest,
     TaiwanAIResearchResponse,
@@ -272,6 +277,48 @@ def get_taiwan_stock_detail(
             status_code=500,
             detail=f"台股個股資訊聚合失敗: {e}",
         ) from e
+
+
+@router.get("/stocks/{symbol}/institutional-history", response_model=TaiwanInstitutionalHistoryResponse)
+def get_taiwan_institutional_history(
+    symbol: str,
+    days: int = Query(60, ge=5, le=250, description="往回推的交易日數 (依台股交易日曆, 週末不計)"),
+):
+    """獲取單一台股標的三大法人買賣超歷史序列 (讀取本地已回補資料，不觸發即時抓取)。"""
+    try:
+        parse_symbol(symbol)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
+
+    svc = get_taiwan_chip_history_service()
+    try:
+        return svc.get_institutional_history(symbol, days=days)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to get institutional history for %s: %s", symbol, e)
+        raise HTTPException(status_code=500, detail=f"三大法人歷史查詢失敗: {e}") from e
+
+
+@router.get("/stocks/{symbol}/margin-history", response_model=TaiwanMarginHistoryResponse)
+def get_taiwan_margin_history(
+    symbol: str,
+    days: int = Query(60, ge=5, le=250, description="往回推的交易日數 (依台股交易日曆, 週末不計)"),
+):
+    """獲取單一台股標的融資融券餘額與變化歷史序列 (讀取本地已回補資料，不觸發即時抓取)。"""
+    try:
+        parse_symbol(symbol)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
+
+    svc = get_taiwan_chip_history_service()
+    try:
+        return svc.get_margin_history(symbol, days=days)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to get margin history for %s: %s", symbol, e)
+        raise HTTPException(status_code=500, detail=f"融資融券歷史查詢失敗: {e}") from e
 
 
 @router.get("/stocks/{symbol}/research-context", response_model=TaiwanStockResearchContext)
