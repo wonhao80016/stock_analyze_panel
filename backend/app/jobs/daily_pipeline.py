@@ -82,25 +82,62 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 台股盘后增量更新 (Taiwan Full-Market Daily OHLCV + Institutional + Margin Update)
-    # 每天 16:30 Asia/Taipei 触发。
-    # 官方全市場快照端點極速更新：Daily (TWSE 1 + TPEx 1) + Inst (2) + Margin (2) = ~6 次 HTTP 請求 / 日
-    def _scheduled_taiwan_update():
+    # 台股盤後增量更新, 分兩班。官方全市場快照端點: Daily (TWSE 1 + TPEx 1) +
+    # Inst (2) + Margin (2) = ~6 次 HTTP 請求 / 日。
+    # 拆班原因: 交易所公布資券餘額的時間晚於三大法人, 單一 16:30 班次抓不到當日
+    # 資券, 於是資券永遠落後一個交易日, 資料狀態也就天天顯示「尚未完全更新」。
+    def _scheduled_taiwan_update(
+        label: str,
+        *,
+        refresh_daily: bool,
+        refresh_institutional: bool,
+        refresh_margin: bool,
+    ) -> None:
         try:
             from app.taiwan.daily_update import TaiwanDailyUpdateService
             svc = TaiwanDailyUpdateService()
-            result = svc.run_update(refresh_daily=True)
+            result = svc.run_update(
+                refresh_daily=refresh_daily,
+                refresh_institutional=refresh_institutional,
+                refresh_margin=refresh_margin,
+            )
             logger.info(
-                "Scheduled Taiwan daily update finished: overall=%s, daily=%s, inst=%s, margin=%s",
-                result.overall_status, result.daily.status, result.institutional.status, result.margin.status,
+                "Scheduled Taiwan update (%s) finished: overall=%s, daily=%s, inst=%s, margin=%s",
+                label, result.overall_status, result.daily.status,
+                result.institutional.status, result.margin.status,
             )
         except Exception as e:
-            logger.exception("Scheduled Taiwan daily update job failed: %s", e)
+            logger.exception("Scheduled Taiwan update (%s) job failed: %s", label, e)
 
+    # 16:30 — 日線與三大法人 (兩者在此時已公布)
     scheduler.add_job(
         _scheduled_taiwan_update,
         trigger=CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone="Asia/Taipei"),
         id="taiwan_daily_update",
+        kwargs={
+            "label": "daily+institutional",
+            "refresh_daily": True,
+            "refresh_institutional": True,
+            "refresh_margin": False,
+        },
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
+    )
+
+    # 21:40 — 融資融券 (公布較晚)。同時補跑日線與法人, 讓 16:30 那班若失敗
+    # 或當時尚未公布仍有第二次機會; 已落盤的日期會被 refresh 略過, 不重複下載。
+    scheduler.add_job(
+        _scheduled_taiwan_update,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=21, minute=40, timezone="Asia/Taipei"),
+        id="taiwan_margin_update",
+        kwargs={
+            "label": "margin",
+            "refresh_daily": True,
+            "refresh_institutional": True,
+            "refresh_margin": True,
+        },
         misfire_grace_time=3600,
         coalesce=True,
         max_instances=1,
@@ -108,7 +145,7 @@ def start_scheduler() -> AsyncIOScheduler:
     )
 
     scheduler.start()
-    logger.info("scheduler started; reprobe@60min, taiwan@16:30 mon-fri")
+    logger.info("scheduler started; reprobe@60min, taiwan@16:30 (daily+inst) & 21:40 (margin) mon-fri")
     return scheduler
 
 

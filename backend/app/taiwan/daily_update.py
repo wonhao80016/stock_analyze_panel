@@ -229,6 +229,8 @@ class TaiwanDailyUpdateService:
         refresh_daily: bool = True,
         daily_symbols: list[str] | None = None,
         force: bool = False,
+        refresh_institutional: bool = True,
+        refresh_margin: bool = True,
     ) -> TaiwanDailyUpdateResult:
         """Execute daily incremental refresh across datasets.
 
@@ -239,6 +241,10 @@ class TaiwanDailyUpdateService:
             daily_symbols: Subset of symbols to refresh for Daily OHLCV if specified (uses per-symbol path;
                            if None, uses the fast market-wide snapshot path).
             force: Refetch even if dates already exist in stores.
+            refresh_institutional: Whether to refresh institutional flows. Defaults to True.
+            refresh_margin: Whether to refresh margin balances. Defaults to True. The exchange
+                            publishes margin later than institutional, so the scheduler runs
+                            them on separate triggers.
 
         Returns:
             Structured TaiwanDailyUpdateResult.
@@ -310,53 +316,61 @@ class TaiwanDailyUpdateService:
 
         # 3. Institutional Refresh (TWSE + TPEx = 2 HTTP calls per date)
         inst_stats = DatasetRefreshStats()
-        try:
-            i_range = resolve_missing_date_range(i_max, target, self.calendar) if not force else (start_bound, end_bound)
-            if not i_range and not force:
-                inst_stats.status = "success"
-                inst_stats.dates_skipped = 1
-                inst_stats.note = "Institutional store already current"
-            else:
-                i_start, i_end = i_range if i_range else (start_bound, end_bound)
-                res = self.inst_service.refresh_dates(i_start, i_end, force=force)
-                inst_stats.dates_requested = res.get("dates_requested", 0)
-                inst_stats.dates_fetched = res.get("dates_fetched", 0)
-                inst_stats.dates_skipped = res.get("dates_skipped", 0)
-                inst_stats.rows_written = res.get("total_rows_written", 0)
-                inst_stats.failed_dates = res.get("failed_dates", [])
-                if inst_stats.failed_dates:
-                    inst_stats.status = "failed" if inst_stats.dates_fetched == 0 else "partial"
-                else:
+        if not refresh_institutional:
+            inst_stats.status = "skipped"
+            inst_stats.note = "Institutional refresh skipped by caller configuration."
+        else:
+            try:
+                i_range = resolve_missing_date_range(i_max, target, self.calendar) if not force else (start_bound, end_bound)
+                if not i_range and not force:
                     inst_stats.status = "success"
-        except Exception as e:
-            logger.exception("Institutional refresh failed: %s", e)
-            inst_stats.status = "failed"
-            inst_stats.failed_dates.append({"error": str(e)})
+                    inst_stats.dates_skipped = 1
+                    inst_stats.note = "Institutional store already current"
+                else:
+                    i_start, i_end = i_range if i_range else (start_bound, end_bound)
+                    res = self.inst_service.refresh_dates(i_start, i_end, force=force)
+                    inst_stats.dates_requested = res.get("dates_requested", 0)
+                    inst_stats.dates_fetched = res.get("dates_fetched", 0)
+                    inst_stats.dates_skipped = res.get("dates_skipped", 0)
+                    inst_stats.rows_written = res.get("total_rows_written", 0)
+                    inst_stats.failed_dates = res.get("failed_dates", [])
+                    if inst_stats.failed_dates:
+                        inst_stats.status = "failed" if inst_stats.dates_fetched == 0 else "partial"
+                    else:
+                        inst_stats.status = "success"
+            except Exception as e:
+                logger.exception("Institutional refresh failed: %s", e)
+                inst_stats.status = "failed"
+                inst_stats.failed_dates.append({"error": str(e)})
 
         # 4. Margin Refresh (TWSE + TPEx = 2 HTTP calls per date)
         margin_stats = DatasetRefreshStats()
-        try:
-            m_range = resolve_missing_date_range(m_max, target, self.calendar) if not force else (start_bound, end_bound)
-            if not m_range and not force:
-                margin_stats.status = "success"
-                margin_stats.dates_skipped = 1
-                margin_stats.note = "Margin store already current"
-            else:
-                m_start, m_end = m_range if m_range else (start_bound, end_bound)
-                res = self.margin_service.refresh_dates(m_start, m_end, force=force)
-                margin_stats.dates_requested = res.get("dates_requested", 0)
-                margin_stats.dates_fetched = res.get("dates_fetched", 0)
-                margin_stats.dates_skipped = res.get("dates_skipped", 0)
-                margin_stats.rows_written = res.get("total_rows_written", 0)
-                margin_stats.failed_dates = res.get("failed_dates", [])
-                if margin_stats.failed_dates:
-                    margin_stats.status = "failed" if margin_stats.dates_fetched == 0 else "partial"
-                else:
+        if not refresh_margin:
+            margin_stats.status = "skipped"
+            margin_stats.note = "Margin refresh skipped by caller configuration."
+        else:
+            try:
+                m_range = resolve_missing_date_range(m_max, target, self.calendar) if not force else (start_bound, end_bound)
+                if not m_range and not force:
                     margin_stats.status = "success"
-        except Exception as e:
-            logger.exception("Margin refresh failed: %s", e)
-            margin_stats.status = "failed"
-            margin_stats.failed_dates.append({"error": str(e)})
+                    margin_stats.dates_skipped = 1
+                    margin_stats.note = "Margin store already current"
+                else:
+                    m_start, m_end = m_range if m_range else (start_bound, end_bound)
+                    res = self.margin_service.refresh_dates(m_start, m_end, force=force)
+                    margin_stats.dates_requested = res.get("dates_requested", 0)
+                    margin_stats.dates_fetched = res.get("dates_fetched", 0)
+                    margin_stats.dates_skipped = res.get("dates_skipped", 0)
+                    margin_stats.rows_written = res.get("total_rows_written", 0)
+                    margin_stats.failed_dates = res.get("failed_dates", [])
+                    if margin_stats.failed_dates:
+                        margin_stats.status = "failed" if margin_stats.dates_fetched == 0 else "partial"
+                    else:
+                        margin_stats.status = "success"
+            except Exception as e:
+                logger.exception("Margin refresh failed: %s", e)
+                margin_stats.status = "failed"
+                margin_stats.failed_dates.append({"error": str(e)})
 
         # 4b. Publish indicators and signals for the engines that read the enriched table.
         if refresh_daily and daily_stats.status in {"success", "skipped"}:
