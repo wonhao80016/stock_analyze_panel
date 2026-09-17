@@ -365,9 +365,54 @@ class TaiwanStockDetailService:
         except Exception as e:
             logger.debug("Institutional aggregation skipped for %s: %s", sym.canonical, e)
 
+        fallback = self._institutional_from_store(sym)
+        if fallback is not None:
+            return fallback
+
         return TaiwanInstitutionalData(
             status="unavailable",
             meta=SectionMeta(source="twse:t86", status="unavailable", is_stale=False),
+        )
+
+    def _institutional_from_store(self, sym: TaiwanSymbol) -> TaiwanInstitutionalData | None:
+        """Backfilled rows already on disk, used when the live fetch comes back empty.
+
+        The exchange throttles bursts of requests, and a blocked live call must not
+        make a card that has local history render as "no data".
+        """
+        try:
+            from app.taiwan.institutional_store import TaiwanInstitutionalStore
+
+            store = TaiwanInstitutionalStore()
+            dates = store.available_dates()
+            if not dates:
+                return None
+            df = store.read_range([sym.canonical], max(dates), max(dates))
+            if df.is_empty():
+                return None
+            r = df.sort("date").to_dicts()[-1]
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Institutional store fallback failed for %s: %s", sym.canonical, e)
+            return None
+
+        total = r.get("computed_net")
+        if total is None:
+            total = r.get("official_net")
+        return TaiwanInstitutionalData(
+            status="available",
+            foreign_net=r.get("foreign_net"),
+            investment_trust_net=r.get("investment_trust_net"),
+            dealer_net=r.get("dealer_net"),
+            total_net=total,
+            foreign_net_5d=r.get("foreign_net"),
+            investment_trust_net_5d=r.get("investment_trust_net"),
+            dealer_net_5d=r.get("dealer_net"),
+            meta=SectionMeta(
+                source="taiwan_institutional_store",
+                trade_date=str(r.get("date")),
+                status="stale",
+                is_stale=True,
+            ),
         )
 
     @staticmethod
@@ -431,9 +476,45 @@ class TaiwanStockDetailService:
         except Exception as e:
             logger.debug("Margin aggregation skipped for %s: %s", sym.canonical, e)
 
+        fallback = self._margin_from_store(sym)
+        if fallback is not None:
+            return fallback
+
         return TaiwanMarginData(
             status="unavailable",
             meta=SectionMeta(source="twse:mi_margn", status="unavailable", is_stale=False),
+        )
+
+    def _margin_from_store(self, sym: TaiwanSymbol) -> TaiwanMarginData | None:
+        """Backfilled rows already on disk, used when the live fetch comes back empty."""
+        try:
+            from app.taiwan.margin_store import TaiwanMarginStore
+
+            store = TaiwanMarginStore()
+            dates = store.available_dates()
+            if not dates:
+                return None
+            df = store.read_range([sym.canonical], max(dates), max(dates))
+            if df.is_empty():
+                return None
+            r = df.sort("date").to_dicts()[-1]
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Margin store fallback failed for %s: %s", sym.canonical, e)
+            return None
+
+        return TaiwanMarginData(
+            status="available",
+            margin_balance=r.get("margin_balance"),
+            margin_change=r.get("margin_change"),
+            short_balance=r.get("short_balance"),
+            short_change=r.get("short_change"),
+            short_margin_ratio=r.get("short_margin_ratio"),
+            meta=SectionMeta(
+                source="taiwan_margin_store",
+                trade_date=str(r.get("date")),
+                status="stale",
+                is_stale=True,
+            ),
         )
 
     def _aggregate_factors(

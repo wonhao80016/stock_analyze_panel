@@ -136,7 +136,7 @@ def test_service_tpex_equity_8069():
     assert res.market_context.benchmark_name == "櫃買指數"
 
 
-def test_service_partial_failure_tolerance():
+def test_service_partial_failure_tolerance(monkeypatch):
     svc = TaiwanStockDetailService()
     # Simulate failed realtime, failed daily, failed institutional
     mock_rt = MagicMock()
@@ -158,6 +158,22 @@ def test_service_partial_failure_tolerance():
     mock_margin = MagicMock()
     mock_margin.fetch_live_day.side_effect = RuntimeError("MI_MARGN timeout")
     svc.margin_provider = mock_margin
+
+    # Chip cards fall back to backfilled rows on disk when the live call fails,
+    # so empty both stores to keep this about tolerating a total outage.
+    class _EmptyStore:
+        def available_dates(self):
+            return []
+
+        def read_range(self, *a):
+            return pl.DataFrame()
+
+    monkeypatch.setattr(
+        "app.taiwan.institutional_store.TaiwanInstitutionalStore", lambda *a, **k: _EmptyStore()
+    )
+    monkeypatch.setattr(
+        "app.taiwan.margin_store.TaiwanMarginStore", lambda *a, **k: _EmptyStore()
+    )
 
     # Service should still return complete valid response with status='unavailable'
     res = svc.get_stock_detail("2330.TWSE")
