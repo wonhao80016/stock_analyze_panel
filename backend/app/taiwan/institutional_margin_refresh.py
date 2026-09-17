@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Callable
 
 import polars as pl
 
@@ -113,8 +113,13 @@ class TaiwanInstitutionalRefreshService:
         start_date: date,
         end_date: date,
         force: bool = False,
+        on_progress: Callable[[date, int], None] | None = None,
     ) -> dict[str, Any]:
-        """Fetch and persist market-wide institutional flows for all trading days in [start_date, end_date]."""
+        """Fetch and persist market-wide institutional flows for all trading days in [start_date, end_date].
+
+        on_progress, when given, is called with (current_date, day_index) for every
+        trading day visited (day_index starts at 1), before that day is fetched or skipped.
+        """
         available = set(self._store.available_dates()) if not force else set()
         stats = {
             "dates_requested": 0,
@@ -125,6 +130,7 @@ class TaiwanInstitutionalRefreshService:
         }
 
         cur = start_date
+        day_index = 0
         while cur <= end_date:
             # Skip confirmed non-trading days
             if self._calendar.is_trading_day(cur) is False:
@@ -132,6 +138,9 @@ class TaiwanInstitutionalRefreshService:
                 continue
 
             stats["dates_requested"] += 1
+            day_index += 1
+            if on_progress is not None:
+                on_progress(cur, day_index)
 
             if cur in available:
                 stats["dates_skipped"] += 1
@@ -216,8 +225,13 @@ class TaiwanMarginRefreshService:
         start_date: date,
         end_date: date,
         force: bool = False,
+        on_progress: Callable[[date, int], None] | None = None,
     ) -> dict[str, Any]:
-        """Fetch and persist market-wide margin records for all trading days in [start_date, end_date]."""
+        """Fetch and persist market-wide margin records for all trading days in [start_date, end_date].
+
+        on_progress, when given, is called with (current_date, day_index) for every
+        trading day visited (day_index starts at 1), before that day is fetched or skipped.
+        """
         available = set(self._store.available_dates()) if not force else set()
         stats = {
             "dates_requested": 0,
@@ -228,6 +242,7 @@ class TaiwanMarginRefreshService:
         }
 
         cur = start_date
+        day_index = 0
         while cur <= end_date:
             # Skip confirmed non-trading days
             if self._calendar.is_trading_day(cur) is False:
@@ -235,6 +250,9 @@ class TaiwanMarginRefreshService:
                 continue
 
             stats["dates_requested"] += 1
+            day_index += 1
+            if on_progress is not None:
+                on_progress(cur, day_index)
 
             if cur in available:
                 stats["dates_skipped"] += 1

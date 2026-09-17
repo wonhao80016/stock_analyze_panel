@@ -8,6 +8,7 @@ import { usePreferences } from '@/lib/useSharedQueries'
 import { toast } from '@/components/Toast'
 import { DataSourceEditor } from './DataSourceEditor'
 import { TaiwanHistoryDataCard } from './TaiwanHistoryDataCard'
+import { TaiwanEnrichmentDataCard } from './TaiwanEnrichmentDataCard'
 
 const DATASET_LABEL: Record<string, string> = {
   daily: '日K',
@@ -962,6 +963,9 @@ function TaiwanOfficialDetail({ active, onSwitch, switching, route }: {
 
       {/* 台股歷史日 K 資料庫狀態與下載/更新 */}
       <TaiwanHistoryDataCard />
+
+      {/* 三大法人與融資融券覆蓋狀況與歷史回補 */}
+      <TaiwanEnrichmentDataCard />
 
       <section className="rounded-card border border-border bg-surface p-6">
         <div className="flex items-center gap-2 mb-2">

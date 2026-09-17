@@ -16,6 +16,7 @@ export const QK = {
   dataSources:    ['data-sources'] as const,
   taiwanDataStatus: ['taiwan-data-status'] as const,
   taiwanHistoryStatus: ['taiwan-history-status'] as const,
+  taiwanEnrichmentStatus: ['taiwan-enrichment-status'] as const,
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,

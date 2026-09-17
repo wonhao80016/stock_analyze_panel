@@ -140,6 +140,40 @@ def update_taiwan_history_to_latest():
         raise HTTPException(status_code=500, detail=f"更新至最新交易日失敗: {exc}") from exc
 
 
+from app.taiwan.enrichment_backfill import (
+    TaiwanEnrichmentBackfillJobState,
+    TaiwanEnrichmentBackfillRequest,
+    TaiwanEnrichmentBackfillService,
+    TaiwanEnrichmentStatus,
+    get_enrichment_status,
+)
+
+
+@router.get("/enrichment-status", response_model=TaiwanEnrichmentStatus)
+def get_taiwan_enrichment_status():
+    """獲取三大法人與融資融券本地資料覆蓋狀況。歷史資料包僅含日線，此兩者需逐日回補。"""
+    return get_enrichment_status()
+
+
+@router.post("/enrichment/backfill")
+def run_taiwan_enrichment_backfill(request: TaiwanEnrichmentBackfillRequest):
+    """觸發三大法人與融資融券歷史回補 (依台股交易日曆往回推 N 個交易日)，背景執行。"""
+    svc = TaiwanEnrichmentBackfillService()
+    job_id = svc.start_backfill(days=request.days)
+    job = svc.get_job(job_id)
+    return {"job_id": job_id, "status": job.status if job else "pending"}
+
+
+@router.get("/enrichment/backfill/{job_id}", response_model=TaiwanEnrichmentBackfillJobState)
+def get_taiwan_enrichment_backfill_job(job_id: str):
+    """查詢三大法人與融資融券回補任務進度。"""
+    svc = TaiwanEnrichmentBackfillService()
+    job = svc.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"找不到任務 {job_id}")
+    return job
+
+
 @router.get("/capabilities", response_model=list[TaiwanDatasetCapability])
 def get_taiwan_data_capabilities():
     """Expose product usage boundaries without fetching network data."""

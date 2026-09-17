@@ -3144,6 +3144,22 @@ export const api = {
   /** 增量補齊已存在的歷史資料至最新交易日（不重新下載整包） */
   taiwanUpdateLatest: () =>
     request<TaiwanUpdateLatestResult>('/api/taiwan/bootstrap/update-latest', { method: 'POST' }),
+
+  // ===== Taiwan Institutional / Margin Enrichment Backfill =====
+  /** 獲取三大法人與融資融券本地資料覆蓋狀況 */
+  taiwanEnrichmentStatus: () =>
+    request<TaiwanEnrichmentStatus>('/api/taiwan/enrichment-status'),
+
+  /** 觸發三大法人與融資融券歷史回補（依交易日曆往回推 N 個交易日） */
+  taiwanEnrichmentBackfillRun: (days: number) =>
+    request<TaiwanBootstrapRunResult>('/api/taiwan/enrichment/backfill', {
+      method: 'POST',
+      body: JSON.stringify({ days }),
+    }),
+
+  /** 查詢三大法人與融資融券回補任務進度 */
+  taiwanEnrichmentBackfillJob: (jobId: string) =>
+    request<TaiwanEnrichmentBackfillJobState>(`/api/taiwan/enrichment/backfill/${jobId}`),
 }
 
 // ===== Taiwan Historical Bootstrap Interfaces =====
@@ -3186,6 +3202,44 @@ export interface TaiwanUpdateLatestResult {
   message: string
   dates_fetched: number
   stats?: Record<string, any>
+}
+
+// ===== Taiwan Institutional / Margin Enrichment Backfill =====
+export interface TaiwanEnrichmentDatasetStatus {
+  has_data: boolean
+  day_count: number
+  earliest: string | null
+  latest: string | null
+}
+
+export interface TaiwanEnrichmentStatus {
+  institutional: TaiwanEnrichmentDatasetStatus
+  margin: TaiwanEnrichmentDatasetStatus
+}
+
+export interface TaiwanEnrichmentRefreshStats {
+  dates_requested: number
+  dates_fetched: number
+  dates_skipped: number
+  total_rows_written: number
+  failed_dates: { date: string; error: string }[]
+}
+
+export interface TaiwanEnrichmentBackfillJobState {
+  job_id: string
+  status: 'pending' | 'running' | 'success' | 'failed'
+  stage: string
+  progress: number
+  current_dataset: 'institutional' | 'margin' | null
+  current_date: string | null
+  day_index: number
+  total_days: number
+  message: string
+  error?: string | null
+  result?: {
+    institutional: TaiwanEnrichmentRefreshStats
+    margin: TaiwanEnrichmentRefreshStats
+  } | null
 }
 
 // ===== Pipeline =====
