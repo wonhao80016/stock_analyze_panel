@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from html import unescape
 from html.parser import HTMLParser
@@ -81,6 +81,19 @@ class _IsinTableParser(HTMLParser):
             self._curr_cell.append(data)
 
 
+def leverage_multiplier_of(code: str, name: str) -> float:
+    """Leverage factor for a Taiwan ETF (2.0 long, -1.0 inverse, 1.0 otherwise).
+
+    Shared by the ISIN table parser and the TWSE OpenAPI directory so the two
+    intake paths cannot drift apart.
+    """
+    if code.endswith("L") or "正2" in name or "正向2" in name:
+        return 2.0
+    if code.endswith("R") or "反1" in name or "反向1" in name or "反一" in name:
+        return -1.0
+    return 1.0
+
+
 def classify_etf_provenance(
     code: str,
     name: str,
@@ -93,11 +106,7 @@ def classify_etf_provenance(
         tuple[etf_category, classification_source, underlying_scope, leverage_multiplier]
     """
     # 0. Determine leverage multiplier
-    multiplier = 1.0
-    if code.endswith("L") or "正2" in name or "正向2" in name:
-        multiplier = 2.0
-    elif code.endswith("R") or "反1" in name or "反向1" in name or "反一" in name:
-        multiplier = -1.0
+    multiplier = leverage_multiplier_of(code, name)
 
     # 1. First priority: Official Product Metadata (e.g. TWSE t187ap47_L 基金類型 + 標的指數)
     if official_product_types and code in official_product_types:
@@ -355,9 +364,14 @@ class TpexInstrumentAdapter:
         official_product_types: dict[str, OfficialEtfProductMeta | str] | None = None,
     ) -> list[TaiwanInstrument]:
         if html_content is None:
+            # The ISIN table carries CFI codes, so most TPEx ETFs classify from
+            # ISO 10962 rather than a name guess. Keep that provenance instead of
+            # flattening every entry to "unknown": MarketProfileBridge already
+            # refuses to apply statutory rules to anything outside
+            # CONFIRMED_SOURCES, so unconfirmed rows stay fail-closed downstream
+            # while bond ETFs keep their no-limit band.
             etfs = [
-                replace(item, etf_category="unknown", classification_source=None,
-                        underlying_scope="unknown", leverage_multiplier=1.0)
+                item
                 for item in parse_isin_html(self.fetch_live_html(), "TPEX", "TPEX_ISIN")
                 if item.instrument_type == "etf"
             ]
@@ -417,14 +431,25 @@ def _official_twse_etf_directory() -> list[TaiwanInstrument]:
         scope = {"是": "foreign", "否": "domestic"}.get(str(row.get("是否包含國外成分股", "")).strip(), "unknown")
         fund_type = str(row.get("基金類型", "")).strip()
         ordinary_types = {"國內成分證券指數股票型基金", "國外成分證券指數股票型基金"}
-        category = "foreign_equity" if scope == "foreign" else "domestic_equity" if scope == "domestic" else "unknown"
         code = str(code).strip()
+        display_name = unescape(str(name)).strip()
+        # 基金類型 is official metadata and already names the leveraged/inverse
+        # class; classifying purely by 是否包含國外成分股 would file 00631L as a
+        # plain domestic equity ETF and leave its multiplier at 1.0, which then
+        # understates the statutory price limit band.
+        multiplier = leverage_multiplier_of(code, display_name)
+        is_leveraged_type = "槓桿" in fund_type or "反向" in fund_type
+        if is_leveraged_type:
+            category = "inverse" if multiplier < 0 else "leveraged"
+        else:
+            category = "foreign_equity" if scope == "foreign" else "domestic_equity" if scope == "domestic" else "unknown"
         instruments.append(TaiwanInstrument(
-            symbol=f"{code}.TWSE", code=code, exchange="TWSE", name=unescape(str(name)).strip(), instrument_type="etf",
+            symbol=f"{code}.TWSE", code=code, exchange="TWSE", name=display_name, instrument_type="etf",
             listing_status="active", listing_date=str(row.get("上市日期") or "").strip() or None,
             isin=None, industry=None, cfi_code=None, raw_category=fund_type, is_supported=True,
             source="TWSE_OPENAPI", updated_at=now, etf_category=category,
-            classification_source="official_metadata" if fund_type in ordinary_types else None,
+            classification_source="official_metadata" if (fund_type in ordinary_types or is_leveraged_type) else None,
             underlying_scope=scope,
+            leverage_multiplier=multiplier,
         ))
     return instruments
