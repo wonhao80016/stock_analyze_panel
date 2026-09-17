@@ -51,6 +51,7 @@ def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
     assert auth.verify_and_create_session("pw-secret") is None
 
 
+@pytest.mark.real_auth
 def test_bootstrap_from_env_does_not_override_existing_password(
     isolated_auth_store: tuple[ModuleType, Path, Path],
 ) -> None:
