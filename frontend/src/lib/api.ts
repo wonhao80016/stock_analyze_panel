@@ -696,6 +696,7 @@ export type TaiwanRuleType =
   | 'volume_spike'
   | 'near_upper_limit'
   | 'near_lower_limit'
+  | 'signal'
 
 export interface TaiwanMonitorRule {
   rule_id: string
@@ -707,6 +708,8 @@ export interface TaiwanMonitorRule {
   cooldown_seconds: number
   hysteresis?: number | null
   reference_volume?: number | null     // In SHARES (股)
+  /** rule_type=signal 時要求全部命中的內建訊號 id */
+  signals?: string[]
   severity: 'info' | 'warning' | 'critical'
   created_at?: string
   updated_at?: string
@@ -3054,6 +3057,7 @@ export const api = {
     cooldown_seconds?: number
     hysteresis?: number | null
     reference_volume?: number | null
+    signals?: string[]
     severity?: string
   }) =>
     request<{ ok: boolean; rule: TaiwanMonitorRule }>('/api/monitor-rules/taiwan', {

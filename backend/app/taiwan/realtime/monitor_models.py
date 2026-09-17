@@ -30,6 +30,8 @@ class TaiwanRuleType(str, Enum):
     VOLUME_SPIKE = "volume_spike"
     NEAR_UPPER_LIMIT = "near_upper_limit"
     NEAR_LOWER_LIMIT = "near_lower_limit"
+    # Daily signals from the published enriched table, not from a live quote.
+    SIGNAL = "signal"
 
 
 class TaiwanAlertSeverity(str, Enum):
@@ -81,6 +83,8 @@ class TaiwanMonitorRule:
     cooldown_seconds: int = 300
     hysteresis: float | None = None
     reference_volume: int | None = None  # in SHARES
+    # rule_type=signal only: every listed signal must have fired on the latest close.
+    signals: list[str] = field(default_factory=list)
     severity: TaiwanAlertSeverity | str = TaiwanAlertSeverity.WARNING
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -106,6 +110,7 @@ class TaiwanMonitorRule:
             "cooldown_seconds": self.cooldown_seconds,
             "hysteresis": self.hysteresis,
             "reference_volume": self.reference_volume,
+            "signals": list(self.signals),
             "severity": self.severity.value if isinstance(self.severity, TaiwanAlertSeverity) else str(self.severity),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -123,6 +128,7 @@ class TaiwanMonitorRule:
             cooldown_seconds=int(data.get("cooldown_seconds", 300)),
             hysteresis=float(data["hysteresis"]) if data.get("hysteresis") is not None else None,
             reference_volume=int(data["reference_volume"]) if data.get("reference_volume") is not None else None,
+            signals=[str(x) for x in (data.get("signals") or [])],
             severity=data.get("severity", TaiwanAlertSeverity.WARNING),
             created_at=str(data.get("created_at", datetime.now().isoformat())),
             updated_at=str(data.get("updated_at", datetime.now().isoformat())),

@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
@@ -13,6 +12,7 @@ import { api, type TaiwanRealtimeQuote } from '@/lib/api'
 
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
+import { useStockPreview } from '@/components/StockPreviewProvider'
 import { DataQualityBadge, formatQuoteTime } from '@/components/taiwan/TaiwanDataQuality'
 
 interface TaiwanQuotePanelProps {
@@ -171,6 +171,7 @@ function FiveLevelBook({
 }
 
 export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQuotePanelProps) {
+  const { openPreview } = useStockPreview()
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [volUnit, setVolUnit] = useState<'shares' | 'lots'>('lots')
 
@@ -272,14 +273,15 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-3">
                 <div className="flex items-center gap-2">
                   <span className="text-lg font-bold text-foreground">{currentQuote.name}</span>
-                  <Link
-                    to={`/stocks/${encodeURIComponent(currentQuote.symbol)}`}
-                    className="font-mono text-sm font-semibold text-accent hover:underline flex items-center gap-0.5"
-                    title="進入個股研究頁"
+                  <button
+                    type="button"
+                    onClick={() => openPreview(currentQuote.symbol, currentQuote.name)}
+                    className="font-mono text-sm font-semibold text-accent hover:underline flex items-center gap-0.5 cursor-pointer"
+                    title="開啟個股視窗"
                   >
                     <span>{currentQuote.symbol}</span>
                     <ExternalLink className="h-3 w-3" />
-                  </Link>
+                  </button>
                   <span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] font-medium text-secondary">
                     {currentQuote.exchange === 'TWSE' ? '上市 (TWSE)' : '上櫃 (TPEx)'}
                   </span>

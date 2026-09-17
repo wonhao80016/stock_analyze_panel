@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { ToastContainer, toast } from '@/components/Toast'
+import { StockPreviewProvider } from '@/components/StockPreviewProvider'
 import { AlertToastContainer } from '@/components/AlertToast'
 import {
   useSettings,
@@ -369,6 +370,7 @@ export function Layout() {
   }
 
   return (
+    <StockPreviewProvider>
     <div
       className="h-screen grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth"
       style={{ gridTemplateColumns: navCollapsed ? '3.5rem 1fr' : '14rem 1fr' }}
@@ -734,5 +736,6 @@ export function Layout() {
       <ToastContainer />
       <AlertToastContainer />
     </div>
+    </StockPreviewProvider>
   )
 }

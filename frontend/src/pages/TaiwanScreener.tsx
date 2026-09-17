@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import {
   Filter,
   ArrowUp,
@@ -37,6 +37,7 @@ import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { TaiwanRuleEditorDialog } from '@/components/monitor/TaiwanRuleEditorDialog'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
 import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS } from '@/lib/signals'
+import { useStockPreview } from '@/components/StockPreviewProvider'
 
 export function TaiwanScreener() {
   const navigate = useNavigate()
@@ -80,6 +81,7 @@ export function TaiwanScreener() {
   const [rsiMax, setRsiMax] = useState<string>('')
   const [momentumMin, setMomentumMin] = useState<string>('')
   const [volRatioMin, setVolRatioMin] = useState<string>('')
+  const { openPreview } = useStockPreview()
   const [selectedSignals, setSelectedSignals] = useState<string[]>([])
   const [aboveMa5, setAboveMa5] = useState<boolean | null>(null)
   const [aboveMa20, setAboveMa20] = useState<boolean | null>(null)
@@ -837,13 +839,14 @@ export function TaiwanScreener() {
                     abnormalData.items.slice(0, 50).map(item => (
                   <tr key={item.symbol} className="hover:bg-zinc-800/30 transition-colors">
                     <td className="py-1.5 px-2 font-sans font-medium text-zinc-200">
-                      <Link
-                        to={`/stocks/${encodeURIComponent(item.symbol)}`}
-                        className="hover:text-amber-400 hover:underline inline-flex items-center gap-1"
+                      <button
+                        type="button"
+                        onClick={() => openPreview(item.symbol, item.name)}
+                        className="hover:text-amber-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
                       >
                         {item.name}
                         <span className="text-zinc-500 font-mono text-[10px]">({item.code})</span>
-                      </Link>
+                      </button>
                     </td>
                     <td className="py-1.5 px-2 font-sans text-zinc-400">{item.industry || '—'}</td>
                     <td className="py-1.5 px-2 text-right text-zinc-200">{item.close ?? '—'}</td>
@@ -1559,12 +1562,13 @@ export function TaiwanScreener() {
                   <tr key={item.symbol} className="hover:bg-zinc-800/40 transition-colors">
                     {/* Symbol */}
                     <td className="py-3 px-4 font-mono font-medium text-zinc-100">
-                      <Link
-                        to={`/stocks/${encodeURIComponent(item.symbol)}`}
-                        className="text-purple-400 hover:underline hover:text-purple-300"
+                      <button
+                        type="button"
+                        onClick={() => openPreview(item.symbol, item.name)}
+                        className="text-purple-400 hover:underline hover:text-purple-300 cursor-pointer"
                       >
                         {item.symbol}
-                      </Link>
+                      </button>
                     </td>
 
                     {/* Name */}
@@ -1723,14 +1727,15 @@ export function TaiwanScreener() {
                         >
                           <RadioTower className="w-3.5 h-3.5" />
                         </button>
-                        <Link
-                          to={`/stocks/${encodeURIComponent(item.symbol)}`}
-                          title="查看詳細研究頁"
-                          aria-label={`查看 ${item.symbol} 詳細研究頁`}
-                          className="inline-flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:bg-purple-600 hover:text-white transition-colors"
+                        <button
+                          type="button"
+                          onClick={() => openPreview(item.symbol, item.name)}
+                          title="開啟個股視窗"
+                          aria-label={`開啟 ${item.symbol} 個股視窗`}
+                          className="inline-flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:bg-purple-600 hover:text-white transition-colors cursor-pointer"
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
-                        </Link>
+                        </button>
                       </div>
                     </td>
                   </tr>

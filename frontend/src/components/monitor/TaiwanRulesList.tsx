@@ -10,6 +10,7 @@ import {
 import { api, type TaiwanMonitorRule, type TaiwanRuleType } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
+import { cnSignal } from '@/lib/signals'
 
 interface TaiwanRulesListProps {
   rules: TaiwanMonitorRule[]
@@ -25,6 +26,7 @@ const RULE_TYPE_LABELS: Record<TaiwanRuleType, { label: string; unit: string }> 
   volume_spike: { label: '成交量異常放大', unit: '倍' },
   near_upper_limit: { label: '接近漲停', unit: '%' },
   near_lower_limit: { label: '接近跌停', unit: '%' },
+  signal: { label: '技術訊號', unit: '' },
 }
 
 export function TaiwanRulesList({ rules, onEdit }: TaiwanRulesListProps) {
@@ -64,6 +66,7 @@ export function TaiwanRulesList({ rules, onEdit }: TaiwanRulesListProps) {
           label: r.rule_type,
           unit: '',
         }
+        const isSignalRule = r.rule_type === 'signal'
         const isVolumeAbove = r.rule_type === 'volume_above'
         const thresholdText = isVolumeAbove
           ? r.threshold >= 1000
@@ -127,7 +130,7 @@ export function TaiwanRulesList({ rules, onEdit }: TaiwanRulesListProps) {
                 {typeCfg.label}
               </span>
               <span className="font-mono font-bold text-accent">
-                {thresholdText}
+                {isSignalRule ? (r.signals || []).map(id => cnSignal(id)).join('、') || '未設定訊號' : thresholdText}
               </span>
               {r.cooldown_seconds > 0 && (
                 <span className="rounded bg-surface border border-border/50 px-1 py-0.5 text-[10px] text-muted">

@@ -65,6 +65,8 @@ class TaiwanMonitorEngine:
         self._trigger_states: dict[str, bool] = {}
         # dedup_key -> last_fired_monotonic_timestamp (float)
         self._last_fire_time: dict[str, float] = {}
+        self._signal_cache_date: str | None = None
+        self._signal_cache: dict[str, set[str]] = {}
         self._state_lock = threading.Lock()
 
         # Load persisted rules if available
@@ -177,7 +179,11 @@ class TaiwanMonitorEngine:
 
         # Rule parameters validation
         rtype = rule.rule_type if isinstance(rule.rule_type, TaiwanRuleType) else TaiwanRuleType(rule.rule_type)
-        if rtype in (TaiwanRuleType.PRICE_ABOVE, TaiwanRuleType.PRICE_BELOW):
+        if rtype == TaiwanRuleType.SIGNAL:
+            # A signal rule carries no threshold; without ids it would match nothing.
+            if not rule.signals:
+                raise ValueError("signal rule requires at least one signal id")
+        elif rtype in (TaiwanRuleType.PRICE_ABOVE, TaiwanRuleType.PRICE_BELOW):
             if rule.threshold <= 0:
                 raise ValueError(f"{rtype.value} threshold must be strictly positive (got {rule.threshold})")
         elif rtype in (TaiwanRuleType.VOLUME_ABOVE,):
@@ -216,6 +222,17 @@ class TaiwanMonitorEngine:
         if not active_rules:
             return []
 
+        signal_rules = [
+            r for r in active_rules
+            if (r.rule_type.value if isinstance(r.rule_type, TaiwanRuleType) else r.rule_type)
+            == TaiwanRuleType.SIGNAL.value
+        ]
+        active_rules = [r for r in active_rules if r not in signal_rules]
+        signal_alerts = self._evaluate_signal_rules(signal_rules)
+
+        if not active_rules:
+            return signal_alerts
+
         symbols = list({r.symbol for r in active_rules})
         if force_quotes is not None:
             quotes = force_quotes
@@ -223,7 +240,7 @@ class TaiwanMonitorEngine:
             # Batch fetch from Realtime Service (only unique symbols requested)
             quotes = self.realtime_service.get_quotes(symbols)
 
-        alerts: list[TaiwanAlertEvent] = []
+        alerts: list[TaiwanAlertEvent] = list(signal_alerts)
         cur_mono = time.monotonic() if now_mono is None else now_mono
 
         for rule in active_rules:
@@ -236,6 +253,103 @@ class TaiwanMonitorEngine:
                         self.alert_handler(alert)
                     except Exception as ex:
                         logger.warning("Alert handler error for %s: %s", alert.alert_id, ex)
+
+        return alerts
+
+    def _latest_signal_map(self) -> tuple[str | None, dict[str, set[str]]]:
+        """Signals that fired on the newest published day, keyed by symbol.
+
+        Read once per publish date: the table only changes when the daily job
+        republishes it, while this engine runs every few seconds.
+        """
+        from app.config import settings
+
+        root = Path(settings.data_dir) / "kline_daily_enriched"
+        try:
+            parts = sorted(p.name for p in root.glob("date=*"))
+        except OSError:
+            return None, {}
+        if not parts:
+            return None, {}
+        as_of = parts[-1].removeprefix("date=")
+
+        with self._state_lock:
+            if self._signal_cache_date == as_of:
+                return as_of, self._signal_cache
+
+        try:
+            import polars as pl
+
+            frame = pl.read_parquet(root / f"date={as_of}" / "part.parquet")
+        except Exception as exc:
+            logger.warning("signal partition unreadable for %s: %s", as_of, exc)
+            return as_of, {}
+
+        cols = [c for c in frame.columns if c.startswith("signal_")]
+        mapping: dict[str, set[str]] = {}
+        for row in frame.select(["symbol", *cols]).iter_rows(named=True):
+            fired = {c for c in cols if row.get(c)}
+            if fired:
+                mapping[row["symbol"]] = fired
+
+        with self._state_lock:
+            self._signal_cache_date = as_of
+            self._signal_cache = mapping
+        return as_of, mapping
+
+    def _evaluate_signal_rules(self, rules: list[TaiwanMonitorRule]) -> list[TaiwanAlertEvent]:
+        """Fire once per rule per published day when every listed signal is present."""
+        if not rules:
+            return []
+        as_of, mapping = self._latest_signal_map()
+        if not as_of:
+            return []
+
+        now_dt = taipei_now()
+        alerts: list[TaiwanAlertEvent] = []
+        sec_master = get_security_master()
+
+        for rule in rules:
+            wanted = set(rule.signals or [])
+            if not wanted:
+                continue
+            fired = mapping.get(rule.symbol, set())
+            if not wanted.issubset(fired):
+                continue
+
+            dedup_key = f"{rule.rule_id}:{rule.symbol}:signal:{as_of}"
+            with self._state_lock:
+                if self._trigger_states.get(dedup_key):
+                    continue
+                self._trigger_states[dedup_key] = True
+
+            inst = sec_master.get_instrument(rule.symbol)
+            labels = "、".join(sorted(wanted))
+            sev = rule.severity.value if isinstance(rule.severity, TaiwanAlertSeverity) else str(rule.severity)
+            alerts.append(TaiwanAlertEvent(
+                alert_id=f"tw_alert_{uuid.uuid4().hex[:12]}",
+                rule_id=rule.rule_id,
+                rule_name=rule.name,
+                symbol=rule.symbol,
+                name=inst.name if inst else rule.symbol,
+                rule_type=TaiwanRuleType.SIGNAL.value,
+                triggered_at=now_dt,
+                quote_time=None,
+                trigger_value=float(len(wanted)),
+                threshold=float(len(wanted)),
+                message=f"{inst.name if inst else rule.symbol} 於 {as_of} 收盤觸發訊號: {labels}",
+                source="taiwan_enriched",
+                source_status="published",
+                market_status="closed",
+                severity=sev,
+                field_name="signals",
+                dedup_key=dedup_key,
+            ))
+            if self.alert_handler:
+                try:
+                    self.alert_handler(alerts[-1])
+                except Exception as ex:
+                    logger.warning("Alert handler error for %s: %s", alerts[-1].alert_id, ex)
 
         return alerts
 

@@ -40,9 +40,11 @@ const RANGE_OPTIONS = [
 interface TaiwanStockDetailProps {
   /** Renders inside the preview dialog, which supplies its own chrome and chart. */
   embeddedSymbol?: string
+  /** Embedded mode routes rule creation to the host dialog's own overlay. */
+  onCreateRule?: () => void
 }
 
-export function TaiwanStockDetail({ embeddedSymbol }: TaiwanStockDetailProps = {}) {
+export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockDetailProps = {}) {
   const embedded = Boolean(embeddedSymbol)
   const { symbol: routeSymbol } = useParams<{ symbol: string }>()
   const navigate = useNavigate()
@@ -433,19 +435,16 @@ export function TaiwanStockDetail({ embeddedSymbol }: TaiwanStockDetailProps = {
                     按鈕 —— 該回測工作台的標的選擇器目前仍呼叫 A 股 instrumentSearch,
                     無法真正選取台股標的,留著會是誤導使用者的死路連結。route/component
                     本身未刪除,待台股回測真正可用後再視情況加回。 */}
-                {/* Every entry point into the rule editor is gated, so the dialog
-                    never opens a modal inside itself; it has its own monitor action. */}
-                {!embedded && (
+                {/* Embedded mode delegates to the host so no modal opens inside the dialog. */}
                 <div className="flex flex-col gap-1.5">
                   <button
-                    onClick={() => setIsRuleEditorOpen(true)}
+                    onClick={() => (embedded ? onCreateRule?.() : setIsRuleEditorOpen(true))}
                     className="flex items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-accent/90 transition-colors cursor-pointer"
                   >
                     <RadioTower className="h-3.5 w-3.5" />
-                    <span>新增監控</span>
+                    <span>建立監控規則</span>
                   </button>
                 </div>
-                )}
               </div>
             </div>
 

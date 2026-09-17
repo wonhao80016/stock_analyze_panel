@@ -9,6 +9,7 @@ import { TaiwanQuotePanel } from '@/components/monitor/TaiwanQuotePanel'
 import { TaiwanRuleEditorDialog } from '@/components/monitor/TaiwanRuleEditorDialog'
 import { TaiwanAlertsList } from '@/components/monitor/TaiwanAlertsList'
 import { TaiwanRulesList } from '@/components/monitor/TaiwanRulesList'
+import { GenericRulesList } from '@/components/monitor/GenericRulesList'
 
 // Phase 8C-D — Legacy Product Removal: 「A 股策略監控」分頁與其專屬觸發記錄/
 // 規則管理 UI (含行業/概念標籤設定) 已隨產品介面正式移除。strategy_alert SSE、
@@ -17,6 +18,7 @@ import { TaiwanRulesList } from '@/components/monitor/TaiwanRulesList'
 // RuleEditor.tsx 經 StockPreviewDialog 等處繼續重用)、Taiwan quote/monitor
 // merge 完全未動。Monitor 最終只剩台股即時監控一種畫面, 不再需要市場切換分頁。
 export function Monitor() {
+  const [rulesTab, setRulesTab] = useState<'taiwan' | 'signal'>('taiwan')
   const [twEditorOpen, setTwEditorOpen] = useState(false)
   const [editingTwRule, setEditingTwRule] = useState<TaiwanMonitorRule | null>(null)
   const [presetTwQuote, setPresetTwQuote] = useState<TaiwanRealtimeQuote | null>(null)
@@ -27,6 +29,13 @@ export function Monitor() {
     queryFn: () => api.taiwanRulesList(),
   })
   const twRules = twRulesQuery.data?.rules || []
+
+  // 同一個 query key, 與訊號分頁列表共用快取, 不會多打一次。
+  const genericRulesQuery = useQuery({
+    queryKey: QK.monitorRules,
+    queryFn: () => api.monitorRulesList(),
+  })
+  const genericRuleCount = genericRulesQuery.data?.rules?.length ?? 0
 
   // 台股觸發記錄 (與 strategy_alert SSE 共用同一份 alertsQuery/api.alertsList,
   // 只是 Monitor 頁面級的兜底輪詢 — 未讀徽標/即時刷新走既有 monitorBadge/SSE)
@@ -62,9 +71,9 @@ export function Monitor() {
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 px-5 py-4">
+      <div className="flex-1 min-h-0 overflow-auto px-5 py-4">
         {/* ===== 台股即時監控區塊 ===== */}
-        <div className="mx-auto flex h-full max-w-7xl flex-col gap-4">
+        <div className="mx-auto flex min-h-full max-w-7xl flex-col gap-4">
           {/* Benchmarks: TWSE weighted index and TPEx index */}
           <TaiwanIndexBar />
 
@@ -80,7 +89,8 @@ export function Monitor() {
           </div>
 
           {/* 下部: 左右雙欄 (左: 警報觸發記錄, 右: 監控規則列表) */}
-          <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row">
+          {/* min-h keeps both panels usable once the index cards take vertical space. */}
+          <div className="flex min-h-[300px] flex-1 flex-col gap-4 lg:flex-row">
             {/* 左欄: 台股告警觸發紀錄 */}
             <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface/40 shadow-lg shadow-black/5">
               <div className="flex items-center justify-between border-b border-border/60 bg-surface/60 px-4 py-2.5">
@@ -99,13 +109,31 @@ export function Monitor() {
             {/* 右欄: 台股監控規則管理 */}
             <section className="flex min-h-0 w-full flex-col overflow-hidden rounded-xl border border-border bg-surface/40 shadow-lg shadow-black/5 lg:w-[420px] lg:shrink-0">
               <div className="flex items-center justify-between border-b border-border/60 bg-surface/60 px-4 py-2.5">
-                <div className="flex items-center gap-2">
-                  <SectionHeader icon={ListChecks} title="台股規則管理" />
-                  <span className="rounded-md bg-elevated/50 px-1.5 py-0.5 text-[10px] font-medium text-muted">
-                    {twRules.length}
-                  </span>
+                <div className="flex items-center gap-1.5">
+                  <SectionHeader icon={ListChecks} title="規則管理" />
+                  <button
+                    onClick={() => setRulesTab('taiwan')}
+                    className={`cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                      rulesTab === 'taiwan'
+                        ? 'border-accent/50 bg-accent/15 text-accent'
+                        : 'border-border/60 bg-surface text-muted hover:border-accent/40 hover:text-foreground'
+                    }`}
+                  >
+                    台股 {twRules.length}
+                  </button>
+                  <button
+                    onClick={() => setRulesTab('signal')}
+                    className={`cursor-pointer rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                      rulesTab === 'signal'
+                        ? 'border-accent/50 bg-accent/15 text-accent'
+                        : 'border-border/60 bg-surface text-muted hover:border-accent/40 hover:text-foreground'
+                    }`}
+                  >
+                    訊號 {genericRuleCount}
+                  </button>
                 </div>
                 <div className="flex items-center gap-1">
+                  {rulesTab === 'taiwan' && (
                   <button
                     onClick={() => {
                       setEditingTwRule(null)
@@ -117,9 +145,11 @@ export function Monitor() {
                   >
                     <Plus className="h-3.5 w-3.5" />
                   </button>
+                  )}
                 </div>
               </div>
               <div className="min-h-0 flex-1 overflow-auto p-3.5">
+                {rulesTab === 'taiwan' ? (
                 <TaiwanRulesList
                   rules={twRules}
                   onEdit={(r) => {
@@ -128,6 +158,9 @@ export function Monitor() {
                     setTwEditorOpen(true)
                   }}
                 />
+                ) : (
+                  <GenericRulesList />
+                )}
               </div>
             </section>
           </div>

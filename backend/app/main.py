@@ -290,6 +290,13 @@ async def _application_lifespan(app: FastAPI):
                 logger.info("matrix cache prewarm done: %s", result)
             except (HeavyJobCancelledError, MatrixPrewarmCancelledError):
                 logger.info("matrix cache prewarm cancelled")
+            except ValueError as exc:
+                # Taiwan enriched data carries no share counts, so the backtest
+                # matrix cannot be built from it. That is a skip, not a failure.
+                if "fields unavailable" in str(exc):
+                    logger.info("matrix cache prewarm skipped: %s", exc)
+                else:
+                    logger.exception("matrix cache prewarm failed")
             except Exception:  # noqa: BLE001
                 logger.exception("matrix cache prewarm failed")
 

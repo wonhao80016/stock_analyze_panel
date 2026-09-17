@@ -14,8 +14,8 @@ import {
   cnSignal,
 } from './signals'
 
-// 這份 id 清單鎖定內建訊號集合不被意外增減/改名。漲跌停四訊號已移除:
-// 其上游計算需要 A 股標的表提供漲跌停價，台股標的一律被跳過。
+// 這份 id 清單鎖定內建訊號集合不被意外增減/改名。漲跌停四訊號由
+// TaiwanEnrichedRefreshService 依台股法定漲跌幅與跳動單位自行計算。
 const EXPECTED_BUILTIN_IDS = [
   'signal_ma_golden_5_20',
   'signal_ma_dead_5_20',
@@ -33,6 +33,10 @@ const EXPECTED_BUILTIN_IDS = [
   'signal_boll_breakout_upper',
   'signal_boll_breakdown_lower',
   'signal_volume_surge',
+  'signal_limit_up',
+  'signal_limit_down',
+  'signal_limit_down_recovery',
+  'signal_broken_limit_up',
 ]
 
 // 已知在 audit 中發現、且本批次應已處理掉的簡體字/A股慣用語彙（用「連續漲停」
@@ -44,7 +48,7 @@ const KNOWN_SIMPLIFIED_OR_A_SHARE_TERMS = [
 ]
 
 describe('BUILTIN_SIGNAL_DEFINITIONS — ids unchanged', () => {
-  it('has exactly the 16 built-in signal ids that Taiwan data can produce', () => {
+  it('has exactly the 20 built-in signal ids the publisher can produce', () => {
     expect(BUILTIN_SIGNAL_DEFINITIONS.map(s => s.id).sort()).toEqual([...EXPECTED_BUILTIN_IDS].sort())
   })
 
@@ -75,16 +79,19 @@ describe('BUILTIN_SIGNAL_DEFINITIONS — Traditional Chinese wording', () => {
     const categories = new Set(BUILTIN_SIGNAL_DEFINITIONS.map(s => s.category))
     expect(categories.has('均線')).toBe(true)
     expect(categories.has('趨勢')).toBe(true)
+    expect(categories.has('漲跌停')).toBe(true)
     expect(categories.has('量價')).toBe(true)
     expect(categories.has('均线')).toBe(false)
     expect(categories.has('趋势')).toBe(false)
   })
 
-  it('drops the four limit-board signals, which are never computed for Taiwan symbols', () => {
-    const removed = ['signal_limit_up', 'signal_limit_down', 'signal_limit_down_recovery', 'signal_broken_limit_up']
-    for (const id of removed) {
-      expect(BUILTIN_SIGNAL_DEFINITIONS.find(s => s.id === id)).toBeUndefined()
-      expect(SIGNAL_OPTIONS).not.toContain(id)
+  it('limit-board signals use Taiwan wording, not A-share board jargon', () => {
+    const ids = ['signal_limit_up', 'signal_limit_down', 'signal_limit_down_recovery', 'signal_broken_limit_up']
+    for (const id of ids) {
+      const sig = BUILTIN_SIGNAL_DEFINITIONS.find(s => s.id === id)!
+      expect(sig, id).toBeDefined()
+      expect(SIGNAL_OPTIONS).toContain(id)
+      expect(sig.name).not.toMatch(/連板|炸板|翹板/)
     }
   })
 

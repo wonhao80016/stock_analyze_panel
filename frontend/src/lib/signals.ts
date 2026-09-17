@@ -135,8 +135,34 @@ export const BUILTIN_SIGNAL_DEFINITIONS: BuiltinSignalDefinition[] = [
     category: '量價',
     description: '成交量顯著放大，可作為入場確認、出場確認或告警條件。',
   },
-  // The four limit-board signals were dropped: their upstream computation needs the
-  // A-share instrument table for limit prices and is skipped for Taiwan symbols.
+  {
+    id: 'signal_limit_up',
+    name: '漲停',
+    kind: 'entry',
+    category: '漲跌停',
+    description: '收盤價達當日漲停價，依標的自身的漲跌幅限制與跳動單位判定。',
+  },
+  {
+    id: 'signal_limit_down',
+    name: '跌停',
+    kind: 'exit',
+    category: '漲跌停',
+    description: '收盤價達當日跌停價，依標的自身的漲跌幅限制與跳動單位判定。',
+  },
+  {
+    id: 'signal_broken_limit_up',
+    name: '漲停打開',
+    kind: 'exit',
+    category: '漲跌停',
+    description: '盤中觸及漲停價但收盤未守住。',
+  },
+  {
+    id: 'signal_limit_down_recovery',
+    name: '跌停翻紅',
+    kind: 'entry',
+    category: '漲跌停',
+    description: '盤中觸及跌停價後收盤回升至跌停之上。',
+  },
 ]
 
 export const MONITOR_INTRADAY_SIGNAL_LABELS: Record<string, string> = {

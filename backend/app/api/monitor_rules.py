@@ -686,6 +686,7 @@ class TaiwanMonitorRuleCreate(BaseModel):
     cooldown_seconds: int = 300
     hysteresis: float | None = None
     reference_volume: int | None = None
+    signals: list[str] = []
     severity: str = "warning"
 
 
@@ -696,6 +697,7 @@ class TaiwanMonitorRuleUpdate(BaseModel):
     cooldown_seconds: int | None = None
     hysteresis: float | None = None
     reference_volume: int | None = None
+    signals: list[str] | None = None
     severity: str | None = None
 
 
@@ -726,6 +728,7 @@ def create_taiwan_rule(req: TaiwanMonitorRuleCreate):
         cooldown_seconds=req.cooldown_seconds,
         hysteresis=req.hysteresis,
         reference_volume=req.reference_volume,
+        signals=req.signals,
         severity=req.severity,
     )
     engine = get_monitor_engine()
@@ -759,6 +762,8 @@ def update_taiwan_rule(rule_id: str, req: TaiwanMonitorRuleUpdate):
         rule.hysteresis = req.hysteresis
     if req.reference_volume is not None:
         rule.reference_volume = req.reference_volume
+    if req.signals is not None:
+        rule.signals = req.signals
     if req.severity is not None:
         rule.severity = req.severity
 

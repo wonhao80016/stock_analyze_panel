@@ -88,15 +88,17 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
     }))
 }
 
+// Taiwan has no consecutive-board convention, so each day stands on its own.
 function buildLimitUpMarkers(rows: KlineRow[]): ChartMarker[] {
   const markers: ChartMarker[] = []
   for (const r of rows) {
     const date = typeof r.date === 'string' ? r.date.slice(0, 10) : String(r.date)
     if (r.signal_broken_limit_up) {
-      markers.push({ date, kind: 'neutral', above: true, color: '#8B5CF6', label: '炸' })
+      markers.push({ date, kind: 'neutral', above: true, color: '#8B5CF6', label: '開' })
     } else if (r.signal_limit_up) {
-      const boards: number = r.consecutive_limit_ups ?? 1
-      markers.push({ date, kind: 'buy', above: true, color: '#FACC15', label: boards <= 1 ? '板' : String(boards) })
+      markers.push({ date, kind: 'buy', above: true, color: '#FACC15', label: '漲停' })
+    } else if (r.signal_limit_down) {
+      markers.push({ date, kind: 'sell', above: false, color: '#34D399', label: '跌停' })
     }
   }
   return markers
@@ -248,7 +250,7 @@ export function StockDailyKChart({
               </select>
             </div>
           )}
-          {showMarkerToggle && showLimitMarkers && (
+          {showMarkerToggle && showLimitMarkers && limitMarkers.length > 0 && (
             <button
               onClick={() => setShowMarkers(v => !v)}
               className={`ml-auto px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${

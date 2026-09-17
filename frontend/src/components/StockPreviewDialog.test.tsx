@@ -2,7 +2,7 @@
 // 回歸測試。重的子元件(K線/分時圖/監控編輯器/擴充插槽)與本測試要驗證的
 // 「有明確路徑離開空白預覽、進到完整個股頁」無關, 全部 mock 掉。
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StockPreviewDialog } from './StockPreviewDialog'
@@ -47,20 +47,19 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('StockPreviewDialog — 完整個股入口 (DAILY_USE_CORE_UX_FIXES P1-3)', () => {
-  it('E. 提供「查看完整個股」action, 導向正確的台股個股詳細頁 route', async () => {
+// 研究頁內容已內嵌於本 dialog, 不再提供離開本頁的出口。
+describe('StockPreviewDialog — 不再導向個股頁', () => {
+  it('不提供「查看完整個股」出口, 也不會切換到個股 route', async () => {
     renderDialog('2454.TWSE')
 
-    const link = await screen.findByRole('button', { name: /查看 2454\.TWSE 完整個股頁/ })
-    fireEvent.click(link)
-
-    expect(await screen.findByText('STOCK DETAIL PAGE')).toBeInTheDocument()
+    await screen.findByTitle('關閉')
+    expect(screen.queryByRole('button', { name: /查看.*完整個股頁/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('STOCK DETAIL PAGE')).toBeNull()
   })
 
-  it('不對非台股代碼顯示「查看完整個股」(該 route 僅支援台股, 與既有「加入比較」同一限制)', async () => {
+  it('非台股代碼同樣不提供該出口', async () => {
     renderDialog('600000.SH')
 
-    // 給 watchlist/monitorRules 查詢一點時間解析, 確認並非還沒 render 完
     await screen.findByTitle('關閉')
     expect(screen.queryByRole('button', { name: /查看.*完整個股頁/ })).not.toBeInTheDocument()
   })

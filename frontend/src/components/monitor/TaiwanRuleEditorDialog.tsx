@@ -15,6 +15,7 @@ import {
   type TaiwanSearchResult,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { BUILTIN_SIGNAL_DEFINITIONS } from '@/lib/signals'
 import { cn } from '@/lib/cn'
 
 interface TaiwanRuleEditorDialogProps {
@@ -34,6 +35,7 @@ const RULE_TYPE_OPTIONS: { key: TaiwanRuleType; label: string; unit: string; des
   { key: 'volume_spike', label: '成交量異常放大', unit: '倍數', desc: '目前量能超越基準參考成交量之倍數時觸發' },
   { key: 'near_upper_limit', label: '接近漲停', unit: '%', desc: '距官方漲停價距離百分比 ≤ 門檻時觸發 (無限制商品不適用)' },
   { key: 'near_lower_limit', label: '接近跌停', unit: '%', desc: '距官方跌停價距離百分比 ≤ 門檻時觸發 (無限制商品不適用)' },
+  { key: 'signal', label: '技術訊號', unit: '', desc: '最新收盤觸發所選訊號時提醒 (盤後資料, 每日最多一次)' },
 ]
 
 export function TaiwanRuleEditorDialog({
@@ -49,6 +51,7 @@ export function TaiwanRuleEditorDialog({
   const [name, setName] = useState('')
   const [symbol, setSymbol] = useState('2330.TWSE')
   const [ruleType, setRuleType] = useState<TaiwanRuleType>('price_above')
+  const [ruleSignals, setRuleSignals] = useState<string[]>([])
   const [threshold, setThreshold] = useState<number>(2500)
   const [cooldown, setCooldown] = useState<number>(300)
   const [hysteresis, setHysteresis] = useState<number | ''>('')
@@ -77,6 +80,7 @@ export function TaiwanRuleEditorDialog({
       setSymbol(rule.symbol)
       setRuleType(rule.rule_type)
       setThreshold(rule.threshold)
+      setRuleSignals(rule.signals || [])
       setCooldown(rule.cooldown_seconds || 300)
       setHysteresis(rule.hysteresis ?? '')
       setRefVolume(rule.reference_volume ?? '')
@@ -114,6 +118,7 @@ export function TaiwanRuleEditorDialog({
           cooldown_seconds: cooldown,
           hysteresis: hysteresis === '' ? null : Number(hysteresis),
           reference_volume: refVolume === '' ? null : Number(refVolume),
+          signals: ruleSignals,
           severity,
         })
       } else {
@@ -125,6 +130,7 @@ export function TaiwanRuleEditorDialog({
           cooldown_seconds: cooldown,
           hysteresis: hysteresis === '' ? null : Number(hysteresis),
           reference_volume: refVolume === '' ? null : Number(refVolume),
+          signals: ruleSignals,
           severity,
         })
       }
@@ -318,7 +324,49 @@ export function TaiwanRuleEditorDialog({
             )}
           </div>
 
+          {/* 技術訊號選擇 (rule_type=signal) */}
+          {ruleType === 'signal' && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[11px] font-semibold text-foreground/80">
+                  觸發訊號（多選為且）
+                </label>
+                {ruleSignals.length > 0 && (
+                  <button
+                    onClick={() => setRuleSignals([])}
+                    className="text-[10px] text-muted hover:text-foreground"
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {BUILTIN_SIGNAL_DEFINITIONS.map(sig => {
+                  const on = ruleSignals.includes(sig.id)
+                  return (
+                    <button
+                      key={sig.id}
+                      title={sig.description}
+                      onClick={() => setRuleSignals(prev => on ? prev.filter(x => x !== sig.id) : [...prev, sig.id])}
+                      className={`px-2 py-1 text-[11px] font-medium rounded-md border transition-all ${
+                        on
+                          ? 'border-accent bg-accent/15 text-accent'
+                          : 'border-border bg-elevated/40 text-muted hover:text-foreground'
+                      }`}
+                    >
+                      {sig.name}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] text-muted mt-1.5">
+                依每日收盤後發布的指標判定，同一天最多提醒一次。
+              </p>
+            </div>
+          )}
+
           {/* 門檻數值 (動態切換單位) */}
+          {ruleType !== 'signal' && (
           <div>
             <div className="flex items-center justify-between mb-1">
               <label className="text-[11px] font-semibold text-foreground/80">
@@ -359,6 +407,7 @@ export function TaiwanRuleEditorDialog({
               </span>
             </div>
           </div>
+          )}
 
           {/* 爆量專用: 基準參考成交量 */}
           {ruleType === 'volume_spike' && (

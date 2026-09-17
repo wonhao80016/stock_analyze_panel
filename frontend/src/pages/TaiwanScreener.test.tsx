@@ -166,38 +166,31 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('Abnormal diagnostics panel navigation (Phase 7K)', () => {
-  it('renders the TWSE row link as exactly /stocks/2330.TWSE', async () => {
+// 標的一律以彈出視窗開啟, 不再離開當前頁面導向 /stocks/:symbol。
+describe('Abnormal diagnostics panel opens the preview card', () => {
+  it('renders the TWSE row as a button, not a route link', async () => {
     renderScreener()
-    const link = await screen.findByRole('link', { name: /台積電/ })
-    expect(link).toHaveAttribute('href', '/stocks/2330.TWSE')
+    expect(await screen.findByRole('button', { name: /台積電/ })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /台積電/ })).toBeNull()
   })
 
-  it('renders the TPEx row link as exactly /stocks/8069.TPEX (suffix preserved)', async () => {
+  it('renders the TPEx row as a button, not a route link', async () => {
     renderScreener()
-    const link = await screen.findByRole('link', { name: /元太/ })
-    expect(link).toHaveAttribute('href', '/stocks/8069.TPEX')
+    expect(await screen.findByRole('button', { name: /元太/ })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /元太/ })).toBeNull()
   })
 
-  it('clicking the TWSE abnormal-diagnostics link navigates to the mocked /stocks/:symbol route', async () => {
+  it('clicking a row never navigates to the stock detail route', async () => {
     renderScreener()
-    const link = await screen.findByRole('link', { name: /台積電/ })
-    fireEvent.click(link)
-    await waitFor(() => expect(screen.getByTestId('detail-mock')).toBeInTheDocument())
+    fireEvent.click(await screen.findByRole('button', { name: /台積電/ }))
+    await waitFor(() => expect(screen.queryByTestId('detail-mock')).toBeNull())
   })
 
-  it('clicking the TPEx abnormal-diagnostics link navigates to the mocked /stocks/:symbol route', async () => {
-    renderScreener()
-    const link = await screen.findByRole('link', { name: /元太/ })
-    fireEvent.click(link)
-    await waitFor(() => expect(screen.getByTestId('detail-mock')).toBeInTheDocument())
-  })
-
-  it('main screener table stock link still points to /stocks/2330.TWSE (regression, unrelated to the fix)', async () => {
+  it('main screener table exposes the symbol as a button too', async () => {
     renderScreener()
     await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
-    const symbolLink = screen.getAllByRole('link', { name: '2330.TWSE' })[0]
-    expect(symbolLink).toHaveAttribute('href', '/stocks/2330.TWSE')
+    expect(screen.getAllByRole('button', { name: '2330.TWSE' }).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('link', { name: '2330.TWSE' })).toBeNull()
   })
 })
 
@@ -209,7 +202,7 @@ describe('Main results row direct actions (Phase 8C-A)', () => {
     expect(await screen.findByRole('button', { name: '將 2330.TWSE 加入自選' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '將 2330.TWSE 加入比較' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '為 2330.TWSE 新增監控' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: '查看 2330.TWSE 詳細研究頁' })).toHaveAttribute('href', '/stocks/2330.TWSE')
+    expect(screen.getByRole('button', { name: '開啟 2330.TWSE 個股視窗' })).toBeInTheDocument()
   })
 
   it('加入自選 is a genuine 1-click quick-add — no group picker in the way (Phase 8C-A fix)', async () => {
@@ -295,8 +288,8 @@ describe('Abnormal diagnostics panel state UX (Phase 7L)', () => {
 
   it('renders populated abnormal-diagnostics rows on a successful non-empty response', async () => {
     renderScreener()
-    expect(await screen.findByRole('link', { name: /台積電/ })).toBeInTheDocument()
-    expect(await screen.findByRole('link', { name: /元太/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /台積電/ })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /元太/ })).toBeInTheDocument()
   })
 
   it('preserves already-loaded populated rows during a background refetch that subsequently errors (cached-data priority)', async () => {
@@ -304,7 +297,7 @@ describe('Abnormal diagnostics panel state UX (Phase 7L)', () => {
       buildAbnormalDiagnostics([buildAbnormalSignal({ symbol: '2330.TWSE', code: '2330', name: '台積電' })]) as any,
     )
     const queryClient = renderScreener()
-    await screen.findByRole('link', { name: /台積電/ })
+    await screen.findByRole('button', { name: /台積電/ })
 
     // Simulate a background refetch (same query key, still 'ALL' filter — no user action needed
     // to change the key) that fails; cached data must remain visible, not be replaced by an error row.
@@ -313,7 +306,7 @@ describe('Abnormal diagnostics panel state UX (Phase 7L)', () => {
       await queryClient.refetchQueries({ queryKey: ['taiwanAbnormalDiagnostics', 'ALL'] })
     })
 
-    expect(screen.getByRole('link', { name: /台積電/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /台積電/ })).toBeInTheDocument()
     expect(screen.queryByText('異常診斷載入失敗，請稍後再試')).not.toBeInTheDocument()
     expect(screen.queryByText('正在載入異常診斷…')).not.toBeInTheDocument()
   })
