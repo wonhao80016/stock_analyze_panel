@@ -34,5 +34,5 @@ def test_fetch_minute_single_window_is_beijing_wall_clock(monkeypatch):
 
     start = datetime.fromtimestamp(captured["start_ms"] / 1000, tz=CN_TZ)
     end = datetime.fromtimestamp(captured["end_ms"] / 1000, tz=CN_TZ)
-    assert (start.date(), start.hour, start.minute) == (date(2026, 8, 14), 9, 25)
-    assert (end.date(), end.hour, end.minute) == (date(2026, 8, 14), 15, 5)
+    assert (start.date(), start.hour, start.minute) == (date(2026, 8, 14), 8, 55)
+    assert (end.date(), end.hour, end.minute) == (date(2026, 8, 14), 13, 35)

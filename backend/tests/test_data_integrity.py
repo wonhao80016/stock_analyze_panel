@@ -125,12 +125,21 @@ def test_missing_tail_day_flagged(tmp_path):
 
 def test_snapshot_and_missing_both_reported(tmp_path):
     # 周四盘中快照 + 周五缺失
-    _write_daily_partition(tmp_path, "kline_daily", THURSDAY, _ts_ms(THURSDAY, time(13, 30)))
+    _write_daily_partition(tmp_path, "kline_daily", THURSDAY, _ts_ms(THURSDAY, time(11, 0)))
     issues = scan_recent_integrity(tmp_path, today=TODAY)
     kinds = {(i.day, i.kind) for i in issues}
     assert (THURSDAY, "snapshot") in kinds
     assert (FRIDAY, "missing") in kinds
     assert earliest_issue_day(issues) == THURSDAY
+
+
+def test_close_line_is_the_taiwan_close(tmp_path):
+    """收盘线必须是台股 13:30: 用 A 股的 15:00 会把合法的收盘定版判成盘中快照。"""
+    _write_daily_partition(tmp_path, "kline_daily", THURSDAY, _ts_ms(THURSDAY, time(13, 30)))
+    _write_daily_partition(tmp_path, "kline_daily", FRIDAY, _ts_ms(FRIDAY, time(13, 29)))
+    kinds = {(i.day, i.kind) for i in scan_recent_integrity(tmp_path, today=TODAY)}
+    assert (THURSDAY, "snapshot") not in kinds
+    assert (FRIDAY, "snapshot") in kinds
 
 
 def test_no_recent_activity_not_flagged(tmp_path):

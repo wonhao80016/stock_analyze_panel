@@ -1263,7 +1263,7 @@ class DepthFinalizeTimeIn(BaseModel):
 
 @router.put("/preferences/depth-finalize-time")
 def update_depth_finalize_time(req: DepthFinalizeTimeIn, request: Request) -> dict:
-    """保存盘后 sealed 定版时间(范围15:01~18:00)并立即 reschedule。需 Pro+。"""
+    """保存盘后 sealed 定版时间(范围13:31~18:00)并立即 reschedule。需 Pro+。"""
     from app.tickflow.capabilities import Cap
     request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
 

@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import Annotated, Literal, Optional
 
@@ -404,6 +404,34 @@ def _get_previous_closes(
 _TAIWAN_INDICATOR_WARMUP_DAYS = 150
 
 
+_CLOSE_FALLBACK_MARGIN = timedelta(minutes=30)
+
+
+def _past_close_with_margin(now: datetime) -> bool:
+    """True once the close plus a settling margin has passed.
+
+    The margin gives the close sync time to land today's daily row, which is what
+    tells a holiday apart from a session that has only just ended.
+    """
+    from app.taiwan.realtime.calendar import REGULAR_OPEN_END
+
+    cutoff = datetime.combine(now.date(), REGULAR_OPEN_END) + _CLOSE_FALLBACK_MARGIN
+    return now.time() >= cutoff.time()
+
+
+def _expected_minute_rows(trade_date: date) -> int:
+    """Minute bars a complete local copy should hold for this date.
+
+    Today is still filling in, so only the elapsed part of the session is expected;
+    any earlier date should already hold the whole session.
+    """
+    from app.taiwan.realtime.calendar import SESSION_TOTAL_MINUTES, session_minutes_elapsed
+
+    if trade_date != cn_today():
+        return int(SESSION_TOTAL_MINUTES)
+    return int(session_minutes_elapsed())
+
+
 def _needs_local_history(df, start: date) -> bool:
     """Enriched rows may cover only the live candle, which cannot satisfy a range query."""
     if df.is_empty():
@@ -709,7 +737,6 @@ def get_minute_batch(request: Request, body: dict):
     - 缺失补拉: 本地不完整的 symbol 用 sync_minute_batch 批量实时拉 (不落库)
     - 需 Pro+ 权限 (kline.minute.batch)
     """
-    from datetime import datetime
     import polars as pl
     from app.tickflow.capabilities import Cap
 
@@ -730,15 +757,15 @@ def get_minute_batch(request: Request, body: dict):
     # 非交易日(周末/节假日)才回退到最近有数据的交易日; 否则盘中会显示昨天而非今天。
     # 注意: 不能用 latest_minute_date_global() 判断盘中是否为交易日 —— 批量实时补拉
     # 不落库 (见下方 sync_minute_batch 无 on_segment), 盘中它恒返回上次全量同步日,
-    # 用它做判据会导致 trade_date 永久回退到昨天, 再因 expected=240 判定昨日"完整"
+    # 用它做判据会导致 trade_date 永久回退到昨天, 再因当日期望条数判定昨日"完整"
     # 而不再补拉今天, 形成永远显示昨日的死循环。
-    # 判据改为: 周末必回退; 工作日收盘后(>=15:30)仍无今日日K → 节假日, 回退。
+    # 判据改为: 周末必回退; 工作日收盘+缓冲后仍无今日日K → 节假日, 回退。
     if not trade_date_str:
         today = cn_today()
         need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
         if not need_fallback:
             now_cn = cn_now()
-            after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
+            after_close = _past_close_with_margin(now_cn)
             if after_close:
                 latest_daily = repo.latest_daily_date()
                 if latest_daily is None or latest_daily < today:
@@ -762,21 +789,7 @@ def get_minute_batch(request: Request, body: dict):
         elif not df_etf.is_empty():
             df_local = pl.concat([df_local, df_etf], how="diagonal_relaxed")
 
-    # 期望条数 (盘中按当前时刻估算, 盘后 240)
-    now = cn_now()
-    h, m = now.hour, now.minute
-    if trade_date != cn_today():
-        expected = 240
-    elif h < 9 or (h == 9 and m < 30):
-        expected = 0
-    elif h < 12 or (h == 12 and m == 0):
-        expected = (h - 9) * 60 + m - 30
-    elif h < 13:
-        expected = 120
-    elif h < 15:
-        expected = 120 + (h - 13) * 60 + m
-    else:
-        expected = 240
+    expected = _expected_minute_rows(trade_date)
 
     # 按 symbol 分组, 判定哪些不完整需要补拉 (partition_by 一次切分, 同 daily-batch)
     result: dict[str, list[dict]] = {}
@@ -794,8 +807,7 @@ def get_minute_batch(request: Request, body: dict):
 
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
     if incomplete:
-        start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
-        end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+        start_time, end_time = kline_sync.intraday_window(trade_date)
         lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
         # etf_set 已在上方获取, 直接复用 — 按 asset_type 拆分调用 sync_minute_batch
         # (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)
@@ -837,6 +849,17 @@ def get_minute_batch(request: Request, body: dict):
                 sub = live_map.get(sym)
                 if sub is not None and not sub.is_empty():
                     result[sym] = sub.to_dicts()
+
+        # Taiwan minute bars are accumulated locally from the realtime poll, so the
+        # local copy only ever covers the part of the session this process ran for
+        # and never clears the completeness bar. Partial real bars beat an empty
+        # chart when no source can fill the gap.
+        for sym in incomplete:
+            if sym in result:
+                continue
+            sub = local_parts.get(sym)
+            if sub is not None and not sub.is_empty():
+                result[sym] = sub.to_dicts()
 
     return {"data": result}
 
@@ -916,7 +939,7 @@ def get_minute(
 ):
     """读取某只股票某天的分钟 K 线。
 
-    - 本地有完整数据(240条) → 直接返回
+    - 本地有完整数据(当日已交易分钟数, 盘后为全时段 270 条) → 直接返回
     - 本地无数据或不完整 → 从 TickFlow 实时拉取返回（不写入）
     """
     repo = request.app.state.repo
@@ -931,7 +954,7 @@ def get_minute(
         need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
         if not need_fallback:
             now_cn = cn_now()
-            after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
+            after_close = _past_close_with_margin(now_cn)
             if after_close:
                 latest_daily = repo.latest_daily_date()
                 if latest_daily is None or latest_daily < today:
@@ -969,22 +992,7 @@ def get_minute(
     )
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
-    # 完整交易日应有 240 条分钟K；如果是今天(盘中)，期望条数按已交易分钟估算
-    expected = 240
-    today = cn_today()
-    if trade_date == today:
-        now = cn_now()
-        h, m = now.hour, now.minute
-        if h < 9 or (h == 9 and m < 30):
-            expected = 0  # 还没开盘
-        elif h < 12 or (h == 12 and m == 0):
-            expected = (h - 9) * 60 + m - 30  # 9:30 起
-        elif h < 13:
-            expected = 120  # 午休
-        elif h < 15:
-            expected = 120 + (h - 13) * 60 + m
-        else:
-            expected = 240
+    expected = _expected_minute_rows(trade_date)
 
     is_complete = not df.is_empty() and len(df) >= expected * 0.9  # 允许 10% 容差
 
@@ -997,8 +1005,19 @@ def get_minute(
             "prev_close": prev_close,
         }
 
-    # 本地不完整或无数据 → 从 TickFlow 实时拉取
+    # 本地不完整或无数据 → 从数据源实时拉取
     live_df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
+    if live_df.is_empty() and not df.is_empty():
+        # Taiwan minute bars are accumulated locally from the realtime poll, so the
+        # local copy only ever covers the part of the session this process ran for.
+        # Partial real bars beat an empty chart when no source can fill the gap.
+        return {
+            "symbol": symbol, "name": stock_name, "stock_info": stock_info,
+            "date": str(trade_date), "rows": df.to_dicts(), "source": "local_partial",
+            "asset_type": asset_type,
+            "price_limit": price_limit,
+            "prev_close": prev_close,
+        }
     return {
         "symbol": symbol, "name": stock_name, "stock_info": stock_info,
         "date": str(trade_date), "rows": live_df.to_dicts(),

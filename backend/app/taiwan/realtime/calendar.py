@@ -24,6 +24,13 @@ REGULAR_OPEN_END = dt_time(13, 30)
 POST_CLOSE_END = dt_time(14, 30)
 
 
+def _minutes_of_day(t: dt_time) -> int:
+    return t.hour * 60 + t.minute
+
+
+SESSION_TOTAL_MINUTES = float(_minutes_of_day(REGULAR_OPEN_END) - _minutes_of_day(REGULAR_OPEN_START))
+
+
 def taipei_now() -> datetime:
     """Current timestamp in Asia/Taipei timezone."""
     return datetime.now(TAIPEI_TZ)
@@ -112,6 +119,46 @@ class TaiwanTradingCalendar:
             return MarketStatus.OPEN
         else:
             return MarketStatus.POST_CLOSE
+
+
+def session_minutes_elapsed(dt: datetime | None = None) -> float:
+    """Minutes traded so far in the regular session, clamped to [0, SESSION_TOTAL_MINUTES].
+
+    The session is continuous, so elapsed time is a plain difference from the open.
+    """
+    now = dt if dt is not None else taipei_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TAIPEI_TZ)
+    else:
+        now = now.astimezone(TAIPEI_TZ)
+
+    t = now.time()
+    if t < REGULAR_OPEN_START:
+        return 0.0
+    if t >= REGULAR_OPEN_END:
+        return SESSION_TOTAL_MINUTES
+    return float(_minutes_of_day(t) - _minutes_of_day(REGULAR_OPEN_START)) + now.second / 60.0
+
+
+def session_progress(dt: datetime | None = None) -> float:
+    """Fraction of the regular session elapsed, in [0.0, 1.0]."""
+    return session_minutes_elapsed(dt) / SESSION_TOTAL_MINUTES
+
+
+def session_progress_from_ts(ts_ms: int | float | None) -> float:
+    """Session progress derived from a quote timestamp in milliseconds.
+
+    Quote timestamps beat server time, which carries network and rate-limit delay.
+    An absent or unparsable timestamp yields a full session so that callers scaling
+    partial volume never divide by a bogus fraction.
+    """
+    if not ts_ms:
+        return 1.0
+    try:
+        dt = datetime.fromtimestamp(int(ts_ms) / 1000.0, tz=TAIPEI_TZ)
+    except (ValueError, TypeError, OSError):
+        return 1.0
+    return session_progress(dt)
 
 
 _DEFAULT_CALENDAR = TaiwanTradingCalendar()

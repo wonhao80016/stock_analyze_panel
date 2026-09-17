@@ -1653,7 +1653,7 @@ def compute_enriched_today(
     prev_enriched: pl.DataFrame,
     today_ohlcv: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
-    elapsed_minutes: float | None = None,
+    session_progress: float | None = None,
 ) -> pl.DataFrame:
     """用昨天的递推状态 + 今天的 OHLCV 增量计算今天的 enriched 数据。
 
@@ -1664,8 +1664,9 @@ def compute_enriched_today(
         prev_enriched:  repo.get_enriched_latest() — 昨天的完整 enriched (用于信号交叉判断)
         today_ohlcv:    今天的 OHLCV (symbol, date, open, high, low, close, volume, amount)
         instruments:    维表 (涨跌停/换手率需要)
-        elapsed_minutes: 当日已交易分钟数(用于标准量比的时间折算)。
-            None 或 0 表示不折算(盘后或时间不可用, 此时 volume 已是全天量)。
+        session_progress: 当日交易时段已过比例 0~1 (用于标准量比的时间折算)。
+            由调用方按所属市场的交易时段算出, 本函数不假设任何市场的时段长度。
+            None、0 或 1 表示不折算(盘后或时间不可用, 此时 volume 已是全天量)。
 
     返回:
         今天的 enriched DataFrame (~5500 行, 64 列)
@@ -1807,12 +1808,12 @@ def compute_enriched_today(
     # vol_ma5/vol_ma10 保留原语义(含当天的均量), 其他地方在用
     vol_ma5 = (pl.col("_vol_ma5_partial_sum") + pl.col("volume")) / 5
     vol_ma10 = (pl.col("_vol_ma10_partial_sum") + pl.col("volume")) / 10
-    # 标准量比(同花顺/东财): 今日累计成交量 / (前5日均量 × 已交易分钟数/240)
+    # 标准量比(同花顺/东财): 今日累计成交量 / (前5日均量 × 当日时段已过比例)
     # _vol_ma5_prev_sum 是前5个交易日成交量之和(tail(5)), 不含当天
-    # 盘中 volume 是部分量, 按 elapsed_minutes 折算到全天量级
+    # 盘中 volume 是部分量, 按 session_progress 折算到全天量级
     vol_ma5_prev = pl.col("_vol_ma5_prev_sum") / 5  # 前5日均量(不含当天)
-    if elapsed_minutes and elapsed_minutes > 0:
-        time_factor = 240.0 / elapsed_minutes  # 盘中折算: 部分量 → 全天量级
+    if session_progress and 0.0 < session_progress < 1.0:
+        time_factor = 1.0 / session_progress  # 盘中折算: 部分量 → 全天量级
     else:
         time_factor = 1.0  # 盘后/无效时间: 不折算(此时 volume 已是全天量)
     df = df.with_columns([

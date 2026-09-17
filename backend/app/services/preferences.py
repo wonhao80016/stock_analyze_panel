@@ -496,17 +496,18 @@ def set_pipeline_schedule(hour: int, minute: int) -> dict:
 
 
 def get_instruments_schedule() -> dict:
-    """返回盘前标的维表调度时间 {"hour": 9, "minute": 10}。"""
-    d = load().get("instruments_schedule", {"hour": 9, "minute": 10})
-    return {"hour": d.get("hour", 9), "minute": d.get("minute", 10)}
+    """返回盘前标的维表调度时间 {"hour": 8, "minute": 10}。"""
+    d = load().get("instruments_schedule", {"hour": 8, "minute": 10})
+    return {"hour": d.get("hour", 8), "minute": d.get("minute", 10)}
 
 
 def set_instruments_schedule(hour: int, minute: int) -> dict:
     h = max(0, min(23, hour))
     m = max(0, min(59, minute))
-    # 盘前不晚于 09:15
-    if h * 60 + m > 9 * 60 + 15:
-        h, m = 9, 15
+    # Must finish before the 09:00 open: the job writes the instrument table that
+    # the realtime poll loop reads.
+    if h * 60 + m > 8 * 60 + 45:
+        h, m = 8, 45
     save({"instruments_schedule": {"hour": h, "minute": m}})
     return {"hour": h, "minute": m}
 
@@ -550,18 +551,19 @@ def set_depth_polling_interval(interval: float) -> float:
 
 
 def get_depth_finalize_time() -> dict:
-    """盘后 sealed 定版时间 {"hour": 15, "minute": 2}。范围 15:01~18:00。"""
-    d = load().get("depth_finalize_time", {"hour": 15, "minute": 2})
-    return {"hour": d.get("hour", 15), "minute": d.get("minute", 2)}
+    """盘后 sealed 定版时间 {"hour": 13, "minute": 35}。范围 13:31~18:00。"""
+    d = load().get("depth_finalize_time", {"hour": 13, "minute": 35})
+    return {"hour": d.get("hour", 13), "minute": d.get("minute", 35)}
 
 
 def set_depth_finalize_time(hour: int, minute: int) -> dict:
-    """保存盘后 sealed 定版时间,强制范围 15:01~18:00。"""
+    """保存盘后 sealed 定版时间,强制范围 13:31~18:00。"""
     h = max(0, min(23, hour))
     m = max(0, min(59, minute))
-    # 下限 15:01, 上限 18:00
-    if h * 60 + m < 15 * 60 + 1:
-        h, m = 15, 1
+    # Never before the 13:30 close: finalize re-pulls the book and overwrites the
+    # sealed cache, so an earlier run would replace it with a mid-session snapshot.
+    if h * 60 + m < 13 * 60 + 31:
+        h, m = 13, 31
     if h * 60 + m > 18 * 60:
         h, m = 18, 0
     save({"depth_finalize_time": {"hour": h, "minute": m}})

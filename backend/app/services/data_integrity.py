@@ -6,8 +6,8 @@
 
 判据 (quote_ts 列, 毫秒 Unix 时间戳, 仅实时 flush 写入真实值):
 - null              → batch 拉取 / 盘后计算写入的权威历史 → 完整
-- d < 今天 且 时刻 < d 15:00 → 盘中快照 (停机前实时写的) → 坏
-- d < 今天 且 时刻 ≥ d 15:00 → 尾盘定版 (close_final) → 完整
+- d < 今天 且 时刻 < d 收盘 → 盘中快照 (停机前实时写的) → 坏
+- d < 今天 且 时刻 ≥ d 收盘 → 尾盘定版 (close_final) → 完整
 - d == 今天         → 实时更新中, 属正常, 不校验
 - 分区缺失的工作日  → 缺口 (工作日近似; 节假日误报的代价是一次空范围拉取,
   merge-upsert 空写, 无害)
@@ -21,17 +21,18 @@ import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from datetime import time as dt_time
 from pathlib import Path
 
 import polars as pl
 
 from app.market_time import CN_TZ
+from app.taiwan.realtime.calendar import REGULAR_OPEN_END
 
 logger = logging.getLogger(__name__)
 
-# 尾盘定版线: quote_ts 达到当日 15:00 即视为收盘后写入 (含 close_final 定版)
-CLOSE_CUTOFF = dt_time(15, 0)
+# Finalized-row line: a partition whose newest quote_ts reaches the Taiwan close was
+# written after trading ended (close_final), so it is authoritative rather than a snapshot.
+CLOSE_CUTOFF = REGULAR_OPEN_END
 
 # 扫描窗口: 最近 N 个自然日内、今天之前的交易日
 SCAN_WINDOW_DAYS = 7

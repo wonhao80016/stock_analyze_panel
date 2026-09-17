@@ -25,9 +25,9 @@ import math
 import os
 import threading
 import time
-from datetime import date, time as dt_time
+from datetime import date
 
-from app.market_time import cn_now, cn_today
+from app.market_time import cn_today
 from pathlib import Path
 
 import polars as pl
@@ -457,7 +457,7 @@ class DepthService:
                 if self._is_continuous_trading():
                     self._poll_once()
                 else:
-                    logger.debug("depth sealed: 非连续竞价时段, 跳过(避免集合竞价盘口覆盖 11:30 定格值)")
+                    logger.debug("depth sealed: outside the regular session, skipping to keep the sealed snapshot")
             except Exception as e:  # noqa: BLE001
                 logger.warning("depth sealed 轮询异常: %s", e)
 
@@ -602,27 +602,15 @@ class DepthService:
         return detect_capabilities()
 
     @staticmethod
-    def _is_trading_hours() -> bool:
-        # 显式北京时间: 容器/服务器本地时区可能是 UTC, 用 naive now() 会整体错开轮询窗口
-        now = cn_now()
-        t = now.time()
-        morning = dt_time(9, 25) <= t <= dt_time(11, 35)
-        afternoon = dt_time(12, 55) <= t <= dt_time(15, 5)
-        return now.weekday() < 5 and (morning or afternoon)
-
-    @staticmethod
     def _is_continuous_trading() -> bool:
-        """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。
+        """Taiwan regular session (Asia/Taipei): 09:00-13:30 on weekdays.
 
-        比 _is_trading_hours 严格: 排除午间休市前后(11:30-13:00)。
-        depth sealed 轮询用此窗口而非宽窗口, 关键原因:
-        12:55-13:00 午后集合竞价准备期, ask1/bid1 盘口语义与连续竞价不同,
-        「涨停价上卖一==0」的真封判定在此期间失效, 会用竞价盘口覆盖 11:30
-        已定格的正确 sealed 值, 导致涨停股误判为 sealed=False(假涨停)被错误扣减。
-        与 quote_service._is_continuous_trading 窗口定义保持一致。
+        Depth polling must stay out of the 08:30-09:00 trial matching window: its
+        ask1/bid1 are indicative rather than executable, so the "no ask left at the
+        limit-up price" sealed test misreads a sealed board as unsealed.
+        Must stay in sync with quote_service._is_continuous_trading.
         """
-        now = cn_now()
-        t = now.time()
-        morning = dt_time(9, 30) <= t <= dt_time(11, 30)
-        afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
-        return now.weekday() < 5 and (morning or afternoon)
+        from app.taiwan.realtime.calendar import get_market_status
+        from app.taiwan.realtime.models import MarketStatus
+
+        return get_market_status() == MarketStatus.OPEN

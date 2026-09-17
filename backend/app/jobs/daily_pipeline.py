@@ -859,7 +859,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
-    # 盘后: 五档盘口 sealed 定版(时间由偏好决定, 默认15:02, 范围15:01~18:00)
+    # 盘后: 五档盘口 sealed 定版(时间由偏好决定, 默认13:35, 范围13:31~18:00)
     depth_sched = preferences.get_depth_finalize_time()
 
     def _depth_finalize():

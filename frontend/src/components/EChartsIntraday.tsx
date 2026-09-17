@@ -191,14 +191,14 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
     }
   }
 
-  // x 軸標籤: 9:30, 10:30, 11:30/13:00, 14:00, 15:00
-  // 11:30(idx 120) 和 13:00(idx 121) 相鄰會重疊, 合併為一個標籤
+  // Hourly ticks across the Taiwan session plus the close.
   const xAxisLabelMap: Record<number, string> = {
-    0: '9:30',
-    60: '10:30',
-    120: '11:30/13:00',
-    181: '14:00',
-    241: '15:00',
+    0: '9:00',
+    60: '10:00',
+    120: '11:00',
+    180: '12:00',
+    240: '13:00',
+    270: '13:30',
   }
   const xAxisLabelFormatter = (_value: string, idx: number) => {
     return xAxisLabelMap[idx] ?? ''

@@ -22,6 +22,25 @@ from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
 from app.tickflow.repository import KlineRepository
 
+
+_MINUTE_WINDOW_MARGIN = timedelta(minutes=5)
+
+
+def intraday_window(trade_date: date) -> tuple[datetime, datetime]:
+    """Minute-bar pull window: the Taiwan regular session plus a small margin.
+
+    The margin covers providers that stamp a bar at its close rather than its open,
+    so the 09:00 and 13:30 bars are never dropped at the edges.
+    The window must be timezone-aware: a naive datetime is read by .timestamp() in
+    the server local timezone, which shifts the window by 8 hours on a UTC container
+    and makes every intraday pull come back empty.
+    """
+    from app.taiwan.realtime.calendar import REGULAR_OPEN_END, REGULAR_OPEN_START
+
+    start = datetime.combine(trade_date, REGULAR_OPEN_START, tzinfo=CN_TZ) - _MINUTE_WINDOW_MARGIN
+    end = datetime.combine(trade_date, REGULAR_OPEN_END, tzinfo=CN_TZ) + _MINUTE_WINDOW_MARGIN
+    return start, end
+
 logger = logging.getLogger(__name__)
 
 
@@ -833,7 +852,7 @@ def fetch_intraday_monitor_batch(
         return pl.DataFrame()
 
     now = now or cn_now()
-    start_time = now.replace(hour=9, minute=25, second=0, microsecond=0)
+    start_time, _ = intraday_window(now.date())
     source = support["source"]
     if source in {"custom_minute", "minute_batch"}:
         limits = capset.limits(Cap.KLINE_MINUTE_BATCH) if capset and capset.has(Cap.KLINE_MINUTE_BATCH) else None
@@ -874,11 +893,7 @@ def fetch_minute_single(
     asset_type: AssetType = "stock",
 ) -> pl.DataFrame:
     """实时拉取单股单日分钟 K(不写入本地)。优先自定义分钟源, 回退 TickFlow。"""
-    from datetime import datetime
-    # 北京时间窗口必须带时区: naive datetime 会被 .timestamp() 按服务器本地时区解释,
-    # UTC 容器上窗口整体偏移 8 小时, 分时补拉必然为空。
-    start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0, tzinfo=CN_TZ)
-    end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0, tzinfo=CN_TZ)
+    start_time, end_time = intraday_window(trade_date)
 
     # 自定义数据源分流: 与 sync_minute_batch 一致, 配了自定义分钟源时走 custom provider,
     # 避免无 TickFlow Pro+ 权限的用户分时图首次打开(本地无数据)时补拉失败返回空。
