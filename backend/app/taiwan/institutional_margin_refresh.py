@@ -39,6 +39,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_INITIAL_BACKOFF_SEC = 1.0
 
+# TWSE answers a rate-limited client with these rather than 429. The 307 has no
+# Location header, so urllib surfaces it as "redirect loop" and the body is the
+# 因為安全性考量 block page.
+THROTTLE_STATUS_CODES = frozenset({307, 308, 428, 429})
+
+# Pause between trading days when backfilling. Without it a 120-day backfill
+# fires ~480 requests back to back and trips the exchange's throttle.
+INTER_REQUEST_DELAY_SEC = 0.4
+
+
+class ExchangeThrottledError(RuntimeError):
+    """The exchange refused the request because we asked too often."""
+
 
 def _fetch_json_with_retry(
     url: str,
@@ -52,10 +65,13 @@ def _fetch_json_with_retry(
       - Timeouts (TimeoutError, urllib.error.URLError wrapping timeout)
       - Connection reset / network dropped
       - HTTP 429 (Too Many Requests)
+      - HTTP 428 / 307 / 308 — TWSE answers a rate-limited client with these
+        instead of 429. The 307 carries no Location, so urllib reports it as a
+        redirect loop; the body is the "因為安全性考量" block page.
       - HTTP 5xx (500, 502, 503, 504)
 
     Non-retryable:
-      - HTTP 4xx (400, 401, 403, 404, etc. except 429)
+      - HTTP 4xx (400, 401, 403, 404, etc. except the throttling codes above)
       - JSON decode / malformed data errors
     """
     attempt = 0
@@ -69,9 +85,13 @@ def _fetch_json_with_retry(
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw)
         except urllib.error.HTTPError as exc:
-            # 429 or 5xx are transient; other 4xx are permanent
-            is_retryable = exc.code == 429 or 500 <= exc.code <= 599
+            is_retryable = exc.code in THROTTLE_STATUS_CODES or 500 <= exc.code <= 599
             if not is_retryable or attempt >= max_attempts:
+                if exc.code in THROTTLE_STATUS_CODES:
+                    raise ExchangeThrottledError(
+                        f"交易所暫時拒絕存取 (HTTP {exc.code})，通常是短時間請求過多；"
+                        f"請稍候再回補，或縮小回補範圍。"
+                    ) from exc
                 raise
             logger.warning(
                 "HTTP %d on %s (attempt %d/%d), retrying in %.1fs...",
@@ -131,6 +151,7 @@ class TaiwanInstitutionalRefreshService:
 
         cur = start_date
         day_index = 0
+        fetched_any = False
         while cur <= end_date:
             # Skip confirmed non-trading days
             if self._calendar.is_trading_day(cur) is False:
@@ -146,6 +167,12 @@ class TaiwanInstitutionalRefreshService:
                 stats["dates_skipped"] += 1
                 cur += timedelta(days=1)
                 continue
+
+            # Space out the calls we are actually about to make; skipped days
+            # cost nothing and must not slow a mostly-cached backfill down.
+            if fetched_any:
+                time.sleep(INTER_REQUEST_DELAY_SEC)
+            fetched_any = True
 
             try:
                 # 1 HTTP call for TWSE, 1 HTTP call for TPEx
@@ -243,6 +270,7 @@ class TaiwanMarginRefreshService:
 
         cur = start_date
         day_index = 0
+        fetched_any = False
         while cur <= end_date:
             # Skip confirmed non-trading days
             if self._calendar.is_trading_day(cur) is False:
@@ -258,6 +286,12 @@ class TaiwanMarginRefreshService:
                 stats["dates_skipped"] += 1
                 cur += timedelta(days=1)
                 continue
+
+            # Space out the calls we are actually about to make; skipped days
+            # cost nothing and must not slow a mostly-cached backfill down.
+            if fetched_any:
+                time.sleep(INTER_REQUEST_DELAY_SEC)
+            fetched_any = True
 
             try:
                 # 1 HTTP call for TWSE, 1 HTTP call for TPEx

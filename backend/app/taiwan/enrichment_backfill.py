@@ -36,6 +36,17 @@ MAX_BACKFILL_DAYS = 250
 
 _DATASET_LABEL = {"institutional": "三大法人", "margin": "融資融券"}
 
+_THROTTLE_MARKERS = ("交易所暫時拒絕存取", "HTTP Error 307", "HTTP Error 308", "HTTP Error 428")
+
+
+def _count_throttled(stats: dict[str, Any]) -> int:
+    """How many failed days were the exchange throttling us rather than real errors."""
+    return sum(
+        1
+        for item in stats.get("failed_dates") or []
+        if any(marker in str(item) for marker in _THROTTLE_MARKERS)
+    )
+
 
 class TaiwanEnrichmentDatasetStatus(BaseModel):
     has_data: bool
@@ -250,6 +261,12 @@ class TaiwanEnrichmentBackfillService:
                 f"融資融券: 成功 {margin_stats['dates_fetched']} / "
                 f"跳過 {margin_stats['dates_skipped']} / 失敗 {len(margin_stats['failed_dates'])}。"
             )
+            throttled = _count_throttled(inst_stats) + _count_throttled(margin_stats)
+            if throttled:
+                message += (
+                    f" 其中 {throttled} 天因交易所限流被拒 —— 這是短時間請求過多所致，"
+                    f"稍候再回補即可補上，資料本身沒有問題。"
+                )
             self._update_job(
                 job_id,
                 status="success",
