@@ -51,8 +51,6 @@ ALLOWED_FIELDS: frozenset[str] = frozenset({
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
     "annual_vol_20d",
     "rsi_6", "rsi_14", "rsi_24",
-    # 异动偏离 (交易所异动规则口径, 运行时列)
-    "deviate_3d", "deviate_10d", "deviate_30d",
     # 距涨跌停距离 (台股法定涨跌幅, 运行时列, 由 compute_enriched_today 计算)
     "distance_to_upper_limit", "distance_to_lower_limit",
 })

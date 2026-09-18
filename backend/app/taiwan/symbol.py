@@ -41,14 +41,10 @@ Design rationale:
    A-share exchange suffix (``SH`` / ``SZ`` / ``BJ``), enabling a future
    multi-market coexistence path if needed.
 
-4. **Suffix length note**: The existing codebase has *one* place that
-   uses ``str.slice(-2)`` to extract the 2-char exchange suffix
-   (``pipeline.py:_bench_exchange_expr``).  That function is A-share
-   deviation logic slated for replacement.  The canonical suffix length
-   should not be constrained by one line of legacy code.  The robust
-   extraction pattern already used elsewhere — ``symbol.split(".")[0]``
-   for code and ``symbol.split(".")[-1]`` for exchange — works with any
-   suffix length.
+4. **Suffix length note**: Exchange suffixes here are 4 characters, so
+   any 2-character slice is wrong.  Extract with ``symbol.split(".")[0]``
+   for the code and ``symbol.split(".")[-1]`` for the exchange, which
+   works with any suffix length.
 """
 from __future__ import annotations
 

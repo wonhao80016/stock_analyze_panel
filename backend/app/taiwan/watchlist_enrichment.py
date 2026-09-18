@@ -18,7 +18,7 @@ network itself; it only orchestrates already-built services:
     the whole watchlist, never per symbol.
 
 Deliberately still NOT implemented here (Phase 8B-5.0.5 report §S):
-KDJ, Bollinger, ATR, turnover_rate, amplitude, annual_vol_20d, RPS, deviate_*,
+KDJ, Bollinger, ATR, turnover_rate, amplitude, annual_vol_20d, RPS,
 signal_* (limit-up/board-related) — those stay ``None``; faking them would be
 worse than showing "—".
 """

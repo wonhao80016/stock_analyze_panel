@@ -581,9 +581,6 @@ class KlineRepository:
                     df_full = compute_indicators(df_hist)
                     logger.info("enriched refresh step done: compute indicators rows=%d (%.2fs)", len(df_full), time.perf_counter() - step)
 
-                    # 异动偏离列 (deviate_Nd = 个股动量 - 基准指数动量), 运行时附着
-                    from app.indicators.pipeline import attach_deviation_columns
-                    df_full = attach_deviation_columns(df_full, self.store.data_dir)
 
                     step = time.perf_counter()
                     logger.info("enriched refresh step start: compute signals")
@@ -908,8 +905,6 @@ class KlineRepository:
                 pl.col("high").tail(59).max().alias("_high_59d"),
                 pl.col("low").tail(59).min().alias("_low_59d"),
 
-                # 异动偏离 deviate_3d 用 (与 5d/10d/30d 同语义: 尾部第 N 个收盘)
-                pl.col("close").tail(3).first().alias("_close_3d_ago"),
                 pl.col("close").tail(5).first().alias("_close_5d_ago"),
                 pl.col("close").tail(10).first().alias("_close_10d_ago"),
                 pl.col("close").tail(20).first().alias("_close_20d_ago"),

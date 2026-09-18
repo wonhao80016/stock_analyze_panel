@@ -113,9 +113,6 @@ export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | nu
     case 'momentum_20d': return <td key={col.id} className={`${numCls} ${priceColorClass(r.momentum_20d)}`}>{fmtPct(r.momentum_20d)}</td>
     case 'momentum_30d': return <td key={col.id} className={`${numCls} ${priceColorClass(r.momentum_30d)}`}>{fmtPct(r.momentum_30d)}</td>
     case 'momentum_60d': return <td key={col.id} className={`${numCls} ${priceColorClass(r.momentum_60d)}`}>{fmtPct(r.momentum_60d)}</td>
-    case 'deviate_3d':  return <td key={col.id} className={`${numCls} ${priceColorClass(r.deviate_3d)}`} title="偏離值 = 個股3日漲跌幅 − 對應指數 (主板±20%/創業科創±30%/北交所±40% 觸發)">{fmtPct(r.deviate_3d)}</td>
-    case 'deviate_10d': return <td key={col.id} className={`${numCls} ${priceColorClass(r.deviate_10d)}`} title="10日累計偏離 (+100% 觸發嚴重異常波動)">{fmtPct(r.deviate_10d)}</td>
-    case 'deviate_30d': return <td key={col.id} className={`${numCls} ${priceColorClass(r.deviate_30d)}`} title="30日累計偏離 (+200% 觸發嚴重異常波動)">{fmtPct(r.deviate_30d)}</td>
     // 連板
     case 'limit_ups':
       return (
