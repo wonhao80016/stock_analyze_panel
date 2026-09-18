@@ -43,6 +43,13 @@ const RANGE_OPTIONS = [
   { label: '1 年', days: 360 },
 ]
 
+export const signColorClass = (v: number | null | undefined) => {
+  if (v == null || Number.isNaN(v) || v === 0) return 'text-muted'
+  return v > 0 ? 'text-rose-500' : 'text-emerald-500'
+}
+
+export const signPrefix = (v: number | null | undefined) => (v != null && v > 0 ? '+' : '')
+
 interface TaiwanStockDetailProps {
   /** Renders inside the preview dialog, which supplies its own chrome and chart. */
   embeddedSymbol?: string
@@ -168,12 +175,11 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
 
   // Volume display helper
   const formatVol = (shares: number | null | undefined) => {
-    if (shares == null) return '--'
-    if (volUnit === 'lots') {
-      const lots = Math.round(shares / 1000)
-      return `${lots.toLocaleString()} 張`
-    }
-    return `${shares.toLocaleString()} 股`
+    if (shares == null || Number.isNaN(shares)) return '--'
+    const inLots = volUnit === 'lots'
+    const value = inLots ? Math.round(shares / 1000) : shares
+    // Formatted volume must never render as '-0'.
+    return `${(Object.is(value, -0) ? 0 : value).toLocaleString()} ${inLots ? '張' : '股'}`
   }
 
   return (
@@ -434,11 +440,10 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                   </span>
                   <div className="mt-1 flex items-center justify-between text-[11px] font-mono">
                     <span>{data.market_context.close?.toFixed(2) || '--'}</span>
-                    <span className={cn(
-                      (data.market_context.change || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'
-                    )}>
-                      {(data.market_context.change || 0) >= 0 ? '+' : ''}
-                      {data.market_context.change_pct?.toFixed(2) || '0.00'}%
+                    <span className={signColorClass(data.market_context.change_pct)}>
+                      {data.market_context.change_pct != null
+                        ? `${signPrefix(data.market_context.change_pct)}${data.market_context.change_pct.toFixed(2)}%`
+                        : '--'}
                     </span>
                   </div>
                 </div>
@@ -631,29 +636,29 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                 <div className="space-y-2.5 text-xs">
                   <div className="flex items-center justify-between">
                     <span className="text-muted">外資及陸資</span>
-                    <span className={cn('font-mono font-bold', (data.institutional.foreign_net || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')}>
-                      {(data.institutional.foreign_net || 0) >= 0 ? '+' : ''}
+                    <span className={cn('font-mono font-bold', signColorClass(data.institutional.foreign_net))}>
+                      {signPrefix(data.institutional.foreign_net)}
                       {formatVol(data.institutional.foreign_net)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted">投信基金</span>
-                    <span className={cn('font-mono font-bold', (data.institutional.investment_trust_net || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')}>
-                      {(data.institutional.investment_trust_net || 0) >= 0 ? '+' : ''}
+                    <span className={cn('font-mono font-bold', signColorClass(data.institutional.investment_trust_net))}>
+                      {signPrefix(data.institutional.investment_trust_net)}
                       {formatVol(data.institutional.investment_trust_net)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted">自營商合計</span>
-                    <span className={cn('font-mono font-bold', (data.institutional.dealer_net || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')}>
-                      {(data.institutional.dealer_net || 0) >= 0 ? '+' : ''}
+                    <span className={cn('font-mono font-bold', signColorClass(data.institutional.dealer_net))}>
+                      {signPrefix(data.institutional.dealer_net)}
                       {formatVol(data.institutional.dealer_net)}
                     </span>
                   </div>
                   <div className="pt-2 border-t border-border flex items-center justify-between">
                     <span className="font-semibold text-foreground">三大法人合計</span>
-                    <span className={cn('font-mono font-bold text-sm', (data.institutional.total_net || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')}>
-                      {(data.institutional.total_net || 0) >= 0 ? '+' : ''}
+                    <span className={cn('font-mono font-bold text-sm', signColorClass(data.institutional.total_net))}>
+                      {signPrefix(data.institutional.total_net)}
                       {formatVol(data.institutional.total_net)}
                     </span>
                   </div>
@@ -690,8 +695,8 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted">融資增減</span>
-                    <span className={cn('font-mono font-bold', (data.margin.margin_change || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')}>
-                      {(data.margin.margin_change || 0) >= 0 ? '+' : ''}
+                    <span className={cn('font-mono font-bold', signColorClass(data.margin.margin_change))}>
+                      {signPrefix(data.margin.margin_change)}
                       {formatVol(data.margin.margin_change)}
                     </span>
                   </div>
@@ -701,8 +706,8 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted">融券增減</span>
-                    <span className={cn('font-mono font-bold', (data.margin.short_change || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')}>
-                      {(data.margin.short_change || 0) >= 0 ? '+' : ''}
+                    <span className={cn('font-mono font-bold', signColorClass(data.margin.short_change))}>
+                      {signPrefix(data.margin.short_change)}
                       {formatVol(data.margin.short_change)}
                     </span>
                   </div>
@@ -732,10 +737,10 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                       <span>投信 5 日累計</span>
                     </div>
                     <div className="flex items-center justify-between font-mono font-bold mt-1">
-                      <span className={(data.factors.foreign_net_5d || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}>
+                      <span className={signColorClass(data.factors.foreign_net_5d)}>
                         {formatVol(data.factors.foreign_net_5d)}
                       </span>
-                      <span className={(data.factors.investment_trust_net_5d || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}>
+                      <span className={signColorClass(data.factors.investment_trust_net_5d)}>
                         {formatVol(data.factors.investment_trust_net_5d)}
                       </span>
                     </div>
@@ -747,10 +752,10 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                       <span>融資變動量</span>
                     </div>
                     <div className="flex items-center justify-between font-mono font-bold mt-1">
-                      <span className={(data.factors.dealer_net_5d || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}>
+                      <span className={signColorClass(data.factors.dealer_net_5d)}>
                         {formatVol(data.factors.dealer_net_5d)}
                       </span>
-                      <span className={(data.factors.margin_balance_change || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500'}>
+                      <span className={signColorClass(data.factors.margin_balance_change)}>
                         {formatVol(data.factors.margin_balance_change)}
                       </span>
                     </div>
@@ -1149,9 +1154,7 @@ function ChipHistoryModal({ symbol, name, type, formatVol, onClose }: ChipHistor
   const marginRows: TaiwanMarginHistoryRow[] = marginQuery.data?.rows ?? []
   const rowCount = isInstitutional ? institutionalRows.length : marginRows.length
 
-  const signClass = (v: number | null | undefined) =>
-    cn('font-mono font-semibold', (v || 0) >= 0 ? 'text-rose-500' : 'text-emerald-500')
-  const signPrefix = (v: number | null | undefined) => ((v || 0) >= 0 ? '+' : '')
+  const signClass = (v: number | null | undefined) => cn('font-mono font-semibold', signColorClass(v))
 
   return (
     <Modal

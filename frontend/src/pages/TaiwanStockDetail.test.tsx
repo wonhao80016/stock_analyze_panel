@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { TaiwanStockDetail } from './TaiwanStockDetail'
+import { TaiwanStockDetail, signColorClass, signPrefix } from './TaiwanStockDetail'
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -74,5 +74,37 @@ describe('TaiwanStockDetail — back navigation (DAILY_USE_CORE_UX_FIXES P1-2)',
     fireEvent.click(await screen.findByText('返回'))
 
     expect(await screen.findByText('SCREENER PAGE')).toBeInTheDocument()
+  })
+})
+
+describe('TaiwanStockDetail — sign helpers', () => {
+  it('treats missing values as neutral, not as a zero net buy', () => {
+    expect(signColorClass(null)).toBe('text-muted')
+    expect(signColorClass(undefined)).toBe('text-muted')
+    expect(signColorClass(NaN)).toBe('text-muted')
+    expect(signPrefix(null)).toBe('')
+    expect(signPrefix(undefined)).toBe('')
+    expect(signPrefix(NaN)).toBe('')
+  })
+
+  it('treats zero as neutral without a plus sign', () => {
+    expect(signColorClass(0)).toBe('text-muted')
+    expect(signColorClass(-0)).toBe('text-muted')
+    expect(signPrefix(0)).toBe('')
+    expect(signPrefix(-0)).toBe('')
+  })
+
+  it('marks positive values as up with a plus sign', () => {
+    expect(signColorClass(1)).toBe('text-rose-500')
+    expect(signColorClass(0.01)).toBe('text-rose-500')
+    expect(signPrefix(1)).toBe('+')
+    expect(signPrefix(0.01)).toBe('+')
+  })
+
+  it('marks negative values as down without a plus sign', () => {
+    expect(signColorClass(-1)).toBe('text-emerald-500')
+    expect(signColorClass(-0.01)).toBe('text-emerald-500')
+    expect(signPrefix(-1)).toBe('')
+    expect(signPrefix(-0.01)).toBe('')
   })
 })
