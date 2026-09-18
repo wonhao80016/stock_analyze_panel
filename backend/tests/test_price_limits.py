@@ -11,6 +11,7 @@ from app.backtest.matrix import load_market_data_matrix_from_parquet
 from app.indicators import pipeline
 from app.price_limits import (
     MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
+    numpy_limit_pct_vectors,
     numpy_limit_price,
     numpy_price_limit_matrix,
     polars_is_risk_warning_name,
@@ -42,6 +43,12 @@ def test_scalar_price_limit_rules(symbol, trade_date, is_st, expected):
 
 
 def test_polars_and_numpy_price_limit_rules_match():
+    """A-share boards only: both variants derive the rate from the symbol alone.
+
+    The Taiwan half of this relationship is pinned separately by
+    test_polars_null_and_numpy_nan_agree_on_taiwan_no_limit, where the two
+    variants legitimately differ.
+    """
     dates = [date(2026, 7, 3), date(2026, 7, 6)]
     symbols = ["600001.SH", "300001.SZ", "689001.SH", "830001.BJ"]
     names = ["*st主板", "*ST创业", "科创ST", "北交ST"]
@@ -498,3 +505,189 @@ def test_compute_limit_signals_batch_mixed_market_a_share_unaffected_by_taiwan_j
     tw_row = result.filter(pl.col("symbol") == tw_symbol).sort("date")
     assert a_row["signal_limit_up"][-1] is True
     assert tw_row["signal_limit_up"][-1] is False
+
+
+# -- Taiwan branch of the NumPy vectors: the per-instrument limit must reach
+# -- the backtest matrix, which cannot read the Polars expression's null. --
+
+
+def _no_limit_etf(symbol: str) -> TaiwanInstrument:
+    return _taiwan_instrument(
+        symbol,
+        instrument_type="etf",
+        etf_category="foreign_equity",
+        classification_source="official_metadata",
+        underlying_scope="foreign",
+    )
+
+
+def _leveraged_etf(symbol: str) -> TaiwanInstrument:
+    return _taiwan_instrument(
+        symbol,
+        instrument_type="etf",
+        etf_category="leveraged",
+        classification_source="official_metadata",
+        underlying_scope="domestic",
+        leverage_multiplier=2.0,
+    )
+
+
+def test_numpy_limit_pct_vectors_resolve_taiwan_per_instrument(monkeypatch):
+    ordinary = "2330.TWSE"
+    leveraged = "00631L.TWSE"
+    foreign = "00646.TWSE"
+    unconfirmed = "00888.TWSE"
+    absent = "9999.TPEX"
+    _patch_taiwan_master(monkeypatch, {
+        ordinary: _taiwan_instrument(ordinary),
+        leveraged: _leveraged_etf(leveraged),
+        foreign: _no_limit_etf(foreign),
+        unconfirmed: _taiwan_instrument(
+            unconfirmed,
+            instrument_type="etf",
+            etf_category="equity",
+            classification_source="official_metadata",
+            underlying_scope="unknown",
+        ),
+    })
+    symbols = [ordinary, leveraged, foreign, unconfirmed, absent]
+
+    _legacy, current = numpy_limit_pct_vectors(symbols, ["測試"] * len(symbols))
+
+    assert current[0] == pytest.approx(0.10)
+    assert current[1] == pytest.approx(0.20)
+    assert np.isnan(current[2])
+    assert np.isnan(current[3])
+    assert np.isnan(current[4])
+
+
+def test_numpy_limit_pct_vectors_do_not_apply_a_share_st_rule_to_taiwan(monkeypatch):
+    symbol = "2330.TWSE"
+    _patch_taiwan_master(monkeypatch, {symbol: _taiwan_instrument(symbol)})
+
+    legacy, current = numpy_limit_pct_vectors([symbol, "600001.SH"], ["ST測試", "*ST主板"])
+
+    assert legacy[0] == pytest.approx(0.10)
+    assert current[0] == pytest.approx(0.10)
+    assert legacy[1] == pytest.approx(0.05)
+
+
+def test_numpy_limit_pct_vectors_skip_security_master_for_a_shares(monkeypatch):
+    def _explode():
+        raise AssertionError("Security Master must not load for A-share-only symbols")
+
+    monkeypatch.setattr("app.taiwan.universe.get_security_master", _explode)
+
+    legacy, current = numpy_limit_pct_vectors(["600001.SH", "300001.SZ"], ["*ST主板", "普通"])
+
+    assert current.tolist() == [0.10, 0.20]
+    assert legacy.tolist() == [0.05, 0.20]
+
+
+def test_polars_null_and_numpy_nan_agree_on_taiwan_no_limit(monkeypatch):
+    """Pins what the two variants now share, and where they deliberately part.
+
+    Shared: an instrument with no limit produces no limit price at all --
+    null from polars_limit_price, NaN from numpy_limit_price. The two absence
+    markers are not interchangeable: polars_limit_price casts to Int64 and
+    rejects a NaN percentage, so the Polars side must stay null.
+    Different: polars_price_limit_pct has no Security Master access and stays
+    null for every Taiwan symbol, while numpy_limit_pct_vectors resolves the
+    real per-instrument rate (0.10 / 0.20 / NaN).
+    """
+    ordinary = "2330.TWSE"
+    foreign = "00646.TWSE"
+    _patch_taiwan_master(monkeypatch, {
+        ordinary: _taiwan_instrument(ordinary),
+        foreign: _no_limit_etf(foreign),
+    })
+    symbols = [ordinary, foreign]
+
+    polars_pct = pl.DataFrame({
+        "symbol": symbols,
+        "date": [date(2026, 9, 17)] * len(symbols),
+        "is_st": [False] * len(symbols),
+    }).with_columns(
+        polars_price_limit_pct(pl.col("symbol"), pl.col("date"), pl.col("is_st")).alias("pct")
+    )["pct"]
+    _legacy, numpy_pct = numpy_limit_pct_vectors(symbols, ["測試"] * len(symbols))
+
+    assert polars_pct.is_null().all()
+    assert numpy_pct[0] == pytest.approx(0.10)
+    assert np.isnan(numpy_pct[1])
+
+    previous = np.array([100.0, 100.0], dtype=np.float64)
+    frame = pl.DataFrame({"previous": previous, "limit": polars_pct})
+    for up in (True, False):
+        polars_price = frame.select(
+            polars_limit_price(pl.col("previous"), pl.col("limit"), up=up).alias("price")
+        )["price"]
+        numpy_price = numpy_limit_price(previous, numpy_pct, up=up)
+        assert polars_price.is_null().all()
+        assert np.isfinite(numpy_price[0])
+        assert np.isnan(numpy_price[1])
+
+    with pytest.raises(pl.exceptions.InvalidOperationError):
+        frame.with_columns(pl.col("limit").fill_null(float("nan"))).select(
+            polars_limit_price(pl.col("previous"), pl.col("limit"), up=True)
+        )
+
+
+def test_numpy_limit_price_is_nan_where_the_limit_is_nan():
+    previous = np.array([100.0, 100.0, np.nan], dtype=np.float64)
+    limits = np.array([0.10, np.nan, 0.10], dtype=np.float64)
+
+    up_price = numpy_limit_price(previous, limits, up=True)
+    down_price = numpy_limit_price(previous, limits, up=False)
+
+    assert up_price[0] == pytest.approx(110.0)
+    assert down_price[0] == pytest.approx(90.0)
+    assert np.isnan(up_price[1]) and np.isnan(down_price[1])
+    assert np.isnan(up_price[2]) and np.isnan(down_price[2])
+
+
+def test_market_matrix_never_marks_a_no_limit_taiwan_etf_as_limit_locked(tmp_path, monkeypatch):
+    ordinary = "2330.TWSE"
+    foreign = "00646.TWSE"
+    _patch_taiwan_master(monkeypatch, {
+        ordinary: _taiwan_instrument(ordinary),
+        foreign: _no_limit_etf(foreign),
+    })
+    root = tmp_path / "market"
+    rows = [
+        (date(2026, 9, 16), 100.0, 100.0),
+        (date(2026, 9, 17), 110.0, 200.0),
+    ]
+    for trade_date, stock_close, etf_close in rows:
+        partition = root / f"date={trade_date.isoformat()}"
+        partition.mkdir(parents=True)
+        pl.DataFrame({
+            "symbol": [ordinary, foreign],
+            "date": [trade_date, trade_date],
+            "open": [stock_close, etf_close],
+            "high": [stock_close, etf_close],
+            "low": [stock_close, etf_close],
+            "close": [stock_close, etf_close],
+            "raw_close": [stock_close, etf_close],
+            "volume": [1000.0, 1000.0],
+        }).write_parquet(partition / "part.parquet")
+
+    market = load_market_data_matrix_from_parquet(
+        root,
+        rows[0][0],
+        rows[-1][0],
+        field_columns={"raw_close", "price_limit_pct"},
+        instruments=pl.DataFrame({
+            "symbol": [ordinary, foreign],
+            "name": ["台積電", "測試ETF"],
+        }),
+        cache_root=tmp_path / "cache",
+    )
+
+    column = {symbol: index for index, symbol in enumerate(market.symbols)}
+    limits = market.field("price_limit_pct")
+    assert limits[-1, column[ordinary]] == pytest.approx(0.10)
+    assert np.isnan(limits[-1, column[foreign]])
+    assert market.limit_up_locked[-1, column[ordinary]] == 1
+    assert market.limit_up_locked[-1, column[foreign]] == 0
+    assert market.limit_down_locked[-1, column[foreign]] == 0

@@ -2,16 +2,22 @@
 
 Covers A-share board rates directly; Taiwan symbols are delegated to
 ``app.taiwan.market_rules.PriceLimitModel`` (see ``taiwan_price_limit_pct``,
-``board_limit_pct``, ``price_limit_pct``). ``polars_price_limit_pct`` is the
-lone exception: as a pure Polars expression it cannot reach Security Master
+``board_limit_pct``, ``price_limit_pct``) or, where the per-instrument class
+matters, to ``app.taiwan.universe.models.MarketProfileBridge`` (see
+``numpy_limit_pct_vectors``). ``polars_price_limit_pct`` is the lone
+exception: as a pure Polars expression it cannot reach Security Master
 data, so it returns null for Taiwan symbols and relies on callers to
 coalesce with an authoritative source (see
 ``app.indicators.pipeline.taiwan_limit_profile``).
+
+Absence of a limit is NaN in the NumPy vectors and null in the Polars
+expressions; 0.0 is never used, because a zero band would read as
+"locked at every price" to the limit-lock consumers.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 
 import numpy as np
@@ -132,18 +138,63 @@ def polars_limit_price(previous: pl.Expr, limit_pct: pl.Expr, *, up: bool) -> pl
     return ((cents * numerator + 50) // 100) / 100
 
 
+TAIWAN_SYMBOL_SUFFIXES = (".TWSE", ".TPEX")
+
+
+def taiwan_limit_pct_by_symbol(symbols: Sequence[str]) -> dict[str, float | None]:
+    """Resolve each Taiwan symbol's own limit through the Security Master.
+
+    ``None`` means either a genuine no-limit instrument or one the master
+    refuses to classify; the two are indistinguishable here and consumers do
+    not agree on what to do with it - the screener drops such rows, the
+    backtest treats the bar as unlocked. Non-Taiwan symbols are absent from
+    the result, so the master is never loaded for them.
+    """
+    taiwan = sorted({
+        str(symbol)
+        for symbol in symbols
+        if str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES)
+    })
+    if not taiwan:
+        return {}
+
+    from app.taiwan.universe import get_security_master
+    from app.taiwan.universe.models import MarketProfileBridge
+
+    master = get_security_master()
+    resolved: dict[str, float | None] = {}
+    for symbol in taiwan:
+        instrument = master.get_instrument(symbol)
+        if instrument is None:
+            resolved[symbol] = None
+            continue
+        try:
+            resolved[symbol] = MarketProfileBridge.get_price_limit_pct(instrument)
+        except ValueError:
+            resolved[symbol] = None
+    return resolved
+
+
+def _limit_pct_value(symbol: str, taiwan_pct: Mapping[str, float | None]) -> float:
+    pct = taiwan_pct[symbol] if symbol in taiwan_pct else board_limit_pct(symbol)
+    return np.nan if pct is None else float(pct)
+
+
 def numpy_limit_pct_vectors(
     symbols: Sequence[str],
     names: Sequence[str],
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return pre/post-change vectors once; callers select one per date."""
+    taiwan_pct = taiwan_limit_pct_by_symbol(symbols)
     current = np.fromiter(
-        (board_limit_pct(str(symbol)) for symbol in symbols),
+        (_limit_pct_value(str(symbol), taiwan_pct) for symbol in symbols),
         dtype=np.float64,
         count=len(symbols),
     )
     legacy = current.copy()
-    for asset_id, (_symbol, name) in enumerate(zip(symbols, names, strict=True)):
+    for asset_id, (symbol, name) in enumerate(zip(symbols, names, strict=True)):
+        if str(symbol) in taiwan_pct:
+            continue
         if current[asset_id] == MAIN_BOARD_LIMIT and is_risk_warning_name(name):
             legacy[asset_id] = LEGACY_MAIN_BOARD_ST_LIMIT
     return legacy, current
@@ -196,11 +247,13 @@ def numpy_limit_price(
 ) -> np.ndarray:
     """NumPy counterpart of :func:`polars_limit_price`."""
     sign = 1 if up else -1
-    numerator = np.rint((1.0 + sign * limit_pct) * 100.0).astype(np.int64)
     result = np.full(previous.shape, np.nan, dtype=np.float64)
-    finite = np.isfinite(previous)
-    cents = np.floor(previous[finite] * 100.0 + 0.5).astype(np.int64)
-    result[finite] = (
-        ((cents * numerator[finite] + 50) // 100).astype(np.float64) / 100.0
-    )
+    # A NaN percentage casts to INT64_MIN instead of propagating, so a
+    # no-limit instrument must be excluded rather than arithmetically carried.
+    usable = np.isfinite(previous) & np.isfinite(limit_pct)
+    if not usable.any():
+        return result
+    numerator = np.rint((1.0 + sign * limit_pct[usable]) * 100.0).astype(np.int64)
+    cents = np.floor(previous[usable] * 100.0 + 0.5).astype(np.int64)
+    result[usable] = ((cents * numerator + 50) // 100).astype(np.float64) / 100.0
     return result
