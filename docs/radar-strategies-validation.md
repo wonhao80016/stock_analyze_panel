@@ -130,6 +130,37 @@
   不會用殘缺資料計算。
 - `frontend/src/pages/Dashboard.tsx`：新增「策略當日推薦」Card，讀取上述快取。
 
+### 即時行情曾讓選股永遠回 0 檔（已修）
+
+Card 接上後仍空白，根因不在策略也不在 Card：
+
+1. `quote_service` 的背景輪詢在台股只抓自選股（當時 9 檔），卻沿用「全市場覆寫」語意
+   寫入 `kline_daily` 與 `kline_daily_enriched`，為交易所尚未公布的當日造出分區。
+2. `enriched_latest_date()` 在任何一次寫入（哪怕 1 列）後就把快取日期設為當天，零完整度檢查。
+3. `ScreenerService.latest_date()` 讀的正是該日期，於是全市場掃描以一個只有 9 檔的日子為基準，
+   20 支策略一律回 0 檔。
+
+修法（`feat/radar-strategies`）：
+
+- **語意分離**：新增 `KlineRepository.taiwan_official_latest_date()` 直接查 `TaiwanDailyStore`，
+  選股改用它；`enriched_latest_date()` 維持「今天」語意不動，即時行情、自選股卡、
+  監控規則等需要當日的消費者不受影響。
+- **寫入閘門**：`_live_write_allowed()` 只允許為交易所已公布的日期落磁碟。
+  閘門直接查 `TaiwanDailyStore`，**刻意不查 enriched 自己的分區**——否則既有污染分區
+  會替自己背書，形成「污染騙過閘門、閘門放行更多污染」的迴圈。
+  被擋下時記憶體快取仍更新，live 讀者照樣拿得到今天。
+- **覆寫改合併**：`flush_live_*` 收斂為 `merge_live_*`。覆寫語意只在「即時來源真的涵蓋全市場」
+  時才安全，台股並非如此，覆寫會清掉分區內其他所有標的。保留 `force=True` 逃生門。
+- **補刷快取**：盤後排程發布指標後補呼叫 `rebuild_views()` + `refresh_cache()`。
+  在此之前發布只寫磁碟，記憶體仍留著盤中那幾檔，而 `_load_enriched_for_date()`
+  只要日期相符就直接採用快取、不檢查列數。
+
+驗證：選股由 0 檔恢復（`as_of=2026-09-17`，六支新策略共 108 檔）。
+新增 `tests/test_screening_basis_date.py`（4 項）與 `tests/test_live_write_gate.py`（5 項）。
+
+**後果須知**：盤中選股基準固定為前一個已公布交易日，直到晚間排程跑完才前進。
+技術上正確，但體感像「盤中不會動」，前端宜標示基準日。
+
 ### 執行前提
 
 策略執行需要 `data/instruments/` 有股本資料——既有策略

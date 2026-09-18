@@ -316,6 +316,9 @@ class KlineRepository:
         # ---- Polars 缓存 ----
         self._enriched_cache: pl.DataFrame | None = None       # 最新一天 (~5500行)
         self._enriched_cache_date: date | None = None
+        # Dates the exchange has actually published, used to gate realtime writes.
+        # Invalidated by refresh_cache(); see _official_stock_dates().
+        self._official_dates: frozenset[date] | None = None
         self._live_agg_cache: pl.DataFrame | None = None       # 预计算聚合表 (~5500行)
         self._live_agg_cache_date: date | None = None
         self._live_agg_check_date: date | None = None          # 上次跨日校验时的 today (快路径节流)
@@ -395,6 +398,11 @@ class KlineRepository:
         """
         started = time.perf_counter()
         logger.info("cache refresh start (background=%s)", background)
+
+        # The post-close publish is what makes a new day official, and this runs
+        # right after it; a stale set here would keep gating out writes for a day
+        # whose data has just landed.
+        self._official_dates = None
 
         step = time.perf_counter()
         logger.info("cache refresh step start: instruments")
@@ -1376,6 +1384,53 @@ class KlineRepository:
         """返回缓存中的 enriched 最新日期。"""
         return self._enriched_cache_date
 
+    def _official_stock_dates(self) -> frozenset[date]:
+        """Dates the exchange has published, cached until refresh_cache().
+
+        Deliberately reads TaiwanDailyStore rather than the enriched partitions:
+        a realtime write creates an enriched partition for a day the exchange has
+        not published, so trusting those would let existing contamination vouch
+        for itself and admit more.
+        """
+        if self._official_dates is None:
+            from app.taiwan.daily_store import TaiwanDailyStore
+
+            self._official_dates = frozenset(TaiwanDailyStore().available_dates())
+        return self._official_dates
+
+    def _live_write_allowed(self, dt, *, force: bool) -> bool:
+        """Whether a realtime write for *dt* may touch disk.
+
+        The live poller fetches only the watchlist, so letting it create a
+        partition for a day the exchange has not published yields a day that
+        looks complete but holds a handful of symbols. Writes for such a day are
+        kept in memory only, where "today" is what the live readers want anyway.
+        """
+        if force:
+            return True
+        try:
+            d = dt if isinstance(dt, date) else date.fromisoformat(str(dt))
+        except (TypeError, ValueError):
+            return False
+        return self.date_has_official_stock_data(d)
+
+    def date_has_official_stock_data(self, d: date) -> bool:
+        """Whether *d* is a day the exchange has published data for."""
+        return d in self._official_stock_dates()
+
+    def taiwan_official_latest_date(self) -> date | None:
+        """Most recent trading day that has official exchange data.
+
+        Deliberately distinct from enriched_latest_date(), which tracks "today"
+        for the live quote path and advances on a single realtime tick. Anything
+        scanning the whole market must use this instead: a nine-symbol realtime
+        write would otherwise make an unfinished day look like a complete one.
+        """
+        from app.taiwan.daily_store import TaiwanDailyStore
+
+        dates = TaiwanDailyStore().available_dates()
+        return dates[-1] if dates else None
+
     # ================================================================
     # 热路径: Polars 查询 (Chart / Screener / Signals / Intraday)
     # ================================================================
@@ -2139,9 +2194,13 @@ class KlineRepository:
             if publication is not None:
                 publication.commit()
 
-    def merge_live_daily_asset(self, asset_type: str, df: pl.DataFrame) -> None:
+    def merge_live_daily_asset(
+        self, asset_type: str, df: pl.DataFrame, *, force: bool = False
+    ) -> None:
         """按 symbol 合并当天指定资产日K分区。用于少量自选实时，不覆盖全市场。"""
         if df.is_empty() or "date" not in df.columns:
+            return
+        if not self._live_write_allowed(df["date"][0], force=force):
             return
         table = {
             "stock": "kline_daily",
@@ -2182,11 +2241,20 @@ class KlineRepository:
         )
         return df.join(metadata, on="symbol", how="left")
 
-    def merge_live_enriched_asset(self, asset_type: str, df: pl.DataFrame) -> None:
-        """按 symbol 合并当天 enriched 分区和内存缓存。用于少量自选实时。"""
+    def merge_live_enriched_asset(
+        self, asset_type: str, df: pl.DataFrame, *, force: bool = False
+    ) -> None:
+        """按 symbol 合并当天 enriched 分区和内存缓存。用于少量自选实时。
+
+        When the exchange has not published *dt* yet the merge stays in memory:
+        the live readers still need today, but a partition for that day would
+        make a watchlist-sized slice look like a full trading session to anything
+        scanning the market.
+        """
         if df.is_empty() or "date" not in df.columns:
             return
         dt = df["date"][0]
+        write_to_disk = self._live_write_allowed(dt, force=force)
         if asset_type == "stock":
             table = "kline_daily_enriched"
             existing_cache = self._enriched_cache if self._enriched_cache_date == dt else pl.DataFrame()
@@ -2214,26 +2282,27 @@ class KlineRepository:
         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
         out = base / f"date={ds}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
-        publication = (
-            EnrichedPublication(self.store.data_dir, asset_type, recover=True)
-            if asset_type in {"stock", "etf"}
-            else None
-        )
-        with self._write_lock:
-            existing = pl.DataFrame()
-            if out.exists():
-                existing = pl.read_parquet(out)
-                df_storage = pl.concat([existing, df_storage], how="diagonal_relaxed").unique(
-                    subset=["symbol", "date"], keep="last"
-                )
-            df_storage = df_storage.sort(["symbol"])
-            if existing.is_empty() or not existing.equals(df_storage):
-                if publication is None:
-                    self._atomic_write_parquet(df_storage, out)
-                else:
-                    publication.write_parquet(df_storage, out)
-            if publication is not None:
-                publication.commit()
+        if write_to_disk:
+            publication = (
+                EnrichedPublication(self.store.data_dir, asset_type, recover=True)
+                if asset_type in {"stock", "etf"}
+                else None
+            )
+            with self._write_lock:
+                existing = pl.DataFrame()
+                if out.exists():
+                    existing = pl.read_parquet(out)
+                    df_storage = pl.concat([existing, df_storage], how="diagonal_relaxed").unique(
+                        subset=["symbol", "date"], keep="last"
+                    )
+                df_storage = df_storage.sort(["symbol"])
+                if existing.is_empty() or not existing.equals(df_storage):
+                    if publication is None:
+                        self._atomic_write_parquet(df_storage, out)
+                    else:
+                        publication.write_parquet(df_storage, out)
+                if publication is not None:
+                    publication.commit()
 
         if asset_type == "stock":
             self._enriched_cache = merged_cache
@@ -2251,24 +2320,16 @@ class KlineRepository:
             return
         self.flush_live_daily_asset("stock", df)
 
-    def flush_live_daily_asset(self, asset_type: str, df: pl.DataFrame) -> None:
-        """覆写当天指定资产日K分区 (实时行情落盘, 非merge)。"""
-        if df.is_empty() or "date" not in df.columns:
-            return
-        table = {
-            "stock": "kline_daily",
-            "index": "kline_index_daily",
-            "etf": "kline_etf_daily",
-        }.get(asset_type)
-        if not table:
-            return
-        base = self.store.data_dir / table
-        dt = df["date"][0]
-        ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
-        out = base / f"date={ds}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with self._write_lock:
-            self._atomic_write_parquet(df.sort(["symbol", "date"]), out)
+    def flush_live_daily_asset(
+        self, asset_type: str, df: pl.DataFrame, *, force: bool = False
+    ) -> None:
+        """合并当天指定资产日K分区。
+
+        Formerly a whole-partition overwrite, which was safe only while the live
+        feed really did carry the whole market. Under Taiwan it carries the
+        watchlist, so an overwrite dropped every other symbol; merging keeps them.
+        """
+        self.merge_live_daily_asset(asset_type, df, force=force)
 
     def flush_live_enriched(self, df: pl.DataFrame) -> None:
         """覆写当天 kline_daily_enriched 分区 (实时 enriched 落盘, 非merge)。
@@ -2277,49 +2338,14 @@ class KlineRepository:
         """
         self.flush_live_enriched_asset("stock", df)
 
-    def flush_live_enriched_asset(self, asset_type: str, df: pl.DataFrame) -> None:
-        """覆写当天指定资产 enriched 分区 (实时 enriched 落盘, 非merge)。"""
-        if df.is_empty() or "date" not in df.columns:
-            return
-        dt = df["date"][0]
-        cache_df = self._with_instrument_metadata(asset_type, df).sort(["symbol"])
-        if asset_type == "stock":
-            table = "kline_daily_enriched"
-        elif asset_type == "etf":
-            table = "kline_etf_enriched"
-        elif asset_type == "index":
-            table = "kline_index_enriched"
-        else:
-            return
+    def flush_live_enriched_asset(
+        self, asset_type: str, df: pl.DataFrame, *, force: bool = False
+    ) -> None:
+        """合并当天指定资产 enriched 分区与内存缓存。
 
-        from app.indicators.pipeline import ENRICHED_STORAGE_COLS
-        storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
-        df_storage = df.select(storage_cols).sort(["symbol"])
-        base = self.store.data_dir / table
-        ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
-        out = base / f"date={ds}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        publication = (
-            EnrichedPublication(self.store.data_dir, asset_type, recover=True)
-            if asset_type in {"stock", "etf"}
-            else None
-        )
-        with self._write_lock:
-            existing = pl.read_parquet(out) if out.exists() else pl.DataFrame()
-            if existing.is_empty() or not existing.equals(df_storage):
-                if publication is None:
-                    self._atomic_write_parquet(df_storage, out)
-                else:
-                    publication.write_parquet(df_storage, out)
-            if publication is not None:
-                publication.commit()
-
-        if asset_type == "stock":
-            self._enriched_cache = cache_df
-            self._enriched_cache_date = dt
-        elif asset_type == "etf":
-            self._etf_enriched_cache = cache_df
-            self._etf_enriched_cache_date = dt
-        elif asset_type == "index":
-            self._index_enriched_cache = cache_df
-            self._index_enriched_cache_date = dt
+        Formerly a whole-partition overwrite that also replaced the in-memory
+        cache outright. Under Taiwan the live feed carries only the watchlist, so
+        replacing meant the cache held those few symbols and the partition lost
+        every other one; merging keeps both intact.
+        """
+        self.merge_live_enriched_asset(asset_type, df, force=force)

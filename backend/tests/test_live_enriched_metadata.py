@@ -41,8 +41,10 @@ def _live_row(symbol: str, close: float) -> pl.DataFrame:
 def test_live_enriched_cache_keeps_instrument_metadata_without_persisting_it(tmp_path):
     repo = _repo(tmp_path)
 
-    repo.flush_live_enriched_asset("stock", _live_row("600000.SH", 10.0))
-    repo.merge_live_enriched_asset("stock", _live_row("000001.SZ", 12.0))
+    # force: this asserts which columns reach disk, not the official-data gate,
+    # and the fixture has no exchange data behind it.
+    repo.flush_live_enriched_asset("stock", _live_row("600000.SH", 10.0), force=True)
+    repo.merge_live_enriched_asset("stock", _live_row("000001.SZ", 12.0), force=True)
 
     cached, cached_date = repo.get_enriched_latest()
     assert cached_date == cn_today()

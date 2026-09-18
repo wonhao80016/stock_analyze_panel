@@ -121,7 +121,31 @@ def start_scheduler() -> AsyncIOScheduler:
                 "strategy cache refresh (%s) skipped: daily bars failed to update", label
             )
             return
+        _refresh_enriched_cache(label)
         _refresh_strategy_cache(label)
+
+    def _refresh_enriched_cache(label: str) -> None:
+        """Reload the in-memory enriched cache from what the update just published.
+
+        run_update publishes indicators to disk but never refreshes this cache, so
+        it can still hold the intraday realtime write — a handful of watchlist
+        symbols stamped with today's date. Screening reads that cache whenever its
+        date matches the basis date and does not check how many rows are in it, so
+        without this reload a market-wide scan can run against those few symbols.
+        """
+        app_state = _get_app_state()
+        repo = getattr(app_state, "repo", None) if app_state is not None else None
+        if repo is None:
+            logger.warning("enriched cache refresh (%s) skipped: repo unavailable", label)
+            return
+        try:
+            repo.rebuild_views()
+            repo.refresh_cache()
+            logger.info(
+                "enriched cache refreshed (%s): as_of=%s", label, repo.enriched_latest_date()
+            )
+        except Exception as e:
+            logger.exception("enriched cache refresh (%s) failed: %s", label, e)
 
     def _refresh_strategy_cache(label: str) -> None:
         """Recompute the strategy picks cache that the dashboard card reads.

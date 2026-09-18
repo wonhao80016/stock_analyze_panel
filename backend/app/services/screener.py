@@ -405,10 +405,17 @@ class ScreenerService:
         )
 
     def latest_date(self) -> date | None:
+        """Basis date for screening: the last trading day with official data.
+
+        Not "today". The live quote path advances the enriched cache date on a
+        single realtime tick, so during a session that cache can point at a day
+        holding only the handful of watchlist symbols that ticked. Screening off
+        that returns nothing at all, which is how this read silently broke.
+        """
         if self.asset_type != "stock":
             _, d = self.repo.get_enriched_latest_asset(self.asset_type)
             return d
-        d = self.repo.enriched_latest_date()
+        d = self.repo.taiwan_official_latest_date()
         if d:
             return d
         # 回退 DuckDB
