@@ -1729,7 +1729,11 @@ class StrategyBacktestService:
             "avg_return": round(float(fwd.mean()), 4),
             "median_return": round(float(np.median(fwd)), 4),
             "win_rate": round(float(wins.size / fwd.size), 4) if fwd.size else 0.0,
-            "profit_factor": round(avg_win / avg_loss, 2) if avg_loss > 0 else None,
+            "profit_factor": (
+                round(float(wins.sum()) / abs(float(losses.sum())), 2)
+                if abs(float(losses.sum())) > 0 else None
+            ),
+            "payoff_ratio": round(avg_win / avg_loss, 2) if avg_loss > 0 else None,
             "best": round(float(fwd.max()), 4),
             "worst": round(float(fwd.min()), 4),
             "total_return": round(float(total_return), 4),
