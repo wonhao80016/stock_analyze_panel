@@ -36,6 +36,8 @@ export function Auth() {
   }, [navigate])
 
   const isSetup = !status?.configured  // configured=false → 設密碼模式
+  // Settings > Account hard-navigates here after a password change; the flag survives that reload.
+  const passwordChanged = new URLSearchParams(window.location.search).get('changed') === '1'
 
   // 登錄 / 設密碼 共用一個 mutation(按 isSetup 調不同接口)
   const submitMut = useMutation({
@@ -110,6 +112,13 @@ export function Auth() {
               </div>
             </div>
           </div>
+
+          {passwordChanged && !isSetup && (
+            <div className="mb-3 flex items-start gap-1.5 rounded-btn bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-600 dark:text-emerald-400">
+              <ShieldCheck className="mt-px h-3.5 w-3.5 shrink-0" />
+              <span>密碼已更新, 請使用新密碼重新登入</span>
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-3">
             {/* 密碼輸入 */}

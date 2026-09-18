@@ -10,6 +10,7 @@
 export const QK = {
   // 全局 / 共享 (Layout 預取)
   capabilities:   ['capabilities'] as const,
+  authStatus:     ['auth-status'] as const,
   settings:       ['settings'] as const,
   version:        ['version'] as const,
   preferences:    ['preferences'] as const,

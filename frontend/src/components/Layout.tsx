@@ -30,6 +30,7 @@ import {
   WifiOff,
   PanelLeftClose,
   PanelLeftOpen,
+  LogOut,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api } from '@/lib/api'
@@ -213,6 +214,17 @@ export function Layout() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const version = versionData?.version
+  const { data: authStatus } = useQuery({
+    queryKey: QK.authStatus,
+    queryFn: api.authStatus,
+    staleTime: 60_000,
+  })
+  const passwordConfigured = authStatus?.configured === true
+  const handleLogout = async () => {
+    await api.authLogout().catch(() => {})
+    qc.clear()
+    window.location.href = '/login'
+  }
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 自選實時模式限制提示: 可手動關閉, 不持久化 (刷新後恢復顯示)
   const [dismissFreeHint, setDismissFreeHint] = useState(false)
@@ -672,6 +684,16 @@ export function Layout() {
         <div className={cn('border-t border-border py-3 shrink-0', navCollapsed ? 'px-2 flex flex-col items-center gap-1' : 'px-2')}>
           <div className={navCollapsed ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1'}>
             <ThemeToggle />
+            {/* With no panel password there is no session to end, and /login would trap the user on the setup form. */}
+            {passwordConfigured && (
+              <button
+                onClick={handleLogout}
+                className="flex items-center justify-center rounded-btn p-2 text-foreground/80 transition-colors duration-150 ease-smooth hover:bg-elevated hover:text-foreground cursor-pointer"
+                title="登出"
+              >
+                <LogOut className="h-4 w-4 shrink-0" />
+              </button>
+            )}
             <NavLink
               to="/settings"
               title={navCollapsed ? '設定' : undefined}

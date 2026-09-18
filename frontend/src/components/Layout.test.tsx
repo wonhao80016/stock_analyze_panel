@@ -23,6 +23,8 @@ vi.mock('@/lib/api', () => ({
     alertsList: vi.fn().mockResolvedValue({ items: [], total: 0 }),
     intradayRefresh: vi.fn().mockResolvedValue({}),
     pipelineJobs: vi.fn().mockResolvedValue({ active_id: null }),
+    authStatus: vi.fn().mockResolvedValue({ configured: true, authenticated: true }),
+    authLogout: vi.fn().mockResolvedValue({ ok: true }),
   },
 }))
 
