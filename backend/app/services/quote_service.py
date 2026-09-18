@@ -165,7 +165,9 @@ def _monitor_name_map(repo) -> dict[str, str]:
 class QuoteService:
     """全局实时行情服务 — 单例。"""
 
-    CORE_INDEX_SYMBOLS = ("000001.SH", "399001.SZ", "399006.SZ", "000680.SH")
+    # Mirrors app.taiwan.benchmarks.BENCHMARK_INDICES; kept literal because every other
+    # app.taiwan import in this module is deliberately function-local.
+    CORE_INDEX_SYMBOLS = ("t00.TWSE", "o00.TPEX")
 
     # TWSE MIS builds one unbounded query string (no server-side batching); cap the
     # merged watchlist+monitor-rule symbol pool to keep that URL bounded.

@@ -14,11 +14,11 @@ import polars as pl
 from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore
 
+# Mirrors app.taiwan.benchmarks.BENCHMARK_INDICES; kept literal because importing
+# app.taiwan executes its package __init__ (enrichment/realtime/universe providers).
 CORE_INDICES = {
-    "000001.SH": "上证指数",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000680.SH": "科创综指",
+    "t00.TWSE": "發行量加權股價指數",
+    "o00.TPEX": "櫃買指數",
 }
 SECTOR_KINDS = {"index", "concept", "industry"}
 _VALUE_SEP = re.compile(r"[\u3001,\uff0c;\uff1b|]+")

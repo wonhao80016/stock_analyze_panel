@@ -619,7 +619,9 @@ SSE_REFRESH_PAGES_DEFAULT = {
     "watchlist": True,
 }
 
-SIDEBAR_INDEX_SYMBOLS_DEFAULT = ["000001.SH", "399001.SZ", "399006.SZ", "000680.SH"]
+# Mirrors app.taiwan.benchmarks.BENCHMARK_INDICES; kept literal because this module
+# is imported on every hot getter path and must stay free of app.taiwan's package init.
+SIDEBAR_INDEX_SYMBOLS_DEFAULT = ["t00.TWSE", "o00.TPEX"]
 
 
 # ===== 盘中实时行情范围 (独立于盘后管道范围) =====

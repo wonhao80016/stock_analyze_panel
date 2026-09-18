@@ -51,11 +51,11 @@ def _sector_rule(targets: list[dict], **overrides) -> dict:
 
 
 def test_validate_accepts_sector_rule_and_rejects_mixed_target_kinds():
-    rule = _sector_rule([_index_target("000001.SH", "上证指数")])
+    rule = _sector_rule([_index_target("t00.TWSE", "發行量加權股價指數")])
     monitor_rules.validate(rule)
 
     mixed = _sector_rule([
-        _index_target("000001.SH", "上证指数"),
+        _index_target("t00.TWSE", "發行量加權股價指數"),
         {
             "key": "concept:test:field:人工智能",
             "kind": "concept",
@@ -89,13 +89,13 @@ def test_index_targets_are_evaluated_independently(tmp_path):
     service = SectorMonitorService(repo)
     engine = MonitorRuleEngine()
     engine.set_sector_monitor_service(service)
-    sh = _index_target("000001.SH", "上证指数")
-    cyb = _index_target("399006.SZ", "创业板指")
-    engine.set_rules([_sector_rule([sh, cyb])])
+    twse = _index_target("t00.TWSE", "發行量加權股價指數")
+    tpex = _index_target("o00.TPEX", "櫃買指數")
+    engine.set_rules([_sector_rule([twse, tpex])])
 
     first = pl.DataFrame({
-        "symbol": ["000001.SH", "399006.SZ"],
-        "name": ["上证指数", "创业板指"],
+        "symbol": ["t00.TWSE", "o00.TPEX"],
+        "name": ["發行量加權股價指數", "櫃買指數"],
         "close": [3000.0, 2000.0],
         "change_pct": [0.8, 0.9],
     })
@@ -106,32 +106,32 @@ def test_index_targets_are_evaluated_independently(tmp_path):
     )
     events = engine.evaluate_sectors(pl.DataFrame(), second, now=1006.0)
 
-    assert [event["sector_name"] for event in events] == ["上证指数"]
+    assert [event["sector_name"] for event in events] == ["發行量加權股價指數"]
     assert events[0]["change_pct"] == 0.012
 
 
 def test_index_availability_updates_when_realtime_pool_changes(tmp_path, monkeypatch):
-    selected = ["000001.SH"]
+    selected = ["t00.TWSE"]
     monkeypatch.setattr(sector_monitor.preferences, "get_realtime_pull_index", lambda: True)
     monkeypatch.setattr(sector_monitor.preferences, "get_realtime_index_mode", lambda: "core")
     monkeypatch.setattr(sector_monitor.preferences, "get_realtime_index_symbols", lambda: selected)
     service = SectorMonitorService(_Repo(tmp_path))
 
     first = {target["symbol"]: target for target in service.list_targets()["index"]}
-    assert first["000001.SH"]["available"] is True
-    assert first["399006.SZ"]["available"] is False
-    initial_quote = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [0.2]})
-    service.build_snapshots(pl.DataFrame(), initial_quote, [first["000001.SH"]], {5}, now=1000.0)
+    assert first["t00.TWSE"]["available"] is True
+    assert first["o00.TPEX"]["available"] is False
+    initial_quote = pl.DataFrame({"symbol": ["t00.TWSE"], "change_pct": [0.2]})
+    service.build_snapshots(pl.DataFrame(), initial_quote, [first["t00.TWSE"]], {5}, now=1000.0)
 
-    selected[:] = ["399006.SZ"]
+    selected[:] = ["o00.TPEX"]
     second = {target["symbol"]: target for target in service.list_targets()["index"]}
-    assert second["000001.SH"]["available"] is False
-    assert second["399006.SZ"]["available"] is True
-    changed_quote = pl.DataFrame({"symbol": ["000001.SH"], "change_pct": [1.3]})
+    assert second["t00.TWSE"]["available"] is False
+    assert second["o00.TPEX"]["available"] is True
+    changed_quote = pl.DataFrame({"symbol": ["t00.TWSE"], "change_pct": [1.3]})
     snapshot = service.build_snapshots(
-        pl.DataFrame(), changed_quote, [second["000001.SH"]], {5}, now=1300.0,
+        pl.DataFrame(), changed_quote, [second["t00.TWSE"]], {5}, now=1300.0,
     )
-    assert snapshot["index:000001.SH"]["window_changes"][5] is None
+    assert snapshot["index:t00.TWSE"]["window_changes"][5] is None
 
 
 def test_concept_snapshot_uses_member_average_and_full_window(tmp_path):
@@ -192,7 +192,7 @@ def test_momentum_rule_triggers_after_complete_window(tmp_path):
     service = SectorMonitorService(_Repo(tmp_path))
     engine = MonitorRuleEngine()
     engine.set_sector_monitor_service(service)
-    target = _index_target("000001.SH", "上证指数")
+    target = _index_target("t00.TWSE", "發行量加權股價指數")
     engine.set_rules([_sector_rule(
         [target],
         sector_trigger="momentum",
@@ -200,8 +200,8 @@ def test_momentum_rule_triggers_after_complete_window(tmp_path):
         window_minutes=5,
     )])
     start = pl.DataFrame({
-        "symbol": ["000001.SH"],
-        "name": ["上证指数"],
+        "symbol": ["t00.TWSE"],
+        "name": ["發行量加權股價指數"],
         "close": [3000.0],
         "change_pct": [0.2],
     })
