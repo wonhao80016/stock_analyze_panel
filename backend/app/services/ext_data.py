@@ -377,32 +377,65 @@ def build_code_lookup(data_dir: Path) -> dict[str, str]:
         return {}
 
 
-def normalize_symbol(series: pl.Series, lookup: dict[str, str] | None = None) -> pl.Series:
-    """将 symbol 列标准化为 代码.交易所 格式。
+def build_taiwan_code_lookup() -> dict[str, str]:
+    """Build a bare-code → canonical-symbol map from the Taiwan security master.
 
-    优先使用 instruments 维表查找 code → symbol，确保 100% 准确。
-    查不到时按规则兜底：6开头 → .SH，其余 → .SZ。
+    A code listed on both exchanges is dropped: a bare code carries nothing that
+    would pick one of them, and guessing would silently mis-file the row.
+    """
+    from app.taiwan.symbol import Exchange, parse_symbol
+    from app.taiwan.universe import get_security_master
+
+    try:
+        df = get_security_master().to_dataframe()
+    except Exception as e:
+        logger.warning("Taiwan security master unavailable, symbols keep bare codes: %s", e)
+        return {}
+    if df.is_empty() or "code" not in df.columns or "exchange" not in df.columns:
+        return {}
+
+    resolved: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for raw_code, raw_exchange in zip(df["code"].to_list(), df["exchange"].to_list(), strict=True):
+        code = str(raw_code or "").strip()
+        if not code or code in ambiguous:
+            continue
+        try:
+            canonical = parse_symbol(code, exchange=Exchange(str(raw_exchange))).canonical
+        except ValueError:
+            continue
+        if resolved.setdefault(code, canonical) != canonical:
+            del resolved[code]
+            ambiguous.add(code)
+    return resolved
+
+
+def normalize_symbol(series: pl.Series, lookup: dict[str, str] | None = None) -> pl.Series:
+    """Normalise a symbol column to ``{code}.{EXCHANGE}``.
+
+    A bare code is resolved against ``lookup`` (the instruments dimension table)
+    first, then against the Taiwan security master. A code neither of them knows
+    is returned unchanged rather than given a guessed exchange suffix.
     """
     _lookup = lookup or {}
+    taiwan_lookup: dict[str, str] | None = None
 
     def _fix_one(val: str) -> str:
+        nonlocal taiwan_lookup
         if not val:
             return val
         val = val.strip()
-        # 已经是标准格式（含 .），直接返回
         if "." in val:
             return val
-        # 纯6位数字代码 → 优先查维表
-        if len(val) == 6 and val.isdigit():
-            mapped = _lookup.get(val)
-            if mapped:
-                return mapped
-            # 兜底规则
-            if val.startswith(("6",)):
-                return f"{val}.SH"
-            else:
-                return f"{val}.SZ"
-        return val
+        mapped = _lookup.get(val)
+        if mapped:
+            return mapped
+        # Built on first miss only: an all-canonical column must not pay for it,
+        # because the security master fetches from TWSE/TPEx when it has no
+        # local cache (TaiwanSecurityMaster.ensure_loaded).
+        if taiwan_lookup is None:
+            taiwan_lookup = build_taiwan_code_lookup()
+        return taiwan_lookup.get(val, val)
 
     return series.map_elements(_fix_one, return_dtype=pl.Utf8)
 

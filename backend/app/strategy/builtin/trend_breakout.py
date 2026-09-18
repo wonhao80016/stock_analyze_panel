@@ -20,12 +20,8 @@ META = {
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "basic_filter": {
-        "price_min": 5,
-        "price_max": 200,
-        "market_cap_min": 20e8,
-        "amount_min": 1e8,
-        "exclude_st": True,
-        "exclude_new_days": 60,
+        "price_min": 3,
+        "amount_min": 0.2e8,
     },
     "params": [
         {
