@@ -4,10 +4,13 @@
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import polars as pl
 import pytest
 
-from app.services import pipeline_jobs, preferences, quote_service
+from app.api.monitor_rules import get_options
+from app.services import kline_sync, pipeline_jobs, preferences, quote_service
 from app.services.pipeline_jobs import JobStore
 from app.services.quote_service import QuoteService
 from app.strategy import monitor_rules
@@ -133,3 +136,18 @@ def test_sector_notification_uses_chinese_title_without_brand(monkeypatch):
 
     assert [args[2] for _, args in calls] == ["板塊", "板塊"]
     assert all("TickFlow" not in args[2] for _, args in calls)
+
+
+# ── Options API contract ────────────────────────────────────────────────
+
+def test_options_hides_sector_scope_but_keeps_sector_type(monkeypatch):
+    """Scope sector is withdrawn (saving one always 400s); rule type sector must stay."""
+    monkeypatch.setattr(kline_sync, "intraday_monitor_support", lambda capset: {})
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    options = get_options(request)
+
+    scope_keys = {s["key"] for s in options["scopes"]}
+    assert "sector" not in scope_keys
+    assert {"symbols", "watchlist_group", "all"} <= scope_keys
+    assert "sector" in {t["key"] for t in options["types"]}

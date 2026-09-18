@@ -217,9 +217,7 @@ def validate(rule: dict) -> None:
             raise ValueError("自選分組作用域僅支援個股")
     if uses_intraday_signals(rule) and rule.get("scope") != "symbols":
         raise ValueError("分時穿越訊號僅支援指定標的")
-    # sector 作用域的板块 JOIN 尚未实现: _apply_scope 目前会退化为「全市场」,
-    # 一条本意针对某板块的规则会对全市场每只命中都触发(告警风暴)。在板块 JOIN
-    # 落地前, 拒绝创建 sector 规则(fail-closed), 避免用户建出会刷屏的规则。
+    # Sector JOIN is unimplemented: _apply_scope fail-closes to an empty frame, so a sector rule never fires.
     if rule.get("scope") == "sector":
         raise ValueError("scope=sector 暫未支持(板塊 JOIN 未實現),請改用 scope=symbols 指定標的或 scope=all")
 

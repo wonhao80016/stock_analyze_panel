@@ -1278,7 +1278,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
             </div>
           )}
           {draft.scope === 'all' && <span className="text-[11px] text-muted">對全市場所有標的生效</span>}
-          {draft.scope === 'sector' && <span className="text-[11px] text-muted/60">板塊精確過濾(開發中,當前等同全市場)</span>}
+          {draft.scope === 'sector' && <span className="text-[11px] text-danger">不支援板塊範圍,此規則不會命中任何標的,請改選其他範圍</span>}
         </div>
       </div>}
 

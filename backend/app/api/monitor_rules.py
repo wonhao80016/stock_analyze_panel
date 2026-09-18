@@ -192,7 +192,6 @@ def get_options(request: Request):
             {"key": "symbols", "label": "指定標的"},
             {"key": "watchlist_group", "label": "自選分組"},
             {"key": "all", "label": "全市場"},
-            {"key": "sector", "label": "板塊"},
         ],
         "logics": [
             {"key": "and", "label": "全部滿足 (AND)"},
