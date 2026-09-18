@@ -104,6 +104,15 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
     qc.invalidateQueries({ queryKey: QK.preferences })
   }, [qc, prefs])
 
+  const saveSystemNotify = useCallback(async (enabled: boolean) => {
+    try {
+      await api.updateSystemNotify(enabled)
+      qc.invalidateQueries({ queryKey: QK.preferences })
+    } catch {
+      // error toast already raised by the request layer
+    }
+  }, [qc])
+
   const saveLine = useMutation({
     mutationFn: ({ recipient, token, clearToken = false }: { recipient: string; token?: string; clearToken?: boolean }) =>
       api.updateLineMessaging(recipient, token, clearToken),
@@ -308,6 +317,16 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
             監控規則命中後,可把告警推送到外部。勾選管道作為<b className="text-foreground/80">新建規則的預設推播</b>,
             單條規則仍可在編輯頁獨立修改。
           </p>
+
+          <div className="mb-3 pb-3 border-b border-border/60">
+            <ToggleRow
+              label="系統桌面通知"
+              desc="只彈在執行後端的那台電腦桌面（容器部署無桌面則不會顯示）,僅平日 09:00–13:30 盤中觸發,每筆告警各發一則不合併"
+              checked={prefs?.system_notify_enabled ?? false}
+              onChange={(v) => saveSystemNotify(v)}
+              wrapDesc
+            />
+          </div>
 
           <div className="space-y-2">
             <div className="rounded-btn border border-border/60 bg-base/40 overflow-hidden">
@@ -593,6 +612,7 @@ function ToggleRow({
   onChange,
   icon: Icon,
   disabled,
+  wrapDesc,
 }: {
   label: string
   desc: string
@@ -600,6 +620,7 @@ function ToggleRow({
   onChange: (v: boolean) => void
   icon?: React.ComponentType<{ className?: string }>
   disabled?: boolean
+  wrapDesc?: boolean
 }) {
   return (
     <div className="flex items-center justify-between gap-4 py-2">
@@ -607,7 +628,7 @@ function ToggleRow({
         {Icon && <Icon className="h-3.5 w-3.5 text-secondary shrink-0 mt-0.5" />}
         <div className="min-w-0">
           <div className="text-sm text-foreground">{label}</div>
-          <div className="text-[11px] text-muted truncate">{desc}</div>
+          <div className={`text-[11px] text-muted ${wrapDesc ? 'break-words' : 'truncate'}`} title={desc}>{desc}</div>
         </div>
       </div>
       <button

@@ -4,9 +4,9 @@
      窗口最小化 / 被遮挡 / 后台运行时都能弹通知 (不依赖前端 WebView)。
 
 平台实现:
-  - Windows: winotify (进现代操作中心, 支持图标)
+  - Windows: winotify, raised through PowerShell; no icon is forwarded
   - macOS:   osascript (系统已内置, 无需额外依赖)
-  - Linux:   notify-send (系统已内置) / plyer 兜底
+  - Linux:   notify-send; disabled when it is not on PATH (no other fallback)
 
 设计: 失败静默降级, 绝不因通知失败阻断告警主流程 (落盘 / SSE 推送)。
      通知去重不在本层做, 复用 MonitorRuleEngine 的 cooldown 逻辑。
@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 # 单次通知最长字符 (避免某些平台截断报错)
 _MAX_LEN = 200
+
+# Toast app_id, kept identical to the product name quote_service puts in notification
+# titles. winotify's Registry is not called: it only installs a URL-protocol handler so
+# a toast click can launch back into the app, and no launch action is set here. Whether
+# Windows shows a toast for an app id it does not know is untested.
+_WINDOWS_APP_ID = "TickFlow"
 
 # 避免重复探测平台能力, 缓存一次
 _backend_cache: str | None = None
@@ -36,16 +43,19 @@ def _detect_backend() -> str | None:
     backend = None
     if sys.platform == "win32":
         try:
-            import winotify  # type: ignore[import-not-found]  # noqa: F401
+            from winotify import Notification  # type: ignore[import-not-found]  # noqa: F401
 
             backend = "winotify"
         except ImportError:
-            logger.debug("winotify 不可用, Windows 通知降级")
+            logger.debug("winotify unavailable, Windows notifications disabled")
             backend = None
     elif sys.platform == "darwin":
         backend = "osascript"
     elif sys.platform.startswith("linux"):
-        backend = "notify-send"
+        if shutil.which("notify-send"):
+            backend = "notify-send"
+        else:
+            logger.debug("notify-send not found on PATH, Linux notifications disabled")
 
     _backend_cache = backend or "none"
     return backend
@@ -66,7 +76,9 @@ def notify(title: str, message: str, icon: Path | None = None) -> bool:
         icon:    可选图标路径 (部分平台支持)
 
     Returns:
-        True=成功送达, False=失败或无可用后端。
+        True = handed to the platform backend, False = failed or no backend available.
+        Windows spawns the toast asynchronously, so True does not mean it was displayed;
+        macOS and Linux wait on the process and report its exit status.
         失败静默, 不抛异常 (通知是辅助通道, 不能阻断告警主流程)。
     """
     title = _truncate(title)
@@ -93,15 +105,15 @@ def notify(title: str, message: str, icon: Path | None = None) -> bool:
 
 
 def _notify_winotify(title: str, message: str) -> bool:
-    """Windows 通知 (winotify) — 进现代操作中心。"""
-    from winotify import Notifier  # type: ignore[import-not-found]
+    """Windows toast through winotify's Notification API."""
+    from winotify import Notification  # type: ignore[import-not-found]
 
-    Notifier().create_notification(
+    # duration only accepts "short" or "long"; launch stays unset (no clickable action).
+    Notification(
+        app_id=_WINDOWS_APP_ID,
         title=title,
         msg=message,
-        # winotify 要求 duration 为 "short" 或 "long"
         duration="short",
-        # 无可点击动作 (桌面版不实现"点击回到窗口"的复杂交互)
     ).show()
     return True
 

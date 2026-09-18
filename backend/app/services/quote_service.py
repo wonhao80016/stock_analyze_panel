@@ -1494,7 +1494,6 @@ class QuoteService:
         - 开关关闭: 直接返回
         - 开关开启: 逐条发系统通知; 失败静默, 不阻断主流程
         - 去重: 复用 MonitorRuleEngine 的 cooldown, 此处不重复去重
-        - 批量策略事件 (symbol="") 聚合为一条通知, 避免刷屏
         """
         try:
             from app.services import preferences
