@@ -22,7 +22,6 @@ from app.api import (
     kline,
     mining,
     monitor_rules,
-    overview,
     pipeline,
     regime,
     screener,
@@ -418,7 +417,6 @@ app.include_router(screener.router)
 app.include_router(backtest.router)
 app.include_router(mining.router)
 app.include_router(intraday.router)
-app.include_router(overview.router)
 app.include_router(regime.router)
 app.include_router(pipeline.router)
 app.include_router(data.router)

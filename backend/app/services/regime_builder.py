@@ -7,9 +7,8 @@
 - run_regime_batch 用 polars group_by("date").agg(...) 一次聚合多日, 非逐日循环。
 - 数据走 repo.get_enriched_range(内存缓存, 已含信号列); 缓存不覆盖时走 scan_parquet 慢路径。
 
-与 market_overview_builder 的区别:
-- overview 面向单日详情(实时总览), 重算指标。
-- regime 面向多日聚合统计(时序分析), 只聚合不重算。
+定位: 面向多日聚合统计(时序分析), 只聚合不重算。单日实时总览由
+app.taiwan.market_intelligence 提供。
 """
 from __future__ import annotations
 
@@ -50,10 +49,10 @@ def load_risk_warning_symbols(data_dir: Path) -> frozenset[str]:
     return syms
 
 # ───────────────────────── 状态分类阈值(可调) ─────────────────────────
-# 评分模型对齐看板情绪分(market_overview_builder): 采用 _score(low,high) 归一化
-# (比多点插值简洁、不易设错), 4 个轻量维度(赚钱/投机/抗跌/趋势), 阈值与看板统一。
-# 设计取舍: 不复制看板的"量能/主线"维度 — 它们依赖 vol_ratio_5d/概念主线等重列,
-# 全量回填补算会爆内存; 这两维对历史择时影响小, 且用户可在看板单独查看。
+# 评分模型采用 _score(low,high) 归一化 (比多点插值简洁、不易设错), 4 个轻量维度
+# (赚钱/投机/抗跌/趋势)。原本对齐的看板情绪分模块已移除。
+# 设计取舍: 不复制"量能/主线"维度 — 它们依赖 vol_ratio_5d/概念主线等重列,
+# 全量回填补算会爆内存; 这两维对历史择时影响小。
 
 WEIGHTS = {
     "profit": 0.35,        # 赚钱(涨家数/均涨幅/中位涨幅/强弱差) — 最反映赚钱难度
@@ -81,7 +80,7 @@ STATE_LABELS = {
 def _score(value: float, low: float, high: float) -> float:
     """归一化: 把 value 在 [low, high] 区间线性映射到 [0, 100], 钳制边界。
 
-    与看板 market_overview_builder._score 同款。low/high 用 A 股真实分位数校准。
+    low/high 仍是 A 股真实分位数校准, 未针对台股重算。
     """
     if high <= low:
         return 50.0

@@ -3,9 +3,7 @@
 preferences / quote_service / sector_monitor each repeat the benchmark symbols
 instead of importing app.taiwan.benchmarks, so none of them imports app.taiwan at
 module scope. Nothing but this test enforces the mirroring, and drift there
-silently marks a user's index monitor targets unavailable. api/overview.py and
-services/market_overview_builder.py still carry the pre-Taiwan A-share list and are
-deliberately out of scope here.
+silently marks a user's index monitor targets unavailable.
 """
 from __future__ import annotations
 

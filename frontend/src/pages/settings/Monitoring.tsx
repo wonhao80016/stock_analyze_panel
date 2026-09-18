@@ -21,7 +21,6 @@ import { toast } from '@/components/Toast'
 
 // 頁面 → 顯示名
 const PAGE_LABELS: Record<string, string> = {
-  'overview-market': '看板',
   watchlist: '自選頁',
 }
 

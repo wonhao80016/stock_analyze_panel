@@ -2,6 +2,8 @@
 
 Provides deterministic, traceable, structured market intelligence for a given trading date:
 - Daily Breadth: Advances, Declines, Flats, Upper/Lower Limit Counts, Traded Counts, Turnover.
+- Change Distribution: Target-date change buckets over rows with a usable previous close.
+- Trend Participation: Closes at or above MA5/MA20/MA60, plus 60-session new highs and lows.
 - Market Slices: Total Market, By Exchange (TWSE, TPEx), By Instrument (Stock, ETF).
 - Institutional Flows: Market-wide aggregate of Foreign, Investment Trust, and Dealer nets.
 - Margin Balances: Market-wide aggregate of Margin Balance/Change and Short Balance/Change.
@@ -35,6 +37,23 @@ from app.taiwan.universe.models import MarketProfileBridge
 
 logger = logging.getLogger(__name__)
 
+# Band bounds are decimal change (0.05 = 5%), lower inclusive / upper exclusive.
+CHANGE_DISTRIBUTION_BANDS: tuple[tuple[str, float | None, float | None], ...] = (
+    ("<-5%", None, -0.05),
+    ("-5~-3%", -0.05, -0.03),
+    ("-3~-1%", -0.03, -0.01),
+    ("-1~0%", -0.01, 0.0),
+    ("0~1%", 0.0, 0.01),
+    ("1~3%", 0.01, 0.03),
+    ("3~5%", 0.03, 0.05),
+    (">5%", 0.05, None),
+)
+
+TREND_MA_WINDOWS: tuple[int, ...] = (5, 20, 60)
+TREND_EXTREME_WINDOW = 60
+# Longest rolling window above decides how many sessions the trend read must cover.
+TREND_LOOKBACK_SESSIONS = max(*TREND_MA_WINDOWS, TREND_EXTREME_WINDOW)
+
 
 # ── Pydantic Response Contract Models ─────────────────────────
 
@@ -66,6 +85,37 @@ class MarketInstrumentBreakdown(BaseModel):
 
     stock: MarketBreadthStats
     etf: MarketBreadthStats
+
+
+class ChangeDistributionBand(BaseModel):
+    """One bucket of the target-date change distribution."""
+
+    label: str
+    count: int = 0
+    pct: float = 0.0  # share of the bucketed rows, 0-100
+
+
+class MarketTrendStats(BaseModel):
+    """Trend participation on the target date: closes versus their own moving averages and 60-session extremes.
+
+    Percentages use the count of rows whose indicator is defined as denominator, so a
+    symbol without enough history lowers *_comparable_count instead of the ratio.
+    """
+
+    lookback_start_date: str | None = None
+    lookback_sessions: int = 0
+    ma5_comparable_count: int = 0
+    above_ma5_count: int = 0
+    above_ma5_pct: float | None = None
+    ma20_comparable_count: int = 0
+    above_ma20_count: int = 0
+    above_ma20_pct: float | None = None
+    ma60_comparable_count: int = 0
+    above_ma60_count: int = 0
+    above_ma60_pct: float | None = None
+    extreme_60d_comparable_count: int = 0
+    new_high_60d_count: int = 0
+    new_low_60d_count: int = 0
 
 
 class InstitutionalMarketAggregate(BaseModel):
@@ -144,6 +194,8 @@ class TaiwanMarketIntelligenceSnapshot(BaseModel):
     market_totals: MarketBreadthStats
     by_exchange: MarketExchangeBreakdown
     by_instrument: MarketInstrumentBreakdown
+    change_distribution: list[ChangeDistributionBand] = Field(default_factory=list)
+    trend: MarketTrendStats = Field(default_factory=MarketTrendStats)
     institutional: InstitutionalMarketAggregate
     margin: MarginMarketAggregate
     indexes: MarketIndexesSnapshot
@@ -217,6 +269,102 @@ class TaiwanMarketIntelligenceService:
             lower_limit_count=limit_downs,
             turnover=turnover,
         )
+
+    def _calc_change_distribution(self, df: pl.DataFrame) -> list[ChangeDistributionBand]:
+        """Bucket close/prev_close changes of the target-date rows into CHANGE_DISTRIBUTION_BANDS."""
+        if df.is_empty() or "prev_close" not in df.columns or "close" not in df.columns:
+            return []
+
+        changes = (
+            df.with_columns(
+                (
+                    pl.col("close").cast(pl.Float64, strict=False)
+                    / pl.col("prev_close").cast(pl.Float64, strict=False)
+                    - 1.0
+                ).alias("_change")
+            )
+            .filter(pl.col("_change").is_finite())
+            .get_column("_change")
+            .to_list()
+        )
+        total = len(changes)
+        if total == 0:
+            return []
+
+        bands: list[ChangeDistributionBand] = []
+        for label, low, high in CHANGE_DISTRIBUTION_BANDS:
+            if low is None:
+                count = sum(1 for v in changes if v < high)
+            elif high is None:
+                count = sum(1 for v in changes if v >= low)
+            else:
+                count = sum(1 for v in changes if low <= v < high)
+            bands.append(
+                ChangeDistributionBand(label=label, count=count, pct=round(count / total * 100.0, 2))
+            )
+        return bands
+
+    def _calc_trend(
+        self,
+        history: pl.DataFrame,
+        target: date,
+        window_start: date | None,
+        lookback_sessions: int,
+    ) -> MarketTrendStats:
+        """Compute MA participation and 60-session extremes for the target-date rows of *history*."""
+        fields: dict[str, Any] = {
+            "lookback_start_date": str(window_start) if window_start else None,
+            "lookback_sessions": lookback_sessions,
+        }
+        if history.is_empty() or not {"symbol", "date", "close"}.issubset(history.columns):
+            return MarketTrendStats(**fields)
+
+        rolled = (
+            history.with_columns(pl.col("close").cast(pl.Float64, strict=False))
+            .sort(["symbol", "date"])
+            .with_columns(
+                [
+                    pl.col("close")
+                    .rolling_mean(w, min_samples=w)
+                    .over("symbol")
+                    .alias(f"ma{w}")
+                    for w in TREND_MA_WINDOWS
+                ]
+                + [
+                    pl.col("close")
+                    .rolling_max(TREND_EXTREME_WINDOW, min_samples=TREND_EXTREME_WINDOW)
+                    .over("symbol")
+                    .alias("high_extreme"),
+                    pl.col("close")
+                    .rolling_min(TREND_EXTREME_WINDOW, min_samples=TREND_EXTREME_WINDOW)
+                    .over("symbol")
+                    .alias("low_extreme"),
+                ]
+            )
+            .filter(pl.col("date") == target)
+        )
+        if rolled.is_empty():
+            return MarketTrendStats(**fields)
+
+        for w in TREND_MA_WINDOWS:
+            comparable = rolled.filter(pl.col("close").is_finite() & pl.col(f"ma{w}").is_finite())
+            comparable_count = len(comparable)
+            above_count = len(comparable.filter(pl.col("close") >= pl.col(f"ma{w}")))
+            fields[f"ma{w}_comparable_count"] = comparable_count
+            fields[f"above_ma{w}_count"] = above_count
+            fields[f"above_ma{w}_pct"] = (
+                round(above_count / comparable_count * 100.0, 2) if comparable_count else None
+            )
+
+        extremes = rolled.filter(
+            pl.col("close").is_finite()
+            & pl.col("high_extreme").is_finite()
+            & pl.col("low_extreme").is_finite()
+        )
+        fields["extreme_60d_comparable_count"] = len(extremes)
+        fields["new_high_60d_count"] = len(extremes.filter(pl.col("close") >= pl.col("high_extreme")))
+        fields["new_low_60d_count"] = len(extremes.filter(pl.col("close") <= pl.col("low_extreme")))
+        return MarketTrendStats(**fields)
 
     def get_snapshot(self, target_date: date | None = None) -> TaiwanMarketIntelligenceSnapshot:
         """Build a deterministic Taiwan Market Intelligence Snapshot for target_date."""
@@ -317,12 +465,28 @@ class TaiwanMarketIntelligenceService:
             etf_breadth = self._calc_breadth(etf_df)
             etf_breadth.supported_count = len(universe_df.filter(pl.col("instrument_type") == "etf"))
 
+            change_distribution = self._calc_change_distribution(joined)
+
+            # Second daily read: MA / extreme windows need history the target-date snapshot lacks.
+            trend_window = sorted(d for d in daily_available if d <= target)[-TREND_LOOKBACK_SESSIONS:]
+            if trend_window:
+                trend = self._calc_trend(
+                    self.daily_store.read_range(supported_symbols, trend_window[0], target),
+                    target,
+                    trend_window[0],
+                    len(trend_window),
+                )
+            else:
+                trend = MarketTrendStats()
+
         else:
             totals = MarketBreadthStats(supported_count=supported_count)
             twse_breadth = MarketBreadthStats()
             tpex_breadth = MarketBreadthStats()
             stock_breadth = MarketBreadthStats()
             etf_breadth = MarketBreadthStats()
+            change_distribution = []
+            trend = MarketTrendStats()
 
         by_exchange = MarketExchangeBreakdown(twse=twse_breadth, tpex=tpex_breadth)
         by_instrument = MarketInstrumentBreakdown(stock=stock_breadth, etf=etf_breadth)
@@ -456,6 +620,8 @@ class TaiwanMarketIntelligenceService:
             market_totals=totals,
             by_exchange=by_exchange,
             by_instrument=by_instrument,
+            change_distribution=change_distribution,
+            trend=trend,
             institutional=inst_agg,
             margin=margin_agg,
             indexes=indexes_snapshot,

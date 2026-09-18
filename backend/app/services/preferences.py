@@ -615,7 +615,6 @@ def set_mining_schedule(enabled: bool, weekday: int, profile: str) -> dict:
 # 页面 SSE 刷新配置: { "watchlist": true, "monitor": true, ... }
 # 可刷新的页面列表及其默认值
 SSE_REFRESH_PAGES_DEFAULT = {
-    "overview-market": True,
     "watchlist": True,
 }
 

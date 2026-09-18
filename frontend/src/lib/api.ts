@@ -1534,7 +1534,7 @@ export function genRuleId(): string {
 // Phase 8B-5.10: LimitLadderStock/Tier/Result 隨已刪除的 LimitUpLadder.tsx
 // (連板梯隊頁)一併移除 —— 連板/打板/炸板/封板率為中國 A 股漲跌停制度
 // 衍生術語, 對台股產品無意義。depth_service 的 sealed cache 判定邏輯本身
-// 完全未動, 仍供 market_overview_builder/quote_service/monitor_rules 使用。
+// 完全未動, 仍供 quote_service/monitor_rules 使用。
 
 // ===== Backtest =====
 export interface BacktestResult {
@@ -2852,8 +2852,8 @@ export const api = {
 
   // Phase 8B-5.11: 大盤覆盤(reviewReportsList/Save/Delete/reviewStream)
   // 隨已刪除的 Review.tsx(盤後檢討頁)一併移除 —— 純 A 股 AI 長篇復盤
-  // workflow, 對台股無意義。GET /api/overview/market(Dashboard A 股選配
-  // 板塊仍用)、market_overview_builder、depth_service 完全未動。
+  // workflow, 對台股無意義。GET /api/overview/market 與 market_overview_builder
+  // 已於後續移除(有用欄位併入 market-intelligence);depth_service 完全未動。
 
   // ===== Strategy Engine =====
   strategyList: (assetType?: 'stock' | 'etf', timeframe = '1d') => {

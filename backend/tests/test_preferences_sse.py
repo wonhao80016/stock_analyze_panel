@@ -14,7 +14,4 @@ def test_sse_refresh_pages_drops_removed_page_keys(monkeypatch):
         },
     )
 
-    assert preferences.get_sse_refresh_pages() == {
-        "overview-market": False,
-        "watchlist": False,
-    }
+    assert preferences.get_sse_refresh_pages() == {"watchlist": False}
