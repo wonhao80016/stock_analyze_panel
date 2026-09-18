@@ -87,6 +87,8 @@ vi.mock('@/lib/api', () => ({
     taiwanMarketIntelligence: vi.fn().mockResolvedValue(null),
     taiwanIndustryIntelligence: vi.fn().mockResolvedValue(null),
     watchlistEnriched: vi.fn().mockResolvedValue({ rows: [], as_of: null, elapsed_ms: 0 }),
+    screenerCached: vi.fn().mockResolvedValue({ as_of: null, results: {}, today_ever_matched: null, today_ever_rows: null, updated_at: null }),
+    screenerStrategies: vi.fn().mockResolvedValue({ presets: [], load_errors: [] }),
   },
 }))
 
@@ -234,5 +236,58 @@ describe('Dashboard — Market data honesty (DAILY_USE_CORE_UX_FIXES P1-1)', () 
     expect(screen.queryByText('偏強')).not.toBeInTheDocument()
     expect(screen.queryByText('偏弱')).not.toBeInTheDocument()
     expect(screen.queryByText('中性')).not.toBeInTheDocument()
+  })
+})
+
+// 策略當日推薦卡 — 讀 /api/screener/cached (盤後 run_all 寫入的快取)。
+// 快取為空時必須給出可理解的 empty state, 不可白屏或顯示假資料。
+describe('Dashboard — 策略當日推薦卡', () => {
+  it('快取為空時顯示 empty state 而非假資料', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    renderDashboard()
+
+    expect(await screen.findByText('今日尚無策略選股結果')).toBeInTheDocument()
+    expect(screen.getByText('盤後排程執行後會自動更新')).toBeInTheDocument()
+  })
+
+  it('有選股結果時列出策略名稱與個股', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.screenerStrategies).mockResolvedValue({
+      presets: [{ id: 'bottom_reversal', name: '深跌止穩反彈' }] as any,
+      load_errors: [],
+    } as any)
+    vi.mocked(api.screenerCached).mockResolvedValue({
+      as_of: '2026-09-17',
+      results: {
+        bottom_reversal: {
+          total: 2,
+          as_of: '2026-09-17',
+          rows: [
+            { symbol: '2377.TWSE', name: '微星', close: 210.5, change_pct: 0.031 },
+            { symbol: '3231.TWSE', name: '緯創', close: 118.0, change_pct: -0.012 },
+          ],
+        },
+      },
+      today_ever_matched: null,
+      today_ever_rows: null,
+      updated_at: null,
+    } as any)
+    renderDashboard()
+
+    expect(await screen.findByText('深跌止穩反彈')).toBeInTheDocument()
+    expect(screen.getByText('微星')).toBeInTheDocument()
+    expect(screen.getByText('2377.TWSE')).toBeInTheDocument()
+    expect(screen.getByText('+3.10%')).toBeInTheDocument()
+  })
+
+  it('讀取失敗時不影響其他區塊', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.screenerCached).mockRejectedValue(new Error('network error'))
+    renderDashboard()
+
+    expect(await screen.findByText('目前無法讀取策略選股結果,不影響其他功能使用。')).toBeInTheDocument()
   })
 })

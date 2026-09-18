@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { Activity, ArrowUpRight, BellRing, Database, Eye, Layers, Loader2, TrendingUp } from 'lucide-react'
+import { Activity, ArrowUpRight, BellRing, Database, Eye, Layers, Loader2, Target, TrendingUp } from 'lucide-react'
 import { api, type AlertEvent, type IndustryMetrics } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
@@ -413,6 +413,90 @@ function WatchlistQuickGlance({ onStockClick }: { onStockClick: (symbol: string,
   )
 }
 
+const STRATEGY_PICK_LIMIT = 3
+const STRATEGY_CARD_LIMIT = 6
+
+function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, name?: string) => void }) {
+  const cached = useQuery({
+    queryKey: QK.screenerCached(),
+    queryFn: () => api.screenerCached(),
+    staleTime: 60_000,
+  })
+  const strategies = useQuery({
+    queryKey: QK.screenerStrategies('stock'),
+    queryFn: () => api.screenerStrategies('stock'),
+    staleTime: 300_000,
+  })
+
+  const nameById = new Map<string, string>(
+    (strategies.data?.presets ?? []).map(s => [s.id, s.name || s.id]),
+  )
+  const results = cached.data?.results ?? {}
+  const hits = Object.entries(results)
+    .filter(([, r]) => (r?.rows?.length ?? 0) > 0)
+    .sort((a, b) => (b[1].total ?? 0) - (a[1].total ?? 0))
+  const shown = hits.slice(0, STRATEGY_CARD_LIMIT)
+  const totalPicks = hits.reduce((sum, [, r]) => sum + (r.total ?? 0), 0)
+
+  return (
+    <section className="mb-1.5 rounded-card border border-border bg-surface/80 p-2.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm">
+      <SectionTitle
+        icon={Target}
+        title="策略當日推薦"
+        hint={cached.data?.as_of ? `${cached.data.as_of} · ${totalPicks} 檔` : undefined}
+      />
+      {cached.isLoading ? (
+        <div className="flex items-center gap-2 py-4 text-xs text-muted">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />正在讀取策略選股結果…
+        </div>
+      ) : cached.isError ? (
+        <p className="py-4 text-xs text-muted">目前無法讀取策略選股結果,不影響其他功能使用。</p>
+      ) : hits.length === 0 ? (
+        <div className="py-4 text-center">
+          <p className="text-xs text-secondary">今日尚無策略選股結果</p>
+          <p className="mt-1 text-[10px] text-muted">盤後排程執行後會自動更新</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {shown.map(([sid, result]) => (
+            <div key={sid}>
+              <div className="mb-1 flex items-baseline justify-between gap-2">
+                <span className="truncate text-[11px] font-medium text-foreground">{nameById.get(sid) ?? sid}</span>
+                <span className="shrink-0 font-mono text-[9px] text-muted">{result.total} 檔</span>
+              </div>
+              <div className="space-y-1">
+                {result.rows.slice(0, STRATEGY_PICK_LIMIT).map((r: any) => (
+                  <button
+                    key={`${sid}-${r.symbol}`}
+                    type="button"
+                    onClick={() => onStockClick(r.symbol, r.name ?? undefined)}
+                    aria-label={`查看 ${r.name || r.symbol} 走勢`}
+                    className="flex w-full items-center justify-between gap-2 rounded-md bg-elevated/40 px-2 py-1.5 text-left hover:bg-elevated hover:brightness-110 transition-colors border border-transparent hover:border-border/60"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-[11px] text-foreground">{r.name || r.symbol}</div>
+                      <div className="font-mono text-[9px] text-muted">{r.symbol}</div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-mono text-[11px] text-foreground">{fmtPrice(r.close)}</div>
+                      <div className={`font-mono text-[10px] font-semibold ${pctClass(r.change_pct)}`}>{fmtStockPct(r.change_pct)}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {hits.length > shown.length && (
+            <Link to="/taiwan-screener" className="block pt-0.5 text-center text-[11px] text-accent hover:text-accent/80 transition-colors">
+              還有 {hits.length - shown.length} 個策略有選股結果 →
+            </Link>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 // ===== Phase 8B-2: 台股資料狀態卡 =====
 // 只讀既有 /api/taiwan/data-status(與 Onboarding 台股資料狀態步驟同一個 API,
 // 不建立重複 backend 邏輯)。沒有資料時顯示清楚的繁體 empty state, 不假造台股
@@ -500,6 +584,8 @@ export function Dashboard() {
         <IndustryStrengthCard />
         <WatchlistQuickGlance onStockClick={(symbol, name) => setPreviewStock({ symbol, name })} />
       </div>
+
+      <StrategyPicksCard onStockClick={(symbol, name) => setPreviewStock({ symbol, name })} />
 
       <section className="mb-1.5 rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
         <div className="mb-2 flex items-center justify-between gap-2">
