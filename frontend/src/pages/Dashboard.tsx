@@ -2,8 +2,8 @@ import { useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { Activity, ArrowUpRight, BellRing, Database, Eye, Layers, Loader2, Target, TrendingUp } from 'lucide-react'
-import { api, type AlertEvent, type IndustryMetrics } from '@/lib/api'
+import { Activity, ArrowUpRight, BellRing, Database, Eye, HelpCircle, Layers, Loader2, Target, TrendingUp } from 'lucide-react'
+import { api, type AlertEvent, type IndustryMetrics, type StrategyDetail } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -416,6 +416,51 @@ function WatchlistQuickGlance({ onStockClick }: { onStockClick: (symbol: string,
 const STRATEGY_PICK_LIMIT = 3
 const STRATEGY_CARD_LIMIT = 6
 
+function StrategyRule({ detail }: { detail: StrategyDetail }) {
+  const params = (detail.params ?? []).map(p => {
+    const v = detail.params_defaults?.[p.id] ?? p.default
+    return `${p.label ?? p.id}: ${v ?? '—'}`
+  })
+  const entry = (detail.entry_signals ?? []).map(s => cnSignal(s))
+  const exit = (detail.exit_signals ?? []).map(s => cnSignal(s))
+  const exits = [
+    detail.stop_loss != null ? `停損 ${(detail.stop_loss * 100).toFixed(1)}%` : null,
+    detail.take_profit != null ? `停利 ${(detail.take_profit * 100).toFixed(1)}%` : null,
+    detail.trailing_stop != null ? `移動停損 ${(detail.trailing_stop * 100).toFixed(1)}%` : null,
+  ].filter(Boolean) as string[]
+
+  return (
+    <div className="mb-1.5 space-y-1 rounded-md border border-border/60 bg-base/60 p-2">
+      <p className="text-[11px] leading-5 text-secondary">{detail.description || '此策略未提供說明。'}</p>
+      {entry.length > 0 && (
+        <p className="text-[10px] leading-4 text-muted">
+          <span className="text-foreground">進場訊號</span>：{entry.join('、')}
+        </p>
+      )}
+      {exit.length > 0 && (
+        <p className="text-[10px] leading-4 text-muted">
+          <span className="text-foreground">出場訊號</span>：{exit.join('、')}
+        </p>
+      )}
+      {exits.length > 0 && (
+        <p className="text-[10px] leading-4 text-muted">
+          <span className="text-foreground">風控</span>：{exits.join('、')}
+        </p>
+      )}
+      {params.length > 0 && (
+        <p className="font-mono text-[10px] leading-4 text-amber-400/90">{params.join('　')}</p>
+      )}
+      {(detail.tags ?? []).length > 0 && (
+        <div className="flex flex-wrap gap-1 pt-0.5">
+          {detail.tags.map(t => (
+            <span key={t} className="rounded border border-border px-1 text-[9px] text-muted">{t}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, name?: string) => void }) {
   const cached = useQuery({
     queryKey: QK.screenerCached(),
@@ -428,6 +473,11 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
     staleTime: 300_000,
   })
 
+  const [openRule, setOpenRule] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const detailById = new Map<string, StrategyDetail>(
+    (strategies.data?.presets ?? []).map(s => [s.id, s]),
+  )
   const nameById = new Map<string, string>(
     (strategies.data?.presets ?? []).map(s => [s.id, s.name || s.id]),
   )
@@ -461,11 +511,47 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
           {shown.map(([sid, result]) => (
             <div key={sid}>
               <div className="mb-1 flex items-baseline justify-between gap-2">
-                <span className="truncate text-[11px] font-medium text-foreground">{nameById.get(sid) ?? sid}</span>
-                <span className="shrink-0 font-mono text-[9px] text-muted">{result.total} 檔</span>
+                <div className="flex min-w-0 items-center gap-1">
+                  <span className="truncate text-[11px] font-medium text-foreground">{nameById.get(sid) ?? sid}</span>
+                  {detailById.has(sid) && (
+                    <button
+                      type="button"
+                      onClick={() => setOpenRule(prev => (prev === sid ? null : sid))}
+                      aria-expanded={openRule === sid}
+                      aria-label={`${nameById.get(sid) ?? sid} 的計算方式`}
+                      title="計算方式"
+                      className={cn(
+                        'shrink-0 rounded p-0.5 transition-colors cursor-pointer',
+                        openRule === sid ? 'text-accent' : 'text-muted hover:text-foreground',
+                      )}
+                    >
+                      <HelpCircle className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+                {(result.rows?.length ?? 0) > STRATEGY_PICK_LIMIT ? (
+                  <button
+                    type="button"
+                    onClick={() => setExpanded(prev => (prev === sid ? null : sid))}
+                    aria-expanded={expanded === sid}
+                    aria-label={
+                      expanded === sid
+                        ? `收合 ${nameById.get(sid) ?? sid} 的選股清單`
+                        : `展開 ${nameById.get(sid) ?? sid} 全部 ${result.total} 檔`
+                    }
+                    className="shrink-0 font-mono text-[9px] text-muted hover:text-accent transition-colors cursor-pointer"
+                  >
+                    {result.total} 檔 {expanded === sid ? '▴' : '▾'}
+                  </button>
+                ) : (
+                  <span className="shrink-0 font-mono text-[9px] text-muted">{result.total} 檔</span>
+                )}
               </div>
-              <div className="space-y-1">
-                {result.rows.slice(0, STRATEGY_PICK_LIMIT).map((r: any) => (
+              {openRule === sid && detailById.has(sid) && (
+                <StrategyRule detail={detailById.get(sid)!} />
+              )}
+              <div className={cn('space-y-1', expanded === sid && 'max-h-64 overflow-y-auto pr-0.5')}>
+                {(expanded === sid ? result.rows : result.rows.slice(0, STRATEGY_PICK_LIMIT)).map((r: any) => (
                   <button
                     key={`${sid}-${r.symbol}`}
                     type="button"

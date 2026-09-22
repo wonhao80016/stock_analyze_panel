@@ -6,7 +6,7 @@
 // 涵蓋：市場強弱摘要、產業強弱 top/bottom、自選股快覽 (empty/populated)、
 // 市場或產業查詢失敗時 Dashboard 仍可渲染不白屏。
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Dashboard } from './Dashboard'
@@ -289,5 +289,132 @@ describe('Dashboard — 策略當日推薦卡', () => {
     renderDashboard()
 
     expect(await screen.findByText('目前無法讀取策略選股結果,不影響其他功能使用。')).toBeInTheDocument()
+  })
+})
+
+// 策略計算方式 — 後端 /api/strategies 已帶 description/params/entry_signals,
+// 卡片必須讓使用者看得到, 否則「當日推薦」是一個無法檢驗的黑盒。
+describe('Dashboard — 策略計算方式', () => {
+  const preset = {
+    id: 'bollinger_squeeze',
+    name: '布林收斂突破',
+    description: '布林帶寬壓縮至近80日低分位後, 首根帶量突破上軌',
+    tags: ['布林', '突破'],
+    params: [{ id: 'squeeze_lookback', label: '帶寬分位回看天數', default: 80 }],
+    params_defaults: { squeeze_lookback: 80 },
+    entry_signals: ['signal_boll_breakout_upper'],
+    exit_signals: [],
+    stop_loss: 0.08,
+  }
+
+  function mockPicks() {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.screenerStrategies).mockResolvedValue({ presets: [preset], load_errors: [] } as any)
+    vi.mocked(api.screenerCached).mockResolvedValue({
+      as_of: '2026-09-21',
+      results: {
+        bollinger_squeeze: {
+          total: 1,
+          as_of: '2026-09-21',
+          rows: [{ symbol: '3467.TPEX', name: '台灣類比', close: 73.5, change_pct: 0.0381 }],
+        },
+      },
+      today_ever_matched: null,
+      today_ever_rows: null,
+      updated_at: null,
+    } as any)
+  }
+
+  it('預設收合, 點開後顯示說明、進場訊號、風控與參數', async () => {
+    mockPicks()
+    renderDashboard()
+
+    expect(await screen.findByText('布林收斂突破')).toBeInTheDocument()
+    expect(screen.queryByText(preset.description)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '布林收斂突破 的計算方式' }))
+
+    expect(await screen.findByText(preset.description)).toBeInTheDocument()
+    // 訊號 id 必須翻成中文, 不可把 signal_* 原樣丟給使用者
+    expect(screen.getByText(/突破布林上軌/)).toBeInTheDocument()
+    expect(screen.getByText(/停損 8\.0%/)).toBeInTheDocument()
+    expect(screen.getByText(/帶寬分位回看天數: 80/)).toBeInTheDocument()
+  })
+
+  it('個股以名稱呈現, 代號只作為次要資訊', async () => {
+    mockPicks()
+    renderDashboard()
+
+    expect(await screen.findByText('台灣類比')).toBeInTheDocument()
+    expect(screen.getByText('3467.TPEX')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '查看 台灣類比 走勢' })).toBeInTheDocument()
+  })
+})
+
+// 卡片預設每個策略只列 3 檔, 但 /api/screener/cached 回傳的是全部。
+// 沒有展開入口時, 其餘選股在前端記憶體裡卻無處可看。
+describe('Dashboard — 策略選股展開', () => {
+  const rows = Array.from({ length: 5 }, (_, i) => ({
+    symbol: `100${i}.TWSE`,
+    name: `標的${i}`,
+    close: 10 + i,
+    change_pct: 0.01,
+  }))
+
+  function mockFive() {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.screenerStrategies).mockResolvedValue({
+      presets: [{ id: 'lorentzian_knn', name: 'Lorentzian KNN 分類' }] as any,
+      load_errors: [],
+    } as any)
+    vi.mocked(api.screenerCached).mockResolvedValue({
+      as_of: '2026-09-21',
+      results: { lorentzian_knn: { total: rows.length, as_of: '2026-09-21', rows } },
+      today_ever_matched: null,
+      today_ever_rows: null,
+      updated_at: null,
+    } as any)
+  }
+
+  it('預設只列前 3 檔, 點檔數後列出全部', async () => {
+    mockFive()
+    renderDashboard()
+
+    expect(await screen.findByText('標的0')).toBeInTheDocument()
+    expect(screen.getByText('標的2')).toBeInTheDocument()
+    expect(screen.queryByText('標的3')).not.toBeInTheDocument()
+    expect(screen.queryByText('標的4')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '展開 Lorentzian KNN 分類 全部 5 檔' }))
+
+    expect(await screen.findByText('標的3')).toBeInTheDocument()
+    expect(screen.getByText('標的4')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '收合 Lorentzian KNN 分類 的選股清單' }))
+    expect(screen.queryByText('標的4')).not.toBeInTheDocument()
+  })
+
+  it('選股數未超過顯示上限時不給展開入口, 避免點了沒反應', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.screenerStrategies).mockResolvedValue({
+      presets: [{ id: 'pullback_resume', name: '回檔續勢' }] as any,
+      load_errors: [],
+    } as any)
+    vi.mocked(api.screenerCached).mockResolvedValue({
+      as_of: '2026-09-21',
+      results: { pullback_resume: { total: 2, as_of: '2026-09-21', rows: rows.slice(0, 2) } },
+      today_ever_matched: null,
+      today_ever_rows: null,
+      updated_at: null,
+    } as any)
+    renderDashboard()
+
+    expect(await screen.findByText('標的0')).toBeInTheDocument()
+    expect(screen.getByText('標的1')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /展開/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /收合/ })).not.toBeInTheDocument()
   })
 })
