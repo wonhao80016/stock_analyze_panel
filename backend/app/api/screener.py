@@ -329,6 +329,64 @@ def _cached_with_realtime(request: Request) -> dict:
     return cached
 
 
+def _attach_instrument_names(repo, payload: dict) -> dict:
+    """Give every cached row its instrument name.
+
+    The rows are enriched frames, which carry no name, and data/instruments is
+    empty on a Taiwan-only install, so the security master is the only source
+    that resolves a TWSE/TPEX symbol. Resolved here rather than at write time so
+    caches already on disk gain the name without being recomputed.
+    """
+    results = payload.get("results") or {}
+    symbols = {
+        r.get("symbol")
+        for result in results.values()
+        for r in (result.get("rows") or [])
+        if r.get("symbol")
+    }
+    if not symbols:
+        return payload
+
+    names: dict[str, str] = {}
+    try:
+        from app.taiwan.universe import get_security_master
+
+        master = get_security_master().to_dataframe()
+        if not master.is_empty() and {"symbol", "name"} <= set(master.columns):
+            names = {
+                row["symbol"]: row["name"]
+                for row in master.select(["symbol", "name"]).iter_rows(named=True)
+                if row["symbol"] in symbols and row["name"]
+            }
+    except Exception as e:  # noqa: BLE001
+        logger.debug("security master name lookup failed: %s", e)
+
+    missing = symbols - names.keys()
+    if missing and repo is not None:
+        try:
+            import polars as pl
+
+            inst = repo.get_instruments()
+            if not inst.is_empty() and {"symbol", "name"} <= set(inst.columns):
+                hit = inst.filter(pl.col("symbol").is_in(list(missing)))
+                names.update(
+                    {row["symbol"]: row["name"]
+                     for row in hit.select(["symbol", "name"]).iter_rows(named=True)
+                     if row["name"]}
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("instruments name lookup failed: %s", e)
+
+    if not names:
+        return payload
+    for result in results.values():
+        for r in result.get("rows") or []:
+            name = names.get(r.get("symbol"))
+            if name:
+                r["name"] = name
+    return payload
+
+
 @router.get("/cached")
 def get_cached(
     request: Request,
@@ -348,7 +406,9 @@ def get_cached(
         return {"as_of": None, "results": {}, "updated_at": None}
 
     ext_values = _load_ext_value_maps(request.app.state.repo, ext_columns)
-    return _cache_payload_with_ext(cached, ext_values)
+    return _attach_instrument_names(
+        request.app.state.repo, _cache_payload_with_ext(cached, ext_values)
+    )
 
 
 @router.get("/cached-summary")
