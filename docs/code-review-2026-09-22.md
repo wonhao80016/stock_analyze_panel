@@ -151,7 +151,7 @@ fallback 全部被跳過、畫面直接空白。
 `== 5` 寫成 `coverage >= 5`、未提法人類的 15 日覆蓋門檻與基期下限、並把本項寫成
 `industry_5d_return`。前端說明文字最初就是照抄這行而寫錯，建議一併修。
 
-#### B1. 即時輪詢非 merge 覆寫 Taiwan 發佈的 enriched 分區 — 待修（最嚴重）
+#### B1. 即時輪詢非 merge 覆寫 Taiwan 發佈的 enriched 分區 — 已由 `feat/radar-strategies` 修正
 `backend/app/taiwan/enriched_refresh.py` 把含 `signal_*` 的全市場資料寫進
 `kline_daily_enriched/date=X/part.parquet`；`quote_service` →
 `repository.flush_live_enriched_asset` 對**同一路徑**做非 merge 覆寫，且只寫
@@ -161,6 +161,24 @@ fallback 全部被跳過、畫面直接空白。
 `signals` 條件的選股**永遠回 0 筆**；其他讀該分區者也只剩自選股那幾列。
 
 修法：Taiwan enriched 改用獨立表名，或兩個寫入端共用 merge 路徑與同一把 `_write_lock`。
+
+**已由 `feat/radar-strategies` 的 `889cbd9` 修正**（於 2026-09-22 併入本分支）。實查
+合併後的程式碼：`flush_live_enriched_asset` 已改為委派 `merge_live_enriched_asset`，
+落盤時對既有分區做 `concat(...).unique(["symbol","date"], keep="last")` 且整段在
+`_write_lock` 內——非自選股不再被抹掉。另新增 `_live_write_allowed`：交易所尚未
+發布該日資料前，即時寫入只留在記憶體，不建立分區；`ScreenerService.latest_date()`
+也改讀 `taiwan_official_latest_date()`（`TaiwanDailyStore`）而非即時快取日期。該
+commit 自述選股從 0 筆恢復為 108 筆，與本項描述的症狀吻合。
+
+**殘留疑點（尚未驗證）**：磁碟合併時 `df_storage` 只帶 `ENRICHED_STORAGE_COLS`
+（不含 `signal_*`），`diagonal_relaxed` 會讓即時列的 `signal_*` 成為 null，而
+`keep="last"` 讓即時列勝出。理論上自選股的 signal 欄仍可能在**交易所發布之後**的
+即時寫入被清成 null。`_live_write_allowed` 讓這個窗口變窄，但未實測確認。
+
+**附帶觀察**：2026-09-22 盤中的 `kline_daily_enriched/date=2026-09-22` 分區只有
+12 欄、0 個 `signal_*`，而 09-17 與 09-21 都是 69 欄、20 個 `signal_*`——即本項
+描述的污染實例。當下不影響選股（基準日為 09-21，不會讀到該分區），且該分區由
+合併前的程式碼產生。
 
 #### B2. `quote_ts` 寫成微秒而非毫秒 — 待修
 `backend/app/services/quote_service.py` 把 provider 的 `timestamp`（`datetime`）
