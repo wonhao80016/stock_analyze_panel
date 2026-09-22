@@ -351,13 +351,14 @@ def _attach_instrument_names(repo, payload: dict) -> dict:
     try:
         from app.taiwan.universe import get_security_master
 
-        master = get_security_master().to_dataframe()
-        if not master.is_empty() and {"symbol", "name"} <= set(master.columns):
-            names = {
-                row["symbol"]: row["name"]
-                for row in master.select(["symbol", "name"]).iter_rows(named=True)
-                if row["symbol"] in symbols and row["name"]
-            }
+        # Per-symbol dict lookup, not to_dataframe(): the master holds a few thousand
+        # instruments and rebuilds the frame on every call, which costs far more than
+        # the handful of symbols a pick list actually asks about.
+        master = get_security_master()
+        for sym in symbols:
+            inst = master.get_instrument(sym)
+            if inst is not None and inst.name:
+                names[sym] = inst.name
     except Exception as e:  # noqa: BLE001
         logger.debug("security master name lookup failed: %s", e)
 
@@ -604,11 +605,15 @@ def compute_and_cache_all(
         params_map=params_map,
         overrides_map=overrides_map,
     )
+    # One strategy that cannot run must not cost the page every other one: the
+    # post-close refresh writes this cache unattended, so a single raise would
+    # freeze the card on whatever day it last succeeded.
     engine_results = engine.run_all(
         context,
         params_map=params_map,
         overrides_map=overrides_map,
         strategy_ids=all_ids,
+        skip_failed=True,
     )
 
     results: dict[str, dict] = {}

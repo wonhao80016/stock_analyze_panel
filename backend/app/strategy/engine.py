@@ -1026,8 +1026,15 @@ class StrategyEngine:
         overrides_map: dict | None = None,
         *,
         strategy_ids: list[str] | None = None,
+        skip_failed: bool = False,
     ) -> dict[str, StrategyResult]:
-        """批量执行策略；当前数据、历史和矩阵均来自同一个调用上下文。"""
+        """批量执行策略；当前数据、历史和矩阵均来自同一个调用上下文。
+
+        skip_failed: log and drop a strategy that raises instead of failing the
+        batch. Opt-in because a composite strategy needs its children to fail
+        loudly, while the page cache is better off holding the strategies that
+        did run than nothing at all.
+        """
         if context.current is None:
             raise ValueError("strategy run_all context requires current data")
         df = context.current
@@ -1078,17 +1085,22 @@ class StrategyEngine:
         results: dict[str, StrategyResult] = {}
 
         for sid, _ in selected:
-            results[sid] = self.run(
-                sid,
-                replace(
-                    context,
-                    current=df,
-                    history=shared_history,
-                    market=shared_matrix,
-                ),
-                params=params_map.get(sid),
-                overrides=overrides_map.get(sid),
-            )
+            try:
+                results[sid] = self.run(
+                    sid,
+                    replace(
+                        context,
+                        current=df,
+                        history=shared_history,
+                        market=shared_matrix,
+                    ),
+                    params=params_map.get(sid),
+                    overrides=overrides_map.get(sid),
+                )
+            except Exception:
+                if not skip_failed:
+                    raise
+                logger.exception("run_all: strategy %s failed, skipped", sid)
 
         return results
 

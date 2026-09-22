@@ -59,12 +59,16 @@ class _CapturingStrategyEngine:
         })
         return ScreenerResult(as_of=context.as_of, strategy=strategy_id)
 
-    def run_all(self, context, *, params_map=None, overrides_map=None, strategy_ids=None):
+    def run_all(
+        self, context, *, params_map=None, overrides_map=None, strategy_ids=None,
+        skip_failed=False,
+    ):
         self.calls.append({
             "kind": "run_all",
             "params_map": params_map,
             "overrides_map": overrides_map,
             "strategy_ids": strategy_ids,
+            "skip_failed": skip_failed,
         })
         return {
             strategy_id: ScreenerResult(as_of=context.as_of, strategy=strategy_id)
@@ -134,6 +138,9 @@ def test_batch_run_passes_saved_params_to_strategy_engine(monkeypatch, tmp_path)
     assert context_call["overrides_map"] == expected_overrides
     assert run_all_call["params_map"] == expected_params
     assert run_all_call["overrides_map"] == expected_overrides
+    # The cache is written unattended after the close, so one unrunnable strategy
+    # must not cost the page every other one.
+    assert run_all_call["skip_failed"] is True
 
 
 def test_batch_summary_response_still_writes_full_cache(monkeypatch, tmp_path):
