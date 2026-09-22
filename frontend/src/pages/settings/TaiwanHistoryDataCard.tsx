@@ -52,8 +52,14 @@ export function TaiwanHistoryDataCard() {
     mutationFn: api.taiwanUpdateLatest,
     onSuccess: (res) => {
       toast(res.message || '更新完成', 'success')
-      qc.invalidateQueries({ queryKey: QK.taiwanHistoryStatus })
-      qc.invalidateQueries({ queryKey: QK.taiwanDataStatus })
+      if (res.dates_fetched > 0) {
+        // Every panel reads the trading day that just moved, so everything is
+        // invalidated rather than a list that would fall behind the next new panel.
+        qc.invalidateQueries()
+      } else {
+        qc.invalidateQueries({ queryKey: QK.taiwanHistoryStatus })
+        qc.invalidateQueries({ queryKey: QK.taiwanDataStatus })
+      }
     },
     onError: (err: any) => {
       toast(`更新至最新交易日失敗: ${err.message || err}`, 'error')

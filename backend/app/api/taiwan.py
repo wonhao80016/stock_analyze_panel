@@ -137,12 +137,26 @@ def update_taiwan_history_to_latest():
     """已有歷史資料時，直接增量補齊至當前最新交易日（不重新下載整包）。"""
     svc = TaiwanBootstrapService()
     try:
-        return svc.update_to_latest()
+        result = svc.update_to_latest()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Update to latest failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"更新至最新交易日失敗: {exc}") from exc
+
+    # New bars on disk are invisible to a running process: the repo caches and the
+    # strategy picks file are both built once and never reread. The post-close job
+    # refreshes them; doing it here too is what makes this button update the panel
+    # rather than only the store behind it. Both helpers log and swallow their own
+    # failures, so a refresh problem cannot undo a fetch that succeeded.
+    if result.get("dates_fetched"):
+        from app.jobs.daily_pipeline import refresh_enriched_cache, refresh_strategy_cache
+
+        refresh_enriched_cache("manual update-latest")
+        refresh_strategy_cache("manual update-latest")
+        result["caches_refreshed"] = True
+
+    return result
 
 
 from app.taiwan.enrichment_backfill import (

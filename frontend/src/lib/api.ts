@@ -477,7 +477,7 @@ export interface StrategyCodeSaveResult {
   meta: Record<string, any>
 }
 
-// ===== Custom Signals (自定義信號) =====
+// ===== Custom Signals (自定義訊號) =====
 export interface CustomSignalCondition {
   left: string     // 字段名
   op: string       // > >= < <= == !=
@@ -2841,7 +2841,7 @@ export const api = {
   strategyReload: () =>
     request<{ ok: boolean; count: number }>('/api/strategies/reload', { method: 'POST' }),
 
-  // ===== Custom Signals (自定義信號) =====
+  // ===== Custom Signals (自定義訊號) =====
   customSignalsList: () =>
     request<{ signals: CustomSignal[] }>('/api/custom-signals'),
 
@@ -3176,6 +3176,8 @@ export interface TaiwanUpdateLatestResult {
   already_current: boolean
   message: string
   dates_fetched: number
+  /** Set when the backend also rebuilt the caches the panels read. */
+  caches_refreshed?: boolean
   stats?: Record<string, any>
 }
 

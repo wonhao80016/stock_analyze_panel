@@ -48,6 +48,56 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         logger.warning("refresh view %s failed: %s", name, e)
 
 
+def refresh_enriched_cache(label: str) -> None:
+    """Reload the in-memory enriched cache from what the update just published.
+
+    run_update publishes indicators to disk but never refreshes this cache, so
+    it can still hold the intraday realtime write — a handful of watchlist
+    symbols stamped with today's date. Screening reads that cache whenever its
+    date matches the basis date and does not check how many rows are in it, so
+    without this reload a market-wide scan can run against those few symbols.
+    """
+    app_state = _get_app_state()
+    repo = getattr(app_state, "repo", None) if app_state is not None else None
+    if repo is None:
+        logger.warning("enriched cache refresh (%s) skipped: repo unavailable", label)
+        return
+    try:
+        repo.rebuild_views()
+        repo.refresh_cache()
+        logger.info(
+            "enriched cache refreshed (%s): as_of=%s", label, repo.enriched_latest_date()
+        )
+    except Exception as e:
+        logger.exception("enriched cache refresh (%s) failed: %s", label, e)
+
+def refresh_strategy_cache(label: str) -> None:
+    """Recompute the strategy picks cache that the dashboard card reads.
+
+    GET /api/screener/cached only ever returns what run_all last wrote, so
+    without this step the card stays empty no matter how fresh the price data is.
+    """
+    app_state = _get_app_state()
+    if app_state is None:
+        logger.warning("strategy cache refresh (%s) skipped: app state unavailable", label)
+        return
+    engine = getattr(app_state, "strategy_engine", None)
+    repo = getattr(app_state, "repo", None)
+    if engine is None or repo is None:
+        logger.warning("strategy cache refresh (%s) skipped: engine/repo unavailable", label)
+        return
+    try:
+        from app.api.screener import compute_and_cache_all
+
+        as_of, results = compute_and_cache_all(repo, engine)
+        logger.info(
+            "strategy cache refreshed (%s): as_of=%s, strategies=%d",
+            label, as_of, len(results),
+        )
+    except Exception as e:
+        logger.exception("strategy cache refresh (%s) failed: %s", label, e)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """启动调度器 — 周期性能力重探 + 台股盘后增量更新。"""
     scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
@@ -121,57 +171,8 @@ def start_scheduler() -> AsyncIOScheduler:
                 "strategy cache refresh (%s) skipped: daily bars failed to update", label
             )
             return
-        _refresh_enriched_cache(label)
-        _refresh_strategy_cache(label)
-
-    def _refresh_enriched_cache(label: str) -> None:
-        """Reload the in-memory enriched cache from what the update just published.
-
-        run_update publishes indicators to disk but never refreshes this cache, so
-        it can still hold the intraday realtime write — a handful of watchlist
-        symbols stamped with today's date. Screening reads that cache whenever its
-        date matches the basis date and does not check how many rows are in it, so
-        without this reload a market-wide scan can run against those few symbols.
-        """
-        app_state = _get_app_state()
-        repo = getattr(app_state, "repo", None) if app_state is not None else None
-        if repo is None:
-            logger.warning("enriched cache refresh (%s) skipped: repo unavailable", label)
-            return
-        try:
-            repo.rebuild_views()
-            repo.refresh_cache()
-            logger.info(
-                "enriched cache refreshed (%s): as_of=%s", label, repo.enriched_latest_date()
-            )
-        except Exception as e:
-            logger.exception("enriched cache refresh (%s) failed: %s", label, e)
-
-    def _refresh_strategy_cache(label: str) -> None:
-        """Recompute the strategy picks cache that the dashboard card reads.
-
-        GET /api/screener/cached only ever returns what run_all last wrote, so
-        without this step the card stays empty no matter how fresh the price data is.
-        """
-        app_state = _get_app_state()
-        if app_state is None:
-            logger.warning("strategy cache refresh (%s) skipped: app state unavailable", label)
-            return
-        engine = getattr(app_state, "strategy_engine", None)
-        repo = getattr(app_state, "repo", None)
-        if engine is None or repo is None:
-            logger.warning("strategy cache refresh (%s) skipped: engine/repo unavailable", label)
-            return
-        try:
-            from app.api.screener import compute_and_cache_all
-
-            as_of, results = compute_and_cache_all(repo, engine)
-            logger.info(
-                "strategy cache refreshed (%s): as_of=%s, strategies=%d",
-                label, as_of, len(results),
-            )
-        except Exception as e:
-            logger.exception("strategy cache refresh (%s) failed: %s", label, e)
+        refresh_enriched_cache(label)
+        refresh_strategy_cache(label)
 
     # 16:30 — 日線與三大法人 (兩者在此時已公布)
     scheduler.add_job(
