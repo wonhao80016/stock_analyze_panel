@@ -1089,8 +1089,13 @@ export function Watchlist() {
 
   // 板塊篩選（持久化）
   const [boardFilter, setBoardFilter] = useState<Set<string>>(() => {
-    const saved = storage.watchlistBoardFilter.get([])
-    return saved.length > 0 ? new Set(saved) : new Set(BOARDS) // 預設全選
+    // BOARDS 從 A 股的五個板塊改成上市/上櫃後, 舊的持久化值仍在瀏覽器裡。原樣載入
+    // 會得到一個沒有任何個股符合的集合, 於是自選股的個股行全部消失 (ETF/指數因為
+    // 不受板塊篩選而留著), 而兩個板塊鈕都顯示未選取 —— 畫面上看不出原因。
+    const saved = storage.watchlistBoardFilter.get([]).filter(
+      (b): b is BoardType => (BOARDS as readonly string[]).includes(b),
+    )
+    return saved.length > 0 ? new Set<string>(saved) : new Set<string>(BOARDS) // 預設全選
   })
   const persistBoardFilter = useCallback((next: Set<string>) => {
     setBoardFilter(next)
