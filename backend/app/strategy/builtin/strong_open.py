@@ -50,7 +50,7 @@ META = {
     "scoring": {"change_pct": 0.4, "amplitude": 0.2, "amount": 0.4},
     "order_by": "score",
     "descending": True,
-    "limit": 50,
+    "limit": 500,
 }
 
 EXECUTION_BACKEND = "matrix_native"

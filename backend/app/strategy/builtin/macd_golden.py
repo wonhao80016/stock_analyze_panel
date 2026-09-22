@@ -38,7 +38,7 @@ META = {
     "scoring": {"momentum_60d": 0.4, "vol_ratio_5d": 0.3, "change_pct": 0.3},
     "order_by": "score",
     "descending": True,
-    "limit": 100,
+    "limit": 500,
 }
 
 ENTRY_SIGNALS = ["signal_macd_golden"]

@@ -45,7 +45,7 @@ META = {
     "scoring": {"change_pct": 0.3, "vol_ratio_5d": 0.3, "momentum_5d": 0.2, "rsi_14": 0.2},
     "order_by": "score",
     "descending": True,
-    "limit": 100,
+    "limit": 500,
 }
 
 EXECUTION_BACKEND = "matrix_native"

@@ -97,7 +97,7 @@ META = {
     "scoring": {"momentum_20d": 0.5, "change_pct": 0.25, "vol_ratio_5d": 0.25},
     "order_by": "score",
     "descending": True,
-    "limit": 100,
+    "limit": 500,
 }
 
 EXECUTION_BACKEND = "matrix_native"
