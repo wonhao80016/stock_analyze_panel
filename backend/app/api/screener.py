@@ -478,43 +478,43 @@ def market_snapshot(request: Request):
     return {"as_of": str(as_of), "rows": rows}
 
 
-@router.post("/run_all")
-def run_all(request: Request, body: Optional[dict] = None):
-    """批量运行指定策略；注册、路由和执行均由 StrategyEngine 负责。"""
-    from datetime import date as date_type
+class UnknownStrategiesError(LookupError):
+    """Raised when explicitly requested strategy ids are absent or research-only."""
 
+
+def compute_and_cache_all(
+    repo,
+    engine,
+    *,
+    asset_type: str = "stock",
+    timeframe: str = "1d",
+    as_of: date | None = None,
+    strategy_ids: list[str] | None = None,
+) -> tuple[date | None, dict[str, dict]]:
+    """Run every eligible strategy for ``as_of`` and persist the page cache.
+
+    Shared by the run_all endpoint and the post-close scheduler; the cache this
+    writes is the only thing GET /cached reads, so nothing calling this path may
+    swallow a write failure silently.
+    """
     t_total = time.perf_counter()
-
-    body = body or {}
-    repo = request.app.state.repo
-    asset_type = str(body.get("asset_type") or "stock")
-    timeframe = str(body.get("timeframe") or "1d")
     svc = ScreenerService(repo, asset_type=asset_type)
-    engine = getattr(request.app.state, "strategy_engine", None)
-    if engine is None:
-        raise HTTPException(status_code=503, detail="策略引擎未初始化")
-
-    # 解析日期
-    raw_date = body.get("as_of")
-    if raw_date:
-        as_of = date_type.fromisoformat(str(raw_date)) if isinstance(raw_date, str) else raw_date
-    else:
+    if as_of is None:
         as_of = svc.latest_date()
     if not as_of:
-        return {"as_of": None, "results": {}}
+        return None, {}
 
-    data_dir = request.app.state.repo.store.data_dir
+    data_dir = repo.store.data_dir
 
-    requested_ids = body.get("strategy_ids")
-    if requested_ids and isinstance(requested_ids, list):
-        all_ids = [str(sid) for sid in requested_ids]
+    if strategy_ids:
+        all_ids = [str(sid) for sid in strategy_ids]
         unknown = [
             sid
             for sid in all_ids
             if not engine.has(sid) or engine.get(sid).meta.get("research_only")
         ]
         if unknown:
-            raise HTTPException(status_code=404, detail=f"unknown strategies: {unknown}")
+            raise UnknownStrategiesError(f"unknown strategies: {unknown}")
     else:
         all_ids = [
             meta["id"]
@@ -525,9 +525,8 @@ def run_all(request: Request, body: Optional[dict] = None):
         ]
 
     if not all_ids:
-        return {"as_of": str(as_of), "results": {}}
+        return as_of, {}
 
-    # 批量预加载所有 override 配置
     t0 = time.perf_counter()
     all_overrides = strategy_config.list_overrides(data_dir)
     logger.info("run_all: list_overrides took %.1fms (%d overrides)", (time.perf_counter() - t0) * 1000, len(all_overrides))
@@ -537,23 +536,20 @@ def run_all(request: Request, body: Optional[dict] = None):
         for sid in all_ids
     }
     overrides_map = {sid: all_overrides.get(sid, {}) for sid in all_ids}
-    try:
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            all_ids,
-            timeframe=timeframe,
-            params_map=params_map,
-            overrides_map=overrides_map,
-        )
-        engine_results = engine.run_all(
-            context,
-            params_map=params_map,
-            overrides_map=overrides_map,
-            strategy_ids=all_ids,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    context = svc.build_strategy_context(
+        engine,
+        as_of,
+        all_ids,
+        timeframe=timeframe,
+        params_map=params_map,
+        overrides_map=overrides_map,
+    )
+    engine_results = engine.run_all(
+        context,
+        params_map=params_map,
+        overrides_map=overrides_map,
+        strategy_ids=all_ids,
+    )
 
     results: dict[str, dict] = {}
     for sid, result in engine_results.items():
@@ -567,12 +563,60 @@ def run_all(request: Request, body: Optional[dict] = None):
     elapsed = (time.perf_counter() - t_total) * 1000
     logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
 
-    # 写入策略缓存 (供页面秒加载)
     if results:
         try:
             strategy_cache.write_cache(data_dir, str(as_of), results)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            logger.exception("write strategy cache failed for %s", as_of)
+
+    return as_of, results
+
+
+@router.post("/run_all")
+def run_all(request: Request, body: Optional[dict] = None):
+    """批量运行指定策略；注册、路由和执行均由 StrategyEngine 负责。"""
+    from datetime import date as date_type
+
+    body = body or {}
+    repo = request.app.state.repo
+    asset_type = str(body.get("asset_type") or "stock")
+    timeframe = str(body.get("timeframe") or "1d")
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="策略引擎未初始化")
+
+    raw_date = body.get("as_of")
+    requested_as_of: date | None = None
+    if raw_date:
+        requested_as_of = (
+            date_type.fromisoformat(str(raw_date)) if isinstance(raw_date, str) else raw_date
+        )
+
+    requested_ids = body.get("strategy_ids")
+    strategy_ids = (
+        [str(sid) for sid in requested_ids]
+        if requested_ids and isinstance(requested_ids, list)
+        else None
+    )
+
+    try:
+        as_of, results = compute_and_cache_all(
+            repo,
+            engine,
+            asset_type=asset_type,
+            timeframe=timeframe,
+            as_of=requested_as_of,
+            strategy_ids=strategy_ids,
+        )
+    except UnknownStrategiesError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    if as_of is None:
+        return {"as_of": None, "results": {}}
+    if not results:
+        return {"as_of": str(as_of), "results": {}}
 
     if body.get("summary_only"):
         return {

@@ -312,6 +312,20 @@ class PanelCache:
 # BacktestEngine
 # ================================================================
 
+
+def _gross_profit_factor(wins, losses) -> float | None:
+    """Gross profit / gross loss.
+
+    Not avg_win/avg_loss: that is the payoff ratio, which omits the win-rate term
+    and reads above 1.0 for a strategy whose many small losses outweigh its few
+    large wins. Exposed separately as payoff_ratio.
+    """
+    gross_loss = abs(float(np.sum(losses)))
+    if gross_loss <= 0:
+        return None
+    return float(np.sum(wins)) / gross_loss
+
+
 class BacktestEngine:
     """回测引擎 — 数据加载 + 撮合模拟 + 统计计算。"""
 
@@ -2892,7 +2906,9 @@ class BacktestEngine:
         # 盈亏比
         avg_win = float(np.mean(wins)) if len(wins) > 0 else 0.0
         avg_loss = abs(float(np.mean(losses))) if len(losses) > 0 else 0.0
-        profit_factor = avg_win / avg_loss if avg_loss > 0 else (float("inf") if avg_win > 0 else 0.0)
+        _pf = _gross_profit_factor(wins, losses)
+        profit_factor = _pf if _pf is not None else (float("inf") if avg_win > 0 else 0.0)
+        payoff_ratio = avg_win / avg_loss if avg_loss > 0 else (float("inf") if avg_win > 0 else 0.0)
 
         # 最大回撤 — 用交易序列近似
         equity = initial_capital
@@ -2924,6 +2940,7 @@ class BacktestEngine:
             "calmar": round(float(calmar), 2),
             "win_rate": round(float(win_rate), 4),
             "profit_factor": round(float(profit_factor), 2) if np.isfinite(profit_factor) else None,
+            "payoff_ratio": round(float(payoff_ratio), 2) if np.isfinite(payoff_ratio) else None,
             "n_trades": n_trades,
             "avg_pnl": round(float(np.mean(pnls)), 4),
             "avg_win": round(avg_win, 4),
@@ -2997,6 +3014,7 @@ class BacktestEngine:
         losses = pnls[pnls <= 0]
         avg_win = float(np.mean(wins)) if len(wins) else 0.0
         avg_loss = abs(float(np.mean(losses))) if len(losses) else 0.0
+        _pf = _gross_profit_factor(wins, losses)
 
         # 按退出日聚合已实现样本收益, 构造“样本收益曲线”。它不是账户净值。
         daily_returns: dict[str, list[float]] = {}
@@ -3049,7 +3067,8 @@ class BacktestEngine:
             "avg_return": round(float(np.mean(pnls)), 4),
             "median_return": round(float(np.median(pnls)), 4),
             "win_rate": round(float(len(wins) / len(pnls)), 4) if len(pnls) else 0.0,
-            "profit_factor": round(float(avg_win / avg_loss), 2) if avg_loss > 0 else None,
+            "profit_factor": round(_pf, 2) if _pf is not None else None,
+            "payoff_ratio": round(float(avg_win / avg_loss), 2) if avg_loss > 0 else None,
             "best": round(float(np.max(pnls)), 4),
             "worst": round(float(np.min(pnls)), 4),
             "avg_duration": round(float(np.mean(durations)), 1) if len(durations) else 0.0,
@@ -3136,6 +3155,7 @@ class BacktestEngine:
         losses = pnls[pnls <= 0]
         avg_win = float(np.mean(wins)) if len(wins) else 0.0
         avg_loss = abs(float(np.mean(losses))) if len(losses) else 0.0
+        _pf = _gross_profit_factor(wins, losses)
         stats = {
             "total_return": round(float(total_return), 4),
             "annual_return": round(float(annual_return), 4),
@@ -3144,7 +3164,8 @@ class BacktestEngine:
             "sortino": round(float(sortino), 2) if sortino is not None else None,
             "calmar": round(float(annual_return / abs(max_drawdown)), 2) if abs(max_drawdown) > 0.001 else 0.0,
             "win_rate": round(float(len(wins) / len(pnls)), 4) if len(pnls) else 0.0,
-            "profit_factor": round(float(avg_win / avg_loss), 2) if avg_loss > 0 else None,
+            "profit_factor": round(_pf, 2) if _pf is not None else None,
+            "payoff_ratio": round(float(avg_win / avg_loss), 2) if avg_loss > 0 else None,
             "n_trades": len(trades),
             "avg_pnl": round(float(np.mean(pnls)), 4) if len(pnls) else 0.0,
             "avg_win": round(avg_win, 4),

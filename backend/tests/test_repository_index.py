@@ -142,7 +142,9 @@ def test_flush_live_enriched_asset_index_updates_cache(repo):
         "open": 3000.0, "high": 3010.0, "low": 2990.0, "close": 3005.0,
         "volume": 1_000_000, "amount": 1e9, "ma5": 3001.0, "rsi_14": 55.0,
     }])
-    repo.flush_live_enriched_asset("index", df)
+    # force: this covers the write/cache contract, not the official-data gate,
+    # and the fixture has no exchange data behind it.
+    repo.flush_live_enriched_asset("index", df, force=True)
     cached, dt = repo.get_enriched_latest_asset("index", refresh=False)
     assert str(dt) == "2026-07-25"
     assert cached["close"].to_list() == [3005.0]
