@@ -180,7 +180,7 @@ commit 自述選股從 0 筆恢復為 108 筆，與本項描述的症狀吻合�
 描述的污染實例。當下不影響選股（基準日為 09-21，不會讀到該分區），且該分區由
 合併前的程式碼產生。
 
-#### B2. `quote_ts` 寫成微秒而非毫秒 — 待修
+#### B2. `quote_ts` 寫成微秒而非毫秒 — 已修
 `backend/app/services/quote_service.py` 把 provider 的 `timestamp`（`datetime`）
 `.cast(pl.Int64)`，polars 產出的是 µs（實測 `1790073000000000`），是契約的 1000 倍；
 provider 本來就有正確的 ms `quote_ts` 欄，卻因為不在 `cols_map` 而被丟棄。
@@ -189,11 +189,55 @@ provider 本來就有正確的 ms `quote_ts` 欄，卻因為不在 `cols_map` �
 `vol_ratio_5d` 全天失真）；`data_integrity._is_snapshot` 永遠無法判定盤中快照，
 損毀修復機制形同關閉。
 
-#### B3. 非即時 fallback 報價被蓋上今天日期寫入 — 待修
+**修法**：`quote_ts` 從 `cols_map` 抽出，改由 `_quote_ts_expr()` 決定，依來源分流——
+provider 已備好的毫秒欄優先直接採用；只有 `timestamp` 時**依型別**處理，`Datetime`
+走 `dt.epoch("ms")`，整數則原樣視為毫秒。原本的無差別 `cast(pl.Int64)` 正是微秒的來源。
+
+**驗證**（三種輸入，期望值 `1790083800000`）：
+
+| 輸入 | 結果 |
+|---|---|
+| provider 帶毫秒 `quote_ts` | 1790083800000 ✓ |
+| 只有 `datetime` 的 `timestamp` | 1790083800000 ✓（修正前為 1790083800000000）|
+| 只有整數 `timestamp` | 1790083800000 ✓ |
+
+另有一條測試把結果直接餵進 `session_progress_from_ts`，斷言落在 0～1 之間——那正是
+這個 bug 原本發作的位置。突變測試：把型別分流關掉退回微秒，該測試轉紅。
+
+**注意 B12 並未因此解決**：`session_progress_from_ts` 仍然永不回傳 `None`，所以
+`quote_service` 那個 `progress is None` 分支依舊不可達。本項修的是不會再用錯誤的
+微秒去觸發它，兩者是不同的問題。
+
+#### B3. 非即時 fallback 報價被蓋上今天日期寫入 — 已修
 `TaiwanHybridProvider.get_realtime` 退回 `official.fetch_quote`／`get_daily` 時拿到的是
 **前一交易日** OHLC，`_build_daily` 仍無條件蓋上 `cn_today()` 並 `flush_live_daily`。
 新增的 `_quote_source_realtime` 閘門只擋監控告警，不擋寫入。這是「同一檔股票、不同
 畫面不同價」的直接成因之一，也是 A4 不能直接合併的原因。
+
+2026-09-22 複查：**成因未變，後果範圍已縮小**。合併帶進來的 `_live_write_allowed`
+讓交易所尚未發布該日資料前的即時寫入只留記憶體、不建立分區，所以不再整片污染。
+但發布**之後**，該股仍會被前一交易日的 OHLC 以今天日期蓋掉（merge 的
+`keep="last"` 讓即時列勝出），UI 錯價依舊。
+
+**修法**：新增 `_records_datable_today()`，**逐筆**（非整批）過濾出 provider 標記為
+`realtime` 的記錄，掛在三個 `_build_daily` 呼叫點（股票／ETF／指數）。
+
+刻意只擋**落盤**這一段：報價快取仍保有那些 fallback 價格，畫面照常顯示並帶著自己的
+provenance，只是不會被寫成今天的日K。有一條測試以程式碼位置斷言
+`_build_index_quotes` 出現在閘門**之前**，把這個分界釘住。
+
+無 `status` 欄的 provider（A 股 TickFlow）不套用此閘門——否則會變成什麼都不寫。
+
+**驗證**（四種批次）：
+
+| 批次 | 保留 |
+|---|---|
+| 全部 realtime | 全部 |
+| realtime ＋ official 混合 | 只留 realtime 那筆 |
+| 全部非即時 | 0 筆（不產生日K）|
+| 無 status（A 股）| 全部 |
+
+突變測試：把閘門改成全放行，三條行為測試轉紅。
 
 #### B4. 台股路徑從不請求指數，卻每輪用空結果覆寫指數快取 — 待修
 `sym_list` 由自選 ＋ 監控規則組成，`CORE_INDEX_SYMBOLS`（`t00.TWSE`／`o00.TPEX`）
@@ -253,20 +297,46 @@ provider 本來就有正確的 ms `quote_ts` 欄，卻因為不在 `cols_map` �
 `frontend/src/pages/TaiwanStockDetail.tsx` 是 `refetchInterval: 10_000`。
 → 即時行情關閉時，Monitor 報價條停在進頁面那一刻，個股視窗每 10 秒更新。
 
-#### C2. 自選頁板塊篩選沿用舊 A 股 localStorage，會整頁清空 — 待修
+#### C2. 自選頁板塊篩選沿用舊 A 股 localStorage — 已修
 `frontend/src/pages/Watchlist.tsx` 的 `BOARDS` 由 5 個 A 股板塊改為
 `['上市','上櫃']`，但讀 `storage.watchlistBoardFilter` 無任何遷移／清洗，且以
 `boardFilter.size < BOARDS.length` 判斷是否啟用篩選。
 
 舊使用者存了 1 個舊板塊（例如 `創業板`）→ size 1 < 2 → 篩選生效 → 上市／上櫃皆不在
-集合中 → **自選股票列全部消失**，而 UI 上兩個板塊鈕都顯示未選取，看不出原因。
+集合中 → **所有個股行消失**，而 UI 上兩個板塊鈕都顯示未選取，看不出原因。
 存 2 個舊值則相反：篩選被整個略過但按鈕全暗。
+
+2026-09-22 複查修正描述：不是「整頁清空」。`Watchlist.tsx` 有「非股票不受板塊
+篩選」的豁免，所以 ETF 與指數仍會留在清單上。**半空的清單比全空更難判斷成因**，
+使用者更容易誤以為是資料壞了。
+
+**修法**：載入持久化值時以 `BOARDS` 白名單過濾，過濾後為空就回退全選。清洗放在
+初始化而不是渲染時，舊值只會被丟棄一次，之後存回去的就是乾淨的。
+
+**驗證**：
+
+| 存著的舊值 | 結果 |
+|---|---|
+| `['創業板']` | 回退全選，篩選不生效 |
+| `['主板','科創板','創業板']` | 回退全選 |
+| `['創業板','上櫃']` | 只留 `上櫃`，篩選生效（使用者確實選過上櫃）|
+| `['上市','上櫃']` | 原樣保留 |
+| `[]` | 預設全選 |
+
+另有一條測試**刻意重現未修正的行為**：`new Set(['創業板'])` 會讓篩選判定為生效，
+但沒有任何板塊能匹配——把症狀本身釘住，而不只測修正後的結果。
 修法：初始化時過濾掉不在 `BOARDS` 內的值，空集合則回退全選。
 
-#### C3. 個股「建立監控規則」預設 `logic:'or'`，與同畫面文案相反 — 待修
-`TaiwanStockDetail.tsx` 與 `TaiwanScreener.tsx` 都傳 `logic:'or'`，但
-`frontend/src/components/monitor/RuleEditor.tsx` 明訂訊號情境應為 `and`、提示文字也寫
-「多選預設需全部命中(AND)」，連接詞卻顯示「或」。存檔後任一訊號命中就發警報。
+#### C3. 個股「建立監控規則」預設 `logic:'or'` — 撤除（原判斷有誤）
+
+2026-09-22 複查撤除。原判斷把**兩個不同畫面**的東西放在一起比了：文件引用的
+「多選預設需全部命中(AND)」文案位於 `RuleEditor.tsx` 的完整模式；而兩個 preset
+呼叫端都帶 `simple`，該模式在更早處就 early return，它自己的文案是「選擇觸發訊號
+(任一命中即報警)」——**與 `logic:'or'` 一致，同畫面內沒有矛盾**。
+
+殘留的真實問題（嚴重度低，未另立項）：完整模式選「訊號」情境會強制 `and`，個股
+彈窗固定 `'or'`，同一種規則**因入口不同而語意不同**。這是跨畫面不一致，不是同畫面
+矛盾，使用者不會在單一畫面上看到相反的說法。
 
 #### C4. 回補任務啟動後、第一次輪詢回來前可重複啟動 — 待修
 `frontend/src/pages/settings/TaiwanEnrichmentDataCard.tsx` 的 `isJobRunning` 為真，
@@ -280,14 +350,32 @@ provider 本來就有正確的 ms `quote_ts` 欄，卻因為不在 `cols_map` �
 只傳 `alerts`，沒傳 `onSelectSymbol`。本次改動把 Screener／QuotePanel／IndexBar 的
 代號連結都改成 `openPreview`，唯獨漏了這裡。游標是 pointer、有 hover 底線，但點了沒反應。
 
-#### C6. RuleEditor 的 `simple` 模式仍可切到「策略・板塊（進階）」 — 待修（plausible）
-`RuleEditor.tsx` 的監控情境列沒有 `!simple` 守衛（資產類型列則有）。個股彈窗的小
-Modal 裡會出現策略／板塊表單，且 `selectCategory('advanced')` 會把 `scope` 改成
-`all`，使原本預填的單一標的被靜默丟棄。
+#### C6. RuleEditor 的 `simple` 模式仍可切到「策略・板塊（進階）」 — 撤除（原判斷有誤）
+
+2026-09-22 複查撤除。「監控情境」晶片列確實沒有 `!simple` 守衛（資產類型列則有），
+這點原判斷是對的——但那一列位於 `simple` 模式的 early return **之後**，簡易模式
+根本渲染不到它，所以描述的情境無法發生。
+
+缺守衛本身仍是隱患：若將來有人把 early return 移走或改成條件渲染，這一列就會暴露
+出來。但它現在不是 bug。
 
 ---
 
 ## 三、次要問題（已確認存在，未列入主清單）
+
+2026-09-22 複查新增（各一句，未展開調查）：
+
+- `backend/app/services/quote_service.py`：輪詢池超過上限時**從尾端截斷**，而監控
+  規則的標的正是 append 在自選股之後——**會最先被丟掉，規則靜默失效**。這比 A5
+  嚴重，因為使用者明確設過規則卻不會收到告警，且畫面上沒有任何線索。
+- `backend/app/api/kline.py`：活蠟燭注入守衛用 `date.today()`（伺服器本地日）而非
+  全專案一致的 `cn_today()`／台北日，跨時區部署會整段跳過注入。
+- `frontend/src/lib/useQuoteStream.ts`：`depth_updated` 明文不受即時行情開關限制，
+  而 `quotes_updated` 受閘門擋住。結果是 Monitor 上封單數字會動、報價不動，
+  **放大 C1 的錯覺**——看起來像在更新，其實價格是凍的。
+- `frontend/src/pages/Watchlist.tsx`：「全選＝跳過篩選」的寫法還有第二個副作用，
+  手動同時選取上市＋上櫃時 `hasBoardFilter` 會顯示成未篩選。
+
 
 - `frontend/src/components/Layout.tsx` 靜態 import `StockPreviewProvider` →
   `StockPreviewDialog` → `TaiwanStockDetail` → ECharts，把整個個股詳細頁拉進首屏
@@ -316,3 +404,41 @@ MIS／Yahoo live frame 帶該欄）；`queryKeys.ts` 移除 `market` 參數後
 
 A1 的嚴重度由本文作者在 2026-09-22 10:44 盤中實打 MIS 端點推翻，A4 的建議由本文
 作者以該 finding 自身引用的程式碼反駁後不採納。其餘 finding 未經第二輪獨立驗證。
+
+---
+
+## 六、複查（2026-09-22 晚間）
+
+本文寫於當日上午。之後這條分支推進約 20 個 commit、合併了 `feat/radar-strategies`、
+新增 `/strategies` 頁面、介面全面正體化。待修項逐一對**當下的程式碼**重新查證，
+由兩個未參與實作的 agent 分頭執行（後端 14 項、前端 6 項）。
+
+| | 結果 |
+|---|---|
+| 後端 A5–A7、B2–B12 | 14 項**全部仍然成立**，零失效 |
+| 前端 C1、C2、C4、C5 | 仍然成立 |
+| 前端 C3、C6 | **撤除**——原判斷有誤，非被修掉 |
+
+前後端的差異有跡可循：後端的 14 項今日幾乎未觸及（只動了 enriched 發佈與股本），
+自然全數留存；前端因為新增頁面、改寫文案而被重新檢視，才暴露出兩項原本就錯的判斷。
+
+**撤除的兩項都不是「被新 commit 修掉」，而是原本就判斷錯**。C3 把兩個不同畫面的
+文案放在一起比；C6 指出的缺守衛屬實，但那段程式碼在該模式下不可達。這類錯誤的
+共同點是：**只讀了程式碼，沒有確認它在目標情境下會不會被執行**。
+
+### 待修優先序
+
+判準是「使用者實際遇到的機率 × 遇到時被誤導的程度」，不是修起來難不難。
+
+當時排出的前三項 **B2 → B3 → C2 已於同日修正**，各自的修法與驗證見其章節。
+B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快照修復恢復作用，
+但**沒有解開 B12**——`session_progress_from_ts` 永不回傳 `None` 是獨立的問題。
+
+剩餘 15 項，接下來建議：
+
+1. **B9** — 把 1 日值當 5 日累計餵進因子計算，產出的是**錯的數字**而非缺值。
+   錯的數字比缺值難發現得多。
+2. **輪詢池從尾端截斷**（見次要問題章節）——監控規則的標的 append 在自選股之後，
+   超過上限時最先被丟掉。症狀是「設了規則卻收不到告警」，比清單少一檔難察覺。
+3. **A5** — 從 Screener／Monitor 點開的股票永遠看不到當日活蠟燭。與 B3 同屬
+   「不同畫面不同價」這條線，但成因不同（輪詢池不含該標的，而非寫錯日期）。
