@@ -12,6 +12,7 @@ import {
   SIGNAL_LABELS,
   SIGNAL_OPTIONS,
   cnSignal,
+  ABNORMAL_SIGNAL_DEFINITIONS,
 } from './signals'
 
 // 這份 id 清單鎖定內建訊號集合不被意外增減/改名。漲跌停四訊號由
@@ -125,5 +126,112 @@ describe('MONITOR_INTRADAY_SIGNAL_LABELS and cnSignal — Traditional Chinese', 
 
   it('cnSignal prefers an explicitly supplied custom-name map over the built-in tables', () => {
     expect(cnSignal('csg_1', { csg_1: '自訂訊號A' })).toBe('自訂訊號A')
+  })
+})
+
+
+// The abnormal diagnostics panel and the signal library settings page both render
+// these strings as the rule the backend applies. A threshold edited on one side only
+// leaves the UI describing a rule that is no longer enforced, which misleads worse
+// than showing nothing, so the expectations below are written out in full rather than
+// as substring probes. Source of truth: backend/app/taiwan/abnormal_diagnostics.py.
+describe('ABNORMAL_SIGNAL_DEFINITIONS — the rules shown to the user', () => {
+  const byId = (id: string) => {
+    const sig = ABNORMAL_SIGNAL_DEFINITIONS.find(s => s.id === id)
+    if (!sig) throw new Error(`no abnormal signal definition for ${id}`)
+    return sig
+  }
+
+  it('covers exactly the ten signal types abnormal_diagnostics.py can emit', () => {
+    expect(ABNORMAL_SIGNAL_DEFINITIONS.map(s => s.id)).toEqual([
+      'VOLUME_SPIKE',
+      'TURNOVER_SPIKE',
+      'PRICE_MOVE',
+      'FOREIGN_FLOW_SPIKE',
+      'TRUST_FLOW_SPIKE',
+      'MARGIN_SURGE',
+      'SHORT_SURGE',
+      'SHORT_MARGIN_RATIO_SPIKE',
+      'PRICE_FLOW_DIVERGENCE',
+      'RELATIVE_STRENGTH_OUTLIER',
+    ])
+  })
+
+  it('states each trigger expression exactly as the backend evaluates it', () => {
+    expect(byId('VOLUME_SPIKE').formula).toBe('成交量 ÷ 前 5 日平均成交量 ≥ 2.0')
+    expect(byId('TURNOVER_SPIKE').formula).toBe('成交金額 ÷ 前 5 日平均成交金額 ≥ 2.0')
+    expect(byId('PRICE_MOVE').formula).toBe('|漲跌幅| ÷ |槓桿倍數| ≥ 5%')
+    expect(byId('FOREIGN_FLOW_SPIKE').formula).toBe(
+      '|外資買賣超| ≥ 100,000 股　且　|外資買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
+    )
+    expect(byId('TRUST_FLOW_SPIKE').formula).toBe(
+      '|投信買賣超| ≥ 50,000 股　且　|投信買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
+    )
+    expect(byId('MARGIN_SURGE').formula).toBe(
+      '|融資增減| ≥ 500,000 股　且　|融資增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0',
+    )
+    expect(byId('SHORT_SURGE').formula).toBe(
+      '|融券增減| ≥ 100,000 股　且　|融券增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0',
+    )
+    expect(byId('SHORT_MARGIN_RATIO_SPIKE').formula).toBe(
+      '券資比 − 前 20 日券資比中位數 ≥ 5 個百分點',
+    )
+    expect(byId('PRICE_FLOW_DIVERGENCE').formula).toBe(
+      '|漲跌幅| ÷ |槓桿倍數| ≥ 3%　且　反向外資買賣超 ≥ 200,000 股　且　該買賣超達前 20 日 |買賣超| 平均的 2 倍',
+    )
+    // The backend subtracts the industry's SAME-DAY average change from the stock's
+    // 5-day return (abnormal_diagnostics.py, where average_change_pct is a one-session
+    // mean). Stated as implemented, not as the surrounding comment claims.
+    expect(byId('RELATIVE_STRENGTH_OUTLIER').formula).toBe(
+      '|個股 5 日報酬率 − 所屬產業當日平均漲跌幅| ≥ 10 個百分點',
+    )
+  })
+
+  it('keeps mean and median apart, matching which statistic each store is read with', () => {
+    expect(byId('FOREIGN_FLOW_SPIKE').formula).toContain('平均')
+    expect(byId('FOREIGN_FLOW_SPIKE').formula).not.toContain('中位數')
+    expect(byId('TRUST_FLOW_SPIKE').formula).toContain('平均')
+    expect(byId('TRUST_FLOW_SPIKE').formula).not.toContain('中位數')
+    expect(byId('MARGIN_SURGE').formula).toContain('中位數')
+    expect(byId('MARGIN_SURGE').formula).not.toContain('平均')
+    expect(byId('SHORT_SURGE').formula).toContain('中位數')
+    expect(byId('SHORT_SURGE').formula).not.toContain('平均')
+    expect(byId('SHORT_MARGIN_RATIO_SPIKE').formula).toContain('中位數')
+  })
+
+  it('states the history each signal needs before it is evaluated', () => {
+    expect(byId('VOLUME_SPIKE').dataRequirement).toBe('前 5 個交易日全部要有成交量資料')
+    expect(byId('TURNOVER_SPIKE').dataRequirement).toBe('前 5 個交易日全部要有成交金額資料')
+    expect(byId('FOREIGN_FLOW_SPIKE').dataRequirement).toBe(
+      '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 10,000 股',
+    )
+    expect(byId('TRUST_FLOW_SPIKE').dataRequirement).toBe(
+      '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 5,000 股',
+    )
+    // f_mult is only assigned inside the foreign-flow branch, so the divergence signal
+    // inherits that branch's coverage and baseline gates.
+    expect(byId('PRICE_FLOW_DIVERGENCE').dataRequirement).toBe(
+      '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 10,000 股',
+    )
+    for (const id of ['MARGIN_SURGE', 'SHORT_SURGE', 'SHORT_MARGIN_RATIO_SPIKE']) {
+      expect(byId(id).dataRequirement).toBe('前 20 日至少 15 日有融資融券資料')
+    }
+  })
+
+  it('leaves PRICE_MOVE without a history requirement, since it only needs the previous close', () => {
+    expect(byId('PRICE_MOVE').dataRequirement).toBeUndefined()
+  })
+
+  it('records that RELATIVE_STRENGTH_OUTLIER is never evaluated for an ETF', () => {
+    expect(byId('RELATIVE_STRENGTH_OUTLIER').dataRequirement).toBe(
+      'ETF 結構性不適用（無所屬產業），不列入其觸發與未觸發統計',
+    )
+  })
+
+  it('gives every signal a description distinct from its bare formula', () => {
+    for (const sig of ABNORMAL_SIGNAL_DEFINITIONS) {
+      expect(sig.description, sig.id).not.toBe(sig.formula)
+      expect(sig.description.trim().length, sig.id).toBeGreaterThan(10)
+    }
   })
 })

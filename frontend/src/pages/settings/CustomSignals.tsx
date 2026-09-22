@@ -199,6 +199,10 @@ export function SettingsCustomSignalsPanel() {
                   <span className="shrink-0 rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{sig.category}</span>
                 </div>
                 <p className="mt-3 text-xs leading-5 text-secondary">{sig.description}</p>
+                <p className="mt-2 font-mono text-[11px] leading-5 text-amber-400/90 break-words">{sig.formula}</p>
+                {sig.dataRequirement && (
+                  <p className="mt-1 text-[11px] leading-4 text-muted">資料條件：{sig.dataRequirement}</p>
+                )}
               </div>
             ))}
           </div>

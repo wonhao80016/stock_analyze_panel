@@ -25,6 +25,7 @@ import {
   Scale,
   RadioTower,
   ChevronDown,
+  HelpCircle,
 } from 'lucide-react'
 import {
   api,
@@ -278,6 +279,8 @@ export function TaiwanScreener() {
 
   // Taiwan Abnormal Diagnostics query (Phase 7D)
   const [abnormalFilter, setAbnormalFilter] = useState<string>('ALL')
+  const [showAbnormalGuide, setShowAbnormalGuide] = useState(false)
+  const selectedAbnormalSignal = ABNORMAL_SIGNAL_DEFINITIONS.find(s => s.id === abnormalFilter)
   const { data: abnormalData, isLoading: isAbnormalLoading, isError: isAbnormalError } = useQuery({
     queryKey: ['taiwanAbnormalDiagnostics', abnormalFilter],
     queryFn: () => api.taiwanAbnormalDiagnostics({
@@ -807,8 +810,66 @@ export function TaiwanScreener() {
                   <option key={sig.id} value={sig.id}>{sig.name}</option>
                 ))}
               </select>
+              <button
+                type="button"
+                onClick={() => setShowAbnormalGuide(prev => !prev)}
+                aria-expanded={showAbnormalGuide}
+                aria-controls="abnormal-signal-guide"
+                title="訊號計算方式"
+                className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 border transition-colors cursor-pointer ${
+                  showAbnormalGuide
+                    ? 'border-amber-700/60 bg-amber-950/40 text-amber-300'
+                    : 'border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                }`}
+              >
+                <HelpCircle className="w-3 h-3" />
+                計算方式
+              </button>
             </div>
           </div>
+
+          {/* The selected signal's rule, so the filter is never an unexplained code. */}
+          {!showAbnormalGuide && selectedAbnormalSignal && (
+            <p className="text-[11px] text-zinc-400 leading-5">
+              <span className="text-zinc-200 font-semibold">{selectedAbnormalSignal.name}</span>
+              <span className="text-zinc-600 font-mono mx-1.5">{selectedAbnormalSignal.id}</span>
+              {selectedAbnormalSignal.description}
+              <span className="text-amber-300/90 font-mono ml-1.5">{selectedAbnormalSignal.formula}</span>
+            </p>
+          )}
+
+          {showAbnormalGuide && (
+            <div id="abnormal-signal-guide" className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
+              <p className="text-[11px] text-zinc-400 leading-5">
+                以下訊號於盤後由日線、三大法人與融資融券資料計算，屬客觀統計判定，不含任何買賣建議。
+                資料不足時該訊號不評估，不會以缺值當成未觸發。
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {ABNORMAL_SIGNAL_DEFINITIONS.map(sig => (
+                  <div
+                    key={sig.id}
+                    className={`rounded-md border p-2 space-y-1 ${
+                      sig.id === abnormalFilter ? 'border-amber-700/60 bg-amber-950/20' : 'border-zinc-800 bg-zinc-900/40'
+                    }`}
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-zinc-200 font-semibold text-[12px]">{sig.name}</span>
+                      <span className="shrink-0 rounded border border-zinc-700 px-1 text-[10px] text-zinc-400">{sig.category}</span>
+                    </div>
+                    <div className="text-zinc-600 font-mono text-[10px]">{sig.id}</div>
+                    <p className="text-[11px] text-zinc-400 leading-5">{sig.description}</p>
+                    <p className="text-[11px] text-amber-300/90 font-mono leading-5 break-words">{sig.formula}</p>
+                    {sig.dataRequirement && (
+                      <p className="text-[10px] text-zinc-500 leading-4">資料條件：{sig.dataRequirement}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="text-[10px] text-zinc-500">
+                表格中每個特徵標籤可滑鼠停留，顯示該筆實際的觀測值與基期。
+              </p>
+            </div>
+          )}
 
           <div className="overflow-x-auto max-h-72 overflow-y-auto">
             <table className="w-full text-left border-collapse">

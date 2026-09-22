@@ -218,6 +218,10 @@ export interface AbnormalSignalDefinition {
   name: string
   category: string
   description: string
+  /** Trigger expression, mirroring abnormal_diagnostics.py. Keep both in step. */
+  formula: string
+  /** History the signal needs before it is evaluated at all; absent when it needs none. */
+  dataRequirement?: string
 }
 
 /** Abnormal move and capital flow diagnostics.
@@ -232,60 +236,81 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     name: '爆量',
     category: '量能',
     description: '成交量達前 5 個交易日均量的 2 倍以上。',
+    formula: '成交量 ÷ 前 5 日平均成交量 ≥ 2.0',
+    dataRequirement: '前 5 個交易日全部要有成交量資料',
   },
   {
     id: 'TURNOVER_SPIKE',
     name: '成交額放大',
     category: '量能',
     description: '成交金額達前 5 個交易日均額的 2 倍以上。',
+    formula: '成交金額 ÷ 前 5 日平均成交金額 ≥ 2.0',
+    dataRequirement: '前 5 個交易日全部要有成交金額資料',
   },
   {
     id: 'PRICE_MOVE',
     name: '價格異動',
     category: '價格',
     description: '單日漲跌幅絕對值達 5% 以上，槓桿型 ETF 會先除以槓桿倍數再判定。',
+    formula: '|漲跌幅| ÷ |槓桿倍數| ≥ 5%',
   },
   {
     id: 'FOREIGN_FLOW_SPIKE',
     name: '外資異常買賣超',
     category: '籌碼',
     description: '外資買賣超達前 20 日平均的 3 倍，且絕對量至少 10 萬股。',
+    formula: '|外資買賣超| ≥ 100,000 股　且　|外資買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
+    dataRequirement: '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 10,000 股',
   },
   {
     id: 'TRUST_FLOW_SPIKE',
     name: '投信異常買賣超',
     category: '籌碼',
     description: '投信買賣超達前 20 日平均的 3 倍，且絕對量至少 5 萬股。',
+    formula: '|投信買賣超| ≥ 50,000 股　且　|投信買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
+    dataRequirement: '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 5,000 股',
   },
   {
     id: 'MARGIN_SURGE',
     name: '融資激增',
     category: '籌碼',
     description: '融資增減至少 50 萬股，且達前 20 日中位數的 3 倍。',
+    formula: '|融資增減| ≥ 500,000 股　且　|融資增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0',
+    dataRequirement: '前 20 日至少 15 日有融資融券資料',
   },
   {
     id: 'SHORT_SURGE',
     name: '融券激增',
     category: '籌碼',
     description: '融券增減至少 10 萬股，且達前 20 日中位數的 3 倍。',
+    formula: '|融券增減| ≥ 100,000 股　且　|融券增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0',
+    dataRequirement: '前 20 日至少 15 日有融資融券資料',
   },
   {
     id: 'SHORT_MARGIN_RATIO_SPIKE',
     name: '券資比驟升',
     category: '籌碼',
     description: '券資比較前 20 日中位數上升 5 個百分點以上。',
+    formula: '券資比 − 前 20 日券資比中位數 ≥ 5 個百分點',
+    dataRequirement: '前 20 日至少 15 日有融資融券資料',
   },
   {
     id: 'PRICE_FLOW_DIVERGENCE',
     name: '價量與法人背離',
     category: '背離',
-    description: '漲跌幅達 3% 以上，但法人資金流向與價格方向相反。',
+    description:
+      '漲跌幅達 3% 以上，但外資同時反向大額進出：上漲時外資大賣、下跌時外資大買。',
+    formula:
+      '|漲跌幅| ÷ |槓桿倍數| ≥ 3%　且　反向外資買賣超 ≥ 200,000 股　且　該買賣超達前 20 日 |買賣超| 平均的 2 倍',
+    dataRequirement: '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 10,000 股',
   },
   {
     id: 'RELATIVE_STRENGTH_OUTLIER',
     name: '產業相對強弱異常',
     category: '相對強弱',
-    description: '個股與所屬產業的 5 日報酬率差距達 10 個百分點以上。',
+    description: '個股 5 日報酬率明顯偏離所屬產業的平均漲跌，差距達 10 個百分點以上。',
+    formula: '|個股 5 日報酬率 − 所屬產業當日平均漲跌幅| ≥ 10 個百分點',
+    dataRequirement: 'ETF 結構性不適用（無所屬產業），不列入其觸發與未觸發統計',
   },
 ]
 
