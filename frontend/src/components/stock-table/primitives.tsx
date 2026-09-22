@@ -3,7 +3,7 @@
  *
  * 只負責「無業務上下文」的純數據列：價格/成交/均線/區間/技術指標/動量/連板/財務等。
  * symbol、strategies、score、signals、candle 等需要頁面上下文（加自選按鈕、失效行、
- * kline 數據、信號提取）的列由各頁面的 renderCell 自行處理。
+ * kline 數據、訊號提取）的列由各頁面的 renderCell 自行處理。
  *
  * 口徑與原 ScreenerTable 對齊（已和自選頁校準過）：amplitude 用 *100、annual_vol/
  * 財務率類用 fmtPct、kdj 用 toFixed(1)、vol_ma 用 fmtBigNum 等。

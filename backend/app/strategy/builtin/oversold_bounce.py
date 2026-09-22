@@ -14,13 +14,13 @@ from app.backtest.matrix import (
 
 META = {
     "id": "oversold_bounce",
-    "name": "超跌反弹",
-    "description": "RSI14 < 30超卖区 + 当日收阳 + 放量, 抄底信号",
-    "tags": ["超跌", "反弹", "RSI"],
+    "name": "超跌反彈",
+    "description": "RSI14 < 30超賣區 + 當日收陽 + 放量, 抄底訊號",
+    "tags": ["超跌", "反彈", "RSI"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
-        {"id": "use_rsi_filter", "label": "启用RSI过滤", "type": "bool", "default": True},
+        {"id": "use_rsi_filter", "label": "啟用RSI過濾", "type": "bool", "default": True},
         {
             "id": "rsi_max",
             "label": "RSI上限",
@@ -30,8 +30,8 @@ META = {
             "max": 50.0,
             "step": 1.0,
         },
-        {"id": "require_bullish_candle", "label": "要求收阳", "type": "bool", "default": True},
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool", "default": True},
+        {"id": "require_bullish_candle", "label": "要求收陽", "type": "bool", "default": True},
+        {"id": "use_volume_filter", "label": "啟用量比過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_min",
             "label": "最低量比",

@@ -14,26 +14,26 @@ from app.backtest.matrix import (
 
 META = {
     "id": "high_turnover_surge",
-    "name": "高换手拉升",
-    "description": "换手率 > 5% 且涨幅 > 3%, 资金活跃",
-    "tags": ["换手率", "放量", "资金"],
+    "name": "高換手拉升",
+    "description": "換手率 > 5% 且漲幅 > 3%, 資金活躍",
+    "tags": ["換手率", "放量", "資金"],
     "asset_types": ["stock"],
     "timeframes": ["1d"],
     "params": [
-        {"id": "use_turnover_filter", "label": "启用换手率过滤", "type": "bool", "default": True},
+        {"id": "use_turnover_filter", "label": "啟用換手率過濾", "type": "bool", "default": True},
         {
             "id": "min_turnover",
-            "label": "最低换手率%",
+            "label": "最低換手率%",
             "type": "float",
             "default": 5.0,
             "min": 1.0,
             "max": 20.0,
             "step": 0.5,
         },
-        {"id": "use_change_filter", "label": "启用涨幅过滤", "type": "bool", "default": True},
+        {"id": "use_change_filter", "label": "啟用漲幅過濾", "type": "bool", "default": True},
         {
             "id": "min_change",
-            "label": "最低涨幅%",
+            "label": "最低漲幅%",
             "type": "float",
             "default": 3.0,
             "min": 1.0,

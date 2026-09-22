@@ -14,13 +14,13 @@ from app.backtest.matrix import (
 
 META = {
     "id": "oversold_reversal",
-    "name": "超跌反转",
-    "description": "RSI14 < 30超卖 + 涨幅 > 1% + 站上MA5, 超卖反转信号",
-    "tags": ["超跌", "反弹", "RSI"],
+    "name": "超跌反轉",
+    "description": "RSI14 < 30超賣 + 漲幅 > 1% + 站上MA5, 超賣反轉訊號",
+    "tags": ["超跌", "反彈", "RSI"],
     "asset_types": ["stock"],
     "timeframes": ["1d"],
     "params": [
-        {"id": "use_rsi_filter", "label": "启用RSI过滤", "type": "bool", "default": True},
+        {"id": "use_rsi_filter", "label": "啟用RSI過濾", "type": "bool", "default": True},
         {
             "id": "rsi_max",
             "label": "RSI上限",
@@ -30,10 +30,10 @@ META = {
             "max": 50.0,
             "step": 1.0,
         },
-        {"id": "use_change_filter", "label": "启用涨幅过滤", "type": "bool", "default": True},
+        {"id": "use_change_filter", "label": "啟用漲幅過濾", "type": "bool", "default": True},
         {
             "id": "min_change",
-            "label": "最低涨幅%",
+            "label": "最低漲幅%",
             "type": "float",
             "default": 1.0,
             "min": 0.5,
@@ -42,7 +42,7 @@ META = {
         },
         {
             "id": "require_above_ma5",
-            "label": "要求收盘价在MA5上方",
+            "label": "要求收盤價在MA5上方",
             "type": "bool",
             "default": True,
         },

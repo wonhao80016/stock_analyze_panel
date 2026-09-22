@@ -14,16 +14,16 @@ from app.backtest.matrix import (
 
 META = {
     "id": "strong_open",
-    "name": "强势高开",
-    "description": "高开 > 3% 且收盘高于开盘价, 集合竞价强势",
-    "tags": ["高开", "强势"],
+    "name": "強勢高開",
+    "description": "高開 > 3% 且收盤高於開盤價, 集合競價強勢",
+    "tags": ["高開", "強勢"],
     "asset_types": ["stock"],
     "timeframes": ["1d"],
     "params": [
-        {"id": "use_open_gap_filter", "label": "启用高开过滤", "type": "bool", "default": True},
+        {"id": "use_open_gap_filter", "label": "啟用高開過濾", "type": "bool", "default": True},
         {
             "id": "min_open_gap",
-            "label": "最低高开%",
+            "label": "最低高開%",
             "type": "float",
             "default": 3.0,
             "min": 1.0,
@@ -32,14 +32,14 @@ META = {
         },
         {
             "id": "require_close_above_open",
-            "label": "要求收盘高于开盘",
+            "label": "要求收盤高於開盤",
             "type": "bool",
             "default": True,
         },
-        {"id": "use_change_filter", "label": "启用涨幅过滤", "type": "bool", "default": True},
+        {"id": "use_change_filter", "label": "啟用漲幅過濾", "type": "bool", "default": True},
         {
             "id": "min_change",
-            "label": "最低涨幅%",
+            "label": "最低漲幅%",
             "type": "float",
             "default": 3.0,
             "min": 1.0,

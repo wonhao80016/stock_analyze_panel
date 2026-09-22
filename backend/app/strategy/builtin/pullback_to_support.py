@@ -14,23 +14,23 @@ from app.backtest.matrix import (
 
 META = {
     "id": "pullback_to_support",
-    "name": "缩量回踩",
-    "description": "回踩MA20附近 + 缩量 + 中期趋势向上",
-    "tags": ["回踩", "支撑"],
+    "name": "縮量回踩",
+    "description": "回踩MA20附近 + 縮量 + 中期趨勢向上",
+    "tags": ["回踩", "支撐"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
-        {"id": "use_ma20_proximity", "label": "启用MA20附近过滤", "type": "bool", "default": True},
+        {"id": "use_ma20_proximity", "label": "啟用MA20附近過濾", "type": "bool", "default": True},
         {
             "id": "ma_proximity",
-            "label": "均线偏离度",
+            "label": "均線偏離度",
             "type": "float",
             "default": 0.02,
             "min": 0.01,
             "max": 0.05,
             "step": 0.005,
         },
-        {"id": "use_volume_filter", "label": "启用缩量过滤", "type": "bool", "default": True},
+        {"id": "use_volume_filter", "label": "啟用縮量過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_max",
             "label": "最大量比",
@@ -42,13 +42,13 @@ META = {
         },
         {
             "id": "require_above_ma60",
-            "label": "要求收盘价在MA60上方",
+            "label": "要求收盤價在MA60上方",
             "type": "bool",
             "default": True,
         },
         {
             "id": "require_positive_momentum",
-            "label": "要求20日动量为正",
+            "label": "要求20日動量為正",
             "type": "bool",
             "default": True,
         },

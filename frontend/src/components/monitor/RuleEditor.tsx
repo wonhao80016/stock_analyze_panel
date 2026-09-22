@@ -16,7 +16,7 @@ interface Props {
   rule: MonitorRule | null
   /** 新建時的預填值 (如個股彈窗傳入 symbol/scope) */
   preset?: Partial<MonitorRule>
-  /** 極簡模式: 個股場景, 隱藏 type/scope/閾值等, 只顯示信號點選 */
+  /** 極簡模式: 個股場景, 隱藏 type/scope/閾值等, 只顯示訊號點選 */
   simple?: boolean
   onClose: () => void
   onSaved?: () => void
@@ -488,13 +488,13 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     ...SIGNAL_OPTIONS.map(key => ({ key, label: cnSignal(key) })),
     ...(options.data?.builtin_signals ?? []).filter(option => MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(option.key)),
   ]
-  // 指數: 隱藏漲跌停/連板類 (指數無這些列) 與分時信號 (無本地分鐘K, 會靜默不觸發)
+  // 指數: 隱藏漲跌停/連板類 (指數無這些列) 與分時訊號 (無本地分鐘K, 會靜默不觸發)
   const INDEX_HIDDEN_SIGNALS = (key: string) =>
     key.includes('limit') || MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(key)
   const pickerSignals = assetType === 'index'
     ? monitorBuiltinSignals.filter(o => !INDEX_HIDDEN_SIGNALS(o.key))
     : monitorBuiltinSignals
-  // 分時穿越信號: 數據按標的清單訂閱且有上限, 自選分組是動態集合 (靜默超限風險) → 禁用
+  // 分時穿越訊號: 數據按標的清單訂閱且有上限, 自選分組是動態集合 (靜默超限風險) → 禁用
   const intradayDisabledSignals =
     intradaySupport?.available === false || isGroupScope ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []
   const intradayDisabledHint = isGroupScope
@@ -546,7 +546,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     })
   }
 
-  // ── 極簡模式: 只顯示信號點選 + 可選描述 ──
+  // ── 極簡模式: 只顯示訊號點選 + 可選描述 ──
   if (simple) {
     return (
       <div className="rounded-card border border-border bg-surface p-5 space-y-4">
@@ -584,7 +584,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           )}
         </div>
 
-        {/* 價位條件 (閾值) — 與信號共存, 可選添加 */}
+        {/* 價位條件 (閾值) — 與訊號共存, 可選添加 */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-muted">價位條件 (可選)</span>

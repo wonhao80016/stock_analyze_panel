@@ -1,13 +1,13 @@
 /**
- * 股票列表共享邏輯(無 JSX)：信號提取、排序取值、不可排序列集合。
+ * 股票列表共享邏輯(無 JSX)：訊號提取、排序取值、不可排序列集合。
  *
- * 自選頁與策略頁共用，避免兩邊各維護一份導致口徑漂移（歷史上策略頁 14 個信號、
+ * 自選頁與策略頁共用，避免兩邊各維護一份導致口徑漂移（歷史上策略頁 14 個訊號、
  * 自選頁 13 個，缺一個均線金叉/死叉變體）。
  */
 import type { ColumnConfig } from '@/lib/list-columns'
 import type { MinuteKlineRow } from '@/lib/api'
 
-// ===== 信號 =====
+// ===== 訊號 =====
 
 export type SignalType = 'bull' | 'bear' | 'neutral'
 
@@ -16,7 +16,7 @@ export interface Signal {
   type: SignalType
 }
 
-/** 信號字段定義：[行字段名, 展示標籤, 信號類型] */
+/** 訊號字段定義：[行字段名, 展示標籤, 訊號類型] */
 export const SIGNAL_FIELDS: [string, string, SignalType][] = [
   ['signal_limit_up', '漲停', 'bull'],
   ['signal_broken_board_recovery', '反包', 'bull'],
@@ -34,12 +34,12 @@ export const SIGNAL_FIELDS: [string, string, SignalType][] = [
   ['signal_boll_breakdown_lower', '布林下破', 'bear'],
 ]
 
-/** 從一行數據中提取已命中的信號列表 */
+/** 從一行數據中提取已命中的訊號列表 */
 export function getSignals(r: Record<string, any>): Signal[] {
   return SIGNAL_FIELDS.filter(([key]) => r[key]).map(([, label, type]) => ({ label, type }))
 }
 
-/** 信號類型 → tailwind 顏色類 */
+/** 訊號類型 → tailwind 顏色類 */
 export function signalCls(type: SignalType): string {
   if (type === 'bull') return 'text-bull bg-bull/10'
   if (type === 'bear') return 'text-bear bg-bear/10'

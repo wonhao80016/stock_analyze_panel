@@ -5,11 +5,11 @@ import { QK } from '@/lib/queryKeys'
 import { SIGNAL_OPTIONS, cnSignal } from '@/lib/signals'
 
 interface Props {
-  /** 當前選中的信號 ID 列表 */
+  /** 當前選中的訊號 ID 列表 */
   signals: string[]
   /** 選中變化回調 */
   onChange: (next: string[]) => void
-  /** 買點 / 賣點 — 決定自定義信號的過濾與配色主題 */
+  /** 買點 / 賣點 — 決定自定義訊號的過濾與配色主題 */
   kind: 'entry' | 'exit'
   /** 渲染尺寸: dialog = 選股彈窗緊湊樣式; panel = 回測頁設置抽屜樣式 */
   variant?: 'dialog' | 'panel'
@@ -19,10 +19,10 @@ interface Props {
 }
 
 /**
- * 買賣觸發器信號選擇 — 選股頁彈窗 / 回測頁共用。
+ * 買賣觸發器訊號選擇 — 選股頁彈窗 / 回測頁共用。
  *
- * - 內置信號 (signal_*): 全部展示
- * - 自定義信號 (csg_*): 按 kind 過濾 (entry / exit / both)
+ * - 內置訊號 (signal_*): 全部展示
+ * - 自定義訊號 (csg_*): 按 kind 過濾 (entry / exit / both)
  * - entry 藍色主題, exit 橙色主題
  */
 export function SignalPicker({ signals, onChange, kind, variant = 'panel', builtinSignals, disabledSignals = [], disabledSignalHint }: Props) {

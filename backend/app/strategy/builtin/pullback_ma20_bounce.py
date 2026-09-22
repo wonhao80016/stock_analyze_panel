@@ -14,16 +14,16 @@ from app.backtest.matrix import (
 
 META = {
     "id": "pullback_ma20_bounce",
-    "name": "均线回踩反弹",
-    "description": "价格在MA20附近(±2%)且MA5>MA20>MA60多头排列, 回踩买入",
-    "tags": ["回踩", "均线", "反弹"],
+    "name": "均線回踩反彈",
+    "description": "價格在MA20附近(±2%)且MA5>MA20>MA60多頭排列, 回踩買入",
+    "tags": ["回踩", "均線", "反彈"],
     "asset_types": ["stock"],
     "timeframes": ["1d"],
     "params": [
-        {"id": "use_ma20_proximity", "label": "启用MA20附近过滤", "type": "bool", "default": True},
+        {"id": "use_ma20_proximity", "label": "啟用MA20附近過濾", "type": "bool", "default": True},
         {
             "id": "ma_proximity",
-            "label": "MA偏离度%",
+            "label": "MA偏離度%",
             "type": "float",
             "default": 2.0,
             "min": 0.5,
@@ -36,7 +36,7 @@ META = {
             "type": "bool",
             "default": True,
         },
-        {"id": "require_positive_change", "label": "要求当日上涨", "type": "bool", "default": True},
+        {"id": "require_positive_change", "label": "要求當日上漲", "type": "bool", "default": True},
     ],
     "scoring": {"momentum_60d": 0.4, "change_pct": 0.3, "momentum_20d": 0.3},
     "order_by": "score",

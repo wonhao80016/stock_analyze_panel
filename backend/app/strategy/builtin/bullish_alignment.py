@@ -14,21 +14,21 @@ from app.backtest.matrix import (
 
 META = {
     "id": "bullish_alignment",
-    "name": "均线多头",
-    "description": "MA5>MA10>MA20>MA60多头排列 + 短期动量为正",
-    "tags": ["均线", "多头"],
+    "name": "均線多頭",
+    "description": "MA5>MA10>MA20>MA60多頭排列 + 短期動量為正",
+    "tags": ["均線", "多頭"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
         {
             "id": "require_ma_alignment",
-            "label": "要求均线多头排列",
+            "label": "要求均線多頭排列",
             "type": "bool",
             "default": True,
         },
         {
             "id": "require_positive_momentum",
-            "label": "要求20日动量为正",
+            "label": "要求20日動量為正",
             "type": "bool",
             "default": True,
         },

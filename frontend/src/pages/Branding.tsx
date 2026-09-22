@@ -75,7 +75,7 @@ const MOCK_NAV = [
   { icon: LineChart, label: 'K 線' },
   { icon: ScanSearch, label: '策略' },
   { icon: History, label: '回測' },
-  { icon: SignalIcon, label: '信號' },
+  { icon: SignalIcon, label: '訊號' },
   { icon: Eye, label: '監控' },
   { icon: FileText, label: '財務分析' },
 ]

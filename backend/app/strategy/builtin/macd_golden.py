@@ -18,13 +18,13 @@ from app.backtest.matrix import (
 META = {
     "id": "macd_golden",
     "name": "MACD 金叉放量",
-    "description": "MACD金叉当日 + 量能放大",
+    "description": "MACD金叉當日 + 量能放大",
     "tags": ["MACD", "金叉", "放量"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
         {"id": "require_macd_golden", "label": "要求MACD金叉", "type": "bool", "default": True},
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool", "default": True},
+        {"id": "use_volume_filter", "label": "啟用量比過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_min",
             "label": "最低量比",

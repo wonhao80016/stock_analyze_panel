@@ -13,7 +13,7 @@ from app.backtest.matrix import (
 META = {
     "id": "factor_rank_research",
     "name": "因子排名研究",
-    "description": "受控多因子截面评分、阈值与排名选股策略",
+    "description": "受控多因子截面評分、閾值與排名選股策略",
     "tags": ["因子", "研究", "截面排名"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
@@ -21,7 +21,7 @@ META = {
     "params": [
         {
             "id": "entry_score",
-            "label": "入场最低分",
+            "label": "入場最低分",
             "type": "float",
             "default": 70.0,
             "min": 0.0,
@@ -30,7 +30,7 @@ META = {
         },
         {
             "id": "exit_score",
-            "label": "离场最高分",
+            "label": "離場最高分",
             "type": "float",
             "default": 40.0,
             "min": 0.0,
@@ -39,7 +39,7 @@ META = {
         },
         {
             "id": "top_rank",
-            "label": "每日最多入选",
+            "label": "每日最多入選",
             "type": "int",
             "default": 20,
             "min": 1,

@@ -14,15 +14,15 @@ from app.backtest.matrix import (
 
 META = {
     "id": "n_day_low_reversal",
-    "name": "新低反转",
-    "description": "触及60日新低后当日收阳放量, 反转信号",
-    "tags": ["反转", "新低"],
+    "name": "新低反轉",
+    "description": "觸及60日新低後當日收陽放量, 反轉訊號",
+    "tags": ["反轉", "新低"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
         {"id": "require_n_day_low", "label": "要求60日新低", "type": "bool", "default": True},
-        {"id": "require_bullish_candle", "label": "要求收阳", "type": "bool", "default": True},
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool", "default": True},
+        {"id": "require_bullish_candle", "label": "要求收陽", "type": "bool", "default": True},
+        {"id": "use_volume_filter", "label": "啟用量比過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_min",
             "label": "最低量比",

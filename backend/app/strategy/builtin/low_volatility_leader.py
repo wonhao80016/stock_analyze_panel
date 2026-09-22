@@ -14,22 +14,22 @@ from app.backtest.matrix import (
 
 META = {
     "id": "low_volatility_leader",
-    "name": "低波动龙头",
-    "description": "20日动量为正 + 年化波动 < 30% + MA20上方",
-    "tags": ["低波动", "龙头"],
+    "name": "低波動龍頭",
+    "description": "20日動量為正 + 年化波動 < 30% + MA20上方",
+    "tags": ["低波動", "龍頭"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
         {
             "id": "require_positive_momentum",
-            "label": "要求20日动量为正",
+            "label": "要求20日動量為正",
             "type": "bool",
             "default": True,
         },
-        {"id": "use_volatility_filter", "label": "启用波动率过滤", "type": "bool", "default": True},
+        {"id": "use_volatility_filter", "label": "啟用波動率過濾", "type": "bool", "default": True},
         {
             "id": "vol_max",
-            "label": "最大年化波动",
+            "label": "最大年化波動",
             "type": "float",
             "default": 0.30,
             "min": 0.05,
@@ -38,7 +38,7 @@ META = {
         },
         {
             "id": "require_above_ma20",
-            "label": "要求收盘价在MA20上方",
+            "label": "要求收盤價在MA20上方",
             "type": "bool",
             "default": True,
         },

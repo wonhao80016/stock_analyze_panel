@@ -1,8 +1,8 @@
 /**
- * 買賣觸發器信號定義 — 選股頁彈窗 / 回測頁共用。
+ * 買賣觸發器訊號定義 — 選股頁彈窗 / 回測頁共用。
  *
- * 信號 ID 必須與後端 backtest/strategy.py:_build_signal_mask 對齊
- * (signal_* 前綴為內置原子信號, csg_ 前綴為用戶自定義信號)。
+ * 訊號 ID 必須與後端 backtest/strategy.py:_build_signal_mask 對齊
+ * (signal_* 前綴為內置原子訊號, csg_ 前綴為用戶自定義訊號)。
  */
 
 export type SignalKind = 'entry' | 'exit' | 'both'
@@ -15,7 +15,7 @@ export interface BuiltinSignalDefinition {
   description: string
 }
 
-/** 內置原子信號清單 (權威展示來源, 兩頁統一)
+/** 內置原子訊號清單 (權威展示來源, 兩頁統一)
  *
  * TAIWAN_LOCALIZATION_POLISH: name/category/description 全面改為正體中文，
  * 並把「連板」相關描述改為依實際語意翻譯的「連續漲停」，不再是 A 股「連板」
@@ -174,13 +174,13 @@ export const MONITOR_INTRADAY_SIGNAL_LABELS: Record<string, string> = {
 
 export const MONITOR_INTRADAY_SIGNAL_OPTIONS = Object.keys(MONITOR_INTRADAY_SIGNAL_LABELS)
 
-/** 內置原子信號 → 中文標籤 */
+/** 內置原子訊號 → 中文標籤 */
 export const SIGNAL_LABELS: Record<string, string> = BUILTIN_SIGNAL_DEFINITIONS.reduce<Record<string, string>>((acc, sig) => {
   acc[sig.id] = sig.name
   return acc
 }, { ...MONITOR_INTRADAY_SIGNAL_LABELS })
 
-/** 內置信號 ID 列表 */
+/** 內置訊號 ID 列表 */
 export const SIGNAL_OPTIONS = BUILTIN_SIGNAL_DEFINITIONS.map(sig => sig.id)
 
 /** 常用技術指標/字段 → 中文 (閾值條件展示用, 與後端 ENRICHED_COLUMNS 對齊) */
@@ -204,8 +204,8 @@ const FIELD_LABELS: Record<string, string> = {
 }
 
 /**
- * 信號/字段 ID → 中文顯示名。
- * 內置信號查 SIGNAL_LABELS; csg_ 前綴查傳入的自定義信號名稱映射;
+ * 訊號/字段 ID → 中文顯示名。
+ * 內置訊號查 SIGNAL_LABELS; csg_ 前綴查傳入的自定義訊號名稱映射;
  * 技術指標查 FIELD_LABELS; 都找不到則原樣返回。
  */
 export function cnSignal(name: string, customNames?: Record<string, string>): string {

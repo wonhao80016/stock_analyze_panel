@@ -620,7 +620,7 @@ const StockCard = React.memo(function StockCard({
         </div>
       </div>
 
-      {/* 信號標籤區 */}
+      {/* 訊號標籤區 */}
       {signals.length > 0 && (
         <div className="pl-4 pr-2.5 pt-1.5 pb-2 flex flex-wrap gap-1">
           {signals.slice(0, 3).map(s => (
@@ -1815,7 +1815,7 @@ export function Watchlist() {
                 if (key === 'turnover') {
                   return <td className={`${numCls} ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</td>
                 }
-                // 信號列
+                // 訊號列
                 if (key === 'signals') {
                   const signals = getSignals(r)
                   return (

@@ -15,13 +15,13 @@ from app.backtest.matrix import (
 META = {
     "id": "ma_golden_cross",
     "name": "MA 金叉",
-    "description": "MA5上穿MA20当日触发, 量能配合",
-    "tags": ["均线", "金叉"],
+    "description": "MA5上穿MA20當日觸發, 量能配合",
+    "tags": ["均線", "金叉"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
         {"id": "require_ma_golden", "label": "要求MA5上穿MA20", "type": "bool", "default": True},
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool", "default": True},
+        {"id": "use_volume_filter", "label": "啟用量比過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_min",
             "label": "最低量比",
@@ -33,7 +33,7 @@ META = {
         },
         {
             "id": "require_above_ma60",
-            "label": "要求收盘价在MA60上方",
+            "label": "要求收盤價在MA60上方",
             "type": "bool",
             "default": True,
         },

@@ -7,18 +7,18 @@ from app.backtest.matrix import MarketDataMatrix, SignalMatrix, make_signal_matr
 META = {
     "id": "boll_breakout",
     "name": "布林突破",
-    "description": "突破布林上轨 + 放量, 强势加速信号",
+    "description": "突破布林上軌 + 放量, 強勢加速訊號",
     "tags": ["布林", "突破"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "params": [
         {
             "id": "require_boll_breakout",
-            "label": "要求突破布林上轨",
+            "label": "要求突破布林上軌",
             "type": "bool",
             "default": True,
         },
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool", "default": True},
+        {"id": "use_volume_filter", "label": "啟用量比過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_min",
             "label": "最低量比",

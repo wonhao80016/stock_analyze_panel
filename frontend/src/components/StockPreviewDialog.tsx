@@ -411,7 +411,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   )}
                 </div>
 
-                {/* 右: 消息 + 信號標籤 */}
+                {/* 右: 消息 + 訊號標籤 */}
                 <div className="flex items-center gap-2 flex-wrap min-w-0">
                   {triggerInfo.message && (
                     <span className="text-[11px] text-foreground/70 truncate">{triggerInfo.message}</span>

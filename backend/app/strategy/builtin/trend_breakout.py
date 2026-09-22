@@ -14,9 +14,9 @@ from app.backtest.matrix import (
 
 META = {
     "id": "trend_breakout",
-    "name": "趋势突破",
+    "name": "趨勢突破",
     "description": "MA60上方 + 60日新高 + 量能 ≥ 2倍均量",
-    "tags": ["趋势", "突破", "放量"],
+    "tags": ["趨勢", "突破", "放量"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
     "basic_filter": {
@@ -26,12 +26,12 @@ META = {
     "params": [
         {
             "id": "require_above_ma60",
-            "label": "要求收盘价在MA60上方",
+            "label": "要求收盤價在MA60上方",
             "type": "bool",
             "default": True,
         },
         {"id": "require_n_day_high", "label": "要求60日新高", "type": "bool", "default": True},
-        {"id": "use_volume_filter", "label": "启用量比过滤", "type": "bool", "default": True},
+        {"id": "use_volume_filter", "label": "啟用量比過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_min",
             "label": "最低量比",
