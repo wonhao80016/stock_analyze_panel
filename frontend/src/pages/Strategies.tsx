@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Loader2, Target } from 'lucide-react'
 import { api, type StrategyDetail } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { StrategyRule } from '@/components/StrategyRule'
+import { StrategyRule, strategyRuleText } from '@/components/StrategyRule'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { cn } from '@/lib/cn'
 
@@ -37,8 +37,20 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: 'unrun', label: '未執行' },
 ]
 
+const MIN_HITS_OPTIONS = [2, 3, 4, 5] as const
+
+/** The cap a run actually applied: a saved display_limit overrides the module's. */
+function effectiveLimit(detail: StrategyDetail): number | null {
+  const value = detail.display_limit ?? detail.limit
+  return typeof value === 'number' && value > 0 ? value : null
+}
+
 export function Strategies() {
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [minHits, setMinHits] = useState<number>(2)
+  // Strategies a stock must ALL be picked by. Empty means no constraint, so a
+  // strategy added later never silently narrows what was already on screen.
+  const [required, setRequired] = useState<Set<string>>(new Set())
   const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [filter, setFilter] = useState<Filter>('all')
 
@@ -72,6 +84,55 @@ export function Strategies() {
       })
       .sort((a, b) => Number(b.ran) - Number(a.ran) || b.total - a.total)
   }, [strategies.data, results])
+
+  // A stock several strategies agree on is the thing a per-strategy list cannot
+  // show: each list holds it once, and nothing says the others hold it too.
+  const nameById = useMemo(
+    () => new Map(((strategies.data?.presets ?? []) as StrategyDetail[]).map(s => [s.id, s.name || s.id])),
+    [strategies.data],
+  )
+
+  /** Strategies that picked something, so the chips never offer an empty one. */
+  const detailById = useMemo(
+    () => new Map(((strategies.data?.presets ?? []) as StrategyDetail[]).map(s => [s.id, s])),
+    [strategies.data],
+  )
+
+  const contributors = useMemo(
+    () => Object.entries(results)
+      .filter(([, r]) => ((r as any)?.rows?.length ?? 0) > 0)
+      .map(([sid]) => sid)
+      .sort((a, b) => (nameById.get(a) ?? a).localeCompare(nameById.get(b) ?? b, 'zh-Hant')),
+    [results, nameById],
+  )
+
+  const resonance = useMemo(() => {
+    const bySymbol = new Map<string, { row: any; ids: string[]; strategies: string[] }>()
+    for (const [sid, result] of Object.entries(results)) {
+      for (const row of ((result as any)?.rows ?? []) as any[]) {
+        const hit = bySymbol.get(row.symbol) ?? { row, ids: [], strategies: [] }
+        hit.ids.push(sid)
+        hit.strategies.push(nameById.get(sid) ?? sid)
+        bySymbol.set(row.symbol, hit)
+      }
+    }
+    const pinned = [...required]
+    return [...bySymbol.values()]
+      // Every pinned strategy must have picked it, so pinning narrows towards the
+      // intersection; with nothing pinned this is the plain multi-hit list.
+      .filter(h => pinned.every(sid => h.ids.includes(sid)))
+      .filter(h => h.strategies.length >= 2)
+      .sort((a, b) => b.strategies.length - a.strategies.length
+        || (b.row.change_pct ?? 0) - (a.row.change_pct ?? 0))
+  }, [results, nameById, required])
+
+  const resonanceShown = resonance.filter(h => h.strategies.length >= minHits)
+
+  // A strategy at its cap published its top N by score, not everything that
+  // matched, so a stock it ranked below the cut is missing from the tally below.
+  const cappedNames = rows
+    .filter(r => r.ran && effectiveLimit(r.detail) != null && r.total === effectiveLimit(r.detail))
+    .map(r => r.detail.name)
 
   const shown = rows.filter(r =>
     filter === 'all' ? true
@@ -117,6 +178,159 @@ export function Strategies() {
         </div>
       </div>
 
+      {contributors.length >= 2 && (
+        <section className="mb-3 rounded-card border border-accent/30 bg-surface p-3">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+            <div className="flex items-baseline gap-2">
+              <h2 className="text-[13px] font-medium text-foreground">多策略共振</h2>
+              <span className="text-[11px] text-muted">
+                {resonanceShown.length} 檔同時被 {minHits} 支以上策略選中
+              </span>
+            </div>
+            <div className="flex gap-1">
+              {MIN_HITS_OPTIONS.map(v => {
+                const count = resonance.filter(h => h.strategies.length >= v).length
+                return (
+                  <button
+                    key={v}
+                    type="button"
+                    disabled={count === 0}
+                    onClick={() => setMinHits(v)}
+                    aria-pressed={minHits === v}
+                    className={cn(
+                      'rounded-md border px-2 py-0.5 text-[11px] transition-colors',
+                      count === 0
+                        ? 'cursor-not-allowed border-border/50 text-muted/40'
+                        : minHits === v
+                          ? 'cursor-pointer border-accent/60 bg-accent/10 text-accent'
+                          : 'cursor-pointer border-border text-muted hover:text-foreground',
+                    )}
+                  >
+                    ≥{v} 支 {count}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+          <div className="mb-2 rounded-md border border-border/60 bg-base/40 p-2">
+            <div className="mb-1 flex items-baseline justify-between gap-2">
+              <span className="text-[11px] text-secondary">
+                指定必須命中的策略
+                <span className="ml-1 text-[10px] text-muted">
+                  {required.size === 0 ? '未指定，列出所有重複命中' : `已指定 ${required.size} 支，需全部命中`}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setRequired(new Set())}
+                disabled={required.size === 0}
+                className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted enabled:cursor-pointer enabled:hover:text-foreground disabled:opacity-40"
+              >
+                清除
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {contributors.map(sid => {
+                const on = required.has(sid)
+                return (
+                  <button
+                    key={sid}
+                    type="button"
+                    role="checkbox"
+                    aria-checked={on}
+                    aria-label={nameById.get(sid) ?? sid}
+                    title={(() => {
+                      const d = detailById.get(sid)
+                      return d ? strategyRuleText(d) : (nameById.get(sid) ?? sid)
+                    })()}
+                    onClick={() => setRequired(prev => {
+                      const next = new Set(prev)
+                      if (next.has(sid)) next.delete(sid)
+                      else next.add(sid)
+                      return next
+                    })}
+                    className={cn(
+                      'rounded border px-1.5 py-0.5 text-[10px] transition-colors cursor-pointer',
+                      on
+                        ? 'border-accent/60 bg-accent/15 text-accent'
+                        : 'border-border text-muted hover:text-foreground',
+                    )}
+                  >
+                    {on && <span className="mr-0.5">✓</span>}
+                    {nameById.get(sid) ?? sid}
+                    <span className="ml-1 font-mono text-[9px] opacity-70">
+                      {(results as any)[sid]?.rows?.length ?? 0}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <p className="mb-2 text-[10px] leading-4 text-muted">
+            數字是這檔股票<span className="text-secondary">出現在幾支策略的選股清單中</span>，
+            不等於它符合幾支策略的條件。
+            {cappedNames.length > 0 && (
+              <>
+                {' '}
+                <span className="text-amber-400/90">
+                  {cappedNames.join('、')} 已達各自的選股上限
+                </span>
+                ，排在上限之外的標的不會計入。
+              </>
+            )}
+          </p>
+          {resonanceShown.length === 0 && (
+            <p className="py-3 text-center text-[11px] text-muted">
+              {required.size > 0
+                ? '沒有個股同時被指定的這幾支策略選中。'
+                : '目前的門檻下沒有被重複命中的個股。'}
+            </p>
+          )}
+          <div className="max-h-96 space-y-1 overflow-y-auto pr-0.5">
+            {resonanceShown.map(({ row, strategies: names }) => (
+              <button
+                key={row.symbol}
+                type="button"
+                onClick={() => setPreview({ symbol: row.symbol, name: row.name ?? undefined })}
+                aria-label={`查看 ${row.name || row.symbol} 走勢`}
+                className="flex w-full items-center gap-3 rounded-md border border-transparent bg-elevated/40 px-2 py-1.5 text-left transition-colors hover:border-border/60 hover:bg-elevated"
+              >
+                <span className="w-7 shrink-0 text-center font-mono text-[13px] font-bold text-accent">
+                  {names.length}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="truncate text-[12px] text-foreground">{row.name || row.symbol}</span>
+                    <span className="shrink-0 font-mono text-[9px] text-muted">{row.symbol}</span>
+                  </div>
+                  <div className="mt-0.5 flex flex-wrap gap-1">
+                    {names.map(name => {
+                      const d = [...detailById.values()].find(x => (x.name || x.id) === name)
+                      return (
+                        <span
+                          key={name}
+                          title={d ? strategyRuleText(d) : name}
+                          className="rounded border border-border px-1 text-[9px] text-muted"
+                        >
+                          {name}
+                        </span>
+                      )
+                    })}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className="font-mono text-[11px] text-foreground">{fmtPrice(row.close)}</div>
+                  <div className={`font-mono text-[10px] font-semibold ${pctClass(row.change_pct)}`}>
+                    {fmtPct(row.change_pct)}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
       {strategies.isLoading ? (
         <div className="flex items-center gap-2 py-6 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />正在讀取策略清單…
@@ -146,7 +360,12 @@ export function Strategies() {
                     {!ran ? (
                       <span className="text-amber-400/90">未執行</span>
                     ) : total > 0 ? (
-                      <span className="text-accent">{total} 檔</span>
+                      <>
+                        <span className="text-accent">{total} 檔</span>
+                        {total === effectiveLimit(detail) && (
+                          <span className="ml-1 text-amber-400/90">已達上限</span>
+                        )}
+                      </>
                     ) : (
                       <span className="text-muted">0 檔</span>
                     )}
