@@ -182,6 +182,17 @@ def _strategy_detail(
     name = overrides.get("name", s.meta.get("name", "")) if overrides else s.meta.get("name", "")
     description = overrides.get("description", s.meta.get("description", "")) if overrides else s.meta.get("description", "")
 
+    def effective(key: str, default):
+        """The value a run would actually use.
+
+        backtest/strategy.py resolves every risk field through the same override
+        lookup, so reporting the module constant here would describe a run that
+        does not happen.
+        """
+        if overrides and key in overrides:
+            return overrides[key]
+        return default
+
     return {
         "id": s.meta["id"],
         "name": name or s.meta.get("name", ""),
@@ -204,12 +215,16 @@ def _strategy_detail(
         "entry_signals": overrides.get("entry_signals", s.entry_signals) if overrides else s.entry_signals,
         "exit_signals": overrides.get("exit_signals", s.exit_signals) if overrides else s.exit_signals,
         "minute_exit_trigger_supported_signals": sorted(MINUTE_EXIT_TRIGGER_SIGNALS),
-        "stop_loss": overrides.get("stop_loss", s.stop_loss) if overrides else s.stop_loss,
-        "take_profit": getattr(s, "take_profit", None),
-        "trailing_stop": getattr(s, "trailing_stop", None),
-        "trailing_take_profit_activate": getattr(s, "trailing_take_profit_activate", None),
-        "trailing_take_profit_drawdown": getattr(s, "trailing_take_profit_drawdown", None),
-        "max_hold_days": overrides.get("max_hold_days", s.max_hold_days) if overrides else s.max_hold_days,
+        "stop_loss": effective("stop_loss", s.stop_loss),
+        "take_profit": effective("take_profit", getattr(s, "take_profit", None)),
+        "trailing_stop": effective("trailing_stop", getattr(s, "trailing_stop", None)),
+        "trailing_take_profit_activate": effective(
+            "trailing_take_profit_activate", getattr(s, "trailing_take_profit_activate", None)
+        ),
+        "trailing_take_profit_drawdown": effective(
+            "trailing_take_profit_drawdown", getattr(s, "trailing_take_profit_drawdown", None)
+        ),
+        "max_hold_days": effective("max_hold_days", s.max_hold_days),
         "order_by": s.meta.get("order_by", "score"),
         "descending": s.meta.get("descending", True),
         "limit": s.meta.get("limit", 30),
