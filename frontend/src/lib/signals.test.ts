@@ -179,11 +179,10 @@ describe('ABNORMAL_SIGNAL_DEFINITIONS — the rules shown to the user', () => {
     expect(byId('PRICE_FLOW_DIVERGENCE').formula).toBe(
       '|漲跌幅| ÷ |槓桿倍數| ≥ 3%　且　反向外資買賣超 ≥ 200,000 股　且　該買賣超達前 20 日 |買賣超| 平均的 2 倍',
     )
-    // The backend subtracts the industry's SAME-DAY average change from the stock's
-    // 5-day return (abnormal_diagnostics.py, where average_change_pct is a one-session
-    // mean). Stated as implemented, not as the surrounding comment claims.
+    // Both sides span five sessions. The industry figure is average_return_5d, not
+    // relative_strength_5d, which is already net of the market's own 5-day return.
     expect(byId('RELATIVE_STRENGTH_OUTLIER').formula).toBe(
-      '|個股 5 日報酬率 − 所屬產業當日平均漲跌幅| ≥ 10 個百分點',
+      '|個股 5 日報酬率 − 所屬產業等權重 5 日報酬率| ≥ 10 個百分點',
     )
   })
 

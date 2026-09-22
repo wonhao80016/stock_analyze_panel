@@ -10,17 +10,22 @@ CORE RULES:
 - Point-In-Time No Look-Ahead: Target day is strictly excluded from historical baselines.
 - Explicit Evidence & Formulas: Every triggered signal provides observed, baseline, ratio/delta, threshold, formula, and coverage.
 - Purely Objective Classifications:
-    * VOLUME_SPIKE: target_volume / mean(previous_5_valid_volumes) >= 2.0 (coverage >= 5)
-    * TURNOVER_SPIKE: target_amount / mean(previous_5_valid_amounts) >= 2.0 (coverage >= 5)
-    * PRICE_MOVE: abs(change_pct) >= 0.05 (>= 5% move)
-    * FOREIGN_FLOW_SPIKE: abs(foreign_net) / mean(abs(previous_20_foreign_net)) >= 3.0 (with abs(net) >= 100,000 shares)
-    * TRUST_FLOW_SPIKE: abs(trust_net) / mean(abs(previous_20_trust_net)) >= 3.0 (with abs(net) >= 50,000 shares)
-    * DEALER_FLOW_SPIKE: abs(dealer_net) / mean(abs(previous_20_dealer_net)) >= 3.0 (with abs(net) >= 50,000 shares)
+    * VOLUME_SPIKE: target_volume / mean(previous_5_volumes) >= 2.0 (all 5 sessions present)
+    * TURNOVER_SPIKE: target_amount / mean(previous_5_amounts) >= 2.0 (all 5 sessions present)
+    * PRICE_MOVE: abs(change_pct) / abs(leverage_multiplier) >= 0.05
+    * FOREIGN_FLOW_SPIKE: abs(foreign_net) >= 100,000 shares AND abs(foreign_net) / mean(abs(previous_20_foreign_net)) >= 3.0
+      (needs 15 of the previous 20 sessions and that mean itself >= 10,000 shares)
+    * TRUST_FLOW_SPIKE: abs(trust_net) >= 50,000 shares AND abs(trust_net) / mean(abs(previous_20_trust_net)) >= 3.0
+      (needs 15 of the previous 20 sessions and that mean itself >= 5,000 shares)
     * MARGIN_SURGE: abs(margin_change) >= 500,000 shares AND abs(margin_change) / median(abs(previous_20)) >= 3.0
+      (needs 15 of the previous 20 sessions)
     * SHORT_SURGE: abs(short_change) >= 100,000 shares AND abs(short_change) / median(abs(previous_20)) >= 3.0
+      (needs 15 of the previous 20 sessions)
     * SHORT_MARGIN_RATIO_SPIKE: (target_sm_ratio - median_previous_20_sm_ratio) >= 5.0 percentage points
-    * PRICE_FLOW_DIVERGENCE: abs(change_pct) >= 0.03 AND strong opposite institutional flow
-    * RELATIVE_STRENGTH_OUTLIER: abs(stock_5d_return - industry_5d_return) >= 0.10 (>= 10% excess return)
+      (needs 15 of the previous 20 sessions)
+    * PRICE_FLOW_DIVERGENCE: abs(change_pct) / abs(leverage_multiplier) >= 0.03 AND an opposite foreign_net
+      of >= 200,000 shares at >= 2x its own 20-session mean (inherits FOREIGN_FLOW_SPIKE's coverage gates)
+    * RELATIVE_STRENGTH_OUTLIER: abs(stock_5d_return - industry_equal_weight_5d_return) >= 0.10
 
 ETF COVERAGE (Phase 7J):
 - get_diagnostics() accepts an opt-in `include_etfs: bool = False` parameter. Default False
@@ -581,22 +586,22 @@ class TaiwanAbnormalDiagnosticsService:
             # ── Signal 10: RELATIVE_STRENGTH_OUTLIER ──
             ind_m = ind_metrics_map.get(inst_master.industry or "")
             c5_base = c5_base_map.get(sym)
-            if ind_m and ind_m.relative_strength_5d is not None and c5_base and close_p is not None:
+            if ind_m and ind_m.average_return_5d is not None and c5_base and close_p is not None:
                 ret_5d = (close_p / c5_base) - 1.0
-                # Excess over industry equal-weight 5D
-                # RS 5D = ind_5d_return - mkt_5d_return
-                # If stock 5D return exceeds industry by >= 10%
-                diff_5d = round(ret_5d - (ind_m.average_change_pct or 0.0), 4)
+                # Both sides span the same five sessions: the industry's own equal-weight
+                # 5D return, not relative_strength_5d (which is already net of the market)
+                # and not average_change_pct (a single session).
+                diff_5d = round(ret_5d - ind_m.average_return_5d, 4)
                 if abs(diff_5d) >= 0.10:
                     signals.append(DiagnosticSignalEvidence(
                         type="RELATIVE_STRENGTH_OUTLIER",
                         subtype="LEADER" if diff_5d > 0 else "LAGGARD",
                         severity="high" if abs(diff_5d) >= 0.15 else "moderate",
                         observed=round(diff_5d * 100.0, 2),
-                        baseline=round((ind_m.average_change_pct or 0.0) * 100.0, 2),
+                        baseline=round(ind_m.average_return_5d * 100.0, 2),
                         delta=round(diff_5d * 100.0, 2),
                         threshold=10.0,
-                        formula="abs(stock_5d_return - industry_mean_return) >= 10%",
+                        formula="abs(stock_5d_return - industry_equal_weight_5d_return) >= 10%",
                         lookback_sessions=5,
                         valid_sessions=5,
                         source="taiwan_daily_store+taiwan_industry_intelligence",

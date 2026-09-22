@@ -1149,6 +1149,8 @@ export interface IndustryMetrics {
   dealer_net: number | null
   margin_balance_change: number | null
   short_balance_change: number | null
+  /** The industry's own equal-weight 5-session return; relative_strength_5d is this minus the market's. */
+  average_return_5d: number | null
   relative_strength_5d: number | null
   relative_strength_20d: number | null
   relative_strength_5d_comparable_count: number

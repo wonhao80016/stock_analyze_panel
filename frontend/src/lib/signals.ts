@@ -308,8 +308,8 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     id: 'RELATIVE_STRENGTH_OUTLIER',
     name: '產業相對強弱異常',
     category: '相對強弱',
-    description: '個股 5 日報酬率明顯偏離所屬產業的平均漲跌，差距達 10 個百分點以上。',
-    formula: '|個股 5 日報酬率 − 所屬產業當日平均漲跌幅| ≥ 10 個百分點',
+    description: '個股與所屬產業的 5 日報酬率差距達 10 個百分點以上。',
+    formula: '|個股 5 日報酬率 − 所屬產業等權重 5 日報酬率| ≥ 10 個百分點',
     dataRequirement: 'ETF 結構性不適用（無所屬產業），不列入其觸發與未觸發統計',
   },
 ]

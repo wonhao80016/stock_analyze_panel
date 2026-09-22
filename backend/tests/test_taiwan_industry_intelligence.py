@@ -253,6 +253,17 @@ def test_relative_strength_formula_and_new_listing_exclusion():
     assert ind_a.relative_strength_5d == 0.026667
     assert ind_a.relative_strength_5d_comparable_count == 2
 
+    # average_return_5d is the industry's own return with the market NOT netted off.
+    # RELATIVE_STRENGTH_OUTLIER compares a stock against this, so publishing
+    # relative_strength_5d here instead would silently halve every comparison.
+    ind_b = [i for i in snapshot.industries if i.industry == "航運業"][0]
+    assert ind_a.average_return_5d == 0.10
+    assert ind_b.average_return_5d == 0.02
+    assert ind_a.average_return_5d != ind_a.relative_strength_5d
+    assert round(
+        ind_a.average_return_5d - snapshot.market_reference.market_equal_weight_return_5d, 6
+    ) == ind_a.relative_strength_5d
+
     # 20D Returns:
     # S1: +10%, S2: excluded (missing), S3: +2%
     # Market equal-weight 20D = (0.10 + 0.02) / 2 = 0.06

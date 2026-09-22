@@ -80,6 +80,10 @@ class IndustryMetrics(BaseModel):
     margin_balance_change: float | None = None  # in shares
     short_balance_change: float | None = None  # in shares
 
+    # The industry's own equal-weight 5-session return. relative_strength_5d below is
+    # this minus the market's, so it cannot stand in for the industry return itself.
+    average_return_5d: float | None = None  # decimal e.g. 0.031
+
     relative_strength_5d: float | None = None  # decimal e.g. 0.025
     relative_strength_20d: float | None = None  # decimal e.g. -0.010
     relative_strength_5d_comparable_count: int = 0
@@ -402,8 +406,9 @@ class TaiwanIndustryIntelligenceService:
             # Relative Strength 5D
             comp_5d = ind_df.filter(pl.col("return_5d").is_not_null())
             rs_5d_cnt = len(comp_5d)
-            if rs_5d_cnt > 0 and m_ret_5d is not None:
-                ind_5d_mean = float(comp_5d["return_5d"].mean())
+            ind_5d_mean = float(comp_5d["return_5d"].mean()) if rs_5d_cnt > 0 else None
+            avg_ret_5d = round(ind_5d_mean, 6) if ind_5d_mean is not None else None
+            if ind_5d_mean is not None and m_ret_5d is not None:
                 rs_5d = round(ind_5d_mean - m_ret_5d, 6)
             else:
                 rs_5d = None
@@ -490,6 +495,7 @@ class TaiwanIndustryIntelligenceService:
                 dealer_net=d_net,
                 margin_balance_change=mb_chg,
                 short_balance_change=sb_chg,
+                average_return_5d=avg_ret_5d,
                 relative_strength_5d=rs_5d,
                 relative_strength_20d=rs_20d,
                 relative_strength_5d_comparable_count=rs_5d_cnt,
