@@ -127,8 +127,16 @@ export function StockInfoBar({
   const latest = rows[rows.length - 1]
   const prev = rows.length >= 2 ? rows[rows.length - 2] : null
   const close = Number(latest.close)
-  const chg = prev ? close - Number(prev.close) : 0
-  const chgPct = prev ? chg / Number(prev.close) * 100 : 0
+  // change_pct is the backend's own figure and a fraction, not a percentage (see
+  // pipeline.py). The preceding row is the same baseline only when the local daily
+  // store holds the previous session, so change_pct wins when it is present.
+  // Number(null) is 0, so a null must be rejected before the finite check.
+  const rowPct = latest.change_pct == null ? null : Number(latest.change_pct)
+  const prevClose = rowPct != null && Number.isFinite(rowPct) && rowPct !== -1
+    ? close / (1 + rowPct)
+    : prev ? Number(prev.close) : null
+  const chg = prevClose ? close - prevClose : 0
+  const chgPct = prevClose ? chg / prevClose * 100 : 0
   const isUp = chg >= 0
   const clr = isUp ? BULL : BEAR
 
@@ -152,7 +160,6 @@ export function StockInfoBar({
       case 'turnover':         return turnoverRate != null ? `${turnoverRate.toFixed(2)}%` : null
       case 'volume':           return latest.volume != null ? fmtVolume(Number(latest.volume)) : null
       case 'amplitude': {
-        const prevClose = prev ? Number(prev.close) : null
         if (prevClose == null || prevClose === 0) return null
         const hi = Number(latest.high)
         const lo = Number(latest.low)

@@ -152,7 +152,10 @@ export function StockDailyKChart({
     queryKey: QK.kline(symbol, dateRange.start, dateRange.end, extColumns),
     queryFn: () => api.klineDaily(symbol, days, dateRange, extColumns),
     enabled: !!symbol,
-    placeholderData: (prev) => prev,
+    // Hold the previous frame only while the same stock is refetched (range or ext
+    // change); carrying it across symbols pairs the new stock with the old price.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey?.[1] === symbol ? prev : undefined,
   })
 
   const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])

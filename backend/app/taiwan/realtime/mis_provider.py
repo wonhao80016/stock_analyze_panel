@@ -153,7 +153,10 @@ class TwseMisRealtimeProvider:
                 if isinstance(trade, dict):
                     last_price = _safe_float(trade.get("z"))
             if last_price is None:
-                last_price = bid_p
+                # A best bid is not a trade price, so it must never be published as one.
+                # Dropping the symbol rather than emitting a priceless quote is what lets
+                # the service fall back: its chain keys off absence from the result map.
+                continue
             prev_close = _safe_float(item.get("y"))
             open_p = _safe_float(item.get("o"))
             high_p = _safe_float(item.get("h"))
