@@ -224,6 +224,12 @@ class TestTwseMisProviderParsing:
 class TestRealtimeFallbackChain:
     def test_primary_mis_success(self):
         """Primary provider succeeds -> source='twse:mis'."""
+        from unittest.mock import patch
+
+        # The clock has to be pinned to the fixture's own trade date: an unpinned run
+        # during a live session reads the fixture as a prior-session quote and stamps
+        # it stale, so the fallback_reason assertion below would fail by date alone.
+        fake_now = datetime(2026, 8, 28, 13, 30, 0, tzinfo=TAIPEI_TZ)
         mock_mis = {
             "msgArray": [
                 {
@@ -243,7 +249,9 @@ class TestRealtimeFallbackChain:
         mis.fetch_quotes = lambda syms: orig_fetch(syms, mock_response_json=mock_mis)
         svc = TaiwanRealtimeService(mis_provider=mis)
 
-        quotes = svc.get_quotes(["0050.TWSE"])
+        with patch("app.taiwan.realtime.service.taipei_now", return_value=fake_now), \
+             patch("app.taiwan.realtime.mis_provider.taipei_now", return_value=fake_now):
+            quotes = svc.get_quotes(["0050.TWSE"])
         assert "0050.TWSE" in quotes
         q = quotes["0050.TWSE"]
         assert q.last_price == 106.95
