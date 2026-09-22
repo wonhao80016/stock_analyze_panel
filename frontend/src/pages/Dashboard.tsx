@@ -8,6 +8,7 @@ import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { cn } from '@/lib/cn'
+import { StrategyRule } from '@/components/StrategyRule'
 import { cnSignal } from '@/lib/signals'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -416,51 +417,6 @@ function WatchlistQuickGlance({ onStockClick }: { onStockClick: (symbol: string,
 const STRATEGY_PICK_LIMIT = 3
 const STRATEGY_CARD_LIMIT = 6
 
-function StrategyRule({ detail }: { detail: StrategyDetail }) {
-  const params = (detail.params ?? []).map(p => {
-    const v = detail.params_defaults?.[p.id] ?? p.default
-    return `${p.label ?? p.id}: ${v ?? '—'}`
-  })
-  const entry = (detail.entry_signals ?? []).map(s => cnSignal(s))
-  const exit = (detail.exit_signals ?? []).map(s => cnSignal(s))
-  const exits = [
-    detail.stop_loss != null ? `停損 ${(detail.stop_loss * 100).toFixed(1)}%` : null,
-    detail.take_profit != null ? `停利 ${(detail.take_profit * 100).toFixed(1)}%` : null,
-    detail.trailing_stop != null ? `移動停損 ${(detail.trailing_stop * 100).toFixed(1)}%` : null,
-  ].filter(Boolean) as string[]
-
-  return (
-    <div className="mb-1.5 space-y-1 rounded-md border border-border/60 bg-base/60 p-2">
-      <p className="text-[11px] leading-5 text-secondary">{detail.description || '此策略未提供說明。'}</p>
-      {entry.length > 0 && (
-        <p className="text-[10px] leading-4 text-muted">
-          <span className="text-foreground">進場訊號</span>：{entry.join('、')}
-        </p>
-      )}
-      {exit.length > 0 && (
-        <p className="text-[10px] leading-4 text-muted">
-          <span className="text-foreground">出場訊號</span>：{exit.join('、')}
-        </p>
-      )}
-      {exits.length > 0 && (
-        <p className="text-[10px] leading-4 text-muted">
-          <span className="text-foreground">風控</span>：{exits.join('、')}
-        </p>
-      )}
-      {params.length > 0 && (
-        <p className="font-mono text-[10px] leading-4 text-amber-400/90">{params.join('　')}</p>
-      )}
-      {(detail.tags ?? []).length > 0 && (
-        <div className="flex flex-wrap gap-1 pt-0.5">
-          {detail.tags.map(t => (
-            <span key={t} className="rounded border border-border px-1 text-[9px] text-muted">{t}</span>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, name?: string) => void }) {
   const cached = useQuery({
     queryKey: QK.screenerCached(),
@@ -548,7 +504,7 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
                 )}
               </div>
               {openRule === sid && detailById.has(sid) && (
-                <StrategyRule detail={detailById.get(sid)!} />
+                <StrategyRule detail={detailById.get(sid)!} className="mb-1.5" />
               )}
               <div className={cn('space-y-1', expanded === sid && 'max-h-64 overflow-y-auto pr-0.5')}>
                 {(expanded === sid ? result.rows : result.rows.slice(0, STRATEGY_PICK_LIMIT)).map((r: any) => (
@@ -678,7 +634,7 @@ export function Dashboard() {
           <div className="flex items-center gap-1.5">
             <BellRing className="h-3.5 w-3.5 text-accent" />
             <h2 className="text-xs font-semibold text-foreground">監控中心</h2>
-            <span className="font-mono text-[10px] text-muted">即時信號</span>
+            <span className="font-mono text-[10px] text-muted">即時訊號</span>
           </div>
           <Link to="/monitor" className="inline-flex items-center justify-center h-5 w-5 rounded text-muted hover:text-accent hover:bg-accent/10 transition-colors" title="進入監控中心">
             <ArrowUpRight className="h-3.5 w-3.5" />

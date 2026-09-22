@@ -12,6 +12,7 @@ import {
   RadioTower,
   Filter,
   Scale,
+  Target,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -26,7 +27,8 @@ export interface NavMeta {
 //     使用者實際無法選取台股標的(如 2330.TWSE)進行回測 —— 不是語言問題,
 //     是功能尚未支援台股, Taiwan-first 導航不該推薦一個選不到台股的回測。
 // route 與 component 其後已刪除, ASHARE_LEGACY_NAV 與 show_ashare_legacy_features
-// 亦已移除; backend 的 /api/strategies 與 /api/backtest 仍註冊但無前端消費端。
+// 亦已移除; backend 的 /api/backtest 仍註冊但無前端消費端。/api/strategies 其後
+// 由 /strategies(策略庫)與看板的策略當日推薦卡消費, 不再是孤兒端點。
 //
 // Phase 8B-5.8 — /data(A 股資料管理頁)已整頁刪除(非僅隱藏): 一般台股
 // 使用者不需要理解或操作 daily pipeline / enriched rebuild / minute K sync
@@ -51,6 +53,7 @@ export interface NavMeta {
 export const CORE_NAV: readonly NavMeta[] = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
   { to: '/taiwan-screener', label: '台股選股', icon: Filter },
+  { to: '/strategies',      label: '策略庫',   icon: Target },
   { to: '/watchlist',  label: '自選股',   icon: Star },
   { to: '/stocks/compare', label: '多股比較', icon: Scale },
   { to: '/monitor', label: '監控中心', icon: RadioTower },

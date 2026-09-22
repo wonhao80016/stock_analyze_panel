@@ -24,6 +24,7 @@ const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
 const TaiwanStockDetail = lazy(() => import('./pages/TaiwanStockDetail').then(m => ({ default: m.TaiwanStockDetail })))
 const TaiwanStockCompare = lazy(() => import('./pages/TaiwanStockCompare').then(m => ({ default: m.TaiwanStockCompare })))
 const TaiwanScreener = lazy(() => import('./pages/TaiwanScreener').then(m => ({ default: m.TaiwanScreener })))
+const Strategies = lazy(() => import('./pages/Strategies').then(m => ({ default: m.Strategies })))
 
 const CORE_ROUTE_PATHS = new Set([
   '/',
@@ -34,6 +35,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/stocks/compare',
   '/watchlist',
   '/taiwan-screener',
+  '/strategies',
   '/monitor',
   '/branding',
   '/settings',
@@ -95,6 +97,7 @@ export const router = createBrowserRouter([
       { path: 'stocks/:symbol', element: <TaiwanStockDetail /> },
       { path: 'watchlist', element: <Watchlist /> },
       { path: 'taiwan-screener', element: <TaiwanScreener /> },
+      { path: 'strategies', element: <Strategies /> },
       { path: 'monitor', element: <Monitor /> },
       { path: 'branding', element: <Branding /> },
       { path: 'settings', element: <Settings /> },

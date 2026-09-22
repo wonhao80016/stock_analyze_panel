@@ -7,6 +7,9 @@
 // 現有順序(看板/自選股/台股選股/多股比較/監控中心)與「看市場→找股票→
 // 加自選→比較→監控」的核心使用流程不符, 本 Phase 只調整陣列順序(route path
 // 不變), 這裡鎖定新順序、並確認 route path 集合本身完全未變。
+//
+// /strategies(策略庫)其後加在 /taiwan-screener 之後: 它同屬「找股票」這一段,
+// 是選股的另一個入口(依策略看, 而非依條件篩), 放在自選股之前才不打斷流程。
 import { describe, expect, it } from 'vitest'
 import * as navigationModule from './navigation'
 import { CORE_NAV } from './navigation'
@@ -16,19 +19,29 @@ describe('CORE_NAV', () => {
     expect(CORE_NAV.map(item => item.to)).toEqual([
       '/',
       '/taiwan-screener',
+      '/strategies',
       '/watchlist',
       '/stocks/compare',
       '/monitor',
     ])
   })
 
-  it('keeps the same 5 route paths as before the reorder (no route added/removed)', () => {
+  it('carries exactly the intended route paths', () => {
     const paths = new Set(CORE_NAV.map(item => item.to))
-    expect(paths).toEqual(new Set(['/', '/watchlist', '/taiwan-screener', '/stocks/compare', '/monitor']))
+    expect(paths).toEqual(
+      new Set(['/', '/watchlist', '/taiwan-screener', '/strategies', '/stocks/compare', '/monitor']),
+    )
   })
 
-  it('is the only exported nav array — CORE_NAV is exactly the 5 Taiwan core items', () => {
-    expect(CORE_NAV).toHaveLength(5)
+  it('is the only exported nav array — CORE_NAV is exactly the 6 Taiwan core items', () => {
+    expect(CORE_NAV).toHaveLength(6)
+  })
+
+  it('gives every item a label and an icon, so none can render blank in the sidebar', () => {
+    for (const item of CORE_NAV) {
+      expect(item.label.length, item.to).toBeGreaterThan(0)
+      expect(item.icon, item.to).toBeTruthy()
+    }
   })
 })
 
