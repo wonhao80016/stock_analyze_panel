@@ -356,24 +356,17 @@ request. Phase 6I historical NAV and distribution evidence remains documentation
 only. Current/reference sections do not enter verified factors, the historical
 screener, turnover history, or backtests.
 
-# Taiwan verified fundamentals factor safety (Phase 6F)
+# Taiwan fundamentals point-in-time rule
 
-Taiwan company factors are derived on demand from `TaiwanFundamentalStore` and
-must pass the strict `query_at > available_at` gate. Current aggregation values
-with `available_at=None` are reference-only and never enter screener ranking or
-backtests. Later revisions cannot replace earlier revisions before their own
-availability time.
+`TaiwanFundamentalStore` (`app/taiwan/fundamentals.py`) is the point-in-time
+seam. `latest_as_of` returns the newest revision whose `available_at` is set and
+strictly earlier than `query_at`, so a record with `available_at=None` is never
+returned and a later revision cannot replace an earlier one before its own
+availability time. `app/taiwan/research_context.py` is its consumer.
 
-| Factor | Dataset / field | Unit | Live official availability | Historical decision |
-|---|---|---|---|---|
-| EPS | financial statement / `cumulative_eps` | TWD per share | date-level aggregation only | supported only for records carrying verified `available_at`; current source is current-only |
-| ROE | `net_income / equity` from one financial-statement revision | ratio | date-level aggregation only | supported only for verified records; zero equity is malformed |
-| PE | valuation / `pe` | ratio | trade/report date without proven first-public timestamp | current-only; verified-record seam supported |
-| PB | valuation / `pb` | ratio | trade/report date without proven first-public timestamp | current-only; verified-record seam supported |
-| Dividend yield | valuation / `dividend_yield` | percent | trade/report date without proven first-public timestamp | current-only; verified-record seam supported |
-| Revenue growth | monthly-revenue aggregation | percent | no stable exact availability join | data-insufficient |
-
-Ranking compares only finite `available` values at one shared `query_at`.
-`missing`, `data_insufficient`, `unsupported`, and `malformed` observations are
-excluded rather than converted to zero or worst rank. Coverage reports totals
-for each status. ETFs are always unsupported for company fundamental factors.
+The verified-factor layer that once sat on top of this store — a fixed EPS / ROE
+/ PE / PB / dividend-yield factor table, the
+missing / data_insufficient / unsupported / malformed status taxonomy, and the
+per-status coverage report — was removed. It had no caller outside its own test,
+and no screener, API or job ever read it. Only the point-in-time rule above
+survives.

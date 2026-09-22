@@ -31,7 +31,7 @@ describe('notification channel settings', () => {
 
 describe('data source settings', () => {
   it('removes TickFlow registration and tier upsell UI', () => {
-    const code = read('DataSources.tsx') + read('Keys.tsx')
+    const code = read('DataSources.tsx')
     expect(code).not.toContain('tickflow.org/auth/register')
     expect(code).not.toMatch(/Starter\+|Pro\+|Expert\+|訂閱檔位|已適配全檔位/u)
   })

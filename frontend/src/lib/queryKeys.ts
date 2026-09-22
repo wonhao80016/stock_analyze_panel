@@ -26,7 +26,6 @@ export const QK = {
   // Watchlist
   watchlist:            ['watchlist'] as const,
   watchlistGroups:      ['watchlist-groups'] as const,
-  watchlistQuotes:      ['watchlist-quotes'] as const,
   watchlistEnriched:    (ext?: string) => ['watchlist-enriched', ext] as const,
   // 不用 watchlist- 前綴: 日K歷史盤中幾乎不變, 若被 SSE quotes_updated 高頻失效
   // (expert 1s) 會導致全自選日K每秒重拉, staleTime 形同虛設。

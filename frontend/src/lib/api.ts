@@ -201,15 +201,6 @@ export interface WatchlistImportResult {
   unmatched_count: number
 }
 
-export interface Quote {
-  symbol: string
-  price?: number
-  pct?: number
-  close?: number
-  change_pct?: number
-  [key: string]: any
-}
-
 export interface IndexQuote {
   symbol: string
   name?: string | null
@@ -579,7 +570,7 @@ export interface MonitorRule {
   message: string
   webhook_url?: string
   webhook_enabled?: boolean  // 兼容老規則, 已由 webhook_channels 取代
-  webhook_channels?: string[]  // 命中時推送的外部渠道 (合法值 'feishu' | 'wecom')
+  webhook_channels?: string[]  // External push channels on hit; backend whitelist is 'line' | 'telegram'
   created_at?: string
   runtime_warning?: string
 }
@@ -1533,8 +1524,7 @@ export function genRuleId(): string {
 
 // Phase 8B-5.10: LimitLadderStock/Tier/Result 隨已刪除的 LimitUpLadder.tsx
 // (連板梯隊頁)一併移除 —— 連板/打板/炸板/封板率為中國 A 股漲跌停制度
-// 衍生術語, 對台股產品無意義。depth_service 的 sealed cache 判定邏輯本身
-// 完全未動, 仍供 quote_service/monitor_rules 使用。
+// 衍生術語, 對台股產品無意義。depth_service 其後已一併移除。
 
 // ===== Backtest =====
 export interface BacktestResult {
@@ -2033,18 +2023,8 @@ export interface CustomSourceConfig {
   datasets: Record<string, DatasetConfig>
 }
 
-export interface WecomBotStatus {
-  enabled: boolean
-  running: boolean
-  connected: boolean
-  bot_id_configured: boolean
-  secret_configured: boolean
-  last_error: string
-}
-
 export interface Preferences {
   realtime_quotes_enabled: boolean
-  indices_nav_pinned: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
@@ -2073,18 +2053,10 @@ export interface Preferences {
   instruments_schedule: { hour: number; minute: number }
   enriched_batch_size: number
   index_daily_batch_size: number
-  depth_polling_interval: number
-  depth_finalize_time: { hour: number; minute: number }
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
   system_notify_enabled: boolean
-  feishu_webhook_url?: string
-  feishu_webhook_secret?: string
-  wecom_webhook_url?: string
-  wecom_bot_id?: string
-  wecom_bot_secret?: string
-  wecom_bot_enabled?: boolean
   webhook_enabled_default?: boolean
   webhook_default_channels?: string[]
   line_target_id?: string
@@ -2321,31 +2293,6 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
-  updateFeishuWebhook: (url: string, secret: string = '') =>
-    request<{ feishu_webhook_url: string; feishu_webhook_secret: string }>('/api/settings/preferences/feishu-webhook', {
-      method: 'PUT',
-      body: JSON.stringify({ url, secret }),
-    }),
-  updateWecomWebhook: (url: string) =>
-    request<{ wecom_webhook_url: string }>('/api/settings/preferences/wecom-webhook', {
-      method: 'PUT',
-      body: JSON.stringify({ url }),
-    }),
-  updateWecomBot: (botId: string, secret: string, enabled: boolean = true) =>
-    request<{
-      wecom_bot_id: string
-      wecom_bot_secret: string
-      wecom_bot_enabled: boolean
-      wecom_bot_status: WecomBotStatus
-    }>('/api/settings/preferences/wecom-bot', {
-      method: 'PUT',
-      body: JSON.stringify({ bot_id: botId, secret, enabled }),
-    }),
-  toggleWecomBot: (enabled: boolean) =>
-    request<{ wecom_bot_enabled: boolean; wecom_bot_status: WecomBotStatus }>('/api/settings/preferences/wecom-bot-toggle', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
   updateWebhookDefault: (enabled: boolean) =>
     request<{ webhook_enabled_default: boolean }>('/api/settings/preferences/webhook-enabled-default', {
       method: 'PUT',
@@ -2370,16 +2317,6 @@ export const api = {
     request<{ ok: boolean }>('/api/settings/preferences/line-messaging/test', { method: 'POST' }),
   testTelegramBot: () =>
     request<{ ok: boolean }>('/api/settings/preferences/telegram-bot/test', { method: 'POST' }),
-  updateDepthPollingInterval: (interval: number) =>
-    request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
-      method: 'PUT',
-      body: JSON.stringify({ interval }),
-    }),
-  updateDepthFinalizeTime: (hour: number, minute: number) =>
-    request<{ hour: number; minute: number }>('/api/settings/preferences/depth-finalize-time', {
-      method: 'PUT',
-      body: JSON.stringify({ hour, minute }),
-    }),
   saveNavOrder: (nav_order: string[]) =>
     request<{ nav_order: string[] }>('/api/settings/preferences/nav-order', {
       method: 'PUT',
@@ -2571,7 +2508,6 @@ export const api = {
     ),
   watchlistClear: () =>
     request<{ removed: number }>('/api/watchlist', { method: 'DELETE' }),
-  watchlistQuotes: () => request<{ quotes: Quote[] }>('/api/watchlist/quotes'),
   watchlistEnriched: (extColumns?: string) =>
     request<{ rows: any[]; as_of: string | null; elapsed_ms: number }>(
       extColumns
@@ -2852,8 +2788,8 @@ export const api = {
 
   // Phase 8B-5.11: 大盤覆盤(reviewReportsList/Save/Delete/reviewStream)
   // 隨已刪除的 Review.tsx(盤後檢討頁)一併移除 —— 純 A 股 AI 長篇復盤
-  // workflow, 對台股無意義。GET /api/overview/market 與 market_overview_builder
-  // 已於後續移除(有用欄位併入 market-intelligence);depth_service 完全未動。
+  // workflow, 對台股無意義。GET /api/overview/market、market_overview_builder
+  // 與 depth_service 其後皆已移除(overview 的有用欄位併入 market-intelligence)。
 
   // ===== Strategy Engine =====
   strategyList: (assetType?: 'stock' | 'etf', timeframe = '1d') => {

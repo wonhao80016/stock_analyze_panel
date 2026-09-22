@@ -69,24 +69,9 @@ def get_realtime_quotes_enabled() -> bool:
     return load().get("realtime_quotes_enabled", False)
 
 
-def get_indices_nav_pinned() -> bool:
-    """侧栏指数报价卡片是否固定显示。默认 True（常驻）。
-    关闭后，卡片跟随实时行情开关（仅实时开时显示）。"""
-    return load().get("indices_nav_pinned", True)
-
-
 def get_watchlist_groups_in_nav() -> bool:
     """自选分组是否显示在侧边栏（可展开二级子菜单）。默认 False。"""
     return load().get("watchlist_groups_in_nav", False)
-
-
-def get_show_ashare_legacy_features() -> bool:
-    """是否在导航中显示中国 A 股 legacy 功能区块（连板梯队/概念分析/行业分析等）。
-
-    Phase 8B-2 — 台股优先: 默认 False, 不删除 A 股功能本身(route/component/backend
-    均保留), 只是默认不在 Taiwan-first 导航中出现。用户可在 设置 → 系统 中开启,
-    开启后功能原样可用, 与台股功能互不影响。"""
-    return load().get("show_ashare_legacy_features", False)
 
 
 def get_realtime_quote_interval() -> float:
@@ -533,40 +518,6 @@ def set_index_daily_batch_size(size: int) -> int:
     size = max(1, min(10000, size))
     save({"index_daily_batch_size": size})
     return size
-
-
-# ── 五档盘口 sealed(真假涨停) 配置 ──────────────────────
-
-def get_depth_polling_interval() -> float:
-    """depth 盘中轮询间隔(秒)。默认 10(Pro/Expert 都适用)。"""
-    return float(load().get("depth_polling_interval", 10.0))
-
-
-def set_depth_polling_interval(interval: float) -> float:
-    """保存 depth 轮询间隔。"""
-    interval = max(1.0, min(600.0, float(interval)))
-    save({"depth_polling_interval": interval})
-    return interval
-
-
-def get_depth_finalize_time() -> dict:
-    """盘后 sealed 定版时间 {"hour": 13, "minute": 35}。范围 13:31~18:00。"""
-    d = load().get("depth_finalize_time", {"hour": 13, "minute": 35})
-    return {"hour": d.get("hour", 13), "minute": d.get("minute", 35)}
-
-
-def set_depth_finalize_time(hour: int, minute: int) -> dict:
-    """保存盘后 sealed 定版时间,强制范围 13:31~18:00。"""
-    h = max(0, min(23, hour))
-    m = max(0, min(59, minute))
-    # Never before the 13:30 close: finalize re-pulls the book and overwrites the
-    # sealed cache, so an earlier run would replace it with a mid-session snapshot.
-    if h * 60 + m < 13 * 60 + 31:
-        h, m = 13, 31
-    if h * 60 + m > 18 * 60:
-        h, m = 18, 0
-    save({"depth_finalize_time": {"hour": h, "minute": m}})
-    return {"hour": h, "minute": m}
 
 
 # 监控规则可选的外部推播渠道。多选: 不推播 = 空数组, 而非 'none'。

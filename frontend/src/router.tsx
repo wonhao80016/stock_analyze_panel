@@ -12,8 +12,8 @@ import {
   getFrontendExtensionRoutes,
 } from './extensions/registry'
 
-// 代码分割: 页面全部 lazy 加载, 避免首屏打包所有页面 (ECharts / lightweight-charts /
-// framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
+// 代码分割: 页面全部 lazy 加载, 避免首屏打包所有页面 (ECharts / framer-motion
+// 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
 // Layout / Onboarding / Auth 为应用外壳与入口, 保持同步加载。
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const Monitor = lazy(() => import('./pages/Monitor').then(m => ({ default: m.Monitor })))
@@ -35,7 +35,6 @@ const CORE_ROUTE_PATHS = new Set([
   '/watchlist',
   '/taiwan-screener',
   '/monitor',
-  '/indices',
   '/branding',
   '/settings',
   '/dev',

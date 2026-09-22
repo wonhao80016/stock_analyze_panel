@@ -437,9 +437,7 @@ def get_preferences() -> dict:
     return {
         "realtime_quotes_enabled": preferences.get_realtime_quotes_enabled(),
         "realtime_allowed": _realtime_allowed(),
-        "indices_nav_pinned": preferences.get_indices_nav_pinned(),
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
-        "show_ashare_legacy_features": preferences.get_show_ashare_legacy_features(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
@@ -484,8 +482,6 @@ def get_preferences() -> dict:
         "nav_order": preferences.get_nav_order(),
         "nav_hidden": preferences.get_nav_hidden(),
         "screener_auto_run": preferences.get_screener_auto_run(),
-        "depth_polling_interval": preferences.get_depth_polling_interval(),
-        "depth_finalize_time": preferences.get_depth_finalize_time(),
         **preferences.get_mining_schedule(),
     }
 
@@ -893,19 +889,6 @@ def update_realtime_watchlist(req: RealtimeWatchlistPrefs) -> dict:
     return {"realtime_watchlist_symbols": symbols}
 
 
-class IndicesNavPinnedPrefs(BaseModel):
-    indices_nav_pinned: bool
-
-
-@router.put("/preferences/indices-nav-pinned")
-def update_indices_nav_pinned(req: IndicesNavPinnedPrefs) -> dict:
-    """保存侧栏指数报价卡片固定显示开关。
-    ON=常驻显示；OFF=跟随实时行情开关（仅实时开时显示）。"""
-    from app.services import preferences
-    preferences.save({"indices_nav_pinned": req.indices_nav_pinned})
-    return {"indices_nav_pinned": req.indices_nav_pinned}
-
-
 class WatchlistGroupsInNavPrefs(BaseModel):
     watchlist_groups_in_nav: bool
 
@@ -916,20 +899,6 @@ def update_watchlist_groups_in_nav(req: WatchlistGroupsInNavPrefs) -> dict:
     from app.services import preferences
     preferences.save({"watchlist_groups_in_nav": req.watchlist_groups_in_nav})
     return {"watchlist_groups_in_nav": req.watchlist_groups_in_nav}
-
-
-class ShowAshareLegacyFeaturesPrefs(BaseModel):
-    show_ashare_legacy_features: bool
-
-
-@router.put("/preferences/show-ashare-legacy-features")
-def update_show_ashare_legacy_features(req: ShowAshareLegacyFeaturesPrefs) -> dict:
-    """保存是否显示中国 A 股 legacy 功能区块开关(默认关闭, Phase 8B-2)。
-
-    只影响导航展示, 不影响功能本身: route/component/backend 全部原样保留。"""
-    from app.services import preferences
-    preferences.save({"show_ashare_legacy_features": req.show_ashare_legacy_features})
-    return {"show_ashare_legacy_features": req.show_ashare_legacy_features}
 
 
 class RealtimeMonitorConfigIn(BaseModel):
@@ -1237,51 +1206,3 @@ def update_index_daily_batch_size(req: IndexDailyBatchSizeIn) -> dict:
     from app.services import preferences
     size = preferences.set_index_daily_batch_size(req.size)
     return {"index_daily_batch_size": size}
-
-
-# ── 五档盘口 sealed 配置 ──────────────────────────────
-
-class DepthPollingIntervalIn(BaseModel):
-    interval: float
-
-
-@router.put("/preferences/depth-polling-interval")
-def update_depth_polling_interval(req: DepthPollingIntervalIn, request: Request) -> dict:
-    """保存五档盘口盘中轮询间隔(秒)。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
-
-    from app.services import preferences
-    interval = preferences.set_depth_polling_interval(req.interval)
-    return {"depth_polling_interval": interval}
-
-
-class DepthFinalizeTimeIn(BaseModel):
-    hour: int
-    minute: int
-
-
-@router.put("/preferences/depth-finalize-time")
-def update_depth_finalize_time(req: DepthFinalizeTimeIn, request: Request) -> dict:
-    """保存盘后 sealed 定版时间(范围13:31~18:00)并立即 reschedule。需 Pro+。"""
-    from app.tickflow.capabilities import Cap
-    request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
-
-    from app.services import preferences
-    sched = preferences.set_depth_finalize_time(req.hour, req.minute)
-
-    from apscheduler.triggers.cron import CronTrigger
-    scheduler = getattr(request.app.state, "scheduler", None)
-    if scheduler:
-        scheduler.reschedule_job(
-            "depth_finalize",
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour=sched["hour"],
-                minute=sched["minute"],
-                timezone="Asia/Shanghai",
-            ),
-        )
-        logger.info("depth_finalize rescheduled to %02d:%02d mon-fri", sched["hour"], sched["minute"])
-
-    return sched

@@ -25,8 +25,8 @@ export interface NavMeta {
 //   /backtest 的 StrategyBacktest 標的選擇器呼叫 A 股 instrumentSearch,
 //     使用者實際無法選取台股標的(如 2330.TWSE)進行回測 —— 不是語言問題,
 //     是功能尚未支援台股, Taiwan-first 導航不該推薦一個選不到台股的回測。
-// route / component / backend 完全保留, 只搬到 ASHARE_LEGACY_NAV, 受
-// show_ashare_legacy_features 控制(HIDE, NOT DELETE, 與既有機制一致)。
+// route 與 component 其後已刪除, ASHARE_LEGACY_NAV 與 show_ashare_legacy_features
+// 亦已移除; backend 的 /api/strategies 與 /api/backtest 仍註冊但無前端消費端。
 //
 // Phase 8B-5.8 — /data(A 股資料管理頁)已整頁刪除(非僅隱藏): 一般台股
 // 使用者不需要理解或操作 daily pipeline / enriched rebuild / minute K sync
@@ -35,17 +35,16 @@ export interface NavMeta {
 //
 // Phase 8B-5.10 — 舊連板梯隊頁已整頁刪除: 連板/打板/炸板/
 // 封板率等皆為中國 A 股漲跌停製度衍生的投機文化術語, 對台股使用者無意義,
-// 不硬改名成台股功能。depth_service 的封板判定(sealed cache)仍被
-// quote_service / monitor_rules 真實消費, 完全保留未動。
+// 不硬改名成台股功能。depth_service 其後已隨 A 股清理一併移除。
 //
 // Phase 8B-5.11 — /review(盤後檢討/AI 大盤復盤頁)已整頁刪除, 連同其專屬的
 // 定時復盤 scheduler job、飛書/企業微信推送設定一併移除(非僅隱藏 UI,
 // 避免曾開啟過的使用者留下無 UI 可關的背景任務)。A 股四大指數/漲停封板率
 // 情緒分析對台股無意義;台股「今天強不強」由 TaiwanScreener / Market
 // Intelligence / Industry Intelligence / Dashboard 提供, 不建立替代頁面。
-// GET /api/overview/market 與 market_overview_builder 已於後續移除(有用欄位
-// 併入 market-intelligence);depth_service、ai_provider、generic WeCom/Feishu
-// webhook 基礎設施完全未動。
+// GET /api/overview/market、market_overview_builder、depth_service 與
+// WeCom/Feishu webhook 基礎設施其後皆已移除(overview 的有用欄位併入
+// market-intelligence);ai_provider 完全未動。
 // Phase 8C-A — 順序改為看市場(看板)→找股票(台股選股)→加自選(自選股)→比較→
 // 監控, 對齊產品核心使用流程(見 Phase 8C-0 審查 C 節); route path 完全不動,
 // 只調整陣列順序(即側欄/選單設定顯示順序)。
