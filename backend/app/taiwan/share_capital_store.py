@@ -149,7 +149,10 @@ class TaiwanShareCapitalStore:
         actually counts.
         """
         df = self.load()
-        if df.is_empty():
+        # A file whose columns have drifted must read as "no denominator", not raise:
+        # the caller publishes the whole Taiwan enriched table and would otherwise
+        # stop over a cosmetic field, losing indicators and signals too.
+        if df.is_empty() or not {"symbol", "issued_shares"} <= set(df.columns):
             return pl.DataFrame(schema={"symbol": pl.Utf8, "float_shares": pl.Float64})
         return df.select(
             pl.col("symbol"),

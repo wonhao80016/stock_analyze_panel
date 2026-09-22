@@ -129,3 +129,59 @@ def test_the_enriched_publish_asks_the_store_for_its_denominator(tmp_path):
     src = inspect.getsource(TaiwanEnrichedRefreshService.refresh)
     assert "share_capital.as_instruments()" in src
     assert "instruments=instruments" in src
+
+
+def test_a_column_drifted_file_reads_as_no_denominator_rather_than_raising(tmp_path):
+    """The caller publishes the whole enriched table; it must not stop over this."""
+    path = tmp_path / "share_capital.parquet"
+    pl.DataFrame({"symbol": ["2330.TWSE"], "shares": [1]}).write_parquet(path)
+    assert TaiwanShareCapitalStore(data_dir=tmp_path).as_instruments().is_empty()
+
+
+# The order matters and nothing else pins it: publishing first would price today's
+# partition with yesterday's share counts, and the mistake is invisible - every
+# number still looks plausible.
+def test_the_daily_update_refreshes_share_capital_before_publishing():
+    import inspect
+    import re
+
+    from app.taiwan.daily_update import TaiwanDailyUpdateService
+
+    src = inspect.getsource(TaiwanDailyUpdateService.run_update)
+    capital = re.search(r"TaiwanShareCapitalStore\(\)\.refresh\(\)", src)
+    publish = re.search(r"TaiwanEnrichedRefreshService\(\)\.refresh_recent\(\)", src)
+    assert capital and publish, "both steps must run in the daily update"
+    assert capital.start() < publish.start()
+
+
+def test_a_broadcast_share_count_never_prices_Taiwan_history():
+    """The backtest matrix does not go through apply_historical_float_shares.
+
+    A vector float_shares is one current count stretched over the whole time axis,
+    so letting it through would price every past bar with a count announced later.
+    """
+    import numpy as np
+
+    from app.backtest.matrix import _populate_matrix_derived_arrays
+
+    bars, assets = 4, 2
+    arrays = {"volume": np.full((bars, assets), 1000.0, dtype=np.float32)}
+    fields = {
+        "turnover_rate": np.zeros((bars, assets), dtype=np.float32),
+        "float_shares": np.zeros((bars, assets), dtype=np.float32),
+    }
+    instruments = pl.DataFrame({
+        "symbol": ["2330.TWSE", "1101.TWSE"],
+        "float_shares": [1_000_000.0, 2_000_000.0],
+    })
+    _populate_matrix_derived_arrays(
+        ["2330.TWSE", "1101.TWSE"],
+        arrays,
+        fields,
+        frozenset({"turnover_rate"}),
+        instruments,
+        np.zeros((bars, assets), dtype=bool),
+        parquet_fields=[],
+        vector_fields=["float_shares"],
+    )
+    assert not np.isfinite(fields["turnover_rate"]).any()

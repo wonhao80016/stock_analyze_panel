@@ -1435,12 +1435,23 @@ def _populate_matrix_derived_arrays(
         float_shares = fields.get("float_shares")
         if float_shares is None:
             raise ValueError("matrix turnover_rate requires float_shares")
-        _write_turnover_rate_matrix(
-            fields["turnover_rate"],
-            arrays["volume"],
-            float_shares,
-            volume_unit_for_symbols(actual_symbols),
-        )
+        volume_unit = volume_unit_for_symbols(actual_symbols)
+        spans_history = fields["turnover_rate"].shape[0] > 1
+        if volume_unit == "shares" and "float_shares" in vector_fields and spans_history:
+            # A vector float_shares is one current count broadcast over the whole
+            # time axis. Taiwan publishes no share history, so across several bars
+            # this prices 2024 with a count announced in 2026 - the look-ahead the
+            # daily pipeline refuses through apply_historical_float_shares, which
+            # this path does not go through. A single bar has nothing to spread the
+            # count across, so it keeps the existing snapshot behaviour.
+            fields["turnover_rate"][:] = np.nan
+        else:
+            _write_turnover_rate_matrix(
+                fields["turnover_rate"],
+                arrays["volume"],
+                float_shares,
+                volume_unit,
+            )
     return names, latest_limits
 
 

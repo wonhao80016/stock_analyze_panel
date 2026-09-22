@@ -115,11 +115,30 @@ endpoints already inventoried above and writes
 `compute_enriched` as the `instruments` frame, whose `float_shares` column is the
 turnover denominator.
 
-This does not reopen the rejected inference. `apply_historical_float_shares`
-still withdraws the denominator from every Taiwan row whose date is not today,
-so a past session's turnover stays absent rather than being recomputed against a
-share count that did not apply then. A regression test pins that, because the
-guarantee is what makes supplying the number acceptable at all.
+This does not reopen the rejected inference, but the guarantee holds per path
+rather than globally, and saying otherwise would be the more dangerous mistake:
+
+- **Daily pipeline.** `apply_historical_float_shares` withdraws the denominator
+  from every Taiwan row whose date is not today, so a past session's turnover
+  stays absent rather than being recomputed against a count that did not apply
+  then.
+- **Backtest matrix.** This path never calls that helper. An instrument
+  `float_shares` arrives there as a single value broadcast over the whole time
+  axis, which across several bars would price 2024 with a count announced in
+  2026. A Taiwan matrix spanning more than one bar is refused: it writes null
+  instead. A single-bar matrix keeps the existing snapshot behaviour, since
+  there is no second date for the count to spread onto.
+
+  What this does **not** cover: a single-bar matrix built for a past date still
+  takes the current count, because the matrix is handed a bare `float_shares`
+  column with no as-of date to check it against. That predates this change and
+  is recorded here rather than left to be rediscovered; closing it means
+  carrying `report_date` into the instruments frame.
+
+Both are pinned by regression tests, because these guarantees are what make
+supplying the number acceptable at all. Until the refusal was added, only the
+absence of `data/instruments` stood between the matrix and that look-ahead, and
+this change is precisely what created the Taiwan share source it was missing.
 
 Two consequences that must not be papered over:
 
