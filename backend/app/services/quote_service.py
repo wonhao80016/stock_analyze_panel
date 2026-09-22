@@ -763,14 +763,16 @@ class QuoteService:
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
 
         # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
-        daily_df = self._build_daily(stock_records)
+        # 非即时来源不参与"今日"这根K: 见 _records_datable_today。报价快取仍保有
+        # 它们, 画面照常显示价格与其 provenance, 只是不会被写成今天的日K。
+        daily_df = self._build_daily(self._records_datable_today(stock_records))
         if not daily_df.is_empty() and self._repo:
             try:
                 self._repo.flush_live_daily(daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("日K写盘失败: %s", e)
 
-        etf_daily_df = self._build_daily(etf_records)
+        etf_daily_df = self._build_daily(self._records_datable_today(etf_records))
         if not etf_daily_df.is_empty() and self._repo:
             try:
                 self._repo.flush_live_daily_asset("etf", etf_daily_df)
@@ -790,7 +792,7 @@ class QuoteService:
         # mode=all (完整 CN_Index universe) → flush 覆盖; mode=core (部分标的) → merge 不截断分区
         engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
         if engine and engine.has_asset_rules("index") and self._repo:
-            index_daily_df = self._build_daily(index_records)
+            index_daily_df = self._build_daily(self._records_datable_today(index_records))
             if not index_daily_df.is_empty():
                 use_flush = preferences.get_realtime_index_mode() == "all"
                 try:
@@ -956,6 +958,40 @@ class QuoteService:
         return index_records, etf_records, stock_records
 
     @staticmethod
+    def _records_datable_today(records: list[dict]) -> list[dict]:
+        """Records fit to be stamped with today's date.
+
+        The Taiwan provider falls back to the official endpoint, which publishes the
+        PREVIOUS session's OHLC during trading hours. _build_daily stamps whatever it
+        is given with cn_today(), so letting those through writes yesterday's close as
+        today's bar - the price a screen then disagrees with. Only rows the provider
+        marked realtime qualify.
+
+        Records with no status at all come from a provider that does not report one
+        (the TickFlow SDK); the gate does not apply and they pass through unchanged.
+        """
+        if not any(r.get("status") for r in records):
+            return records
+        return [r for r in records if r.get("status") == "realtime"]
+
+    @staticmethod
+    def _quote_ts_expr(df: pl.DataFrame) -> pl.Expr | None:
+        """The quote timestamp in milliseconds, which is what the column contracts.
+
+        The provider already emits a millisecond quote_ts; casting its datetime
+        "timestamp" instead yields microseconds, a silent factor of 1000 that makes
+        session_progress_from_ts read every intraday bar as a finished session and
+        stops data_integrity recognising a mid-session snapshot.
+        """
+        if "quote_ts" in df.columns:
+            return pl.col("quote_ts").cast(pl.Int64, strict=False).alias("quote_ts")
+        if "timestamp" not in df.columns:
+            return None
+        if df.schema["timestamp"] == pl.Datetime:
+            return pl.col("timestamp").dt.epoch(time_unit="ms").alias("quote_ts")
+        return pl.col("timestamp").cast(pl.Int64, strict=False).alias("quote_ts")
+
+    @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:
         """将 API records 转为日K格式 DataFrame (OHLCV + quote_ts, 写 kline_daily 用)。"""
         if not records:
@@ -969,16 +1005,14 @@ class QuoteService:
             "low": "low",
             "volume": "volume",
             "amount": "amount",
-            "timestamp": "quote_ts",
         }
         # Taiwan official provider emits "close" where TickFlow emits "last_price".
         if "last_price" not in df.columns and "close" in df.columns:
             cols_map["close"] = "close"
-        select_exprs = []
-        for src, dst in cols_map.items():
-            if src in df.columns:
-                select_exprs.append(pl.col(src).cast(pl.Int64, strict=False).alias(dst)
-                                     if dst == "quote_ts" else pl.col(src).alias(dst))
+        select_exprs = [pl.col(src).alias(dst) for src, dst in cols_map.items() if src in df.columns]
+        quote_ts = QuoteService._quote_ts_expr(df)
+        if quote_ts is not None:
+            select_exprs.append(quote_ts)
         if not select_exprs:
             return pl.DataFrame()
         result = df.select(select_exprs).with_columns(
