@@ -1,0 +1,281 @@
+# Code Review 2026-09-22 — feat/wire-unreachable-settings
+
+審查範圍：`feat/wire-unreachable-settings` 分支相對 `main` 的變更，加上使用者回報的
+「清單價格與個股彈窗 card 不同步」症狀追查。由四個獨立 agent 分頭審查（前端、後端
+core、`backend/app/taiwan/*`、價格資料流追查），本文彙整其結果。
+
+狀態欄：`已修` / `待修` / `不修（附理由）`。
+
+---
+
+## 一、使用者回報的症狀：6196 帆宣點開 card 資訊不同步
+
+清單與 card 走**兩條完全不同的價格資料流**：
+
+| | 清單（自選股列表） | Card（個股彈窗） |
+|---|---|---|
+| 端點 | `/api/watchlist/enriched` | `/api/kline/daily` |
+| 來源 | `watchlist_enrichment.py` 直接呼叫 `TaiwanRealtimeService.get_quotes()` | `TaiwanDailyStore` 磁碟日K ＋ 條件式注入當日活蠟燭 |
+| 漲跌幅 | 後端 `change_pct`（小數制） | 前端用**最後兩根日K**自行重算 |
+| 刷新 | 每個 SSE `quotes_updated` tick 失效 | `_focusSymbol` 單槽 hack，且受即時行情開關閘門 |
+
+`QK` 的 SSE 失效前綴含 `watchlist-enriched`、`taiwan-quotes`，**不含 `kline`**
+（`frontend/src/lib/queryKeys.ts`），所以兩邊刷新節奏本來就不對等。
+
+關鍵不對稱：`hybrid_provider._live_quote_frame` 要求 `is_realtime and not is_stale`
+才收錄，而 `watchlist_enrichment` 對 `q.last_price` 照單全收。同一個 symbol 在同一秒
+可以「清單有價、card 沒有活蠟燭」。
+
+---
+
+## 二、Findings
+
+### A. 價格同步群組
+
+#### A1. MIS 缺成交價時以最佳買價冒充 — 已修
+`backend/app/taiwan/realtime/mis_provider.py`
+
+`z` 與 `trade.z` 皆缺時 `last_price = bid_p`。買價不是成交價，會讓畫面系統性低於
+交易所，`change`／`change_pct` 由此推算也跟著錯，而 `available_fields` 仍標示
+`last_price`。
+
+**嚴重度修正**：原審查稱「`z` 缺席率 83–95%，所以這是常態路徑」。2026-09-22 10:44
+（盤中）實測 MIS 六檔標的：`z` 全部是 `'-'`（6/6），但 `trade.z` **全部有值**（6/6）。
+83–95% 只適用於 `item["z"]` 這一層，`trade.z` 已經接住；買價 fallback 是罕見的第三層。
+原判斷的方向對，嚴重度高估，**不是使用者症狀的成因**。
+
+修法：該層改為 `continue`（不產生該 symbol 的 quote），讓
+`TaiwanRealtimeService` 既有的 Yahoo → 官方快照 → 日K fallback 鏈接手——該鏈是以
+「symbol 不在結果 map 中」為觸發條件，回傳 `last_price=None` 的 quote 反而會讓
+fallback 全部被跳過、畫面直接空白。
+
+副作用（已知，待觀察）：盤前試撮時段若 `z` 與 `trade.z` 同時缺，整批會落到 Yahoo，
+輪詢成本上升。輪詢池有 `TAIWAN_REALTIME_MAX_SYMBOLS` 上限，影響有界。
+
+#### A2. Card 的漲跌幅忽略後端 `change_pct` — 已修
+`frontend/src/components/StockInfoBar.tsx`
+
+原本 `chgPct = (rows[n-1].close - rows[n-2].close) / rows[n-2].close`。後端注入的活蠟燭
+明明帶了 `change_pct`（`backend/app/api/kline.py` 的 `live_row`）卻被忽略；本地日K若
+缺最近一個交易日，分母會是兩天前的收盤，%數必然與清單不同。
+
+修法：以 `latest.change_pct`（小數制，見 `backend/app/indicators/pipeline.py` 的欄位
+說明）反推 `prevClose`，`chg`／`chgPct`／振幅三者改用同一個 `prevClose`，缺
+`change_pct` 時才退回前一根日K。歷史列的 `change_pct` 本來就等於兩列相除，所以行為
+只在活蠟燭那一根改變——正是出問題的那一根。
+
+#### A3. 換股時 placeholder 把上一檔的價格填進新股票 — 已修
+`frontend/src/components/StockDailyKChart.tsx`
+
+`placeholderData: (prev) => prev` 在 queryKey 換 symbol 時仍回傳舊資料。父層
+`StockPanel` 換股時會清掉 `dailyResult`，子層的 `onDataChange` 立刻用 placeholder
+（上一檔的 rows）回填，而標頭的 symbol/name 走 props 已經更新 → 新代碼配舊價格。
+彈窗現在是 Layout 裡常駐的單一實例，不關閉直接換股是常見路徑。
+
+修法：`placeholderData: (prev, prevQuery) => prevQuery?.queryKey?.[1] === symbol ? prev : undefined`，
+只在同一檔股票換日期區間／ext 欄位時沿用。
+
+#### A4. `get_realtime` 丟掉沒有即時報價的標的 — 不修（原建議有誤）
+`backend/app/taiwan/providers/hybrid_provider.py`
+
+原審查建議「live 與 official 依 symbol 合併後回傳，而非二選一」。**不採納**，理由是
+該建議與它自己引用的程式碼矛盾：
+
+- `_live_quote_frame` 的 docstring 明寫官方端點在盤中發布的是**前一交易日收盤**。
+- `quote_service._build_daily` 無條件蓋上 `cn_today()` 再寫入。
+
+兩者相加，合併後的 official 列會把**昨收寫成今日的日K／enriched**——正是 card 現在
+靠守衛避免的事，合併等於讓 card 顯示「標成今天的昨收」，比現況更糟。
+
+另有第二個回歸：`_records_realtime_status` 要求整批全部 `realtime` 才回 True，
+`_evaluate_monitors` 看到 False 就整輪跳過。合併後只要有一檔拿不到即時報價，
+**整輪監控告警會靜默停擺**。
+
+正確方向（尚未實作，需獨立一輪）：把批次層級的閘門改成 per-symbol，讓非即時列
+只進報價快取、不進日K寫入也不進規則評估，然後才談合併。
+
+#### A5. 非自選標的永遠拿不到當日活蠟燭 — 待修
+`backend/app/api/kline.py` 的注入守衛依賴 `quote_service.get_enriched_today()`，
+而該快取的輪詢 universe 只有「自選股 ＋ 監控規則標的 ＋ 指數」
+（`backend/app/services/quote_service.py`）。從 Screener／Monitor 點開的股票永遠
+顯示昨收。
+
+#### A6. `/api/kline/daily` 幾乎恆繞過 enriched 正本 — 待修
+`_needs_local_history` 以 `earliest > start` 判斷，而 `start = today - days` 通常不是
+交易日，所以幾乎恆真 → 走 `TaiwanDailyStore` ＋ 現算 `compute_enriched`，形成第二套
+獨立計算的價格／指標來源。修法：改以列數或日期跨度判斷，而非與請求視窗起點比較。
+
+#### A7. 純台股自選時 `as_of` 為 `None` — 待修
+`backend/app/api/watchlist.py` 的 `as_of` 只由 A 股／ETF／指數快取決定，純台股自選股
+時為 `None`，導致 `frontend/src/pages/Watchlist.tsx` 的當日蠟燭即時修補整段被跳過。
+
+---
+
+### B. 資料正確性（後端）
+
+#### B0. 產業相對強弱訊號拿 5 日報酬減單日平均 — 待修
+`backend/app/taiwan/abnormal_diagnostics.py` 的 `RELATIVE_STRENGTH_OUTLIER` 算
+`diff_5d = ret_5d - ind_m.average_change_pct`，其中 `ret_5d` 是個股**5 日**報酬率，
+而 `average_change_pct` 是產業成分股**當日**漲跌幅的平均（`industry_intelligence.py`
+對 `change_pct` 取 mean）。兩個不同期間的數字相減，門檻 10 個百分點因此沒有一致的
+意義：多頭期間會系統性高估個股的相對強度。
+
+同一行上方的註解寫著「Excess over industry equal-weight 5D」，與程式碼矛盾；真正的
+5 日欄位 `relative_strength_5d` 就在同一個 `if` 裡被當存在性守衛用，卻沒有進入運算。
+看起來是原意要用 5 日、實作接錯欄位。
+
+修法需要先裁決：若原意是 5 日對 5 日，改用產業的 5 日報酬；若刻意比較「個股一週
+漲幅 vs 產業今日動能」，則註解與門檻要重寫。**這會改變訊號語意與觸發結果，不宜
+順手改。**
+
+附帶：同檔 docstring 已腐化——列出程式碼並不存在的 `DEALER_FLOW_SPIKE`、把
+`== 5` 寫成 `coverage >= 5`、未提法人類的 15 日覆蓋門檻與基期下限、並把本項寫成
+`industry_5d_return`。前端說明文字最初就是照抄這行而寫錯，建議一併修。
+
+#### B1. 即時輪詢非 merge 覆寫 Taiwan 發佈的 enriched 分區 — 待修（最嚴重）
+`backend/app/taiwan/enriched_refresh.py` 把含 `signal_*` 的全市場資料寫進
+`kline_daily_enriched/date=X/part.parquet`；`quote_service` →
+`repository.flush_live_enriched_asset` 對**同一路徑**做非 merge 覆寫，且只寫
+`ENRICHED_STORAGE_COLS`（不含任何 `signal_*`）與當次輪詢的自選股。
+
+後果：`backend/app/taiwan/screener.py` 讀不到 signal 欄 → `df.clear()` → 任何帶
+`signals` 條件的選股**永遠回 0 筆**；其他讀該分區者也只剩自選股那幾列。
+
+修法：Taiwan enriched 改用獨立表名，或兩個寫入端共用 merge 路徑與同一把 `_write_lock`。
+
+#### B2. `quote_ts` 寫成微秒而非毫秒 — 待修
+`backend/app/services/quote_service.py` 把 provider 的 `timestamp`（`datetime`）
+`.cast(pl.Int64)`，polars 產出的是 µs（實測 `1790073000000000`），是契約的 1000 倍；
+provider 本來就有正確的 ms `quote_ts` 欄，卻因為不在 `cols_map` 而被丟棄。
+
+後果：`session_progress_from_ts` 例外後靜默回 `1.0`（盤中量比從不做時間折算，
+`vol_ratio_5d` 全天失真）；`data_integrity._is_snapshot` 永遠無法判定盤中快照，
+損毀修復機制形同關閉。
+
+#### B3. 非即時 fallback 報價被蓋上今天日期寫入 — 待修
+`TaiwanHybridProvider.get_realtime` 退回 `official.fetch_quote`／`get_daily` 時拿到的是
+**前一交易日** OHLC，`_build_daily` 仍無條件蓋上 `cn_today()` 並 `flush_live_daily`。
+新增的 `_quote_source_realtime` 閘門只擋監控告警，不擋寫入。這是「同一檔股票、不同
+畫面不同價」的直接成因之一，也是 A4 不能直接合併的原因。
+
+#### B4. 台股路徑從不請求指數，卻每輪用空結果覆寫指數快取 — 待修
+`sym_list` 由自選 ＋ 監控規則組成，`CORE_INDEX_SYMBOLS`（`t00.TWSE`／`o00.TPEX`）
+被分類卻從未被請求，於是 `index_records` 恆空，每輪用空 frame 覆寫
+`_index_quotes_cache`。`GET /api/intraday/indices` 因此永遠回退到
+`source: "index_daily"` 的昨收。
+
+#### B5. `distance_to_upper/lower_limit` 只存在於增量路徑 — 待修
+`backend/app/indicators/pipeline.py` 只在 `compute_enriched_today` 內加這兩欄；
+`run_pipeline`／`compute_enriched` 與全量回退路徑沒有。回退發生時
+`monitor._condition_mask_expr` 遇到缺欄回傳 `None`，「接近漲停／跌停」規則**靜默零命中**。
+
+#### B6. Edge 觸發在 cooldown 吞掉事件時仍解除 armed — 待修
+`backend/app/strategy/monitor.py` 在命中當下就 `armed=False`，但 cooldown 檢查在
+`_evaluate_rule` 之後才做並 `continue`。在 `cooldown_seconds`（預設 3600）內重新觸發的
+條件會同時被「抑制」與「解除武裝」，使用者永遠看不到，而且要等條件再次轉為 false
+才可能重新觸發。
+
+#### B7. enriched 暫存檔命名與讀取端 glob 衝突 — 待修
+`enriched_refresh.py` 用 `suffix=".parquet"` 在分區目錄內建暫存檔，讀取端卻是
+`**/*.parquet`。寫入到 rename 之間若被讀到，同日分區出現兩個檔案 → 該日每列重複計算。
+同分支的 `realtime/minute_recorder.py` 已用 `.parquet.tmp` 並註明此風險，兩處不一致。
+
+#### B8. 指數月資料一次網路失敗即永久放棄回補 — 待修
+`backend/app/taiwan/index_daily.py` 任何例外都回空 frame，隨即把該月加入
+`_barren_months` 且行程生命週期內不再重試。單次逾時 = 該月指數 K 線永久缺口。
+修法：區分「抓到空資料」與「抓取失敗」，只有前者標 barren。
+
+#### B9. 法人／融資 fallback 只看全庫最新日，且把 1 日值填進 5 日欄 — 待修
+`backend/app/taiwan/detail_service.py` 用 `max(dates)` 當查詢區間：該標的當日若無列
+直接回 None（卡片顯示「無資料」，儘管本地有大量歷史）。另把當日淨額填入
+`foreign_net_5d` 等欄，因子計算當成 5 日累計使用 → **因子值錯**。
+
+#### B10. `_needs_fetch` 把部分快取的月份當成已完整 — 待修（plausible）
+`index_daily.py` 的 `cached_months` 只要該月有任一列就算命中。曾只抓到半個月
+（或被 B8 中斷）的歷史月份永遠補不齊。
+
+#### B11. MinuteBarRecorder 落盤在鎖外，且回傳值語意錯誤 — 待修（plausible）
+`backend/app/taiwan/realtime/minute_recorder.py` 的 `_write()` 在釋放 `self._lock`
+之後執行，輪詢執行緒與收盤 `flush()` 可能同時對同一 parquet 做 read-modify-write。
+另回傳整個分區列數而非本次新增列數，「completed bars written」被灌水。
+
+#### B12. 死路徑：`progress is None` fallback — 待修（minor）
+`session_progress_from_ts` 永不回傳 `None`（失敗時回 `1.0`），所以
+`quote_service` 的 `session_progress()` 伺服器時間 fallback 不可達。與 B2 相加，
+壞掉的 `quote_ts` 靜默等於「整個交易時段已過完」而不是退回牆鐘時間。
+
+---
+
+### C. 前端
+
+#### C1. 報價清單與詳細頁刷新政策不一致 — 待修
+`frontend/src/components/monitor/TaiwanQuotePanel.tsx` 與
+`frontend/src/components/monitor/TaiwanIndexBar.tsx` 只設 `staleTime: 3000`、無
+`refetchInterval`，只靠 SSE `quotes_updated`，而該事件在 `useQuoteStream` 內被
+`if (!enabledRef.current) return` 擋掉（即時行情開關預設 false）。同時
+`frontend/src/pages/TaiwanStockDetail.tsx` 是 `refetchInterval: 10_000`。
+→ 即時行情關閉時，Monitor 報價條停在進頁面那一刻，個股視窗每 10 秒更新。
+
+#### C2. 自選頁板塊篩選沿用舊 A 股 localStorage，會整頁清空 — 待修
+`frontend/src/pages/Watchlist.tsx` 的 `BOARDS` 由 5 個 A 股板塊改為
+`['上市','上櫃']`，但讀 `storage.watchlistBoardFilter` 無任何遷移／清洗，且以
+`boardFilter.size < BOARDS.length` 判斷是否啟用篩選。
+
+舊使用者存了 1 個舊板塊（例如 `創業板`）→ size 1 < 2 → 篩選生效 → 上市／上櫃皆不在
+集合中 → **自選股票列全部消失**，而 UI 上兩個板塊鈕都顯示未選取，看不出原因。
+存 2 個舊值則相反：篩選被整個略過但按鈕全暗。
+修法：初始化時過濾掉不在 `BOARDS` 內的值，空集合則回退全選。
+
+#### C3. 個股「建立監控規則」預設 `logic:'or'`，與同畫面文案相反 — 待修
+`TaiwanStockDetail.tsx` 與 `TaiwanScreener.tsx` 都傳 `logic:'or'`，但
+`frontend/src/components/monitor/RuleEditor.tsx` 明訂訊號情境應為 `and`、提示文字也寫
+「多選預設需全部命中(AND)」，連接詞卻顯示「或」。存檔後任一訊號命中就發警報。
+
+#### C4. 回補任務啟動後、第一次輪詢回來前可重複啟動 — 待修
+`frontend/src/pages/settings/TaiwanEnrichmentDataCard.tsx` 的 `isJobRunning` 為真，
+但渲染條件是 `isJobRunning && activeJob`；`mutate` 成功後 `isPending` 已回 false 而
+`activeJob` 仍是 null，因此按鈕仍在畫面上且可點。800ms 內點兩次 → 第二個 job 覆蓋
+`activeJobId`，第一個變成無人追蹤的孤兒，下方還顯示上一輪的數字。
+
+#### C5. Monitor 告警記錄的股票代號按鈕是空點擊 — 待修
+`frontend/src/components/monitor/TaiwanAlertsList.tsx` 的
+`onClick={() => onSelectSymbol?.(alert.symbol!)}`，但 `frontend/src/pages/Monitor.tsx`
+只傳 `alerts`，沒傳 `onSelectSymbol`。本次改動把 Screener／QuotePanel／IndexBar 的
+代號連結都改成 `openPreview`，唯獨漏了這裡。游標是 pointer、有 hover 底線，但點了沒反應。
+
+#### C6. RuleEditor 的 `simple` 模式仍可切到「策略・板塊（進階）」 — 待修（plausible）
+`RuleEditor.tsx` 的監控情境列沒有 `!simple` 守衛（資產類型列則有）。個股彈窗的小
+Modal 裡會出現策略／板塊表單，且 `selectCategory('advanced')` 會把 `scope` 改成
+`all`，使原本預填的單一標的被靜默丟棄。
+
+---
+
+## 三、次要問題（已確認存在，未列入主清單）
+
+- `frontend/src/components/Layout.tsx` 靜態 import `StockPreviewProvider` →
+  `StockPreviewDialog` → `TaiwanStockDetail` → ECharts，把整個個股詳細頁拉進首屏
+  bundle，抵銷 `frontend/src/router.tsx` 明文寫的 lazy 分割。
+- `TaiwanEnrichmentDataCard` 的 `isJobRunning` 見 C4。
+
+## 四、已實查排除（非 finding）
+
+`daily_store.scan_range` 的 except fallback；`chip_history._trading_days_start` 的
+±1 天（被 `.tail(days)` 吸收）；`daily_update` 新增 `skipped` 狀態對 `overall_status`
+的影響；`universe/adapters.py` 抽出的 `leverage_multiplier_of`；`search_instruments`
+簽名變更無孤兒呼叫端；`numpy_limit_price` 的新 `usable` mask 形狀正確；
+`add_limit_distance_columns` 的 polars Null-dtype 運算傳播 null 而非拋例外
+（對 polars 1.40.1 實測）；`quote_service` 的 `change_pct / 100` 正規化正確（只有
+MIS／Yahoo live frame 帶該欄）；`queryKeys.ts` 移除 `market` 參數後
+`api.instrumentSearch` 也不再收該參數；告警列表的 `fmtPct` 是修正而非 bug；
+`intraday-chart.ts` 移除 `volume * 100` 正確；`EChartsIntraday` 軸標籤索引與 271 格
+時間軸一致；`benchmarks.ts` 大小寫與後端 `_BY_UPPER` 相容；
+`ABNORMAL_SIGNAL_DEFINITIONS` 的 10 個 id 與門檻值與 `abnormal_diagnostics.py` 吻合。
+
+## 五、審查方法與涵蓋範圍
+
+四個 agent 分頭審查前端 diff、後端 core diff、`backend/app/taiwan/*` diff，以及價格
+資料流的專項追查。行號在審查當下逐一實查；本文刻意只寫檔案路徑不寫行號，因為後續
+修改會讓行號腐化（見 `~\.claude\rules\lessons.md` L7／L10）。
+
+A1 的嚴重度由本文作者在 2026-09-22 10:44 盤中實打 MIS 端點推翻，A4 的建議由本文
+作者以該 finding 自身引用的程式碼反駁後不採納。其餘 finding 未經第二輪獨立驗證。
