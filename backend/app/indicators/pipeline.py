@@ -119,7 +119,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "raw_close":               "原始收盘价(未复权)",
     "raw_high":                "原始最高价(未复权)",
     "raw_low":                 "原始最低价(未复权)",
-    "turnover_rate":           "换手率",
+    "turnover_rate":           "换手率(台股分母為已發行普通股數, 非流通股數)",
     "consecutive_limit_ups":   "连板数",
     "consecutive_limit_downs": "连跌数",
     # ── 基础指标 ─────────────────────────────────────────

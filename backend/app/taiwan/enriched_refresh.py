@@ -21,6 +21,7 @@ import polars as pl
 
 from app.indicators.pipeline import compute_enriched
 from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,11 @@ class TaiwanEnrichedRefreshService:
         self,
         daily_store: TaiwanDailyStore | None = None,
         enriched_root: Path | None = None,
+        share_capital: TaiwanShareCapitalStore | None = None,
     ) -> None:
         self.daily_store = daily_store or TaiwanDailyStore()
         self._root = enriched_root or _enriched_root()
+        self.share_capital = share_capital or TaiwanShareCapitalStore()
 
     @staticmethod
     def _write_partition(partition_dir: Path, df: pl.DataFrame) -> int:
@@ -79,7 +82,16 @@ class TaiwanEnrichedRefreshService:
             logger.info("taiwan enriched refresh skipped: empty window")
             return 0
 
-        enriched = compute_enriched(raw, factors=pl.DataFrame())
+        # Issued shares are the turnover denominator; without them the column is
+        # absent entirely and any strategy scoring on turnover_rate cannot run.
+        # compute_enriched nulls it for every Taiwan row that is not today, so the
+        # current count never reaches a historical date.
+        instruments = self.share_capital.as_instruments()
+        if instruments.is_empty():
+            logger.warning(
+                "taiwan enriched refresh: no share capital on disk, turnover_rate will be null"
+            )
+        enriched = compute_enriched(raw, factors=pl.DataFrame(), instruments=instruments)
         if enriched.is_empty():
             return 0
         enriched = self._add_limit_signals(enriched)

@@ -374,6 +374,16 @@ class TaiwanDailyUpdateService:
 
         # 4b. Publish indicators and signals for the engines that read the enriched table.
         if refresh_daily and daily_stats.status in {"success", "skipped"}:
+            # Issued shares first: the enriched publish reads them as the turnover
+            # denominator, so refreshing afterwards would leave today's partition
+            # priced by yesterday's share counts until the next run.
+            try:
+                from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+
+                TaiwanShareCapitalStore().refresh()
+            except Exception as e:
+                logger.warning("Taiwan share capital refresh failed: %s", e)
+
             try:
                 from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
 

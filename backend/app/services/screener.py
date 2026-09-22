@@ -154,8 +154,12 @@ class ScreenerService:
         # 加载 warmup 历史 (目标日期前 ~120 天)
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         start = target_date - timedelta(days=150)
+        # turnover_rate is stored, not derivable from OHLCV: it needs the share
+        # count that only the enriched publish had. Leaving it out of this list
+        # makes matrix_feature reject it and takes down every strategy that
+        # scores on it.
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
 
         try:
             lf = (
@@ -245,8 +249,12 @@ class ScreenerService:
         start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
 
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        # turnover_rate is stored, not derivable from OHLCV: it needs the share
+        # count that only the enriched publish had. Leaving it out of this list
+        # makes matrix_feature reject it and takes down every strategy that
+        # scores on it.
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
 
         try:
             lf = (

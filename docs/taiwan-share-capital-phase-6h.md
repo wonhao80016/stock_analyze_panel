@@ -102,3 +102,35 @@ The existing non-Taiwan fallback behavior remains unchanged.
 - same issuer/date/amount or subject similarity as event identity;
 - report date, effective date, retrieval time, or HTTP headers as exact availability;
 - ETF issued or beneficiary units as company share capital.
+
+## Same-day turnover denominator (2026-09-22)
+
+The findings above stand. What changed is that the current issued-share count is
+now supplied for the **current trading day only**, so `turnover_rate` exists for
+today instead of not existing at all.
+
+`TaiwanShareCapitalStore` refreshes issued common shares in bulk from the two
+endpoints already inventoried above and writes
+`data/taiwan/share_capital.parquet`. `TaiwanEnrichedRefreshService` passes it to
+`compute_enriched` as the `instruments` frame, whose `float_shares` column is the
+turnover denominator.
+
+This does not reopen the rejected inference. `apply_historical_float_shares`
+still withdraws the denominator from every Taiwan row whose date is not today,
+so a past session's turnover stays absent rather than being recomputed against a
+share count that did not apply then. A regression test pins that, because the
+guarantee is what makes supplying the number acceptable at all.
+
+Two consequences that must not be papered over:
+
+- The denominator is **issued** shares, not free float. Every Taiwan turnover
+  figure is therefore a share of issued capital and reads lower than a
+  float-based one, by more for a company whose insiders hold more of it.
+  Taiwan market data conventionally uses issued shares because nothing else is
+  published, so figures stay comparable between listings — but none of them is a
+  true float turnover, and the field description says so.
+- Historical turnover remains unavailable, so a strategy that scores on
+  `turnover_rate` still cannot be backtested. It can screen today.
+
+Before this, four built-in strategies scored on `turnover_rate` and could not run
+at all; the field was absent from the Taiwan enriched table rather than null.
