@@ -899,7 +899,13 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
         except Exception as e:
             yield json.dumps({"type": "error", "message": f"AI生成失败: {e}"}, ensure_ascii=False) + "\n"
 
-    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+    # identity 让 GZipMiddleware 原样放行: 它不会 flush 每个 chunk, 压缩会把逐步
+    # 推送的生成进度憋到串流结束才一次送达, 前端是 getReader() 逐块消费的。
+    return StreamingResponse(
+        event_generator(),
+        media_type="application/x-ndjson",
+        headers={"Content-Encoding": "identity"},
+    )
 
 
 

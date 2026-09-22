@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -350,6 +351,12 @@ app = FastAPI(
     description="台股選股、監控與回測面板",
     lifespan=lifespan,
 )
+
+# 压缩: 面板的几个端点回传整份缓存 (策略选股快取单次即 3MB 量级), 未压缩直送
+# 会让看板与策略库每次开页都拖一份完整 JSON。SSE 由 Starlette 预设排除
+# (text/event-stream), 逐块推送的 ndjson 串流则由端点自行标记 identity 跳过 —
+# GZipMiddleware 不会 flush 每个 chunk, 压了会把进度事件憋到最后一次吐出。
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # CORS: 允许局域网访问 (自托管场景, 放开所有来源)
 # 注: allow_credentials=True 与 allow_origins=['*'] 不能共存 (浏览器规范),
