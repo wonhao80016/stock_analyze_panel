@@ -51,7 +51,8 @@ class TaiwanEnrichedRefreshService:
     def _write_partition(partition_dir: Path, df: pl.DataFrame) -> int:
         partition_dir.mkdir(parents=True, exist_ok=True)
         target = partition_dir / "part.parquet"
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(partition_dir), suffix=".parquet")
+        # The suffix must not end in .parquet: readers glob **/*.parquet.
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=str(partition_dir), suffix=".parquet.tmp")
         try:
             os.close(tmp_fd)
             df.write_parquet(tmp_path)

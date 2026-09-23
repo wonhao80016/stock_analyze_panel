@@ -59,6 +59,8 @@ class MinuteBarRecorder:
             data_dir = Path(settings.data_dir)
         self._data_dir = Path(data_dir)
         self._lock = threading.Lock()
+        # The close flush and a manual refresh can read-modify-write one partition at once.
+        self._write_lock = threading.Lock()
         self._open: dict[str, _OpenBar] = {}
         # Cumulative day volume last seen per symbol. A minute's volume is the
         # increase since the previous snapshot, so the first snapshot after start-up
@@ -193,11 +195,12 @@ class MinuteBarRecorder:
             grouped.setdefault((asset, row["datetime"].date()), []).append(row)
 
         written = 0
-        for (asset, day), group in grouped.items():
-            try:
-                written += self._write_partition(asset, day, pl.DataFrame(group))
-            except Exception as exc:
-                logger.warning("minute bar write failed (%s %s): %s", asset, day, exc)
+        with self._write_lock:
+            for (asset, day), group in grouped.items():
+                try:
+                    written += self._write_partition(asset, day, pl.DataFrame(group))
+                except Exception as exc:
+                    logger.warning("minute bar write failed (%s %s): %s", asset, day, exc)
         return written
 
     def _write_partition(self, asset: str, day: date, df: pl.DataFrame) -> int:

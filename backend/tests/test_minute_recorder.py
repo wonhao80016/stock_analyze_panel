@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -159,6 +160,49 @@ def test_temp_file_is_invisible_to_the_reader_glob(recorder, tmp_path, monkeypat
     assert seen, "expected at least one partition write"
     for names in seen:
         assert names in ([], ["part.parquet"]), f"temp file matched the reader glob: {names}"
+
+
+def _bar(minute: int) -> dict:
+    return {
+        "symbol": "3545.TWSE",
+        "datetime": datetime(2026, 9, 17, 10, minute, tzinfo=TAIPEI_TZ),
+        "open": 50.0, "high": 50.0, "low": 50.0, "close": 50.0 + minute,
+        "volume": 100.0, "amount": 5000.0,
+    }
+
+
+def test_concurrent_writes_to_one_partition_keep_every_bar(tmp_path, monkeypatch):
+    """The poll thread's close flush and a manual refresh can write one partition at once."""
+    recorder = MinuteBarRecorder(data_dir=tmp_path)
+    recorder._write([_bar(0)], None)
+
+    real_read = pl.read_parquet
+    first_read = threading.Event()
+    second_written = threading.Event()
+
+    def _pausing_read(source, *args, **kwargs):
+        frame = real_read(source, *args, **kwargs)
+        if not first_read.is_set():
+            first_read.set()
+            second_written.wait(timeout=1.0)
+        return frame
+
+    monkeypatch.setattr("app.taiwan.realtime.minute_recorder.pl.read_parquet", _pausing_read)
+    first = threading.Thread(target=recorder._write, args=([_bar(1)], None))
+    first.start()
+    assert first_read.wait(timeout=5.0)
+
+    def _second() -> None:
+        recorder._write([_bar(2)], None)
+        second_written.set()
+
+    second = threading.Thread(target=_second)
+    second.start()
+    first.join(timeout=5.0)
+    second.join(timeout=5.0)
+    monkeypatch.setattr("app.taiwan.realtime.minute_recorder.pl.read_parquet", real_read)
+
+    assert [b["close"] for b in _read(tmp_path)] == [50.0, 51.0, 52.0]
 
 
 def test_close_flush_persists_the_last_bar_of_the_day(recorder, tmp_path):
