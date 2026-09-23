@@ -435,6 +435,10 @@ def watchlist_enriched(
                 for c in float_cols
             ])
         legacy_rows = df.to_dicts()
+        # A-share rows have no per-symbol quote provenance yet, so live_date
+        # mirrors the response's global as_of (matches prior frontend behavior).
+        for row in legacy_rows:
+            row["live_date"] = str(as_of) if as_of else None
     else:
         legacy_rows = []
 
@@ -453,7 +457,7 @@ def watchlist_enriched(
 
     # 合并 + 补齐字段: 两条路径产出的字典 key 集合不同 (Taiwan 没有技术指标列),
     # 统一补 None 而非让 key 缺失, 遵循"缺数据回 null 不是假造"的既有口径。
-    expected_cols = _WATCHLIST_COLS + ["name", "float_shares", "asset_type"] + ext_col_names
+    expected_cols = _WATCHLIST_COLS + ["name", "float_shares", "asset_type", "live_date"] + ext_col_names
     all_rows = legacy_rows + taiwan_rows
     for row in all_rows:
         for col in expected_cols:

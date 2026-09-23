@@ -9,6 +9,7 @@ import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
+import { patchLiveCandles } from '@/lib/liveCandles'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -869,26 +870,8 @@ export function Watchlist() {
   const klineData = useMemo(() => {
     const base = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
     const liveRows = enriched.data?.rows
-    const asOf = enriched.data?.as_of
-    if (!dailyKVisible || !liveRows?.length || !asOf) return base
-    const liveBySymbol = new Map<string, any>(liveRows.map((r: any) => [r.symbol, r]))
-    const patched: Record<string, KlineRow[]> = {}
-    for (const sym of Object.keys(base)) {
-      const arr = base[sym]
-      if (!Array.isArray(arr) || arr.length === 0) { patched[sym] = arr; continue }
-      const live = liveBySymbol.get(sym)
-      const { open, high, low, close } = live ?? {}
-      if (open == null || high == null || low == null || close == null) { patched[sym] = arr; continue }
-      const last = arr[arr.length - 1]
-      if (last.date === asOf) {
-        patched[sym] = [...arr.slice(0, -1), { ...last, open, high, low, close }]
-      } else if (last.date < asOf) {
-        patched[sym] = [...arr, { date: asOf, open, high, low, close }]
-      } else {
-        patched[sym] = arr
-      }
-    }
-    return patched
+    if (!dailyKVisible || !liveRows?.length) return base
+    return patchLiveCandles(base, liveRows)
   }, [dailyKVisible, klineBatch.data, enriched.data])
 
   // 批量分時數據 (有分鐘K批量能力時, 列可見才拉)

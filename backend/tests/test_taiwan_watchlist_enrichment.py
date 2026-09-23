@@ -39,6 +39,7 @@ class _FakeSourceMeta:
     freshness_class: str = "best_effort_near_realtime"
     fallback_reason: str | None = None
     trade_date: date | None = None
+    is_realtime: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +64,7 @@ class _FakeQuote:
     amount: float | None
     quote_time: object | None = None
     source_meta: _FakeSourceMeta | None = None
+    trade_date: date | None = None
 
 
 class _FakeRealtimeService:
@@ -562,3 +564,55 @@ def test_watchlist_row_no_quote_at_all_has_no_fake_metadata():
     row = rows[0]
     assert row["quote_time"] is None
     assert row["source_meta"] is None
+
+
+# ===== A7: live_date lets the frontend patch today's mini daily candle
+# only from a realtime quote; a fallback quote's trade_date must not qualify. =====
+
+def test_realtime_quote_sets_live_date_from_its_own_trade_date():
+    """A realtime quote (source_meta.is_realtime=True) yields live_date == its own trade_date."""
+    sec_master = _FakeSecurityMaster({
+        "2330.TWSE": _FakeInstrument(name="TSMC", instrument_type="stock"),
+    })
+    meta = _FakeSourceMeta(source="twse:mis", is_realtime=True)
+    rt_service = _FakeRealtimeService({
+        "2330.TWSE": _FakeQuote(
+            1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85, 1, 1.0,
+            source_meta=meta, trade_date=date(2026, 9, 23),
+        ),
+    })
+    rows = enrich_taiwan_watchlist_rows(
+        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+    )
+    assert rows[0]["live_date"] == "2026-09-23"
+
+
+def test_non_realtime_quote_has_no_live_date():
+    """A non-realtime quote (e.g. daily-close fallback) must not date today's candle."""
+    sec_master = _FakeSecurityMaster({
+        "2330.TWSE": _FakeInstrument(name="TSMC", instrument_type="stock"),
+    })
+    meta = _FakeSourceMeta(source="twse:stock_day_all", is_realtime=False)
+    rt_service = _FakeRealtimeService({
+        "2330.TWSE": _FakeQuote(
+            1080.0, 1060.0, 1065.0, 1085.0, 1062.0, 20.0, 1.85, 1, 1.0,
+            source_meta=meta, trade_date=date(2026, 9, 22),
+        ),
+    })
+    rows = enrich_taiwan_watchlist_rows(
+        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+    )
+    assert rows[0]["live_date"] is None
+
+
+def test_no_quote_at_all_has_no_live_date():
+    """A symbol with no quote (q is None) must not fake a live_date."""
+    sec_master = _FakeSecurityMaster({})
+    rt_service = _FakeRealtimeService(quotes={})
+    rows = enrich_taiwan_watchlist_rows(
+        ["9999.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+    )
+    assert rows[0]["live_date"] is None

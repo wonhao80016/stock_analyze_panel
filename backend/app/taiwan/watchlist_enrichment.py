@@ -66,6 +66,16 @@ def _to_fraction_pct(value: Any) -> float | None:
     return value / 100.0
 
 
+def _taiwan_live_date(q: Any) -> str | None:
+    """A non-realtime quote's trade_date may be a stale fallback session, so only
+    a realtime quote (source_meta.is_realtime) may date today's mini candle."""
+    if q is None or q.source_meta is None or not q.source_meta.is_realtime:
+        return None
+    if q.trade_date is None:
+        return None
+    return q.trade_date.isoformat()
+
+
 def _taiwan_daily_fallback_map(symbols: list[str], daily_store: Any) -> dict[str, dict]:
     """一次性批量读取最近窗口的台股日K, 算出「最新收盘 + 前收盘 + 涨跌」映射。
 
@@ -208,6 +218,7 @@ def enrich_taiwan_watchlist_rows(
             # quote 查无(q is None)时两者都是 None, 不伪造新鲜度状态。
             "quote_time": q.quote_time.isoformat() if q and q.quote_time else None,
             "source_meta": q.source_meta.to_dict() if q and q.source_meta else None,
+            "live_date": _taiwan_live_date(q),
             "ma5": _sanitize_float(ind.get("ma5")),
             "ma10": _sanitize_float(ind.get("ma10")),
             "ma20": _sanitize_float(ind.get("ma20")),

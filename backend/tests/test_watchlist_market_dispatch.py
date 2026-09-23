@@ -163,3 +163,67 @@ def test_taiwan_enrichment_exception_does_not_break_legacy_rows(monkeypatch):
     assert rows["600519"]["close"] == 1800.0, "legacy 行不应被台股异常连累"
     assert rows["2330.TWSE"]["close"] is None
     assert rows["2330.TWSE"]["symbol"] == "2330.TWSE"
+
+
+# ===== A7: live_date dispatch/merge across the Taiwan and legacy A-share paths =====
+
+def test_taiwan_only_watchlist_rows_carry_their_own_live_date(monkeypatch):
+    """Pure-Taiwan watchlist: each Taiwan row keeps the per-row live_date its own enrichment set."""
+    monkeypatch.setattr(
+        wl_api.watchlist, "list_symbols",
+        lambda: [{"symbol": "2330.TWSE"}, {"symbol": "6488.TPEX"}],
+    )
+    repo = _FakeRepo()
+    monkeypatch.setattr(
+        "app.taiwan.watchlist_enrichment.enrich_taiwan_watchlist_rows",
+        lambda symbols, **kwargs: [
+            {"symbol": s, "asset_type": "stock", "close": 100.0,
+             "live_date": "2026-09-23" if s == "2330.TWSE" else None}
+            for s in symbols
+        ],
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+    rows = {r["symbol"]: r for r in res["rows"]}
+    assert rows["2330.TWSE"]["live_date"] == "2026-09-23"
+    assert rows["6488.TPEX"]["live_date"] is None
+
+
+def test_ashare_row_live_date_matches_response_as_of(monkeypatch):
+    """Legacy A-share rows get live_date == the response's global as_of (unchanged frontend contract)."""
+    monkeypatch.setattr(
+        wl_api.watchlist, "list_symbols",
+        lambda: [{"symbol": "600519"}],
+    )
+    repo = _FakeRepo(
+        enriched_df=_enriched_df([("600519", 1800.0, 1.2, 1e9)]),
+        enriched_date="2026-07-08",
+        name_map={"600519": "Test Corp"},
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+    row = res["rows"][0]
+    assert row["symbol"] == "600519"
+    assert row["live_date"] == res["as_of"] == "2026-07-08"
+
+
+def test_every_row_has_live_date_key(monkeypatch):
+    """Mixed watchlist: every row (Taiwan and A-share) must carry the live_date key."""
+    monkeypatch.setattr(
+        wl_api.watchlist, "list_symbols",
+        lambda: [{"symbol": "2330.TWSE"}, {"symbol": "600519"}],
+    )
+    repo = _FakeRepo(
+        enriched_df=_enriched_df([("600519", 1800.0, 1.2, 1e9)]),
+        enriched_date="2026-07-08",
+        name_map={"600519": "Test Corp"},
+    )
+    monkeypatch.setattr(
+        "app.taiwan.watchlist_enrichment.enrich_taiwan_watchlist_rows",
+        lambda symbols, **kwargs: [
+            {"symbol": s, "asset_type": "stock", "close": 1100.0} for s in symbols
+        ],
+    )
+
+    res = wl_api.watchlist_enriched(_make_request(repo), ext_columns=None)
+    assert all("live_date" in r for r in res["rows"])
