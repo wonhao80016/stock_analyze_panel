@@ -445,6 +445,10 @@ store 不足 5 日、即時路徑兩種情境、融資最新日無列），修�
 `frontend/src/pages/TaiwanStockDetail.tsx` 是 `refetchInterval: 10_000`。
 → 即時行情關閉時，Monitor 報價條停在進頁面那一刻，個股視窗每 10 秒更新。
 
+2026-09-24 補充：即時行情開啟時，`frontend/src/lib/queryKeys.ts` 的 `SSE_INVALIDATE_PREFIXES`
+含 `taiwan-quotes`，報價條隨 SSE 刷新，與個股視窗一致；只有 SSE 斷線重連期間報價條會凍結
+（全域 `refetchOnWindowFocus: false`），畫面有重連提示。
+
 #### C2. 自選頁板塊篩選沿用舊 A 股 localStorage — 已修
 `frontend/src/pages/Watchlist.tsx` 的 `BOARDS` 由 5 個 A 股板塊改為
 `['上市','上櫃']`，但讀 `storage.watchlistBoardFilter` 無任何遷移／清洗，且以
@@ -491,6 +495,13 @@ store 不足 5 日、即時路徑兩種情境、融資最新日無列），修�
 但渲染條件是 `isJobRunning && activeJob`；`mutate` 成功後 `isPending` 已回 false 而
 `activeJob` 仍是 null，因此按鈕仍在畫面上且可點。800ms 內點兩次 → 第二個 job 覆蓋
 `activeJobId`，第一個變成無人追蹤的孤兒，下方還顯示上一輪的數字。
+
+2026-09-24 補正：「第二個 job 成孤兒」不成立。後端 `taiwan/enrichment_backfill.py` 的
+`start_backfill` 在 `_jobs_lock` 內檢查 `_active_job_id`，既有任務未結束時回傳同一個
+job_id，不建立新任務（`tests/test_taiwan_enrichment_backfill.py` 的
+`test_single_active_job_returns_same_job_id`）。800ms 是已知任務的下一輪輪詢間隔，首次
+查詢在 `activeJobId` 變更時立即發出，前端可重按的窗口只有一次請求往返。殘留問題：`onSuccess`
+沒有清掉 `activeJob`，啟動新回補時進度區會短暫顯示上一輪的數字，純顯示、不影響資料。
 
 #### C5. Monitor 告警記錄的股票代號按鈕是空點擊 — 待修
 `frontend/src/components/monitor/TaiwanAlertsList.tsx` 的
@@ -614,3 +625,41 @@ B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快
 建議順序：B7 → B11；開始使用監控規則前修 B6、B5、C5。
 
 2026-09-23 B7、B11 已修（見其章節）。主清單剩餘 7 項：B4、B5、B6、B12、C1、C4、C5。
+
+## 七、剩餘項目複查（2026-09-24）
+
+依使用者實際情境（即時行情開啟、監控規則 0 條、自選 9 檔全為台股）逐項確認是否仍存在、
+在此情境下會不會被執行。
+
+| 項目 | 現況 | 在此情境下 | 建議 |
+|---|---|---|---|
+| B5 | 部分存在：距漲跌停兩欄只由 `compute_enriched_today` 產生；實測 2026-09-22、09-23 已存 enriched 分區都沒有這兩欄 | 無規則，不執行 | 開始用監控規則前修 |
+| B6 | 仍存在：命中當下即解除 armed，cooldown 之後才判斷 | 無規則，不執行 | 開始用監控規則前修 |
+| B12 | 仍存在；B2 修正後觸發機率低（推測） | 每次輪詢都經過，極少觸發 | 低優先 |
+| C1 | 仍存在，但見 C1 段補充：即時行情開啟時只在 SSE 斷線期間凍結 | 平時不可見 | 不急 |
+| C4 | 原判斷有誤，見 C4 段補正；只剩進度區短暫閃爍 | 按回補時才會 | 不急 |
+| C5 | 仍存在：`Monitor.tsx` 未傳 `onSelectSymbol` | 無告警，看不到 | 開始用監控規則前修 |
+| B4 | 見 B4 段補正，無畫面使用 | 不可見 | 低優先 |
+
+新發現：
+
+- **N1 預覽視窗資訊列缺「市值／流通值／換手」（台股）**：`backend/app/api/kline.py` 的
+  `_get_stock_info` 只查 A 股維表 `repo.get_instruments()`；純台股部署下 `data/instruments/`
+  本來就是空的，台股標的一律回空。`frontend/src/components/StockInfoBar.tsx` 用
+  `stock_info` 的股本算這三欄，缺值就略過不顯示，而 `frontend/src/lib/stock-info-fields.ts`
+  預設三欄都顯示。台股已有自己的股本資料（`backend/app/taiwan/share_capital_store.py`）。
+  預設設定下每個台股預覽都會缺這三欄，**建議優先修**。
+- **N2 測試寫進正式 log**：`backend/app/main.py` 在 import 時就把指向
+  `settings.data_dir / "backend.log"` 的 `RotatingFileHandler` 掛到 root logger，測試沒有
+  改寫資料目錄，任何 import `app.main` 的測試都會把該輪測試的 log 寫進正式檔（`_FakeRepo`、
+  `example.invalid` 等訊息即由此而來）。影響往後依 log 查問題的可信度。
+- **N3 instruments 快取警告洗版**：`backend/app/repository.py` 的 `_refresh_instruments` 在
+  `data/instruments/` 為空時每次都記 WARNING，而且快取永遠建不起來，隨每輪輪詢重試；
+  2026-09-23 全日 1,515 則（其中多少來自 N2 的測試寫入未區分）。同類的 index／ETF
+  instruments 失敗記的是 DEBUG。
+- **N4 法人／融資資料日期標記**：`taiwan/enrichment/margin.py`、`institutional.py` 的
+  `parse_payload` 用請求日期標記每筆資料，不比對回應自身的日期。實測對 2026-09-24（未來日期）
+  四個端點都回 0 列（TWSE 拒絕查詢；TPEx `stat=ok`、日期與請求相同、資料為空），不會誤標；
+  「當日尚未公布」的情境未實測。屬防禦性加強，低優先。
+
+建議順序：N1 → N2 → N3；開始使用監控規則前修 C5、B6、B5；其餘低優先。
