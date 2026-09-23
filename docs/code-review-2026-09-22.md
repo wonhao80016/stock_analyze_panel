@@ -148,9 +148,27 @@ fallback 全部被跳過、畫面直接空白。
 交易日，所以幾乎恆真 → 走 `TaiwanDailyStore` ＋ 現算 `compute_enriched`，形成第二套
 獨立計算的價格／指標來源。修法：改以列數或日期跨度判斷，而非與請求視窗起點比較。
 
-#### A7. 純台股自選時 `as_of` 為 `None` — 待修
+#### A7. 純台股自選時 `as_of` 為 `None` — 已修
 `backend/app/api/watchlist.py` 的 `as_of` 只由 A 股／ETF／指數快取決定，純台股自選股
 時為 `None`，導致 `frontend/src/pages/Watchlist.tsx` 的當日蠟燭即時修補整段被跳過。
+迷你日K批次資料的查詢快取 5 分鐘，結果是價格欄隨即時價跳動、迷你K棒卻停住。
+
+修法（2026-09-23）：不能只把 `as_of` 補成今天——台股列來自 `TaiwanRealtimeService`
+的備援鏈（MIS → Yahoo → 官方收盤快照 → 本地日K），同一次回應裡不同列可能屬於不同
+交易日，全域日期會把備援拿到的昨收畫成今天的K棒（與 B3 同類）。改為逐列日期：每列新增
+`live_date`，台股列只有即時報價（`source_meta.is_realtime`）才填入該報價自己的
+`trade_date`，其餘為 None；A 股列填原本的全域 `as_of`，行為不變。前端修補邏輯抽成
+`frontend/src/lib/liveCandles.ts` 的 `patchLiveCandles`，逐列依 `live_date` 更新或追加。
+回應的全域 `as_of` 保留，向後相容。
+
+驗證：`tests/test_taiwan_watchlist_enrichment.py` 與 `tests/test_watchlist_market_dispatch.py`
+各新增 3 個測試（即時報價帶自身交易日、非即時與查無報價為 None、A 股列等於 `as_of`、
+每列都有 `live_date`），`frontend/src/lib/liveCandles.test.ts` 8 個測試（含「非即時列不得
+修補」護欄）；後端相關測試 37 個、前端全套 256 個通過，build 通過。MIS 層只有在盤中
+（`MarketStatus.OPEN`）且報價未過期（交易日為今天、時間戳正常）時才標 `is_realtime`
+（`backend/app/taiwan/realtime/mis_provider.py` 的 `date_mismatch`／`is_stale`），Yahoo、
+官方快照、日K備援恆為非即時。因此盤前與收盤後迷你K棒不做即時修補，顯示批次資料的內容，
+直到批次查詢重抓；修正前純台股自選完全不修補，這不是新的退步。
 
 ---
 
@@ -287,6 +305,10 @@ provenance，只是不會被寫成今天的日K。有一條測試以程式碼位
 被分類卻從未被請求，於是 `index_records` 恆空，每輪用空 frame 覆寫
 `_index_quotes_cache`。`GET /api/intraday/indices` 因此永遠回退到
 `source: "index_daily"` 的昨收。
+
+2026-09-23 補正影響範圍：前端沒有任何地方呼叫 `/api/intraday/indices`；Monitor 的
+`TaiwanIndexBar` 走 `/api/intraday/quotes`（`TaiwanRealtimeService`），會正常即時更新。
+本項只影響依賴 `_index_quotes_cache` 的指數類監控規則，畫面上看不到，優先度應下調。
 
 #### B5. `distance_to_upper/lower_limit` 只存在於增量路徑 — 待修
 `backend/app/indicators/pipeline.py` 只在 `compute_enriched_today` 內加這兩欄；
@@ -510,3 +532,7 @@ B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快
 2026-09-23 更新：以上三項已修正，修法與驗證見各章節。受影響模組的 27 個測試檔共
 259 個測試通過；同日追加 A5 技術指標後，涵蓋增量管線的 29 個測試檔共 275 個測試通過。
 主清單剩餘 13 項：A6、A7、B4–B8、B10–B12、C1、C4、C5。
+
+2026-09-23 A7 已修（見其章節）。主清單剩餘 12 項：A6、B4–B8、B10–B12、C1、C4、C5。
+依實際使用情境重排（即時行情開啟、無監控規則、自選全為台股）：A6 → B8＋B10 → B7 → B11；
+開始使用監控規則前需修 B6、B5、C5；C1 只在即時行情關閉時可見；B4 無畫面使用。
