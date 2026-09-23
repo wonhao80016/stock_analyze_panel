@@ -8,13 +8,15 @@ official.fetch_quote / get_daily (status != "realtime"); 这些数据此前未�
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
 
+from app.market_time import cn_today
 from app.services.quote_service import QuoteService
-
+from tests.test_realtime_enriched_resume import _live_state, _previous_enriched
 
 # ── A1: 回退来源闸门 ──────────────────────────────────────
 
@@ -255,3 +257,207 @@ def test_build_quote_extra_change_pct_unaffected_by_turnover_normalization():
     否则会把 TickFlow 分支既有的小数值再次除以 100 (双重错误)。"""
     out = QuoteService._build_quote_extra([{"symbol": "600000.SH", "change_pct": 0.0366}])
     assert out["change_pct"][0] == pytest.approx(0.0366)
+
+
+# ── Poll pool cap: rule symbols go before the watchlist ──
+
+
+def test_monitor_rule_symbol_survives_truncation_when_watchlist_fills_the_cap():
+    """A rule symbol dropped by the cap silently disables its rule."""
+    svc = _svc_for_fetch()
+    cap = QuoteService.TAIWAN_REALTIME_MAX_SYMBOLS
+    watchlist_symbols = [f"{1000 + i}.TWSE" for i in range(cap)]
+    svc._app_state.monitor_engine.rules = {
+        "r1": {"enabled": True, "scope": "symbols", "symbols": ["9999.TWSE"]},
+    }
+
+    captured: dict = {}
+
+    class _FakeProvider:
+        def get_realtime(self, symbols):
+            captured["symbols"] = list(symbols)
+            return pl.DataFrame()
+
+    with (
+        patch("app.services.preferences.get_realtime_data_provider", return_value="taiwan"),
+        patch("app.data_providers.registry.get_provider", return_value=_FakeProvider()),
+        patch("app.services.watchlist.list_symbols", return_value=[{"symbol": s} for s in watchlist_symbols]),
+    ):
+        svc._fetch_full_market_quotes()
+
+    assert "9999.TWSE" in captured["symbols"]
+    assert len(captured["symbols"]) == cap
+    assert len(captured["symbols"]) == len(set(captured["symbols"]))
+
+
+def test_monitor_rule_symbol_in_watchlist_appears_once_within_cap():
+    svc = _svc_for_fetch()
+    watchlist_symbols = [f"{2000 + i}.TWSE" for i in range(5)]
+    svc._app_state.monitor_engine.rules = {
+        "r1": {"enabled": True, "scope": "symbols", "symbols": [watchlist_symbols[0]]},
+    }
+
+    captured: dict = {}
+
+    class _FakeProvider:
+        def get_realtime(self, symbols):
+            captured["symbols"] = list(symbols)
+            return pl.DataFrame()
+
+    with (
+        patch("app.services.preferences.get_realtime_data_provider", return_value="taiwan"),
+        patch("app.data_providers.registry.get_provider", return_value=_FakeProvider()),
+        patch("app.services.watchlist.list_symbols", return_value=[{"symbol": s} for s in watchlist_symbols]),
+    ):
+        svc._fetch_full_market_quotes()
+
+    assert sorted(captured["symbols"]) == sorted(watchlist_symbols)
+    assert len(captured["symbols"]) == len(set(captured["symbols"]))
+
+
+# ── A5: fetch_live_bar, today's bar for a symbol outside the poll pool ──
+
+
+def test_fetch_live_bar_builds_bar_from_realtime_row():
+    svc = _svc_for_fetch()
+    today = cn_today()
+
+    class _FakeProvider:
+        def get_realtime(self, symbols):
+            assert list(symbols) == ["6196.TWSE"]
+            return pl.DataFrame([{
+                "symbol": "6196.TWSE", "date": str(today), "open": 100.0, "high": 105.0,
+                "low": 99.0, "close": 104.0, "volume": 1000.0, "amount": 104000.0,
+                "prev_close": 101.0, "change_pct": 2.97, "quote_ts": 1_700_000_000_000,
+                "status": "realtime",
+            }])
+
+    with (
+        patch("app.services.preferences.get_realtime_data_provider", return_value="taiwan"),
+        patch("app.data_providers.registry.get_provider", return_value=_FakeProvider()),
+    ):
+        out = svc.fetch_live_bar("6196.TWSE")
+
+    assert out is not None
+    assert out["symbol"] == "6196.TWSE"
+    assert out["date"] == today
+    assert out["close"] == 104.0
+    assert out["open"] == 100.0
+    assert out["high"] == 105.0
+    assert out["low"] == 99.0
+    assert out["change_pct"] == pytest.approx(0.0297)
+
+
+@pytest.mark.parametrize("status", ["third_party_fallback", "official", "stale"])
+def test_fetch_live_bar_none_when_row_is_not_realtime(status):
+    svc = _svc_for_fetch()
+
+    class _FakeProvider:
+        def get_realtime(self, symbols):
+            return pl.DataFrame([{
+                "symbol": "6196.TWSE", "date": "2026-09-17", "open": 100.0, "high": 105.0,
+                "low": 99.0, "close": 104.0, "volume": 1000.0, "amount": 104000.0,
+                "prev_close": 101.0, "change_pct": 2.97, "status": status,
+            }])
+
+    with (
+        patch("app.services.preferences.get_realtime_data_provider", return_value="taiwan"),
+        patch("app.data_providers.registry.get_provider", return_value=_FakeProvider()),
+    ):
+        assert svc.fetch_live_bar("6196.TWSE") is None
+
+
+def test_fetch_live_bar_none_when_provider_raises():
+    svc = _svc_for_fetch()
+
+    class _ExplodingProvider:
+        def get_realtime(self, symbols):
+            raise RuntimeError("HTTP Error 428: Precondition Required")
+
+    with (
+        patch("app.services.preferences.get_realtime_data_provider", return_value="taiwan"),
+        patch("app.data_providers.registry.get_provider", return_value=_ExplodingProvider()),
+    ):
+        assert svc.fetch_live_bar("6196.TWSE") is None
+
+
+def test_fetch_live_bar_none_and_no_provider_call_when_source_is_not_taiwan():
+    svc = _svc_for_fetch()
+
+    with (
+        patch("app.services.preferences.get_realtime_data_provider", return_value="custom_provider"),
+        patch("app.data_providers.registry.get_provider") as mock_get_provider,
+    ):
+        assert svc.fetch_live_bar("6196.TWSE") is None
+        mock_get_provider.assert_not_called()
+
+
+def _repo_with_state(symbol: str) -> MagicMock:
+    repo = MagicMock()
+    repo.get_live_agg.return_value = _live_state().with_columns(pl.lit(symbol).alias("symbol"))
+    repo.get_enriched_latest.return_value = (
+        _previous_enriched().with_columns(pl.lit(symbol).alias("symbol")),
+        cn_today() - timedelta(days=1),
+    )
+    repo.get_instruments.return_value = pl.DataFrame()
+    return repo
+
+
+def _fetch_live_bar_with_row(svc: QuoteService, row: dict) -> dict | None:
+    class _FakeProvider:
+        def get_realtime(self, symbols):
+            return pl.DataFrame([row])
+
+    with (
+        patch("app.services.preferences.get_realtime_data_provider", return_value="taiwan"),
+        patch("app.data_providers.registry.get_provider", return_value=_FakeProvider()),
+    ):
+        return svc.fetch_live_bar(row["symbol"])
+
+
+_LIVE_ROW = {
+    "symbol": "6196.TWSE", "open": 10.1, "high": 10.2, "low": 10.0, "close": 10.2,
+    "volume": 1200.0, "amount": 12240.0, "prev_close": 10.0, "change_pct": 2.0,
+    "quote_ts": 1_700_000_000_000, "status": "realtime",
+}
+
+
+def test_fetch_live_bar_carries_indicators_from_the_incremental_pipeline():
+    svc = _svc_for_fetch()
+    svc._repo = _repo_with_state("6196.TWSE")
+
+    out = _fetch_live_bar_with_row(svc, _LIVE_ROW)
+
+    assert out["close"] == 10.2
+    assert out["change_pct"] == pytest.approx(0.02)
+    assert out["ma5"] == pytest.approx((40.0 + 10.2) / 5)
+    assert out["macd_dif"] is not None
+
+
+def test_fetch_live_bar_keeps_the_bare_bar_without_recursive_state():
+    svc = _svc_for_fetch()
+    svc._repo = _repo_with_state("6196.TWSE")
+    svc._repo.get_live_agg.return_value = pl.DataFrame()
+
+    out = _fetch_live_bar_with_row(svc, _LIVE_ROW)
+
+    assert out["close"] == 10.2
+    assert out.get("ma5") is None
+
+
+def test_fetch_live_bar_none_when_building_the_bar_fails():
+    svc = _svc_for_fetch()
+
+    with patch.object(QuoteService, "_build_daily", side_effect=RuntimeError("malformed quote")):
+        assert _fetch_live_bar_with_row(svc, _LIVE_ROW) is None
+
+
+def test_fetch_live_bar_keeps_the_bare_bar_when_the_pipeline_fails():
+    svc = _svc_for_fetch()
+    svc._repo = _repo_with_state("6196.TWSE")
+    svc._repo.get_live_agg.side_effect = RuntimeError("live agg rebuild failed")
+
+    out = _fetch_live_bar_with_row(svc, _LIVE_ROW)
+
+    assert out["close"] == 10.2
+    assert out.get("ma5") is None

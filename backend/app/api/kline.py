@@ -476,11 +476,18 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
     # 查找该 symbol 的实时 enriched 行
     import polars as pl
     try:
-        q = df_today.filter(pl.col("symbol") == symbol).to_dicts()
+        matches = df_today.filter(pl.col("symbol") == symbol).to_dicts()
+    except Exception:  # noqa: BLE001
+        return rows
+    if matches:
+        q = matches[0]
+    elif asset_type == "stock":
+        # The poll covers only watchlist and rule symbols; any other stock opened
+        # from a list would otherwise never get today's candle.
+        q = qs.fetch_live_bar(symbol)
         if not q:
             return rows
-        q = q[0]
-    except Exception:  # noqa: BLE001
+    else:
         return rows
 
     close_price = q.get("close")

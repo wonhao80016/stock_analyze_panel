@@ -4,12 +4,13 @@
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import polars as pl
 
 from app.api import screener
-from app.api.kline import _attach_ext, _get_stock_info
+from app.api.kline import _attach_ext, _get_stock_info, _maybe_inject_live_candle
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField
 
 
@@ -153,3 +154,110 @@ def test_attach_ext_real_loader_unknown_symbol_is_none(tmp_path):
     resp = {"symbol": "999999.SH", "stock_info": {}, "rows": []}
     out = _attach_ext(resp, repo, "999999.SH", "benchx.score")
     assert out["stock_info"]["ext"] == {"benchx__score": None}
+
+
+# ---------------------------------------------------------------- _maybe_inject_live_candle
+# A5: a symbol outside the polling pool snapshot must still get today's live candle via
+# QuoteService.fetch_live_bar, instead of being silently skipped because it is absent
+# from the full-market poll's enriched-today DataFrame.
+
+
+class _FakeQuoteServiceForInject:
+    def __init__(self, enriched_today: pl.DataFrame, enriched_date, live_bar: dict | None) -> None:
+        self._enriched_today = enriched_today
+        self._enriched_date = enriched_date
+        self._live_bar = live_bar
+        self.fetch_live_bar_calls: list[str] = []
+
+    def get_enriched_today(self):
+        return self._enriched_today, self._enriched_date
+
+    def fetch_live_bar(self, symbol):
+        self.fetch_live_bar_calls.append(symbol)
+        return self._live_bar
+
+
+def _fake_request(quote_service=None, repo=None):
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(quote_service=quote_service, repo=repo)))
+
+
+def test_maybe_inject_live_candle_falls_back_to_live_bar_for_symbol_outside_pool():
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    snapshot = pl.DataFrame({"symbol": ["2330.TWSE"], "close": [500.0]})
+    live_bar = {
+        "symbol": "6196.TWSE", "date": today, "open": 100.0, "high": 105.0,
+        "low": 99.0, "close": 104.0, "volume": 1000.0, "amount": 104000.0,
+        "change_pct": 0.0297,
+    }
+    qs = _FakeQuoteServiceForInject(snapshot, today, live_bar)
+    request = _fake_request(quote_service=qs)
+    rows = [{"date": str(yesterday), "symbol": "6196.TWSE", "open": 90.0, "high": 91.0, "low": 89.0, "close": 90.5}]
+
+    out = _maybe_inject_live_candle(request, "6196.TWSE", rows, "stock")
+
+    assert len(out) == 2
+    injected = out[-1]
+    assert injected["date"] == str(today)
+    assert injected["close"] == 104.0
+    assert injected["is_live"] is True
+    assert injected["change_pct"] == 0.0297
+
+
+def test_maybe_inject_live_candle_skips_stale_snapshot_without_calling_fetch_live_bar():
+    """A snapshot not dated today (realtime off, or a non-trading day) must not trigger a fetch."""
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    snapshot = pl.DataFrame({"symbol": ["6196.TWSE"], "close": [500.0]})
+    live_bar = {"symbol": "6196.TWSE", "date": today, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+                "volume": 1.0, "amount": 1.0, "change_pct": 0.0}
+    qs = _FakeQuoteServiceForInject(snapshot, yesterday, live_bar)
+    request = _fake_request(quote_service=qs)
+    rows = [{"date": str(yesterday), "symbol": "6196.TWSE", "open": 90.0, "high": 91.0, "low": 89.0, "close": 90.5}]
+
+    out = _maybe_inject_live_candle(request, "6196.TWSE", rows, "stock")
+
+    assert out == rows
+    assert qs.fetch_live_bar_calls == []
+
+
+def test_maybe_inject_live_candle_prefers_snapshot_when_symbol_already_polled():
+    today = date.today()
+    snapshot = pl.DataFrame({
+        "symbol": ["6196.TWSE"], "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
+        "volume": [100.0], "amount": [1000.0], "change_pct": [0.01],
+    })
+    live_bar = {"symbol": "6196.TWSE", "date": today, "open": 1.0, "high": 1.0, "low": 1.0, "close": 999.0,
+                "volume": 1.0, "amount": 1.0, "change_pct": 0.0}
+    qs = _FakeQuoteServiceForInject(snapshot, today, live_bar)
+    request = _fake_request(quote_service=qs)
+    rows: list[dict] = []
+
+    out = _maybe_inject_live_candle(request, "6196.TWSE", rows, "stock")
+
+    assert len(out) == 1
+    assert out[0]["close"] == 10.5
+    assert qs.fetch_live_bar_calls == []
+
+
+def test_maybe_inject_live_candle_etf_path_never_touches_quote_service_fetch_live_bar():
+    today = date.today()
+    snapshot = pl.DataFrame({
+        "symbol": ["0050.TWSE"], "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
+        "volume": [100.0], "amount": [1000.0], "change_pct": [0.01],
+    })
+
+    class _FakeRepoForInject:
+        def get_enriched_latest_asset(self, asset_type):
+            assert asset_type == "etf"
+            return snapshot, today
+
+    qs = _FakeQuoteServiceForInject(pl.DataFrame(), today, {"symbol": "0050.TWSE"})
+    request = _fake_request(quote_service=qs, repo=_FakeRepoForInject())
+    rows: list[dict] = []
+
+    out = _maybe_inject_live_candle(request, "0050.TWSE", rows, "etf")
+
+    assert len(out) == 1
+    assert out[0]["close"] == 10.5
+    assert qs.fetch_live_bar_calls == []

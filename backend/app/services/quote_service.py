@@ -580,26 +580,22 @@ class QuoteService:
         provider_name = preferences.get_realtime_data_provider()
         if provider_name in ("taiwan", "tickflow"):
             try:
-                from app.data_providers.registry import get_provider
-                provider = get_provider("taiwan")
                 t0 = time.perf_counter()
                 now_ts = time.perf_counter()
                 from app.services import watchlist
                 symbols = watchlist.list_symbols()
-                sym_list = [str((s or {}).get("symbol") or "").strip() for s in symbols]
-                sym_list = [s for s in sym_list if s]
+                watch_syms = [str((s or {}).get("symbol") or "").strip() for s in symbols]
                 # Monitor rules may target symbols outside the watchlist; without merging
                 # them in, such a symbol never receives a live quote and its rule can
                 # never fire (mirrors the index-symbol merge below).
+                # Rule symbols go first so the cap below can only drop watchlist symbols.
+                rule_syms: list[str] = []
                 engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
                 if engine:
-                    seen = set(sym_list)
                     for _r in list(engine.rules.values()):
                         if _r.get("enabled", True) and _r.get("scope") == "symbols":
-                            for _s in _r.get("symbols", []):
-                                if _s and _s not in seen:
-                                    seen.add(_s)
-                                    sym_list.append(_s)
+                            rule_syms.extend(_r.get("symbols", []))
+                sym_list = list(dict.fromkeys(s for s in (*rule_syms, *watch_syms) if s))
                 if len(sym_list) > self.TAIWAN_REALTIME_MAX_SYMBOLS:
                     logger.warning(
                         "台股实时标的池超限 (%d > %d), 已截断; MIS 端点单次请求无内建分批",
@@ -608,15 +604,8 @@ class QuoteService:
                     sym_list = sym_list[: self.TAIWAN_REALTIME_MAX_SYMBOLS]
                 if not sym_list:
                     return
-                df = provider.get_realtime(symbols=sym_list)
-                if not df.is_empty():
-                    if "change_pct" in df.columns:
-                        # mis/yahoo/enrichment providers report change_pct as a percentage
-                        # number (1.30 = 1.30%); the enriched pipeline is decimal-scale
-                        # (0.05 = 5%, see ENRICHED_COLUMNS in pipeline.py). Normalize here
-                        # so quote_extra/enriched/rules/alerts all agree.
-                        df = df.with_columns((pl.col("change_pct") / 100.0).alias("change_pct"))
-                    records = df.to_dicts()
+                records = self._taiwan_realtime_records(sym_list)
+                if records:
                     self._record_minute_bars(records)
                     self._process_full_market_records(records, t0=t0, now_ts=now_ts)
                 return
@@ -717,6 +706,51 @@ class QuoteService:
             })
 
         self._process_full_market_records(records, t0=t0, now_ts=now_ts)
+
+    @staticmethod
+    def _taiwan_realtime_records(symbols: list[str]) -> list[dict]:
+        from app.data_providers.registry import get_provider
+
+        df = get_provider("taiwan").get_realtime(symbols=symbols)
+        if df.is_empty():
+            return []
+        if "change_pct" in df.columns:
+            # mis/yahoo/enrichment providers report change_pct as a percentage
+            # number (1.30 = 1.30%); the enriched pipeline is decimal-scale
+            # (0.05 = 5%, see ENRICHED_COLUMNS in pipeline.py). Normalize here
+            # so quote_extra/enriched/rules/alerts all agree.
+            df = df.with_columns((pl.col("change_pct") / 100.0).alias("change_pct"))
+        return df.to_dicts()
+
+    def fetch_live_bar(self, symbol: str) -> dict | None:
+        """Today's row for a symbol outside the polling pool, fetched on demand.
+
+        Same provider, realtime gate, change_pct scale and incremental indicator
+        pipeline as the poll, so the row matches what the symbol would show once it
+        joins the pool. Without the recursive state it is the bare OHLCV bar.
+        """
+        from app.services import preferences
+
+        if preferences.get_realtime_data_provider() not in ("taiwan", "tickflow"):
+            return None
+        try:
+            records = self._records_datable_today(self._taiwan_realtime_records([symbol]))
+            bar = self._build_daily(records)
+        except Exception as e:
+            logger.debug("On-demand quote failed for %s: %s", symbol, e)
+            return None
+        if bar.is_empty():
+            return None
+        live_bar = {**bar.row(0, named=True), "change_pct": records[0].get("change_pct")}
+        try:
+            prev_enriched, _ = self._repo.get_enriched_latest()
+            enriched = self._enrich_today_incremental(
+                bar, self._build_quote_extra(records), self._repo.get_live_agg(), prev_enriched,
+            )
+        except Exception as e:
+            logger.debug("On-demand indicators failed for %s: %s", symbol, e)
+            return live_bar
+        return enriched.row(0, named=True) if not enriched.is_empty() else live_bar
 
     def _process_full_market_records(self, records: list[dict], *, t0: float, now_ts: float) -> None:
         """把全市场 records 写盘并增量计算 enriched。"""
@@ -1561,6 +1595,36 @@ class QuoteService:
     # enriched 增量计算
     # ================================================================
 
+    def _enrich_today_incremental(
+        self,
+        daily_df: pl.DataFrame,
+        quote_extra: pl.DataFrame | None,
+        live_agg: pl.DataFrame,
+        prev_enriched: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """Today's enriched rows from yesterday's recursive state plus today's OHLCV."""
+        from app.indicators.pipeline import compute_enriched_today
+        from app.taiwan.realtime.calendar import session_progress, session_progress_from_ts
+        instruments = self._repo.get_instruments()
+        today_ohlcv = daily_df
+        if quote_extra is not None and not quote_extra.is_empty():
+            today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
+        # The volume ratio is scaled by the session time elapsed at the quote's trade time.
+        progress: float | None = None
+        if "quote_ts" in daily_df.columns and not daily_df.is_empty():
+            valid_ts = daily_df["quote_ts"].drop_nulls()
+            if not valid_ts.is_empty():
+                progress = session_progress_from_ts(valid_ts.median())
+        if progress is None:
+            progress = session_progress()
+        return compute_enriched_today(
+            live_agg=live_agg,
+            prev_enriched=prev_enriched,
+            today_ohlcv=today_ohlcv,
+            instruments=instruments,
+            session_progress=progress,
+        )
+
     def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False) -> None:
         """增量计算今天的 enriched: 用昨天的递推状态 + 今天 OHLCV → 只算今天 5500 行。
 
@@ -1587,28 +1651,7 @@ class QuoteService:
             )
 
             if use_incremental:
-                from app.indicators.pipeline import compute_enriched_today
-                from app.taiwan.realtime.calendar import session_progress, session_progress_from_ts
-                instruments = self._repo.get_instruments()
-                # 将 API 直接提供的补充字段 JOIN 到 daily_df
-                today_ohlcv = daily_df
-                if quote_extra is not None and not quote_extra.is_empty():
-                    today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
-                # 量比时间折算: 优先用行情 quote_ts (真实成交时间), 缺失则兜底服务端时间
-                progress: float | None = None
-                if "quote_ts" in daily_df.columns and not daily_df.is_empty():
-                    valid_ts = daily_df["quote_ts"].drop_nulls()
-                    if not valid_ts.is_empty():
-                        progress = session_progress_from_ts(valid_ts.median())
-                if progress is None:
-                    progress = session_progress()
-                enriched_today = compute_enriched_today(
-                    live_agg=live_agg,
-                    prev_enriched=prev_enriched,
-                    today_ohlcv=today_ohlcv,
-                    instruments=instruments,
-                    session_progress=progress,
-                )
+                enriched_today = self._enrich_today_incremental(daily_df, quote_extra, live_agg, prev_enriched)
                 if enriched_today.is_empty():
                     logger.warning("增量计算结果为空, 回退到全量计算")
                     use_incremental = False

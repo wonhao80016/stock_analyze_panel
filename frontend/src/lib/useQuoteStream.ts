@@ -161,7 +161,7 @@ export function useQuoteStream(
           })
         }
         // 焦點股票日K精準刷新: 個股對話框打開時, 日K最後一根蠟燭隨實時價變化。
-        // 後端 _maybe_inject_live_candle 只讀內存緩存, 不調 TickFlow, 秒級重拉零額外成本。
+        // Polled symbols are served from memory; any other stock costs one on-demand quote per refetch.
         if (_focusSymbol) {
           qc.invalidateQueries({ queryKey: ['kline', _focusSymbol] })
         }
