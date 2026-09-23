@@ -272,6 +272,10 @@ class TaiwanDailyStore:
                 continue
         return sorted(dates)
 
+    def has_date(self, d: date) -> bool:
+        """Return *True* if a partition exists for *d*."""
+        return (self._data_dir / f"date={d.isoformat()}" / "part.parquet").exists()
+
     def latest_date(self) -> date | None:
         """Return the most recent partition date, or *None* if empty."""
         return self.available_dates()[-1] if self.available_dates() else None

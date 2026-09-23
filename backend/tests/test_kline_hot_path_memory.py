@@ -10,7 +10,12 @@ from types import SimpleNamespace
 import polars as pl
 
 from app.api import screener
-from app.api.kline import _attach_ext, _get_stock_info, _maybe_inject_live_candle
+from app.api.kline import (
+    _attach_ext,
+    _get_stock_info,
+    _maybe_inject_live_candle,
+    _needs_local_history,
+)
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField
 
 
@@ -261,3 +266,61 @@ def test_maybe_inject_live_candle_etf_path_never_touches_quote_service_fetch_liv
     assert len(out) == 1
     assert out[0]["close"] == 10.5
     assert qs.fetch_live_bar_calls == []
+
+
+# ── A6: a weekend or holiday start is not a gap in the enriched rows ──
+
+
+def _patch_trading_days(monkeypatch, *days: date) -> None:
+    class _Store:
+        def has_date(self, d: date) -> bool:
+            return d in days
+
+    monkeypatch.setattr("app.taiwan.daily_store.TaiwanDailyStore", _Store)
+
+
+def _enriched_rows(*days: date) -> pl.DataFrame:
+    return pl.DataFrame({"date": list(days), "close": [1.0] * len(days)})
+
+
+def test_needs_local_history_accepts_enriched_rows_after_a_weekend_start(monkeypatch):
+    friday, sunday, monday = date(2026, 5, 22), date(2026, 5, 24), date(2026, 5, 25)
+    _patch_trading_days(monkeypatch, friday, monday)
+
+    assert _needs_local_history(_enriched_rows(monday, date(2026, 5, 26)), sunday) is False
+
+
+def test_needs_local_history_accepts_enriched_rows_after_a_holiday_start(monkeypatch):
+    start, reopen = date(2026, 2, 16), date(2026, 2, 23)
+    _patch_trading_days(monkeypatch, date(2026, 2, 13), reopen)
+
+    assert _needs_local_history(_enriched_rows(reopen), start) is False
+
+
+def test_needs_local_history_falls_back_when_enriched_misses_trading_days(monkeypatch):
+    start, today = date(2026, 5, 25), date(2026, 9, 23)
+    _patch_trading_days(monkeypatch, start, date(2026, 5, 26), today)
+
+    assert _needs_local_history(_enriched_rows(today), start) is True
+
+
+def test_needs_local_history_accepts_enriched_rows_starting_on_the_start_date(monkeypatch):
+    start = date(2026, 5, 25)
+    _patch_trading_days(monkeypatch, start)
+
+    assert _needs_local_history(_enriched_rows(start), start) is False
+
+
+def test_needs_local_history_falls_back_without_enriched_rows():
+    assert _needs_local_history(pl.DataFrame(), date(2026, 5, 25)) is True
+
+
+def test_needs_local_history_falls_back_without_probing_a_gap_longer_than_any_closure(monkeypatch):
+    class _Store:
+        def has_date(self, d: date) -> bool:
+            raise AssertionError("a gap this long must not be probed day by day")
+
+    monkeypatch.setattr("app.taiwan.daily_store.TaiwanDailyStore", _Store)
+    earliest = date(2026, 5, 25)
+
+    assert _needs_local_history(_enriched_rows(earliest), earliest - timedelta(days=60)) is True

@@ -272,6 +272,8 @@ def _get_previous_closes(
 
 
 _TAIWAN_INDICATOR_WARMUP_DAYS = 150
+# Longer than any Taiwan market closure, so a wider gap means missing trading days.
+_MAX_MARKET_CLOSURE_DAYS = 31
 
 
 _CLOSE_FALLBACK_MARGIN = timedelta(minutes=30)
@@ -303,7 +305,12 @@ def _expected_minute_rows(trade_date: date) -> int:
 
 
 def _needs_local_history(df, start: date) -> bool:
-    """Enriched rows may cover only the live candle, which cannot satisfy a range query."""
+    """Enriched rows may cover only the live candle, which cannot satisfy a range query.
+
+    ``start`` is a calendar date and often a weekend or holiday, so the rows fall short
+    only if the local store traded on a day between ``start`` and their earliest date,
+    or that gap is longer than any market closure.
+    """
     if df.is_empty():
         return True
     if "date" not in df.columns:
@@ -312,9 +319,21 @@ def _needs_local_history(df, start: date) -> bool:
     if earliest is None:
         return True
     try:
-        return earliest > start
+        if earliest <= start:
+            return False
+        if (earliest - start).days > _MAX_MARKET_CLOSURE_DAYS:
+            return True
     except TypeError:
         return False
+    from app.taiwan.daily_store import TaiwanDailyStore
+
+    store = TaiwanDailyStore()
+    day = start
+    while day < earliest:
+        if store.has_date(day):
+            return True
+        day += timedelta(days=1)
+    return False
 
 
 def _read_taiwan_local_daily(symbol: str, start: date, end: date):
