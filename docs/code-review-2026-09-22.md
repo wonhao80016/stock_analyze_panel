@@ -342,10 +342,20 @@ provenance，只是不會被寫成今天的日K。有一條測試以程式碼位
 條件會同時被「抑制」與「解除武裝」，使用者永遠看不到，而且要等條件再次轉為 false
 才可能重新觸發。
 
-#### B7. enriched 暫存檔命名與讀取端 glob 衝突 — 待修
+#### B7. enriched 暫存檔命名與讀取端 glob 衝突 — 已修
 `enriched_refresh.py` 用 `suffix=".parquet"` 在分區目錄內建暫存檔，讀取端卻是
 `**/*.parquet`。寫入到 rename 之間若被讀到，同日分區出現兩個檔案 → 該日每列重複計算。
 同分支的 `realtime/minute_recorder.py` 已用 `.parquet.tmp` 並註明此風險，兩處不一致。
+
+2026-09-23 補充：寫入失敗時暫存檔會被刪除，正常情況只有寫檔那幾毫秒的窗口；但後端若在
+發佈過程中被強制結束（例如 dev.ps1 停止服務、斷電），`tmp*.parquet` 會永久留在分區目錄，
+之後每次讀取該日都重複計算。實查當時所有 enriched 分區沒有殘留暫存檔。另查
+`taiwan/daily_store.py` 也用 `suffix=".parquet"`，但它的讀取端一律指名 `date=*/part.parquet`，
+目前不受影響，未改。
+
+修法（2026-09-23）：暫存檔改用 `.parquet.tmp`，與 `minute_recorder.py` 一致。驗證：新增
+`tests/test_taiwan_enriched_refresh_write.py`，在改名那一刻檢查讀取端 glob 看得到的檔案，
+修正前看得到暫存檔（失敗），修正後只看得到 `part.parquet`。
 
 #### B8. 指數月資料一次網路失敗即永久放棄回補 — 已修
 `backend/app/taiwan/index_daily.py` 任何例外都回空 frame，隨即把該月加入
@@ -401,10 +411,22 @@ store 不足 5 日、即時路徑兩種情境、融資最新日無列），修�
 會再抓。三個護欄：冷卻期間不重打、過去月份空結果不重抓、完整月份不重抓。相關 23 個測試檔
 共 277 個測試通過。
 
-#### B11. MinuteBarRecorder 落盤在鎖外，且回傳值語意錯誤 — 待修（plausible）
+#### B11. MinuteBarRecorder 落盤在鎖外，且回傳值語意錯誤 — 已修
 `backend/app/taiwan/realtime/minute_recorder.py` 的 `_write()` 在釋放 `self._lock`
 之後執行，輪詢執行緒與收盤 `flush()` 可能同時對同一 parquet 做 read-modify-write。
 另回傳整個分區列數而非本次新增列數，「completed bars written」被灌水。
+
+2026-09-23 補正：輪詢的 `record()` 與收盤的 `flush()` 都在輪詢執行緒內依序執行
+（`quote_service._poll_loop`），彼此不會重疊。真正能同時寫同一分區的是手動刷新
+（`POST /api/intraday/refresh` 在 API 執行緒呼叫 `record()`）與收盤 `flush()`；`_fetch_lock`
+只包住取價，不包住 `flush()`。窗口只有收盤定版那一刻，發生時會掉分鐘K。回傳值沒有任何
+呼叫端使用，不修。
+
+修法（2026-09-23）：新增 `_write_lock` 串行化分區的讀改寫，與保護未完成分鐘棒的 `_lock`
+分開，避免落盤時擋住報價折算。驗證：`tests/test_minute_recorder.py` 新增
+`test_concurrent_writes_to_one_partition_keep_every_bar`，用事件固定兩個寫入的交錯順序：
+修正前，第二個寫入的那根會被暫停中的第一個寫入覆蓋（失敗）；修正後三根都在；連跑 5 次
+結果穩定。
 
 #### B12. 死路徑：`progress is None` fallback — 待修（minor）
 `session_progress_from_ts` 永不回傳 `None`（失敗時回 `1.0`），所以
@@ -590,3 +612,5 @@ B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快
 
 2026-09-23 B8、B10 已修（見其章節）。主清單剩餘 9 項：B4–B7、B11、B12、C1、C4、C5。
 建議順序：B7 → B11；開始使用監控規則前修 B6、B5、C5。
+
+2026-09-23 B7、B11 已修（見其章節）。主清單剩餘 7 項：B4、B5、B6、B12、C1、C4、C5。
