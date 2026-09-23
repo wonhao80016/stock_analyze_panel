@@ -643,12 +643,23 @@ B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快
 
 新發現：
 
-- **N1 預覽視窗資訊列缺「市值／流通值／換手」（台股）**：`backend/app/api/kline.py` 的
+- **N1 預覽視窗資訊列缺「市值／流通值／換手」（台股）— 已修**：`backend/app/api/kline.py` 的
   `_get_stock_info` 只查 A 股維表 `repo.get_instruments()`；純台股部署下 `data/instruments/`
   本來就是空的，台股標的一律回空。`frontend/src/components/StockInfoBar.tsx` 用
   `stock_info` 的股本算這三欄，缺值就略過不顯示，而 `frontend/src/lib/stock-info-fields.ts`
   預設三欄都顯示。台股已有自己的股本資料（`backend/app/taiwan/share_capital_store.py`）。
-  預設設定下每個台股預覽都會缺這三欄，**建議優先修**。
+  預設設定下每個台股預覽都會缺這三欄。2026-09-24 依使用者裁決修正：名稱取自證券主檔；市值＝
+  收盤價 × 已發行普通股數，只放在 K 線 API 的 stock_info 供顯示、不寫入任何 total_shares／
+  float_shares，且只給主檔類別為 stock 的標的；流通值依決策文件維持不顯示。換手改用後端依市場
+  換算單位的 turnover_rate（前端原公式寫死 A 股「×100」，套台股股數會大 100 倍），A 股有
+  float_shares 時沿用原公式；盤中即時K棒由 `_fill_taiwan_turnover_rate` 補上（只補今日、只補
+  個股），自選頁台股列在報價日期為今日時計算。已知限制：當日第一次輪詢若走全量回退路徑，該輪
+  換手為 null，約 6 秒後的下一輪補上。驗證：後端相關測試 302 個、前端 261 個通過，build 通過；
+  真實資料查 2454.TWSE、6196.TWSE 名稱與股數有值；獨立驗收第一輪以 ETF 未排除退回，修正後放行。
+- **N5 盤中台股漲跌停價與漲跌停訊號從未計算（未修）**：`compute_enriched_today` 只在 instruments
+  非空時才呼叫 `_compute_limit_signals_today`，純台股部署下 instruments（A 股維表）是空的，盤中
+  快照的台股列整段略過。無監控規則時不受影響；用漲停類規則時盤中不會觸發。修法會改變盤中漲跌停
+  訊號的行為，需使用者裁決。
 - **N2 測試寫進正式 log**：`backend/app/main.py` 在 import 時就把指向
   `settings.data_dir / "backend.log"` 的 `RotatingFileHandler` 掛到 root logger，測試沒有
   改寫資料目錄，任何 import `app.main` 的測試都會把該輪測試的 log 寫進正式檔（`_FakeRepo`、
@@ -663,3 +674,4 @@ B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快
   「當日尚未公布」的情境未實測。屬防禦性加強，低優先。
 
 建議順序：N1 → N2 → N3；開始使用監控規則前修 C5、B6、B5；其餘低優先。
+2026-09-24 N1 已修。建議順序：N2 → N3；開始使用監控規則前修 C5、B6、B5、N5；其餘低優先。
