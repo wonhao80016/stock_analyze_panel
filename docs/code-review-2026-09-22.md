@@ -94,11 +94,54 @@ fallback 全部被跳過、畫面直接空白。
 正確方向（尚未實作，需獨立一輪）：把批次層級的閘門改成 per-symbol，讓非即時列
 只進報價快取、不進日K寫入也不進規則評估，然後才談合併。
 
-#### A5. 非自選標的永遠拿不到當日活蠟燭 — 待修
+#### A5. 非自選標的永遠拿不到當日活蠟燭 — 已修
 `backend/app/api/kline.py` 的注入守衛依賴 `quote_service.get_enriched_today()`，
 而該快取的輪詢 universe 只有「自選股 ＋ 監控規則標的 ＋ 指數」
 （`backend/app/services/quote_service.py`）。從 Screener／Monitor 點開的股票永遠
 顯示昨收。
+
+2026-09-23 補充範圍：受影響的是預覽視窗上方的日K（`StockPanel` → `StockDailyKChart`
+→ `/api/kline/daily`）；下方研究區塊（`TaiwanStockDetail`）的K線走 detail 端點，不經過
+這條路徑。即時行情關閉時任何標的都沒有活蠟燭，那是開關本身的設計，不屬於本項。
+
+修法：快照是今天的、但裡面沒有這檔個股時，`_maybe_inject_live_candle` 改呼叫新的
+`QuoteService.fetch_live_bar` 單獨取一次報價。它與輪詢共用同一段取價函式
+（`_taiwan_realtime_records`：同一個 provider、同一個 `change_pct` 百分數→小數換算），
+並經過同一道 `_records_datable_today` 閘門，所以非即時的備援報價不會被標成今天。
+沒有採用「把該檔加進輪詢池」：池內標的會寫進今日日K與 enriched 快照、出現在盤中選股、
+並被全市場範圍的監控規則評估，看一眼就改變這些結果不合理。代價是池外標的每次重抓日K
+多一次報價查詢（provider 內部經 `TaiwanRealtimeService` 的短快取）。
+
+技術指標（2026-09-23 追加）：這根活蠟燭的均線、MACD、KDJ、布林、RSI、ATR、量比，與池內
+標的走同一個增量計算——把輪詢 `_flush_live_enriched` 裡「昨日遞推狀態 ＋ 今日 OHLCV」
+那段原封不動抽成 `_enrich_today_incremental`，輪詢與 `fetch_live_bar` 共用。遞推狀態
+`live_agg` 由啟動時載入的 enriched 歷史建成，而 enriched 分區是全市場（2026-09-22 分區
+2,316 檔），所以池外標的一樣有狀態；只取單列計算，成本在毫秒級。遞推狀態不可用時
+（例如啟動預熱中、或該標的沒有歷史）退回只有 OHLCV 的K棒，不會讓請求失敗。均線交叉
+這類訊號依賴 `prev_enriched`（盤中是只含池內標的的快照），池外標的的訊號欄位可能為空，
+但日K注入只取指標數值，不取訊號。
+
+已知風險（未處理）：這次查詢在 API 請求執行緒內同步進行。網路正常時是一次 MIS 往返；
+網路卡住而非立即失敗時，備援鏈依序嘗試，各來源逾時為 MIS 8 秒、Yahoo 8 秒、官方端點
+15 秒（見各 provider 的 `timeout` 預設值），最壞可達數十秒，期間該次日K請求（包括第一次
+打開預覽視窗）都會等待。只在快照日期為今天時才會走到；DNS 解析失敗這類立即失敗不受影響。
+若要處理，方向是對失敗的標的加冷卻時間，或改成背景取價、下一次重抓時再注入。
+
+已知風險（未處理，2026-09-23 追加技術指標後）：`fetch_live_bar` 是 `get_live_agg()` 第一個
+在請求執行緒上的呼叫者。該函式每天第一次被呼叫時會查一次 DuckDB，若遞推狀態的基準日
+不符，還會同步重建（`_refresh_enriched`，耗時數十秒），而且這個跨日分支不受
+`_enriched_warming` 保護。盤中輪詢在把快照更新成今天之前就會先呼叫 `get_live_agg()`，
+所以即時行情開啟時不會發生；只有「快照已是今天、但當天還沒有輪詢呼叫過它」時（例如快照
+由其他流程更新），才可能由請求執行緒承擔。報價或組K棒失敗時 `fetch_live_bar` 回傳 None、
+不注入，日K請求本身不會失敗（`test_fetch_live_bar_none_when_building_the_bar_fails`）。
+`frontend/src/lib/useQuoteStream.ts` 原註解稱這條路徑「只讀內存緩存、零額外成本」，
+已同步改正。
+
+驗證：`tests/test_taiwan_quote_fallback_gate.py` 的 `test_fetch_live_bar_*`（正例、
+三種非即時狀態、provider 例外、非台股 provider；指標：以遞推狀態斷言 MA5 = (40.0 + 10.2) / 5，
+以及無遞推狀態、管線拋例外時退回純 OHLCV）與 `tests/test_kline_hot_path_memory.py`
+的 `test_maybe_inject_live_candle_*`（池外標的注入；快照非今天、標的已在池內、ETF
+三種情境不呼叫 `fetch_live_bar`）。
 
 #### A6. `/api/kline/daily` 幾乎恆繞過 enriched 正本 — 待修
 `_needs_local_history` 以 `earliest > start` 判斷，而 `start = today - days` 通常不是
@@ -266,10 +309,23 @@ provenance，只是不會被寫成今天的日K。有一條測試以程式碼位
 `_barren_months` 且行程生命週期內不再重試。單次逾時 = 該月指數 K 線永久缺口。
 修法：區分「抓到空資料」與「抓取失敗」，只有前者標 barren。
 
-#### B9. 法人／融資 fallback 只看全庫最新日，且把 1 日值填進 5 日欄 — 待修
+#### B9. 法人／融資 fallback 只看全庫最新日，且把 1 日值填進 5 日欄 — 已修
 `backend/app/taiwan/detail_service.py` 用 `max(dates)` 當查詢區間：該標的當日若無列
 直接回 None（卡片顯示「無資料」，儘管本地有大量歷史）。另把當日淨額填入
 `foreign_net_5d` 等欄，因子計算當成 5 日累計使用 → **因子值錯**。
+（即時抓取路徑 `_aggregate_institutional` 也有同樣的 1 日值充數，一併修正。）
+
+修法：
+- 法人與融資的 store 備援改為在最近 20 個 store 日期內找該標的的最後一列，
+  `meta.trade_date` 標示該列日期。
+- 5 日欄位改由 `_institutional_5d` 計算：以該筆日期為終點、往前 5 個 store 日期的加總。
+  T86 只列出當天有法人交易的股票，所以視窗內缺列視為 0。證據：2026-09-23 實測本地
+  store 最近 20 個日期共 136,437 列，三大法人六個買賣欄全為 0 的列數是 0。
+- store 湊不滿 5 個日期、不含該筆日期、或該標的在該日沒有列時，5 日欄位回傳 None，
+  不再拿 1 日值充數。即時路徑也走同一個計算，因此 store 尚未寫入當天時 5 日欄位為 None。
+
+驗證：`tests/test_detail_chip_store_fallback.py` 新增 6 個測試（最新日無列、缺列當 0、
+store 不足 5 日、即時路徑兩種情境、融資最新日無列），修正前全數失敗、修正後通過。
 
 #### B10. `_needs_fetch` 把部分快取的月份當成已完整 — 待修（plausible）
 `index_daily.py` 的 `cached_months` 只要該月有任一列就算命中。曾只抓到半個月
@@ -368,6 +424,14 @@ provenance，只是不會被寫成今天的日K。有一條測試以程式碼位
 - `backend/app/services/quote_service.py`：輪詢池超過上限時**從尾端截斷**，而監控
   規則的標的正是 append 在自選股之後——**會最先被丟掉，規則靜默失效**。這比 A5
   嚴重，因為使用者明確設過規則卻不會收到告警，且畫面上沒有任何線索。
+  **2026-09-23 已修**：規則標的改排在自選股之前並去重，截斷只會丟自選股（自選列停住
+  在畫面上看得到）。補正：截斷時後端 log 會寫一行 warning，「靜默」指的是畫面上。
+  驗證：`tests/test_taiwan_quote_fallback_gate.py` 的
+  `test_monitor_rule_symbol_survives_truncation_when_watchlist_fills_the_cap`。
+- `backend/app/taiwan/research_context.py`（2026-09-23 修 B9 時發現，未修）：研究脈絡的
+  法人 5 日累計取「該標的最後 5 列」（`inst_sorted.tail(5)`），不是最後 5 個交易日。
+  T86 只列有法人交易的日子，交易稀疏的標的這 5 列會跨越超過 5 個交易日。B9 修正後的
+  個股卡片以交易日為視窗，兩處在稀疏標的上會出現不同的「5 日」數字。
 - `backend/app/api/kline.py`：活蠟燭注入守衛用 `date.today()`（伺服器本地日）而非
   全專案一致的 `cn_today()`／台北日，跨時區部署會整段跳過注入。
 - `frontend/src/lib/useQuoteStream.ts`：`depth_updated` 明文不受即時行情開關限制，
@@ -442,3 +506,7 @@ B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快
    超過上限時最先被丟掉。症狀是「設了規則卻收不到告警」，比清單少一檔難察覺。
 3. **A5** — 從 Screener／Monitor 點開的股票永遠看不到當日活蠟燭。與 B3 同屬
    「不同畫面不同價」這條線，但成因不同（輪詢池不含該標的，而非寫錯日期）。
+
+2026-09-23 更新：以上三項已修正，修法與驗證見各章節。受影響模組的 27 個測試檔共
+259 個測試通過；同日追加 A5 技術指標後，涵蓋增量管線的 29 個測試檔共 275 個測試通過。
+主清單剩餘 13 項：A6、A7、B4–B8、B10–B12、C1、C4、C5。
