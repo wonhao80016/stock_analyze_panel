@@ -18,9 +18,11 @@ network itself; it only orchestrates already-built services:
     the whole watchlist, never per symbol.
 
 Deliberately still NOT implemented here (Phase 8B-5.0.5 report §S):
-KDJ, Bollinger, ATR, turnover_rate, amplitude, annual_vol_20d, RPS,
+KDJ, Bollinger, ATR, amplitude, annual_vol_20d, RPS,
 signal_* (limit-up/board-related) — those stay ``None``; faking them would be
 worse than showing "—".
+
+``turnover_rate`` is filled for today's quotes only; see ``_taiwan_turnover_rate``.
 """
 from __future__ import annotations
 
@@ -38,7 +40,7 @@ logger = logging.getLogger(__name__)
 _TAIWAN_ROW_FIELDS = (
     "symbol", "name", "asset_type",
     "close", "open", "high", "low", "prev_close",
-    "change_amount", "change_pct", "amount",
+    "change_amount", "change_pct", "amount", "turnover_rate",
 )
 
 
@@ -74,6 +76,25 @@ def _taiwan_live_date(q: Any) -> str | None:
     if q.trade_date is None:
         return None
     return q.trade_date.isoformat()
+
+
+def _taiwan_turnover_rate(
+    q: Any, asset_type: str, issued_shares: Any, today: Any,
+) -> float | None:
+    """Issued-share turnover for today's quote only.
+
+    Taiwan has no historical share-count source (docs/taiwan-share-capital-phase-6h.md),
+    so a fallback quote from a previous session (q.trade_date != today) must stay null
+    rather than being priced with today's issued-share count.
+    """
+    if q is None or asset_type != "stock":
+        return None
+    if q.trade_date is None or q.trade_date != today:
+        return None
+    volume = q.volume
+    if volume is None or issued_shares is None or issued_shares <= 0:
+        return None
+    return _sanitize_float(volume * 100.0 / issued_shares)
 
 
 def _taiwan_daily_fallback_map(symbols: list[str], daily_store: Any) -> dict[str, dict]:
@@ -145,6 +166,7 @@ def enrich_taiwan_watchlist_rows(
     security_master: Any | None = None,
     realtime_service: Any | None = None,
     daily_store: Any | None = None,
+    share_capital: Any | None = None,
 ) -> list[dict]:
     """返回 canonical Taiwan symbol 的自选股 enriched 行, 字段对齐 legacy A 股口径。
 
@@ -159,11 +181,23 @@ def enrich_taiwan_watchlist_rows(
 
     from app.taiwan.daily_store import TaiwanDailyStore
     from app.taiwan.realtime import get_realtime_service
+    from app.taiwan.realtime.calendar import taipei_now
+    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
     from app.taiwan.universe import get_security_master
 
     sec_master = security_master or get_security_master()
     rt_service = realtime_service or get_realtime_service()
     store = daily_store or TaiwanDailyStore()
+    capital_store = share_capital or TaiwanShareCapitalStore()
+
+    today = taipei_now().date()
+    try:
+        issued_shares_map = {
+            row["symbol"]: row["issued_shares"] for row in capital_store.load().to_dicts()
+        }
+    except Exception as e:
+        logger.warning("taiwan watchlist share capital read failed: %s", e)
+        issued_shares_map = {}
 
     fallback_map = _taiwan_daily_fallback_map(symbols, store)
 
@@ -231,5 +265,6 @@ def enrich_taiwan_watchlist_rows(
             "macd_hist": _sanitize_float(ind.get("macd_hist")),
             "momentum_5d": _sanitize_float(ind.get("momentum_5d")),
             "momentum_20d": _sanitize_float(ind.get("momentum_20d")),
+            "turnover_rate": _taiwan_turnover_rate(q, asset_type, issued_shares_map.get(symbol), today),
         })
     return rows

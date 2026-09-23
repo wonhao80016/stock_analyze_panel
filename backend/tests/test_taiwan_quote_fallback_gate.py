@@ -9,6 +9,7 @@ official.fetch_quote / get_daily (status != "realtime"); 这些数据此前未�
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -461,3 +462,181 @@ def test_fetch_live_bar_keeps_the_bare_bar_when_the_pipeline_fails():
 
     assert out["close"] == 10.2
     assert out.get("ma5") is None
+
+
+# ── Taiwan same-day turnover: filled from issued shares, for stocks only ──
+
+
+def _patch_instrument_types(monkeypatch, types: dict[str, str]) -> None:
+    master = SimpleNamespace(
+        get_instrument=lambda s: SimpleNamespace(instrument_type=types[s]) if s in types else None,
+    )
+    monkeypatch.setattr("app.taiwan.universe.get_security_master", lambda: master)
+
+
+def _fake_share_capital_store(rows: list[dict]):
+    """rows: [{"symbol": ..., "float_shares": ...}, ...] — mirrors as_instruments()'s schema."""
+    schema = {"symbol": pl.Utf8, "float_shares": pl.Float64}
+
+    class _Store:
+        def as_instruments(self):
+            return pl.DataFrame(rows, schema=schema) if rows else pl.DataFrame(schema=schema)
+
+    return _Store
+
+
+def test_fill_taiwan_turnover_rate_backfills_and_leaves_no_helper_columns(monkeypatch):
+    from app.services.quote_service import _fill_taiwan_turnover_rate
+    _patch_instrument_types(monkeypatch, {"6196.TWSE": "stock"})
+
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([{"symbol": "6196.TWSE", "float_shares": 100_000_000.0}]),
+    )
+    today = cn_today()
+    df = pl.DataFrame(
+        {"symbol": ["6196.TWSE"], "date": [today], "volume": [1_000_000.0]},
+        schema={"symbol": pl.Utf8, "date": pl.Date, "volume": pl.Float64},
+    )
+
+    out = _fill_taiwan_turnover_rate(df)
+
+    assert out["turnover_rate"][0] == pytest.approx(1.0)
+    assert "float_shares" not in out.columns
+    assert "turnover_rate_tw_fill" not in out.columns
+
+
+def test_fill_taiwan_turnover_rate_ignores_a_non_today_row(monkeypatch):
+    """Guards the same-day-only contract even if this helper is ever handed a stale row."""
+    from app.services.quote_service import _fill_taiwan_turnover_rate
+    _patch_instrument_types(monkeypatch, {"6196.TWSE": "stock"})
+
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([{"symbol": "6196.TWSE", "float_shares": 100_000_000.0}]),
+    )
+    yesterday = cn_today() - timedelta(days=1)
+    df = pl.DataFrame(
+        {"symbol": ["6196.TWSE"], "date": [yesterday], "volume": [1_000_000.0]},
+        schema={"symbol": pl.Utf8, "date": pl.Date, "volume": pl.Float64},
+    )
+
+    out = _fill_taiwan_turnover_rate(df)
+
+    assert out["turnover_rate"][0] is None
+
+
+def test_fill_taiwan_turnover_rate_skips_non_positive_issued_shares(monkeypatch):
+    from app.services.quote_service import _fill_taiwan_turnover_rate
+    _patch_instrument_types(monkeypatch, {"6196.TWSE": "stock"})
+
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([{"symbol": "6196.TWSE", "float_shares": 0.0}]),
+    )
+    today = cn_today()
+    df = pl.DataFrame(
+        {"symbol": ["6196.TWSE"], "date": [today], "volume": [1_000_000.0]},
+        schema={"symbol": pl.Utf8, "date": pl.Date, "volume": pl.Float64},
+    )
+
+    out = _fill_taiwan_turnover_rate(df)
+
+    assert out["turnover_rate"][0] is None
+
+
+def test_fill_taiwan_turnover_rate_leaves_an_etf_null(monkeypatch):
+    """ETF units are not company share capital (docs/taiwan-share-capital-phase-6h.md)."""
+    from app.services.quote_service import _fill_taiwan_turnover_rate
+
+    _patch_instrument_types(monkeypatch, {"0050.TWSE": "etf"})
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([{"symbol": "0050.TWSE", "float_shares": 100_000_000.0}]),
+    )
+    df = pl.DataFrame(
+        {"symbol": ["0050.TWSE"], "date": [cn_today()], "volume": [1_000_000.0]},
+        schema={"symbol": pl.Utf8, "date": pl.Date, "volume": pl.Float64},
+    )
+
+    assert _fill_taiwan_turnover_rate(df)["turnover_rate"][0] is None
+
+
+def test_fill_taiwan_turnover_rate_stays_null_when_the_security_master_fails(monkeypatch):
+    from app.services.quote_service import _fill_taiwan_turnover_rate
+
+    monkeypatch.setattr(
+        "app.taiwan.universe.get_security_master",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([{"symbol": "6196.TWSE", "float_shares": 100_000_000.0}]),
+    )
+    df = pl.DataFrame(
+        {"symbol": ["6196.TWSE"], "date": [cn_today()], "volume": [1_000_000.0]},
+        schema={"symbol": pl.Utf8, "date": pl.Date, "volume": pl.Float64},
+    )
+
+    assert _fill_taiwan_turnover_rate(df)["turnover_rate"][0] is None
+
+
+def test_enrich_today_incremental_backfills_taiwan_turnover_rate(monkeypatch):
+    _patch_instrument_types(monkeypatch, {"6196.TWSE": "stock"})
+    svc = _svc_for_fetch()
+    svc._repo = _repo_with_state("6196.TWSE")
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([{"symbol": "6196.TWSE", "float_shares": 100_000_000.0}]),
+    )
+    row = {**_LIVE_ROW, "volume": 1_000_000.0}
+
+    out = _fetch_live_bar_with_row(svc, row)
+
+    assert out["turnover_rate"] == pytest.approx(1.0)
+
+
+def test_enrich_today_incremental_leaves_a_share_turnover_rate_untouched(monkeypatch):
+    """The Taiwan-suffix mask must not touch a non-Taiwan symbol's turnover_rate."""
+    svc = _svc_for_fetch()
+    svc._repo = _repo_with_state("600000.SH")
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([{"symbol": "600000.SH", "float_shares": 999.0}]),
+    )
+    row = {**_LIVE_ROW, "symbol": "600000.SH", "volume": 1_000_000.0}
+
+    out = _fetch_live_bar_with_row(svc, row)
+
+    assert out.get("turnover_rate") is None
+
+
+def test_enrich_today_incremental_turnover_stays_null_when_share_capital_empty(monkeypatch):
+    _patch_instrument_types(monkeypatch, {"6196.TWSE": "stock"})
+    svc = _svc_for_fetch()
+    svc._repo = _repo_with_state("6196.TWSE")
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        _fake_share_capital_store([]),
+    )
+
+    out = _fetch_live_bar_with_row(svc, _LIVE_ROW)
+
+    assert out.get("turnover_rate") is None
+
+
+def test_enrich_today_incremental_turnover_stays_null_when_share_capital_read_fails(monkeypatch):
+    _patch_instrument_types(monkeypatch, {"6196.TWSE": "stock"})
+    svc = _svc_for_fetch()
+    svc._repo = _repo_with_state("6196.TWSE")
+
+    class _BoomStore:
+        def as_instruments(self):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.taiwan.share_capital_store.TaiwanShareCapitalStore", _BoomStore)
+
+    out = _fetch_live_bar_with_row(svc, _LIVE_ROW)
+
+    assert out is not None
+    assert out.get("turnover_rate") is None

@@ -42,6 +42,7 @@ from app.market_time import cn_now, cn_today
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
+from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -135,23 +136,63 @@ def _get_stock_info(repo, symbol: str) -> dict:
     该接口在个股弹窗打开时每秒被调用 (SSE invalidate 触发重拉), 走
     repo.get_instruments() 的 Polars 内存缓存按 symbol 过滤, 不再每请求
     DuckDB 扫 instruments parquet。列缺失时返回空 dict, 与旧 SQL 报错路径一致。
+
+    Taiwan symbols are absent from this legacy cache and fall back to
+    _get_taiwan_stock_info.
     """
     import polars as pl
+    info: dict = {}
     try:
         df = repo.get_instruments()
         needed = ("symbol", "name", "total_shares", "float_shares")
-        if df.is_empty() or not all(c in df.columns for c in needed):
-            return {}
-        hit = df.filter(pl.col("symbol") == symbol).head(1)
-        if hit.is_empty():
-            return {}
-        return {
-            "name": hit["name"][0],
-            "total_shares": hit["total_shares"][0],
-            "float_shares": hit["float_shares"][0],
-        }
+        if not df.is_empty() and all(c in df.columns for c in needed):
+            hit = df.filter(pl.col("symbol") == symbol).head(1)
+            if not hit.is_empty():
+                info = {
+                    "name": hit["name"][0],
+                    "total_shares": hit["total_shares"][0],
+                    "float_shares": hit["float_shares"][0],
+                }
     except Exception:  # noqa: BLE001
-        return {}
+        info = {}
+    if not info and symbol.endswith(TAIWAN_SUFFIXES):
+        info = _get_taiwan_stock_info(symbol)
+    return info
+
+
+def _get_taiwan_stock_info(symbol: str) -> dict:
+    """Name from the Taiwan security master; total_shares is issued common shares,
+    display-only market cap and stocks only (docs/taiwan-share-capital-phase-6h.md).
+    float_shares stays null: Taiwan has no public-float source, and none may be substituted.
+    """
+    name = None
+    is_stock = False
+    try:
+        from app.taiwan.universe import get_security_master
+
+        inst = get_security_master().get_instrument(symbol)
+        if inst is not None:
+            name = inst.name
+            is_stock = getattr(inst, "instrument_type", None) == "stock"
+    except Exception:
+        pass
+
+    total_shares = None
+    if is_stock:
+        try:
+            import polars as pl
+
+            from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+
+            shares = TaiwanShareCapitalStore().load()
+            if not shares.is_empty() and "symbol" in shares.columns:
+                hit = shares.filter(pl.col("symbol") == symbol).head(1)
+                if not hit.is_empty():
+                    total_shares = hit["issued_shares"][0]
+        except Exception:
+            pass
+
+    return {"name": name, "total_shares": total_shares, "float_shares": None}
 
 
 def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
@@ -538,7 +579,7 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
                 "kdj_k", "kdj_d", "kdj_j",
                 "boll_upper", "boll_lower",
                 "rsi_6", "rsi_14", "rsi_24",
-                "atr_14", "vol_ratio_5d"):
+                "atr_14", "vol_ratio_5d", "turnover_rate"):
         if key in q and q[key] is not None:
             live_row[key] = q[key]
 

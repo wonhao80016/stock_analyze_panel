@@ -162,6 +162,67 @@ def _monitor_name_map(repo) -> dict[str, str]:
     return {s: n for s, n in repo.get_name_map().items() if n}
 
 
+def _taiwan_stock_symbols(symbols: list[str]) -> list[str]:
+    """ETF units are not company share capital, so only master-listed stocks qualify."""
+    try:
+        from app.taiwan.universe import get_security_master
+
+        master = get_security_master()
+        return [s for s in symbols if getattr(master.get_instrument(s), "instrument_type", None) == "stock"]
+    except Exception as e:
+        logger.debug("taiwan security master lookup failed during today enrichment: %s", e)
+        return []
+
+
+def _fill_taiwan_turnover_rate(df: pl.DataFrame) -> pl.DataFrame:
+    """Fill a null Taiwan turnover_rate from issued shares, for today's rows only.
+
+    A current share count must never price a past session
+    (docs/taiwan-share-capital-phase-6h.md).
+    """
+    if df.is_empty() or "symbol" not in df.columns or "volume" not in df.columns:
+        return df
+
+    taiwan_mask = pl.col("symbol").str.ends_with(".TWSE") | pl.col("symbol").str.ends_with(".TPEX")
+    if "date" in df.columns:
+        taiwan_mask = taiwan_mask & (pl.col("date") == pl.lit(cn_today()))
+    if "turnover_rate" not in df.columns:
+        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
+
+    missing = df.filter(taiwan_mask & pl.col("turnover_rate").is_null())
+    if missing.is_empty():
+        return df
+    missing = missing.filter(pl.col("symbol").is_in(_taiwan_stock_symbols(missing["symbol"].to_list())))
+    if missing.is_empty():
+        return df
+
+    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+    from app.volume_units import turnover_rate_pct_expr
+
+    try:
+        shares = TaiwanShareCapitalStore().as_instruments()
+    except Exception as e:
+        logger.debug("taiwan share capital read failed during today enrichment: %s", e)
+        return df
+    if shares.is_empty():
+        return df
+
+    filled = (
+        missing.select("symbol", "volume")
+        .join(shares, on="symbol", how="left")
+        .filter(pl.col("float_shares") > 0)
+        .select("symbol", turnover_rate_pct_expr().alias("turnover_rate"))
+    )
+    if filled.is_empty():
+        return df
+
+    return (
+        df.join(filled, on="symbol", how="left", suffix="_tw_fill")
+        .with_columns(pl.coalesce(["turnover_rate", "turnover_rate_tw_fill"]).alias("turnover_rate"))
+        .drop("turnover_rate_tw_fill")
+    )
+
+
 class QuoteService:
     """全局实时行情服务 — 单例。"""
 
@@ -1617,13 +1678,14 @@ class QuoteService:
                 progress = session_progress_from_ts(valid_ts.median())
         if progress is None:
             progress = session_progress()
-        return compute_enriched_today(
+        enriched = compute_enriched_today(
             live_agg=live_agg,
             prev_enriched=prev_enriched,
             today_ohlcv=today_ohlcv,
             instruments=instruments,
             session_progress=progress,
         )
+        return _fill_taiwan_turnover_rate(enriched)
 
     def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False) -> None:
         """增量计算今天的 enriched: 用昨天的递推状态 + 今天 OHLCV → 只算今天 5500 行。

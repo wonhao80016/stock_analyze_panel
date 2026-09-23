@@ -138,6 +138,45 @@ def test_a_column_drifted_file_reads_as_no_denominator_rather_than_raising(tmp_p
     assert TaiwanShareCapitalStore(data_dir=tmp_path).as_instruments().is_empty()
 
 
+# ── mtime-keyed read cache: kline's per-second hot path and quote_service's
+# ~6s poll both call load()/as_instruments() repeatedly for an unchanged file. ──
+
+
+def test_load_is_cached_across_instances_until_the_file_changes(tmp_path):
+    import os
+
+    store = _store(tmp_path)
+    store.refresh()
+    path = tmp_path / "share_capital.parquet"
+    original_mtime = path.stat().st_mtime
+    first = TaiwanShareCapitalStore(data_dir=tmp_path).load()
+
+    # Corrupt the file but pin its mtime back to the original value: only a real
+    # mtime-keyed cache survives this unchanged — a fresh read would blow up on
+    # the bad bytes (or at least return different rows).
+    path.write_bytes(b"not a parquet file")
+    os.utime(path, (original_mtime, original_mtime))
+
+    cached = TaiwanShareCapitalStore(data_dir=tmp_path).load()
+    assert cached.equals(first)
+
+
+def test_load_reflects_a_refresh_that_changes_the_file(tmp_path):
+    store = TaiwanShareCapitalStore(data_dir=tmp_path, client=_client(twse=TWSE_ROWS, tpex=[]))
+    store.refresh()
+    before = TaiwanShareCapitalStore(data_dir=tmp_path).load()
+
+    # A disjoint symbol set (TPEx-only) proves the reload picked up new content,
+    # reusing the module's existing ASCII-keyed TPEX_ROWS fixture rather than a
+    # one-off row (TWSE_ROWS/TPEX_ROWS mirror the exchanges' own field names).
+    other = TaiwanShareCapitalStore(data_dir=tmp_path, client=_client(twse=[], tpex=TPEX_ROWS))
+    assert other.refresh() == 1
+    after = TaiwanShareCapitalStore(data_dir=tmp_path).load()
+
+    assert not after.equals(before)
+    assert set(after["symbol"]) == {"1240.TPEX"}
+
+
 # The order matters and nothing else pins it: publishing first would price today's
 # partition with yesterday's share counts, and the mistake is invisible - every
 # number still looks plausible.

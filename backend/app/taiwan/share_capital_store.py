@@ -43,6 +43,9 @@ SCHEMA = {
     "retrieved_at": pl.Utf8,
 }
 
+# Keyed by path and mtime, so a fresh store instance reuses an unchanged file's frame.
+_load_cache: dict[str, tuple[float, pl.DataFrame]] = {}
+
 
 def _whole_shares(raw: Any) -> int | None:
     text = str(raw or "").replace(",", "").strip()
@@ -135,11 +138,23 @@ class TaiwanShareCapitalStore:
     def load(self) -> pl.DataFrame:
         if not self.path.exists():
             return pl.DataFrame(schema=SCHEMA)
+        key = str(self.path)
         try:
-            return pl.read_parquet(self.path)
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None:
+            cached = _load_cache.get(key)
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
+        try:
+            df = pl.read_parquet(self.path)
         except Exception as e:  # noqa: BLE001
             logger.warning("taiwan share capital read failed: %s", e)
             return pl.DataFrame(schema=SCHEMA)
+        if mtime is not None:
+            _load_cache[key] = (mtime, df)
+        return df
 
     def as_instruments(self) -> pl.DataFrame:
         """The frame compute_enriched expects, with issued shares as the denominator.

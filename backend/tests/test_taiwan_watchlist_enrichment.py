@@ -100,6 +100,21 @@ class _FakeRealtimeService:
         return result
 
 
+class _FakeShareCapitalStore:
+    """Mirrors TaiwanShareCapitalStore.load(): symbol -> issued_shares."""
+
+    def __init__(self, issued_shares: dict[str, int] | None = None) -> None:
+        self._issued_shares = issued_shares or {}
+
+    def load(self) -> pl.DataFrame:
+        if not self._issued_shares:
+            return pl.DataFrame(schema={"symbol": pl.Utf8, "issued_shares": pl.Int64})
+        return pl.DataFrame({
+            "symbol": list(self._issued_shares.keys()),
+            "issued_shares": list(self._issued_shares.values()),
+        })
+
+
 class _FakeDailyStore:
     """模拟 TaiwanDailyStore: 固定 fixture, 不落盘不读盘。"""
 
@@ -616,3 +631,110 @@ def test_no_quote_at_all_has_no_live_date():
         daily_store=_FakeDailyStore(),
     )
     assert rows[0]["live_date"] is None
+
+
+# ===== Watchlist turnover_rate: issued shares * volume, today's realtime quote only
+# (see docs/taiwan-share-capital-phase-6h.md — no historical Taiwan share count exists,
+# so a fallback quote from a previous session must not be priced). =====
+
+
+def test_taiwan_turnover_rate_computed_for_todays_realtime_quote():
+    from app.taiwan.realtime.calendar import taipei_now
+    today = taipei_now().date()
+    sec_master = _FakeSecurityMaster({
+        "2330.TWSE": _FakeInstrument(name="TSMC", instrument_type="stock"),
+    })
+    rt_service = _FakeRealtimeService({
+        "2330.TWSE": _FakeQuote(
+            1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85,
+            volume=1_000_000, amount=1.0, trade_date=today,
+        ),
+    })
+    rows = enrich_taiwan_watchlist_rows(
+        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+        share_capital=_FakeShareCapitalStore({"2330.TWSE": 100_000_000}),
+    )
+    assert rows[0]["turnover_rate"] == pytest.approx(1.0)
+
+
+def test_taiwan_turnover_rate_none_for_previous_session_fallback_quote():
+    from app.taiwan.realtime.calendar import taipei_now
+    yesterday = taipei_now().date() - timedelta(days=1)
+    sec_master = _FakeSecurityMaster({
+        "2330.TWSE": _FakeInstrument(name="TSMC", instrument_type="stock"),
+    })
+    rt_service = _FakeRealtimeService({
+        "2330.TWSE": _FakeQuote(
+            1080.0, 1060.0, 1065.0, 1085.0, 1062.0, 20.0, 1.85,
+            volume=1_000_000, amount=1.0, trade_date=yesterday,
+        ),
+    })
+    rows = enrich_taiwan_watchlist_rows(
+        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+        share_capital=_FakeShareCapitalStore({"2330.TWSE": 100_000_000}),
+    )
+    assert rows[0]["turnover_rate"] is None
+
+
+def test_taiwan_turnover_rate_none_for_etf():
+    from app.taiwan.realtime.calendar import taipei_now
+    today = taipei_now().date()
+    sec_master = _FakeSecurityMaster({
+        "0050.TWSE": _FakeInstrument(name="Yuanta Taiwan 50 ETF", instrument_type="etf"),
+    })
+    rt_service = _FakeRealtimeService({
+        "0050.TWSE": _FakeQuote(
+            185.5, 184.0, 184.2, 186.0, 184.0, 1.5, 0.82,
+            volume=8_000_000, amount=1.0, trade_date=today,
+        ),
+    })
+    rows = enrich_taiwan_watchlist_rows(
+        ["0050.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+        share_capital=_FakeShareCapitalStore({"0050.TWSE": 900_000_000}),
+    )
+    assert rows[0]["turnover_rate"] is None
+
+
+def test_taiwan_turnover_rate_none_without_share_capital_row():
+    from app.taiwan.realtime.calendar import taipei_now
+    today = taipei_now().date()
+    sec_master = _FakeSecurityMaster({
+        "2330.TWSE": _FakeInstrument(name="TSMC", instrument_type="stock"),
+    })
+    rt_service = _FakeRealtimeService({
+        "2330.TWSE": _FakeQuote(
+            1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85,
+            volume=1_000_000, amount=1.0, trade_date=today,
+        ),
+    })
+    rows = enrich_taiwan_watchlist_rows(
+        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+        share_capital=_FakeShareCapitalStore({}),
+    )
+    assert rows[0]["turnover_rate"] is None
+
+
+def test_taiwan_turnover_rate_uses_shares_not_lots():
+    """volume is already shares for Taiwan (mis_provider.py); a stray *1000 lot
+    conversion would give 2000% instead of 2%."""
+    from app.taiwan.realtime.calendar import taipei_now
+    today = taipei_now().date()
+    sec_master = _FakeSecurityMaster({
+        "2330.TWSE": _FakeInstrument(name="TSMC", instrument_type="stock"),
+    })
+    rt_service = _FakeRealtimeService({
+        "2330.TWSE": _FakeQuote(
+            1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85,
+            volume=2_000_000, amount=1.0, trade_date=today,
+        ),
+    })
+    rows = enrich_taiwan_watchlist_rows(
+        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+        share_capital=_FakeShareCapitalStore({"2330.TWSE": 100_000_000}),
+    )
+    assert rows[0]["turnover_rate"] == pytest.approx(2.0)

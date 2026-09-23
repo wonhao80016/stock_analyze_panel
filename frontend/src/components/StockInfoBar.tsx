@@ -5,6 +5,7 @@ import { fmtPrice, fmtBigNum, fmtVolume } from '@/lib/format'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { INFO_GROUPS, type ColumnConfig } from '@/lib/stock-info-fields'
+import { resolveTurnoverRate } from '@/lib/turnoverRate'
 
 const BULL = '#C74040'
 const BEAR = '#2D9B65'
@@ -144,9 +145,7 @@ export function StockInfoBar({
   const floatShares = stockInfo?.float_shares
   const marketCap = totalShares ? close * totalShares : null
   const floatMarketCap = floatShares ? close * floatShares : null
-  const turnoverRate = floatShares && latest.volume
-    ? (Number(latest.volume) * 100 / floatShares * 100)
-    : null
+  const turnoverRate = resolveTurnoverRate(latest, floatShares)
 
   const displayName = stockInfo?.name ?? name ?? ''
   const extData = stockInfo?.ext ?? {}

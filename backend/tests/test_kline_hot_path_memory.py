@@ -79,6 +79,102 @@ def test_get_stock_info_repo_failure_returns_empty():
     assert _get_stock_info(repo, "600000.SH") == {}
 
 
+# ------------------------------------------------- _get_stock_info (Taiwan fallback)
+# The legacy A-share instruments cache is always empty under a pure-Taiwan deployment
+# (no data/instruments/), so a .TWSE/.TPEX symbol must fall back to the Taiwan security
+# master (name) and TaiwanShareCapitalStore (issued shares, display-only market cap).
+
+
+def test_get_stock_info_taiwan_uses_security_master_and_share_capital(monkeypatch):
+    repo = _FakeRepo(pl.DataFrame(), None)
+
+    class _FakeInst:
+        name = "TSMC"
+        instrument_type = "stock"
+
+    monkeypatch.setattr(
+        "app.taiwan.universe.get_security_master",
+        lambda: SimpleNamespace(get_instrument=lambda s: _FakeInst() if s == "2330.TWSE" else None),
+    )
+
+    class _FakeShareStore:
+        def load(self):
+            return pl.DataFrame({"symbol": ["2330.TWSE"], "issued_shares": [25_930_380_458]})
+
+    monkeypatch.setattr("app.taiwan.share_capital_store.TaiwanShareCapitalStore", _FakeShareStore)
+
+    assert _get_stock_info(repo, "2330.TWSE") == {
+        "name": "TSMC", "total_shares": 25_930_380_458, "float_shares": None,
+    }
+
+
+def test_get_stock_info_taiwan_missing_share_capital_leaves_total_shares_none(monkeypatch):
+    repo = _FakeRepo(pl.DataFrame(), None)
+
+    class _FakeInst:
+        name = "Test Stock"
+        instrument_type = "stock"
+
+    monkeypatch.setattr(
+        "app.taiwan.universe.get_security_master",
+        lambda: SimpleNamespace(get_instrument=lambda s: _FakeInst()),
+    )
+
+    class _EmptyShareStore:
+        def load(self):
+            return pl.DataFrame(schema={"symbol": pl.Utf8, "issued_shares": pl.Int64})
+
+    monkeypatch.setattr("app.taiwan.share_capital_store.TaiwanShareCapitalStore", _EmptyShareStore)
+
+    info = _get_stock_info(repo, "9999.TWSE")
+    assert info == {"name": "Test Stock", "total_shares": None, "float_shares": None}
+
+
+def test_get_stock_info_taiwan_etf_has_no_share_count(monkeypatch):
+    """ETF units are not company share capital (docs/taiwan-share-capital-phase-6h.md)."""
+    repo = _FakeRepo(pl.DataFrame(), None)
+
+    class _FakeInst:
+        name = "Yuanta Taiwan 50"
+        instrument_type = "etf"
+
+    monkeypatch.setattr(
+        "app.taiwan.universe.get_security_master",
+        lambda: SimpleNamespace(get_instrument=lambda s: _FakeInst()),
+    )
+
+    class _FakeShareStore:
+        def load(self):
+            return pl.DataFrame({"symbol": ["0050.TWSE"], "issued_shares": [100_000_000]})
+
+    monkeypatch.setattr("app.taiwan.share_capital_store.TaiwanShareCapitalStore", _FakeShareStore)
+
+    assert _get_stock_info(repo, "0050.TWSE") == {
+        "name": "Yuanta Taiwan 50", "total_shares": None, "float_shares": None,
+    }
+
+
+def test_get_stock_info_taiwan_lookup_failure_returns_none_fields_not_raise(monkeypatch):
+    repo = _FakeRepo(pl.DataFrame(), None)
+    monkeypatch.setattr(
+        "app.taiwan.universe.get_security_master",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        "app.taiwan.share_capital_store.TaiwanShareCapitalStore",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert _get_stock_info(repo, "2330.TWSE") == {
+        "name": None, "total_shares": None, "float_shares": None,
+    }
+
+
+def test_get_stock_info_a_share_unaffected_by_taiwan_fallback():
+    """A .SH/.SZ symbol never matches the Taiwan suffix check, so a miss still returns {}."""
+    repo = _FakeRepo(_instruments_df(), None)
+    assert _get_stock_info(repo, "300999.SZ") == {}
+
+
 # ---------------------------------------------------------------- _attach_ext
 
 def test_attach_ext_empty_columns_untouched():
@@ -266,6 +362,22 @@ def test_maybe_inject_live_candle_etf_path_never_touches_quote_service_fetch_liv
     assert len(out) == 1
     assert out[0]["close"] == 10.5
     assert qs.fetch_live_bar_calls == []
+
+
+def test_maybe_inject_live_candle_carries_turnover_rate():
+    """Taiwan info-bar/watchlist turnover reads from the live candle's own row."""
+    today = date.today()
+    snapshot = pl.DataFrame({
+        "symbol": ["6196.TWSE"], "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
+        "volume": [100.0], "amount": [1000.0], "change_pct": [0.01], "turnover_rate": [1.23],
+    })
+    qs = _FakeQuoteServiceForInject(snapshot, today, None)
+    request = _fake_request(quote_service=qs)
+
+    out = _maybe_inject_live_candle(request, "6196.TWSE", [], "stock")
+
+    assert len(out) == 1
+    assert out[0]["turnover_rate"] == 1.23
 
 
 # ── A6: a weekend or holiday start is not a gap in the enriched rows ──
