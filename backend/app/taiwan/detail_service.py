@@ -49,6 +49,9 @@ from app.taiwan.universe import get_security_master
 
 logger = logging.getLogger(__name__)
 
+_STORE_LOOKBACK_DAYS = 20
+_FLOW_FIELDS = ("foreign_net", "investment_trust_net", "dealer_net")
+
 
 class TaiwanStockDetailService:
     """Service that aggregates all Taiwan domain data for a single security."""
@@ -351,15 +354,16 @@ class TaiwanStockDetailService:
                     status="available" if not f.meta.is_stale else "stale",
                     is_stale=f.meta.is_stale if f.meta else False,
                 )
+                flows_5d = self._institutional_5d(sym.canonical, trade_dt)
                 return TaiwanInstitutionalData(
                     status="available",
                     foreign_net=f.foreign_net,
                     investment_trust_net=f.investment_trust_net,
                     dealer_net=f.dealer_net,
                     total_net=total,
-                    foreign_net_5d=f.foreign_net,  # 1-day fallback if rolling not precalculated
-                    investment_trust_net_5d=f.investment_trust_net,
-                    dealer_net_5d=f.dealer_net,
+                    foreign_net_5d=flows_5d["foreign_net"],
+                    investment_trust_net_5d=flows_5d["investment_trust_net"],
+                    dealer_net_5d=flows_5d["dealer_net"],
                     meta=meta,
                 )
         except Exception as e:
@@ -384,10 +388,11 @@ class TaiwanStockDetailService:
             from app.taiwan.institutional_store import TaiwanInstitutionalStore
 
             store = TaiwanInstitutionalStore()
-            dates = store.available_dates()
+            dates = sorted(store.available_dates())
             if not dates:
                 return None
-            df = store.read_range([sym.canonical], max(dates), max(dates))
+            lookback = dates[-_STORE_LOOKBACK_DAYS:]
+            df = store.read_range([sym.canonical], lookback[0], lookback[-1])
             if df.is_empty():
                 return None
             r = df.sort("date").to_dicts()[-1]
@@ -395,6 +400,7 @@ class TaiwanStockDetailService:
             logger.debug("Institutional store fallback failed for %s: %s", sym.canonical, e)
             return None
 
+        flows_5d = self._institutional_5d(sym.canonical, r["date"])
         total = r.get("computed_net")
         if total is None:
             total = r.get("official_net")
@@ -404,9 +410,9 @@ class TaiwanStockDetailService:
             investment_trust_net=r.get("investment_trust_net"),
             dealer_net=r.get("dealer_net"),
             total_net=total,
-            foreign_net_5d=r.get("foreign_net"),
-            investment_trust_net_5d=r.get("investment_trust_net"),
-            dealer_net_5d=r.get("dealer_net"),
+            foreign_net_5d=flows_5d["foreign_net"],
+            investment_trust_net_5d=flows_5d["investment_trust_net"],
+            dealer_net_5d=flows_5d["dealer_net"],
             meta=SectionMeta(
                 source="taiwan_institutional_store",
                 trade_date=str(r.get("date")),
@@ -414,6 +420,33 @@ class TaiwanStockDetailService:
                 is_stale=True,
             ),
         )
+
+    @staticmethod
+    def _institutional_5d(canonical: str, as_of: date) -> dict[str, int | None]:
+        """Net flows summed over the five stored trading days ending at ``as_of``.
+
+        T86 lists only securities the institutions traded that day, so a stored date
+        without a row for the symbol counts as zero. A window the store cannot fill
+        is reported as unknown, never summed short.
+        """
+        unknown: dict[str, int | None] = dict.fromkeys(_FLOW_FIELDS)
+        try:
+            from app.taiwan.institutional_store import TaiwanInstitutionalStore
+
+            store = TaiwanInstitutionalStore()
+            window = [d for d in sorted(store.available_dates()) if d <= as_of][-5:]
+            if len(window) < 5 or window[-1] != as_of:
+                return unknown
+            df = store.read_range([canonical], window[0], as_of)
+            if df.is_empty() or as_of not in df.get_column("date").to_list():
+                return unknown
+            return {
+                field: None if df[field].null_count() else int(df[field].sum())
+                for field in _FLOW_FIELDS
+            }
+        except Exception as e:
+            logger.debug("Institutional 5-day sum failed for %s: %s", canonical, e)
+            return unknown
 
     @staticmethod
     def _empty_institutional() -> TaiwanInstitutionalData:
@@ -491,10 +524,11 @@ class TaiwanStockDetailService:
             from app.taiwan.margin_store import TaiwanMarginStore
 
             store = TaiwanMarginStore()
-            dates = store.available_dates()
+            dates = sorted(store.available_dates())
             if not dates:
                 return None
-            df = store.read_range([sym.canonical], max(dates), max(dates))
+            lookback = dates[-_STORE_LOOKBACK_DAYS:]
+            df = store.read_range([sym.canonical], lookback[0], lookback[-1])
             if df.is_empty():
                 return None
             r = df.sort("date").to_dicts()[-1]
