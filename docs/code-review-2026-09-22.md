@@ -691,3 +691,31 @@ B2 的預期沒有完全兌現：它讓 `vol_ratio_5d` 與 data_integrity 的快
 - 這批 finding 沒有併入本文件的 A／B／C／N 編號。已知關聯：`A01-price-data#7`（日K快照
   `snapshot_provider.py` 不比對回應日期）與 N4（法人、融資的 `parse_payload`）同類、程式位置不同。
   修正順序待使用者裁決。
+
+2026-09-24 **RC02 已修**（盤後抓取把缺上櫃的結果當成完成；含同類的 `A01-price-data#7` 與
+`A06-turnover-mcap-pct#5`）：
+
+- `OfficialDailySnapshotAdapter.fetch_date` 以證交所判斷當天是否交易：證交所沒有資料就視為休市，
+  不再請求櫃買；證交所有資料但櫃買失敗或沒有資料時丟出 `IncompleteSnapshotError`，該日不寫入，
+  留給 21:40 或下一班重抓。兩個交易所都比對回應的 `date` 欄，日期不符的回應當成沒有資料。
+- `refresh_dates`：
+  - 比執行前最新已存日還新的日期抓取失敗就停，避免之後的日期先寫入、讓最新日期越過缺口而永遠不補。
+  - 已存範圍內的日期抓取失敗時，保留原資料並繼續；非 force 時記在當次 daily 狀態的 note，不改變狀態，
+    force 時照舊記為失敗。這類日期包括缺一個交易所的分區，以及範圍內沒有分區的日子。
+  - 缺一個交易所的分區視為未完成並重抓；重抓只拿到空結果時同樣記在 note。
+- `run_update` 檢查最新 20 個分區，有缺交易所的就把抓取範圍往回延伸到那一天。當班 daily 為 success
+  或 partial 時刷新股本並發佈 enriched：`refresh_recent` 從最新 20 個分區中「日K在 enriched 發佈之後
+  被改寫，或 enriched 分區不存在」的最早一天開始重算。partial 代表某個新日期失敗，但不會寫入比它晚的
+  日子，已存的日子沒有缺口，可以發佈；daily 為 failed 時不發佈，排程也不刷新快取。
+- 股本刷新時某個交易所拋出例外，沿用舊檔中該交易所的資料。「更新到最新」按鈕在有日期抓取失敗且一天
+  都沒抓到時回報錯誤；部分更新時在訊息寫出失敗日期（提示樣式仍是成功）。排程 log 會記下 daily note。
+- 既有的 9/16、9/23 殘缺分區：後端以 `uvicorn --reload` 執行，已自動載入新程式；改寫前已把受影響的
+  分區備份到 repo 外。2026-09-24 16:30 的盤後更新補齊了兩天的上櫃日K（各 1,007 列）；同一班 9/24 的
+  櫃買抓取再次 incomplete chunked read，依新規則沒有寫入，daily 為 partial。當時的程式在 partial 時
+  還不發佈 enriched（之後才放寬），所以 9/16 起的 enriched 要等下一次 success 或 partial 的更新才重算；
+  21:40 那班若只剩 9/24 一天而且又失敗，狀態會是 failed，同樣不重算。
+- 已知限制：新日期若一直抓不到櫃買（例如櫃買整日未發布），之後的日K會停在前一天，daily 狀態為
+  failed（同班有修補成功時為 partial），直到櫃買恢復。
+- 驗證：受影響的 17 個測試檔共 196 個測試通過；新增 21 個測試函式（參數化後 23 項），其中 18 個函式
+  （20 項）在 HEAD 上重現失敗，另 3 個是回歸保護；既有的 `test_failure_isolation_does_not_crash_or_mark_holiday`
+  原本把「只有上市也照寫」當成預期，已改寫成新行為。ruff 與 HEAD 逐檔比對沒有新增告警。

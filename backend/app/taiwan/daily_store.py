@@ -41,6 +41,9 @@ DEFAULT_TAIWAN_METADATA = SourceMetadata(
     price_semantics=PriceSemantics.RAW,
 )
 
+# How many of the newest stored days a daily run checks for repair, about four weeks.
+REPAIR_WINDOW_PARTITIONS = 20
+
 
 class TaiwanDailyStore:
     """Minimal Taiwan daily parquet persistence.
@@ -275,6 +278,35 @@ class TaiwanDailyStore:
     def has_date(self, d: date) -> bool:
         """Return *True* if a partition exists for *d*."""
         return (self._data_dir / f"date={d.isoformat()}" / "part.parquet").exists()
+
+    def incomplete_dates(self, dates: list[date]) -> list[date]:
+        """Return the stored dates among *dates* whose partition lacks TWSE or TPEx rows.
+
+        Both exchanges trade on the same days, so a partition holding only one of
+        them is half a snapshot. An unreadable partition is reported as well, so it
+        is refetched rather than trusted.
+        """
+        incomplete: list[date] = []
+        for d in dates:
+            path = self._data_dir / f"date={d.isoformat()}" / "part.parquet"
+            if not path.exists():
+                continue
+            try:
+                symbols = pl.read_parquet(path, columns=["symbol"]).get_column("symbol")
+            except Exception as exc:
+                logger.warning("incomplete_dates could not read %s: %s", path, exc)
+                incomplete.append(d)
+                continue
+            if not (symbols.str.ends_with(".TWSE").any() and symbols.str.ends_with(".TPEX").any()):
+                incomplete.append(d)
+        return sorted(incomplete)
+
+    def partition_mtime(self, d: date) -> float | None:
+        """Return when the partition for *d* was last written, or None if absent."""
+        try:
+            return (self._data_dir / f"date={d.isoformat()}" / "part.parquet").stat().st_mtime
+        except OSError:
+            return None
 
     def latest_date(self) -> date | None:
         """Return the most recent partition date, or *None* if empty."""

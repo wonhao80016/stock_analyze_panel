@@ -215,6 +215,115 @@ def test_orchestrator_idempotency_already_current():
     assert result.margin.dates_skipped == 1
 
 
+def test_run_update_reaches_back_to_a_recent_partition_missing_an_exchange(monkeypatch):
+    """A store whose latest date is current is not finished while a recent day holds one exchange."""
+    from app.taiwan import enriched_refresh, share_capital_store
+
+    monkeypatch.setattr(share_capital_store.TaiwanShareCapitalStore, "refresh", lambda self: 0)
+    monkeypatch.setattr(enriched_refresh.TaiwanEnrichedRefreshService, "refresh_recent", lambda self, days=5: 0)
+
+    stored = [date(2026, 8, 26), date(2026, 8, 27), date(2026, 8, 28)]
+    mock_daily_store = MagicMock()
+    mock_daily_store.available_dates.return_value = stored
+    mock_daily_store.incomplete_dates.return_value = [date(2026, 8, 27)]
+    mock_inst_store = MagicMock()
+    mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_margin_store = MagicMock()
+    mock_margin_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_daily_svc = MagicMock()
+    mock_daily_svc.refresh_dates.return_value = {
+        "dates_requested": 2, "dates_fetched": 1, "dates_skipped": 1, "total_rows_written": 2330, "failed_dates": []
+    }
+
+    svc = TaiwanDailyUpdateService(
+        daily_store=mock_daily_store,
+        inst_store=mock_inst_store,
+        margin_store=mock_margin_store,
+        daily_service=mock_daily_svc,
+        inst_service=MagicMock(),
+        margin_service=MagicMock(),
+    )
+    result = svc.run_update(target_date=date(2026, 8, 28))
+
+    mock_daily_store.incomplete_dates.assert_called_once_with(stored)
+    mock_daily_svc.refresh_dates.assert_called_once_with(
+        start_date=date(2026, 8, 27), end_date=date(2026, 8, 28), force=False
+    )
+    assert result.daily.status == "success"
+
+
+def test_a_failed_repair_is_reported_without_failing_the_daily_run(monkeypatch):
+    """New days still publish; the stored half snapshot is named so it is not mistaken for complete."""
+    from app.taiwan import enriched_refresh, share_capital_store
+
+    monkeypatch.setattr(share_capital_store.TaiwanShareCapitalStore, "refresh", lambda self: 0)
+    monkeypatch.setattr(enriched_refresh.TaiwanEnrichedRefreshService, "refresh_recent", lambda self, days=5: 0)
+
+    mock_daily_store = MagicMock()
+    mock_daily_store.available_dates.return_value = [date(2026, 8, 27)]
+    mock_daily_store.incomplete_dates.return_value = [date(2026, 8, 27)]
+    mock_inst_store = MagicMock()
+    mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_margin_store = MagicMock()
+    mock_margin_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_daily_svc = MagicMock()
+    mock_daily_svc.refresh_dates.return_value = {
+        "dates_requested": 2, "dates_fetched": 1, "dates_skipped": 0, "total_rows_written": 2330,
+        "failed_dates": [], "repair_failed_dates": [{"date": "2026-08-27", "error": "TPEx down"}],
+    }
+
+    svc = TaiwanDailyUpdateService(
+        daily_store=mock_daily_store,
+        inst_store=mock_inst_store,
+        margin_store=mock_margin_store,
+        daily_service=mock_daily_svc,
+        inst_service=MagicMock(),
+        margin_service=MagicMock(),
+    )
+    result = svc.run_update(target_date=date(2026, 8, 28))
+
+    assert result.daily.status == "success"
+    assert "2026-08-27" in (result.daily.note or "")
+
+
+def test_a_partial_daily_run_still_publishes_what_it_stored(monkeypatch):
+    """Repaired days must not wait for a fully successful run to reach the enriched table."""
+    from app.taiwan import enriched_refresh, share_capital_store
+
+    calls: list[str] = []
+    monkeypatch.setattr(share_capital_store.TaiwanShareCapitalStore, "refresh", lambda self: calls.append("shares") or 0)
+    monkeypatch.setattr(
+        enriched_refresh.TaiwanEnrichedRefreshService, "refresh_recent",
+        lambda self, days=5: calls.append("enriched") or 0,
+    )
+
+    mock_daily_store = MagicMock()
+    mock_daily_store.available_dates.return_value = [date(2026, 8, 27)]
+    mock_daily_store.incomplete_dates.return_value = []
+    mock_inst_store = MagicMock()
+    mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_margin_store = MagicMock()
+    mock_margin_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_daily_svc = MagicMock()
+    mock_daily_svc.refresh_dates.return_value = {
+        "dates_requested": 2, "dates_fetched": 1, "dates_skipped": 0, "total_rows_written": 2330,
+        "failed_dates": [{"date": "2026-08-28", "error": "TPEx snapshot failed"}],
+    }
+
+    svc = TaiwanDailyUpdateService(
+        daily_store=mock_daily_store,
+        inst_store=mock_inst_store,
+        margin_store=mock_margin_store,
+        daily_service=mock_daily_svc,
+        inst_service=MagicMock(),
+        margin_service=MagicMock(),
+    )
+    result = svc.run_update(target_date=date(2026, 8, 28))
+
+    assert result.daily.status == "partial"
+    assert calls == ["shares", "enriched"]
+
+
 def test_api_taiwan_data_status_endpoint():
     """GET /api/taiwan/data-status returns typed freshness without external calls."""
     client = TestClient(app, client=("127.0.0.1", 50000))

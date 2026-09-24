@@ -447,10 +447,16 @@ class TaiwanBootstrapService:
         start = latest + timedelta(days=1)
         res = self.refresh_service.refresh_dates(start_date=start, end_date=target)
         fetched = res.get("dates_fetched", 0)
+        failed = res.get("failed_dates") or []
+        if failed and not fetched:
+            raise RuntimeError(f"{failed[0]['date']} 行情抓取失敗: {failed[0]['error']}")
+        message = f"成功更新 {fetched} 個交易日 (最新至 {target})"
+        if failed:
+            message = f"已更新 {fetched} 個交易日, {failed[0]['date']} 行情抓取失敗, 請稍後再試"
         return {
             "ok": True,
             "already_current": False,
-            "message": f"成功更新 {fetched} 個交易日 (最新至 {target})",
+            "message": message,
             "dates_fetched": fetched,
             "stats": res,
         }

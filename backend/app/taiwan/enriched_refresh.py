@@ -20,7 +20,7 @@ from pathlib import Path
 import polars as pl
 
 from app.indicators.pipeline import compute_enriched
-from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 
 logger = logging.getLogger(__name__)
@@ -189,13 +189,31 @@ class TaiwanEnrichedRefreshService:
         ]).drop(["limit_pct", "is_etf_tick", "_limit_up", "_limit_down"])
 
     def refresh_recent(self, days: int = 5) -> int:
-        """Republish only the newest partitions, for the daily update job."""
-        available = self.daily_store.available_dates()
+        """Republish the newest partitions, for the daily update job.
+
+        Reaches back to the earliest recent day whose bars were rewritten after its
+        enriched partition, or that has no enriched partition, and republishes from
+        there: every later day was computed from the old bars.
+        """
+        available = sorted(self.daily_store.available_dates())
         if not available:
             return 0
-        end = max(available)
-        recent = sorted(available)[-days:]
-        return self.refresh(start=recent[0], end=end)
+        start = available[-days:][0]
+        for d in available[-REPAIR_WINDOW_PARTITIONS:]:
+            if d >= start:
+                break
+            if self._published_before_bars(d):
+                start = d
+                break
+        return self.refresh(start=start, end=available[-1])
+
+    def _published_before_bars(self, d: date) -> bool:
+        bars_written = self.daily_store.partition_mtime(d)
+        try:
+            published = (self._root / f"date={d.isoformat()}" / "part.parquet").stat().st_mtime
+        except OSError:
+            return True
+        return bars_written is not None and bars_written > published
 
 
 def refresh_taiwan_enriched(full: bool = False, repo=None) -> int:

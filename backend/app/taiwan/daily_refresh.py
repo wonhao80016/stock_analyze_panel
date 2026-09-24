@@ -147,13 +147,17 @@ class TaiwanDailyRefreshService:
           - Exactly 1 HTTP request for TPEx dailyQuotes
         per trading day (2 HTTP requests total per date instead of ~2,335).
         """
-        available = set(self._store.available_dates()) if not force else set()
+        stored = self._store.available_dates()
+        latest_stored = max(stored, default=None)
+        repairs = set(self._store.incomplete_dates(sorted(d for d in stored if start_date <= d <= end_date)))
+        available = set(stored) - repairs if not force else set()
         stats: dict[str, Any] = {
             "dates_requested": 0,
             "dates_fetched": 0,
             "dates_skipped": 0,
             "total_rows_written": 0,
             "failed_dates": [],
+            "repair_failed_dates": [],
         }
 
         cur = start_date
@@ -177,9 +181,17 @@ class TaiwanDailyRefreshService:
                     stats["dates_fetched"] += 1
                 else:
                     stats["dates_skipped"] += 1
+                    if cur in repairs:
+                        stats["repair_failed_dates"].append({"date": str(cur), "error": "no rows"})
             except Exception as exc:
                 logger.warning("Daily snapshot refresh failed for %s: %s", cur, exc)
-                stats["failed_dates"].append({"date": str(cur), "error": str(exc)})
+                failure = {"date": str(cur), "error": str(exc)}
+                if latest_stored is None or cur > latest_stored:
+                    stats["failed_dates"].append(failure)
+                    # Later dates must wait: storing them would move the latest stored date past this gap.
+                    break
+                # The latest stored date is already past this day, so moving on cannot open a new gap.
+                stats["failed_dates" if force else "repair_failed_dates"].append(failure)
 
             cur += timedelta(days=1)
 

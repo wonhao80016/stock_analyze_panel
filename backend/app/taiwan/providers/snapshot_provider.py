@@ -43,6 +43,10 @@ SNAPSHOT_METADATA = SourceMetadata(
 _MISSING_PRICE_SET = {"", "-", "--", "---", "----", "N/A", "null", "None"}
 
 
+class IncompleteSnapshotError(RuntimeError):
+    """TWSE traded on the date but the TPEx half of the snapshot is missing."""
+
+
 def _parse_snapshot_number(raw: object) -> float | None:
     if raw is None:
         return None
@@ -95,33 +99,31 @@ class OfficialDailySnapshotAdapter:
     def fetch_date(self, target_date: date) -> pl.DataFrame:
         """Fetch and normalize full-market daily OHLCV for target_date.
 
-        Dispatches exactly:
-          - 1 HTTP request to TWSE MI_INDEX
-          - 1 HTTP request to TPEx dailyQuotes
-        Filters strictly by Security Master allowlist.
+        TWSE decides whether the date traded: without TWSE rows the day counts as
+        closed, TPEx is not requested and an empty frame is returned. Once TWSE has
+        rows, TPEx must have them too, otherwise IncompleteSnapshotError is raised
+        so the date is retried rather than stored as a finished day. A TWSE failure
+        propagates. Filters strictly by Security Master allowlist.
         """
-        frames: list[pl.DataFrame] = []
-        # 1. TWSE Snapshot
-        try:
-            df_twse = self.fetch_twse(target_date)
-            if not df_twse.is_empty():
-                frames.append(df_twse)
-        except Exception as e:
-            logger.warning("TWSE snapshot fetch failed for %s: %s", target_date, e)
-
-        # 2. TPEx Snapshot
-        try:
-            df_tpex = self.fetch_tpex(target_date)
-            if not df_tpex.is_empty():
-                frames.append(df_tpex)
-        except Exception as e:
-            logger.warning("TPEx snapshot fetch failed for %s: %s", target_date, e)
-
-        if not frames:
+        df_twse = self.fetch_twse(target_date)
+        if df_twse.is_empty():
             return pl.DataFrame(schema={col: pl.Float64 for col in DAILY_COLS})
 
-        combined = pl.concat(frames, how="diagonal_relaxed")
+        try:
+            df_tpex = self.fetch_tpex(target_date)
+        except Exception as e:
+            raise IncompleteSnapshotError(f"TPEx snapshot failed for {target_date}: {e}") from e
+        if df_tpex.is_empty():
+            raise IncompleteSnapshotError(f"TPEx snapshot has no rows for {target_date}")
+
+        combined = pl.concat([df_twse, df_tpex], how="diagonal_relaxed")
         return combined.unique(subset=["symbol", "date"], keep="last").sort(["symbol", "date"])
+
+    @staticmethod
+    def _stamped_for(payload: dict[str, Any], target_date: date) -> bool:
+        """False when the exchange stamped the response with another trading date."""
+        stamped = str(payload.get("date") or "").strip()
+        return not stamped or stamped == target_date.strftime("%Y%m%d")
 
     def fetch_twse(self, target_date: date) -> pl.DataFrame:
         """Fetch and parse TWSE MI_INDEX for a single trading date."""
@@ -132,6 +134,9 @@ class OfficialDailySnapshotAdapter:
         stat = payload.get("stat", "")
         if stat != "OK":
             logger.info("TWSE MI_INDEX returned non-OK status for %s: %s", target_date, stat)
+            return pl.DataFrame()
+        if not self._stamped_for(payload, target_date):
+            logger.warning("TWSE MI_INDEX answered %s with data for %s", target_date, payload.get("date"))
             return pl.DataFrame()
 
         tables = payload.get("tables", [])
@@ -215,6 +220,9 @@ class OfficialDailySnapshotAdapter:
         date_str = f"{roc_year}/{target_date.month:02d}/{target_date.day:02d}"
         url = f"{TPEX_DAILY_QUOTES_URL}?date={date_str}&response=json"
         payload = self._request_json(url)
+        if not self._stamped_for(payload, target_date):
+            logger.warning("TPEx dailyQuotes answered %s with data for %s", target_date, payload.get("date"))
+            return pl.DataFrame()
 
         tables = payload.get("tables", [])
         quote_table = None

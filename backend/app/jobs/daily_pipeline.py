@@ -156,6 +156,8 @@ def start_scheduler() -> AsyncIOScheduler:
                 label, result.overall_status, result.daily.status,
                 result.institutional.status, result.margin.status,
             )
+            if result.daily.note:
+                logger.info("Scheduled Taiwan update (%s) daily note: %s", label, result.daily.note)
         except Exception as e:
             logger.exception("Scheduled Taiwan update (%s) job failed: %s", label, e)
             return

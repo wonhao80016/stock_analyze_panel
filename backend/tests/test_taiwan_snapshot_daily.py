@@ -15,7 +15,12 @@ Validates:
   12. One-day full-market refresh HTTP budget (exactly 1 TWSE + 1 TPEx = 2 requests)
   13. Multi-day catch-up HTTP budget (3 missing dates = 6 requests)
   14. Idempotency (already-persisted date skips network requests)
-  15. Failure isolation (TWSE success + TPEx failure does not mark holiday or crash)
+  15. Failure isolation (a failed date is recorded, not written and not taken for a holiday)
+  16. A one-sided snapshot (TWSE traded, TPEx failed or empty) raises instead of returning half a market
+  17. A day without TWSE rows is treated as closed and TPEx is not requested
+  18. A payload stamped with another trading date yields no rows
+  19. A stored partition missing one exchange is refetched
+  20. refresh_dates stops at the first failed new date; failures inside the stored range do not block new days
 """
 from datetime import date
 from unittest.mock import MagicMock, patch
@@ -50,6 +55,37 @@ def mock_security_master():
     })
     master.to_provider_dataframe.side_effect = lambda asset_type: df_stocks if asset_type == "stock" else df_etfs
     return master
+
+
+def _rows(symbols: list[str], d: date = date(2026, 8, 28)) -> pl.DataFrame:
+    n = len(symbols)
+    return pl.DataFrame({
+        "symbol": symbols,
+        "date": [d] * n,
+        "open": [10.0] * n,
+        "high": [10.5] * n,
+        "low": [9.5] * n,
+        "close": [10.0] * n,
+        "volume": [1000.0] * n,
+        "amount": [10000.0] * n,
+        "quote_ts": pl.Series([None] * n, dtype=pl.Int64),
+    })
+
+
+def _twse_payload(stamped: str) -> dict:
+    return {"stat": "OK", "date": stamped, "tables": [{
+        "title": "每日收盤行情(全部)",
+        "fields": ["證券代號", "證券名稱", "成交股數", "成交筆數", "成交金額", "開盤價", "最高價", "最低價", "收盤價"],
+        "data": [["2330", "台積電", "15,025,832", "52,492", "36,465,015,980", "2,440.00", "2,445.00", "2,410.00", "2,420.00"]],
+    }]}
+
+
+def _tpex_payload(stamped: str) -> dict:
+    return {"stat": "ok", "date": stamped, "tables": [{
+        "title": "上櫃股票行情",
+        "fields": ["代號", "名稱", "收盤", "漲跌", "開盤", "最高", "最低", "均價", "成交股數", "成交金額(元)"],
+        "data": [["6488", "環球晶", "972.00", "+14.00", "967.00", "1015.00", "949.00", "975.02", "11,772,540", "11,478,474,997"]],
+    }]}
 
 
 # ── Parser Unit Tests ─────────────────────────────────────────────
@@ -184,6 +220,69 @@ def test_schema_mismatch_fails_safely():
     assert df.is_empty()
 
 
+# ── Snapshot Completeness ─────────────────────────────────────────
+
+def test_fetch_date_rejects_twse_rows_when_tpex_fails():
+    """TWSE traded, so the day is only complete with TPEx; half a market stored as the day hides the gap."""
+    adapter = OfficialDailySnapshotAdapter(security_master=mock_security_master())
+    with (
+        patch.object(adapter, "fetch_twse", return_value=_rows(["2330.TWSE"])),
+        patch.object(adapter, "fetch_tpex", side_effect=RuntimeError("incomplete chunked read")),
+        pytest.raises(RuntimeError, match="TPEx"),
+    ):
+        adapter.fetch_date(date(2026, 8, 28))
+
+
+def test_fetch_date_rejects_twse_rows_when_tpex_has_none():
+    adapter = OfficialDailySnapshotAdapter(security_master=mock_security_master())
+    with (
+        patch.object(adapter, "fetch_twse", return_value=_rows(["2330.TWSE"])),
+        patch.object(adapter, "fetch_tpex", return_value=pl.DataFrame()),
+        pytest.raises(RuntimeError, match="TPEx"),
+    ):
+        adapter.fetch_date(date(2026, 8, 28))
+
+
+def test_fetch_date_treats_a_day_without_twse_rows_as_closed():
+    """TWSE decides whether the day traded, so whatever TPEx answers for a holiday is never stored."""
+    adapter = OfficialDailySnapshotAdapter(security_master=mock_security_master())
+    with (
+        patch.object(adapter, "fetch_twse", return_value=pl.DataFrame()),
+        patch.object(adapter, "fetch_tpex", return_value=_rows(["6488.TPEX"])) as tpex,
+    ):
+        assert adapter.fetch_date(date(2026, 9, 25)).is_empty()
+    tpex.assert_not_called()
+
+
+def test_fetch_date_propagates_a_twse_failure():
+    adapter = OfficialDailySnapshotAdapter(security_master=mock_security_master())
+    with (
+        patch.object(adapter, "fetch_twse", side_effect=RuntimeError("TWSE down")),
+        patch.object(adapter, "fetch_tpex", return_value=_rows(["6488.TPEX"])),
+        pytest.raises(RuntimeError, match="TWSE down"),
+    ):
+        adapter.fetch_date(date(2026, 8, 28))
+
+
+def test_fetch_date_combines_both_exchanges():
+    adapter = OfficialDailySnapshotAdapter(security_master=mock_security_master())
+    with (
+        patch.object(adapter, "fetch_twse", return_value=_rows(["2330.TWSE"])),
+        patch.object(adapter, "fetch_tpex", return_value=_rows(["6488.TPEX"])),
+    ):
+        df = adapter.fetch_date(date(2026, 8, 28))
+    assert df["symbol"].to_list() == ["2330.TWSE", "6488.TPEX"]
+
+
+@pytest.mark.parametrize("fetch, payload", [("fetch_twse", _twse_payload), ("fetch_tpex", _tpex_payload)])
+def test_a_payload_stamped_with_another_date_yields_no_rows(fetch, payload):
+    """Rows the exchange published for another trading day must not be relabelled as the requested day."""
+    adapter = OfficialDailySnapshotAdapter(security_master=mock_security_master())
+    with patch.object(adapter, "_request_json", return_value=payload("20260923")):
+        assert getattr(adapter, fetch)(date(2026, 9, 24)).is_empty()
+        assert getattr(adapter, fetch)(date(2026, 9, 23)).height == 1
+
+
 # ── Refresh Service & HTTP Budget Tests ───────────────────────────
 
 def test_refresh_dates_one_day_budget():
@@ -271,19 +370,12 @@ def test_refresh_dates_idempotency():
 
 
 def test_failure_isolation_does_not_crash_or_mark_holiday():
-    """If TPEx fails, TWSE data is still preserved and not marked as holiday."""
+    """A date whose snapshot fetch fails is recorded as failed: nothing is written and it is not counted as skipped."""
     mock_store = MagicMock(spec=TaiwanDailyStore)
     mock_store.available_dates.return_value = []
-    mock_store.write_batch.return_value = 1318
 
-    # Adapter returns only TWSE rows
     mock_adapter = MagicMock(spec=OfficialDailySnapshotAdapter)
-    mock_adapter.fetch_date.return_value = pl.DataFrame({
-        "symbol": ["2330.TWSE"],
-        "date": [date(2026, 8, 28)],
-        "open": [2440.0], "high": [2445.0], "low": [2410.0], "close": [2420.0],
-        "volume": [15025832.0], "amount": [36465015980.0], "quote_ts": [None],
-    })
+    mock_adapter.fetch_date.side_effect = RuntimeError("TPEx snapshot failed for 2026-08-28")
 
     svc = TaiwanDailyRefreshService(
         store=mock_store,
@@ -293,9 +385,126 @@ def test_failure_isolation_does_not_crash_or_mark_holiday():
 
     stats = svc.refresh_dates(date(2026, 8, 28), date(2026, 8, 28))
     assert stats["dates_requested"] == 1
+    assert stats["dates_fetched"] == 0
+    assert stats["dates_skipped"] == 0
+    assert stats["failed_dates"] == [{"date": "2026-08-28", "error": "TPEx snapshot failed for 2026-08-28"}]
+    mock_store.write_batch.assert_not_called()
+
+
+def test_refresh_dates_refetches_a_partition_holding_one_exchange(tmp_path):
+    """A partition written from half a snapshot is not a finished day and must not be skipped as one."""
+    store = TaiwanDailyStore(data_dir=tmp_path)
+    day = date(2026, 8, 28)
+    store.write_batch(_rows(["2330.TWSE"], day))
+    adapter = MagicMock(spec=OfficialDailySnapshotAdapter)
+    adapter.fetch_date.return_value = _rows(["2330.TWSE", "6488.TPEX"], day)
+    svc = TaiwanDailyRefreshService(store=store, snapshot_adapter=adapter, calendar=TaiwanTradingCalendar())
+
+    stats = svc.refresh_dates(day, day)
+
+    adapter.fetch_date.assert_called_once_with(day)
     assert stats["dates_fetched"] == 1
-    assert stats["total_rows_written"] == 1318
-    mock_store.write_batch.assert_called_once()
+    assert sorted(store.read_range(None, day, day)["symbol"]) == ["2330.TWSE", "6488.TPEX"]
+
+
+def test_refresh_dates_stops_at_the_first_failed_date():
+    """Storing the later dates would move the latest stored date past the gap, and runs only fetch after it."""
+    mock_store = MagicMock(spec=TaiwanDailyStore)
+    mock_store.available_dates.return_value = []
+    adapter = MagicMock(spec=OfficialDailySnapshotAdapter)
+    adapter.fetch_date.side_effect = [
+        RuntimeError("TPEx down"),
+        _rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 27)),
+        _rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 28)),
+    ]
+    svc = TaiwanDailyRefreshService(store=mock_store, snapshot_adapter=adapter, calendar=TaiwanTradingCalendar())
+
+    stats = svc.refresh_dates(date(2026, 8, 26), date(2026, 8, 28))
+
+    assert [f["date"] for f in stats["failed_dates"]] == ["2026-08-26"]
+    assert adapter.fetch_date.call_count == 1
+    mock_store.write_batch.assert_not_called()
+
+
+def test_refresh_dates_moves_on_when_a_repair_fails(tmp_path):
+    """A stored half snapshot that cannot be refetched must not hold back new days forever."""
+    store = TaiwanDailyStore(data_dir=tmp_path)
+    store.write_batch(_rows(["2330.TWSE"], date(2026, 8, 27)))
+    adapter = MagicMock(spec=OfficialDailySnapshotAdapter)
+    adapter.fetch_date.side_effect = [
+        RuntimeError("TPEx down"),
+        _rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 28)),
+    ]
+    svc = TaiwanDailyRefreshService(store=store, snapshot_adapter=adapter, calendar=TaiwanTradingCalendar())
+
+    stats = svc.refresh_dates(date(2026, 8, 27), date(2026, 8, 28))
+
+    assert stats["failed_dates"] == []
+    assert stats["repair_failed_dates"] == [{"date": "2026-08-27", "error": "TPEx down"}]
+    assert stats["dates_fetched"] == 1
+    assert store.available_dates() == [date(2026, 8, 27), date(2026, 8, 28)]
+    assert store.incomplete_dates([date(2026, 8, 27)]) == [date(2026, 8, 27)]
+
+
+def test_a_failed_day_inside_the_stored_range_does_not_hold_back_new_days(tmp_path):
+    """The latest stored date is already past that day, so moving on cannot open a new gap."""
+    store = TaiwanDailyStore(data_dir=tmp_path)
+    store.write_batch(_rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 26)))
+    store.write_batch(_rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 28)))
+    adapter = MagicMock(spec=OfficialDailySnapshotAdapter)
+    adapter.fetch_date.side_effect = [
+        RuntimeError("TPEx down"),
+        _rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 31)),
+    ]
+    svc = TaiwanDailyRefreshService(store=store, snapshot_adapter=adapter, calendar=TaiwanTradingCalendar())
+
+    stats = svc.refresh_dates(date(2026, 8, 27), date(2026, 8, 31))
+
+    assert stats["failed_dates"] == []
+    assert stats["repair_failed_dates"] == [{"date": "2026-08-27", "error": "TPEx down"}]
+    assert date(2026, 8, 31) in store.available_dates()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_a_repair_that_returns_no_rows_is_reported(tmp_path, force):
+    store = TaiwanDailyStore(data_dir=tmp_path)
+    store.write_batch(_rows(["2330.TWSE"], date(2026, 8, 28)))
+    adapter = MagicMock(spec=OfficialDailySnapshotAdapter)
+    adapter.fetch_date.return_value = pl.DataFrame()
+    svc = TaiwanDailyRefreshService(store=store, snapshot_adapter=adapter, calendar=TaiwanTradingCalendar())
+
+    stats = svc.refresh_dates(date(2026, 8, 28), date(2026, 8, 28), force=force)
+
+    assert stats["repair_failed_dates"] == [{"date": "2026-08-28", "error": "no rows"}]
+
+
+def test_force_refresh_moves_past_a_stored_day_that_fails(tmp_path):
+    """A forced refetch keeps a stored day's bars when it fails, so the later days are still refetched."""
+    store = TaiwanDailyStore(data_dir=tmp_path)
+    for d in (date(2026, 8, 26), date(2026, 8, 27), date(2026, 8, 28)):
+        store.write_batch(_rows(["2330.TWSE", "6488.TPEX"], d))
+    adapter = MagicMock(spec=OfficialDailySnapshotAdapter)
+    adapter.fetch_date.side_effect = [
+        RuntimeError("TPEx down"),
+        _rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 27)),
+        _rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 28)),
+    ]
+    svc = TaiwanDailyRefreshService(store=store, snapshot_adapter=adapter, calendar=TaiwanTradingCalendar())
+
+    stats = svc.refresh_dates(date(2026, 8, 26), date(2026, 8, 28), force=True)
+
+    assert [f["date"] for f in stats["failed_dates"]] == ["2026-08-26"]
+    assert adapter.fetch_date.call_count == 3
+    assert stats["dates_fetched"] == 2
+
+
+def test_incomplete_dates_flags_partitions_missing_an_exchange(tmp_path):
+    store = TaiwanDailyStore(data_dir=tmp_path)
+    store.write_batch(_rows(["2330.TWSE", "6488.TPEX"], date(2026, 8, 27)))
+    store.write_batch(_rows(["2330.TWSE"], date(2026, 8, 28)))
+
+    checked = [date(2026, 8, 27), date(2026, 8, 28), date(2026, 8, 31)]
+    assert store.incomplete_dates(checked) == [date(2026, 8, 28)]
 
 
 def test_daily_update_orchestration_with_snapshot():

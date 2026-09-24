@@ -24,7 +24,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
-from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
 from app.taiwan.institutional_margin_refresh import (
     TaiwanInstitutionalRefreshService,
     TaiwanMarginRefreshService,
@@ -280,6 +280,13 @@ class TaiwanDailyUpdateService:
         else:
             try:
                 d_range = resolve_missing_date_range(d_max, target, self.calendar) if not force else (start_bound, end_bound)
+                if not force and daily_symbols is None:
+                    # The missing range starts after the latest stored day, so a recent day
+                    # holding only one exchange would otherwise never be fetched again.
+                    recent = d_dates[-REPAIR_WINDOW_PARTITIONS:]
+                    incomplete = [d for d in sorted(self.daily_store.incomplete_dates(recent)) if d <= target]
+                    if incomplete:
+                        d_range = (incomplete[0], target)
                 if not d_range and not force:
                     daily_stats.status = "success"
                     daily_stats.dates_skipped = 1
@@ -305,6 +312,9 @@ class TaiwanDailyUpdateService:
                         daily_stats.dates_skipped = res.get("dates_skipped", 0)
                         daily_stats.rows_written = res.get("total_rows_written", 0)
                         daily_stats.failed_dates = res.get("failed_dates", [])
+                        repair_failed = res.get("repair_failed_dates") or []
+                        if repair_failed:
+                            daily_stats.note = "Earlier days not refreshed: " + ", ".join(f["date"] for f in repair_failed)
                         if daily_stats.failed_dates:
                             daily_stats.status = "failed" if daily_stats.dates_fetched == 0 else "partial"
                         else:
@@ -373,7 +383,8 @@ class TaiwanDailyUpdateService:
                 margin_stats.failed_dates.append({"error": str(e)})
 
         # 4b. Publish indicators and signals for the engines that read the enriched table.
-        if refresh_daily and daily_stats.status in {"success", "skipped"}:
+        # A partial run never stores a day past a failed new day, so the stored days have no gap to publish across.
+        if refresh_daily and daily_stats.status in {"success", "skipped", "partial"}:
             # Issued shares first: the enriched publish reads them as the turnover
             # denominator, so refreshing afterwards would leave today's partition
             # priced by yesterday's share counts until the next run.

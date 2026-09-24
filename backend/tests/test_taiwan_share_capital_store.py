@@ -58,6 +58,15 @@ def test_one_exchange_failing_still_prices_the_other(tmp_path):
     assert set(store.load()["symbol"]) == {"1101.TWSE", "2330.TWSE"}
 
 
+def test_an_exchange_that_fails_keeps_its_rows_from_the_previous_refresh(tmp_path):
+    """Dropping them would blank that exchange's turnover and market cap until the next good refresh."""
+    _store(tmp_path).refresh()
+    partial = TaiwanShareCapitalStore(data_dir=tmp_path, client=_client(tpex_error=RuntimeError("tpex down")))
+
+    assert partial.refresh() == 3
+    assert set(partial.load()["symbol"]) == {"1101.TWSE", "2330.TWSE", "1240.TPEX"}
+
+
 def test_both_failing_leaves_the_previous_file_untouched(tmp_path):
     store = _store(tmp_path)
     store.refresh()

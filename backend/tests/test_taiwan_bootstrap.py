@@ -306,6 +306,35 @@ def test_update_to_latest_when_data_exists(tmp_path: Path, monkeypatch):
     assert mock_refresh.refresh_dates.called
 
 
+def test_update_to_latest_reports_a_failed_day_instead_of_success(tmp_path: Path):
+    """With nothing fetched, the failure must reach the user as an error rather than "0 days updated"."""
+    daily_dir = tmp_path / "taiwan" / "daily"
+    _create_dummy_parquet(daily_dir / "date=2024-01-02" / "part.parquet")
+    mock_refresh = MagicMock()
+    mock_refresh.refresh_dates.return_value = {
+        "dates_fetched": 0, "failed_dates": [{"date": "2024-01-03", "error": "TPEx snapshot failed"}],
+    }
+    svc = TaiwanBootstrapService(store=TaiwanDailyStore(data_dir=daily_dir), refresh_service=mock_refresh)
+
+    with pytest.raises(RuntimeError, match="2024-01-03"):
+        svc.update_to_latest()
+
+
+def test_update_to_latest_names_the_failed_day_after_a_partial_update(tmp_path: Path):
+    daily_dir = tmp_path / "taiwan" / "daily"
+    _create_dummy_parquet(daily_dir / "date=2024-01-02" / "part.parquet")
+    mock_refresh = MagicMock()
+    mock_refresh.refresh_dates.return_value = {
+        "dates_fetched": 1, "failed_dates": [{"date": "2024-01-04", "error": "TPEx snapshot failed"}],
+    }
+    svc = TaiwanBootstrapService(store=TaiwanDailyStore(data_dir=daily_dir), refresh_service=mock_refresh)
+
+    res = svc.update_to_latest()
+
+    assert res["dates_fetched"] == 1
+    assert "2024-01-04" in res["message"]
+
+
 def test_taiwan_bootstrap_api_endpoints(monkeypatch):
     from starlette.testclient import TestClient
     from app.main import app

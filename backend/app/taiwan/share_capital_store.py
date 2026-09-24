@@ -106,11 +106,12 @@ class TaiwanShareCapitalStore:
     def refresh(self) -> int:
         """Fetch both exchanges and replace the file. Returns rows written.
 
-        One exchange failing does not discard the other: a partial refresh still
-        prices the listings it covers, and the previous file is only replaced
-        once at least one exchange answered.
+        An exchange that fails keeps its rows from the previous file, so one outage
+        does not drop that exchange's listings; the file is only replaced once at
+        least one exchange returned rows.
         """
         rows: list[dict[str, Any]] = []
+        failed: list[str] = []
         for url, suffix, code_keys, share_keys, date_keys in (
             (TWSE_URL, "TWSE", ("公司代號",), ("已發行普通股數或TDR原股發行股數",), ("出表日期",)),
             (TPEX_URL, "TPEX", ("SecuritiesCompanyCode", "公司代號"),
@@ -122,12 +123,22 @@ class TaiwanShareCapitalStore:
                 rows.extend(fetched)
             except Exception as e:  # noqa: BLE001
                 logger.warning("taiwan share capital fetch failed for %s: %s", suffix, e)
+                failed.append(suffix)
 
         if not rows:
             logger.warning("taiwan share capital refresh wrote nothing: both exchanges failed")
             return 0
 
-        df = pl.DataFrame(rows, schema=SCHEMA).unique(subset=["symbol"], keep="last").sort("symbol")
+        df = pl.DataFrame(rows, schema=SCHEMA)
+        if failed:
+            previous = self.load()
+            if set(SCHEMA) <= set(previous.columns):
+                kept = previous.filter(
+                    pl.any_horizontal([pl.col("symbol").str.ends_with(f".{s}") for s in failed])
+                ).select(list(SCHEMA)).cast(SCHEMA)
+                logger.info("taiwan share capital: kept %d previous rows for %s", kept.height, failed)
+                df = pl.concat([df, kept])
+        df = df.unique(subset=["symbol"], keep="last").sort("symbol")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".parquet.tmp")
         df.write_parquet(tmp)
