@@ -22,6 +22,7 @@ from typing import Any
 
 import polars as pl
 
+from app.taiwan.daily_store import is_provisional_mtime
 from app.taiwan.providers.base import (
     AmountUnit,
     PriceSemantics,
@@ -274,6 +275,18 @@ class TaiwanInstitutionalStore:
             except (IndexError, ValueError):
                 continue
         return sorted(dates)
+
+    def provisional_dates(self, dates: list[date]) -> list[date]:
+        """Return the stored dates among *dates* whose partition was last written on the day itself."""
+        provisional: list[date] = []
+        for d in dates:
+            try:
+                mtime = (self._data_dir / f"date={d.isoformat()}" / "part.parquet").stat().st_mtime
+            except OSError:
+                continue
+            if is_provisional_mtime(d, mtime):
+                provisional.append(d)
+        return sorted(provisional)
 
     def latest_date(self) -> date | None:
         """Return the maximum date partition currently stored, or None if empty."""

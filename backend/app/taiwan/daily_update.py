@@ -14,7 +14,8 @@ Core Design Principles:
         to prevent provider rate limits or system saturation until full-market batch endpoint is available.
   - Partial failure semantics: Reports per-dataset status (success/failed/skipped) and overall_status
     ('success' | 'partial' | 'failed').
-  - Bounded concurrency, idempotency, and 0 rewrite of existing partitions.
+  - Bounded concurrency and idempotency; recent partitions that are half a snapshot or were
+    written on their own trading day are refetched, all other existing partitions are left untouched.
 """
 from __future__ import annotations
 
@@ -307,11 +308,16 @@ class TaiwanDailyUpdateService:
                 d_range = resolve_missing_date_range(d_max, target, self.calendar) if not force else (start_bound, end_bound)
                 if not force and daily_symbols is None:
                     # The missing range starts after the latest stored day, so a recent day
-                    # holding only one exchange would otherwise never be fetched again.
+                    # holding one exchange only, or written before the exchanges finalized it,
+                    # would otherwise never be fetched again.
                     recent = d_dates[-REPAIR_WINDOW_PARTITIONS:]
-                    incomplete = [d for d in sorted(self.daily_store.incomplete_dates(recent)) if d <= target]
-                    if incomplete:
-                        d_range = (incomplete[0], target)
+                    provisional = [d for d in self.daily_store.provisional_dates(recent) if d <= target]
+                    incomplete = [d for d in self.daily_store.incomplete_dates(recent) if d <= target]
+                    if provisional:
+                        logger.info("Refetching provisional daily partitions: %s", ", ".join(map(str, provisional)))
+                    repair_dates = sorted(set(incomplete) | set(provisional))
+                    if repair_dates:
+                        d_range = (repair_dates[0], target)
                 if not d_range and not force:
                     daily_stats.status = "success"
                     daily_stats.dates_skipped = 1
@@ -357,6 +363,13 @@ class TaiwanDailyUpdateService:
         else:
             try:
                 i_range = resolve_missing_date_range(i_max, target, self.calendar) if not force else (start_bound, end_bound)
+                if not force:
+                    provisional = [
+                        d for d in self.inst_store.provisional_dates(i_dates[-REPAIR_WINDOW_PARTITIONS:]) if d <= target
+                    ]
+                    if provisional:
+                        logger.info("Refetching provisional institutional partitions: %s", ", ".join(map(str, provisional)))
+                        i_range = (provisional[0], target)
                 if not i_range and not force:
                     inst_stats.status = "success"
                     inst_stats.dates_skipped = 1
@@ -369,6 +382,9 @@ class TaiwanDailyUpdateService:
                     inst_stats.dates_skipped = res.get("dates_skipped", 0)
                     inst_stats.rows_written = res.get("total_rows_written", 0)
                     inst_stats.failed_dates = res.get("failed_dates", [])
+                    repair_failed = res.get("repair_failed_dates") or []
+                    if repair_failed:
+                        inst_stats.note = "Earlier days not refreshed: " + ", ".join(f["date"] for f in repair_failed)
                     if inst_stats.failed_dates:
                         inst_stats.status = "failed" if inst_stats.dates_fetched == 0 else "partial"
                     else:

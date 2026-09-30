@@ -3200,6 +3200,7 @@ export interface TaiwanEnrichmentRefreshStats {
   dates_skipped: number
   total_rows_written: number
   failed_dates: { date: string; error: string }[]
+  repair_failed_dates?: { date: string; error: string }[]
 }
 
 export interface TaiwanEnrichmentBackfillJobState {

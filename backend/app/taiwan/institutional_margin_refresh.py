@@ -4,7 +4,8 @@ Design:
   - Granularity-aware: Since official TWSE & TPEx feeds provide full-market
     snapshots for each trading day in 1 HTTP call per exchange, the refresh
     service operates at the trading-day level.
-  - Resume-capable: Inspects persisted store dates and skips dates already complete.
+  - Resume-capable: Inspects persisted store dates and skips finalized ones; institutional
+    days written on the trading day itself are refetched (margin days are still skipped).
   - Calendar-aware: Skips weekends and confirmed market holidays.
   - Rate-limit friendly: Bounded timeout and retry policy.
 """
@@ -139,14 +140,29 @@ class TaiwanInstitutionalRefreshService:
 
         on_progress, when given, is called with (current_date, day_index) for every
         trading day visited (day_index starts at 1), before that day is fetched or skipped.
+
+        Stored days still provisional are refetched. Without force, a day up to the
+        latest stored one is never written from a single exchange: a stored day where
+        either exchange returns no rows, or a gap day where only one does, is listed
+        in repair_failed_dates and left as it was, so a stored day stays provisional.
+        A gap day with no rows from either exchange is only skipped. A failure on any
+        such day is listed there too, since moving on opens no new gap. Failures on
+        later days, and every failure under force, go to failed_dates. Under force a
+        stored provisional day with no rows from either exchange is also listed in
+        repair_failed_dates, and a single-exchange result is written as before.
         """
-        available = set(self._store.available_dates()) if not force else set()
+        stored = self._store.available_dates()
+        latest_stored = max(stored, default=None)
+        stored_set = set(stored)
+        repairs = set(self._store.provisional_dates(sorted(d for d in stored if start_date <= d <= end_date)))
+        available = set(stored) - repairs if not force else set()
         stats = {
             "dates_requested": 0,
             "dates_fetched": 0,
             "dates_skipped": 0,
             "total_rows_written": 0,
             "failed_dates": [],
+            "repair_failed_dates": [],
         }
 
         cur = start_date
@@ -187,7 +203,14 @@ class TaiwanInstitutionalRefreshService:
                     self._provider.tpex.build_url(cur),
                 )
                 all_flows = flows_twse + flows_tpex
-                if all_flows:
+                within_stored = not force and latest_stored is not None and cur <= latest_stored
+                one_sided = within_stored and not (flows_twse and flows_tpex) and (cur in stored_set or bool(all_flows))
+                if one_sided:
+                    # Writing half a day would move the mtime and leave the other exchange missing or frozen.
+                    missing = "TWSE and TPEx" if not all_flows else ("TWSE" if not flows_twse else "TPEx")
+                    stats["dates_skipped"] += 1
+                    stats["repair_failed_dates"].append({"date": str(cur), "error": f"no {missing} rows"})
+                elif all_flows:
                     rows = [
                         {
                             "symbol": f.symbol,
@@ -222,9 +245,13 @@ class TaiwanInstitutionalRefreshService:
                     stats["dates_fetched"] += 1
                 else:
                     stats["dates_skipped"] += 1
+                    if cur in repairs:
+                        stats["repair_failed_dates"].append({"date": str(cur), "error": "no rows"})
             except Exception as exc:
                 logger.warning("Institutional refresh failed for %s: %s", cur, exc)
-                stats["failed_dates"].append({"date": str(cur), "error": str(exc)})
+                failure = {"date": str(cur), "error": str(exc)}
+                past_gap = latest_stored is not None and cur <= latest_stored
+                stats["repair_failed_dates" if past_gap and not force else "failed_dates"].append(failure)
 
             cur += timedelta(days=1)
 

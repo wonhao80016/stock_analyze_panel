@@ -43,7 +43,7 @@ def _count_throttled(stats: dict[str, Any]) -> int:
     """How many failed days were the exchange throttling us rather than real errors."""
     return sum(
         1
-        for item in stats.get("failed_dates") or []
+        for item in (stats.get("failed_dates") or []) + (stats.get("repair_failed_dates") or [])
         if any(marker in str(item) for marker in _THROTTLE_MARKERS)
     )
 
@@ -257,7 +257,7 @@ class TaiwanEnrichmentBackfillService:
             result = {"institutional": inst_stats, "margin": margin_stats}
             message = (
                 f"回補完成。三大法人: 成功 {inst_stats['dates_fetched']} / "
-                f"跳過 {inst_stats['dates_skipped']} / 失敗 {len(inst_stats['failed_dates'])}；"
+                f"跳過 {inst_stats['dates_skipped']} / 失敗 {len(inst_stats['failed_dates']) + len(inst_stats.get('repair_failed_dates', []))}；"
                 f"融資融券: 成功 {margin_stats['dates_fetched']} / "
                 f"跳過 {margin_stats['dates_skipped']} / 失敗 {len(margin_stats['failed_dates'])}。"
             )

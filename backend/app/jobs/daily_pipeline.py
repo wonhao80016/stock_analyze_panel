@@ -158,6 +158,8 @@ def start_scheduler() -> AsyncIOScheduler:
             )
             if result.daily.note:
                 logger.info("Scheduled Taiwan update (%s) daily note: %s", label, result.daily.note)
+            if result.institutional.note:
+                logger.info("Scheduled Taiwan update (%s) institutional note: %s", label, result.institutional.note)
         except Exception as e:
             logger.exception("Scheduled Taiwan update (%s) job failed: %s", label, e)
             return
@@ -193,8 +195,9 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # 21:40 — 融資融券 (公布較晚)。同時補跑日線與法人, 讓 16:30 那班若失敗
-    # 或當時尚未公布仍有第二次機會; 已落盤的日期會被 refresh 略過, 不重複下載。
+    # 21:40 - margin, which the exchange publishes later. Daily bars and institutional flows run
+    # again so a failed or early 16:30 run gets a second chance: days stored on their own trading
+    # day are provisional and refetched here, other stored days are skipped.
     scheduler.add_job(
         _scheduled_taiwan_update,
         trigger=CronTrigger(day_of_week="mon-fri", hour=21, minute=40, timezone="Asia/Taipei"),

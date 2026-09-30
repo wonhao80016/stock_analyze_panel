@@ -115,7 +115,7 @@ class TaiwanDailyRefreshService:
     - Trading-day-aware: weekends and known holidays do not cause re-fetches
     - Incremental: only fetches missing trading-date ranges, not whole history
     - Bounded concurrency (default 5) to respect provider rate limits
-    - Resume-capable: already-persisted symbols/dates are skipped
+    - Resume-capable: complete, finalized dates are skipped; half-snapshot and same-day-written dates are refetched
     """
 
     def __init__(
@@ -149,7 +149,8 @@ class TaiwanDailyRefreshService:
         """
         stored = self._store.available_dates()
         latest_stored = max(stored, default=None)
-        repairs = set(self._store.incomplete_dates(sorted(d for d in stored if start_date <= d <= end_date)))
+        in_range = sorted(d for d in stored if start_date <= d <= end_date)
+        repairs = set(self._store.incomplete_dates(in_range)) | set(self._store.provisional_dates(in_range))
         available = set(stored) - repairs if not force else set()
         stats: dict[str, Any] = {
             "dates_requested": 0,

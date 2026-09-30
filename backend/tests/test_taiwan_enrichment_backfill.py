@@ -13,16 +13,19 @@ Covers:
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
+import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
 from app.taiwan.enrichment_backfill import (
     TaiwanEnrichmentBackfillService,
+    _count_throttled,
     get_enrichment_status,
 )
 from app.taiwan.institutional_margin_refresh import (
@@ -31,7 +34,7 @@ from app.taiwan.institutional_margin_refresh import (
 )
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
-from app.taiwan.realtime.calendar import TaiwanTradingCalendar
+from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar
 
 
 def _wait_for_job(svc: TaiwanEnrichmentBackfillService, job_id: str, timeout: float = 5.0):
@@ -264,6 +267,27 @@ class TestBackfillJobLifecycle:
         assert len(failed) == 1
         assert failed[0]["date"] == str(end_date)
         assert job.result["institutional"]["dates_fetched"] == total_days - 1
+
+    def test_failed_repairs_of_stored_days_are_counted_in_the_completion_message(self, tmp_path: Path):
+        range_probe = _make_service(tmp_path / "probe")
+        _, end_date, _ = range_probe._resolve_backfill_range(2)
+
+        svc = _make_service(tmp_path / "scenario", inst_provider=_StubInstitutionalProvider(raise_on={end_date}))
+        store = svc.inst_service._store
+        store.write_batch(pl.DataFrame([{"symbol": "2330.TWSE", "date": end_date, "foreign_net": 1}]))
+        written = datetime(end_date.year, end_date.month, end_date.day, 16, 30, tzinfo=TAIPEI_TZ).timestamp()
+        os.utime(tmp_path / "scenario" / "institutional" / f"date={end_date.isoformat()}" / "part.parquet", (written, written))
+        job = _wait_for_job(svc, svc.start_backfill(days=2))
+
+        assert job is not None
+        assert job.status == "success"
+        assert job.result["institutional"]["failed_dates"] == []
+        assert [f["date"] for f in job.result["institutional"]["repair_failed_dates"]] == [str(end_date)]
+        assert "失敗 1；" in job.message  # noqa: RUF001
+
+    def test_throttled_repairs_are_reported_as_throttled(self):
+        stats = {"failed_dates": [], "repair_failed_dates": [{"date": "2026-09-23", "error": "HTTP Error 307: redirect"}]}
+        assert _count_throttled(stats) == 1
 
 
 # =====================================================================

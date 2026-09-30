@@ -14,7 +14,7 @@ import os
 import tempfile
 import threading
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,7 @@ from app.taiwan.providers.base import (
     VolumeUnit,
 )
 from app.taiwan.providers.normalizer import normalize_taiwan_daily
+from app.taiwan.realtime.calendar import TAIPEI_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,16 @@ DEFAULT_TAIWAN_METADATA = SourceMetadata(
 
 # How many of the newest stored days a daily run checks for repair, about four weeks.
 REPAIR_WINDOW_PARTITIONS = 20
+
+
+def is_provisional_mtime(d: date, mtime: float) -> bool:
+    """Whether a partition for trading day *d* written at *mtime* may hold pre-final figures.
+
+    The exchanges revise a day's volume, amount and institutional flows after the
+    evening publication, so a partition last written on day *d* itself (Taipei time)
+    is provisional until it is rewritten on a later day.
+    """
+    return datetime.fromtimestamp(mtime, TAIPEI_TZ).date() <= d
 
 
 class TaiwanDailyStore:
@@ -307,6 +318,15 @@ class TaiwanDailyStore:
             return (self._data_dir / f"date={d.isoformat()}" / "part.parquet").stat().st_mtime
         except OSError:
             return None
+
+    def provisional_dates(self, dates: list[date]) -> list[date]:
+        """Return the stored dates among *dates* whose partition was last written on the day itself."""
+        provisional: list[date] = []
+        for d in dates:
+            mtime = self.partition_mtime(d)
+            if mtime is not None and is_provisional_mtime(d, mtime):
+                provisional.append(d)
+        return sorted(provisional)
 
     def latest_date(self) -> date | None:
         """Return the most recent partition date, or *None* if empty."""

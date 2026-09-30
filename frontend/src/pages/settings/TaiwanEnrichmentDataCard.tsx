@@ -14,6 +14,7 @@ import {
   api,
   type TaiwanEnrichmentStatus,
   type TaiwanEnrichmentBackfillJobState,
+  type TaiwanEnrichmentRefreshStats,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -27,6 +28,10 @@ const RANGE_OPTIONS = [
 const DATASET_LABEL: Record<string, string> = {
   institutional: '三大法人',
   margin: '融資融券',
+}
+
+function failuresOf(stats: TaiwanEnrichmentRefreshStats | undefined) {
+  return [...(stats?.failed_dates ?? []), ...(stats?.repair_failed_dates ?? [])]
 }
 
 function DatasetStatusTile({
@@ -280,17 +285,17 @@ export function TaiwanEnrichmentDataCard() {
                     <span>{DATASET_LABEL[key]}</span>
                     <span className="font-mono">
                       成功 {stats.dates_fetched} · 跳過 {stats.dates_skipped} · 失敗{' '}
-                      <span className={stats.failed_dates.length > 0 ? 'text-danger' : undefined}>
-                        {stats.failed_dates.length}
+                      <span className={failuresOf(stats).length > 0 ? 'text-danger' : undefined}>
+                        {failuresOf(stats).length}
                       </span>
                     </span>
                   </div>
                 )
               })}
-              {(['institutional', 'margin'] as const).some(key => result[key]?.failed_dates.length) && (
+              {(['institutional', 'margin'] as const).some(key => failuresOf(result[key]).length) && (
                 <div className="pt-1 border-t border-border/40 space-y-1">
                   {(['institutional', 'margin'] as const).map(key =>
-                    result[key]?.failed_dates.map(fd => (
+                    failuresOf(result[key]).map(fd => (
                       <div key={`${key}-${fd.date}`} className="flex items-center gap-1.5 text-danger">
                         <XCircle className="h-3 w-3 shrink-0" />
                         <span className="font-mono">{DATASET_LABEL[key]} {fd.date}</span>
@@ -305,7 +310,7 @@ export function TaiwanEnrichmentDataCard() {
 
           <div className="flex items-center gap-1.5 text-[11px] text-muted pt-2 border-t border-border/40">
             <Calendar className="h-3 w-3" />
-            回補範圍依台股交易日曆自動往回推算，已存在的日期會自動跳過，不會重複下載。
+            回補範圍依台股交易日曆自動往回推算。已存在的日期會自動跳過；當天盤後寫入、可能還是初值的三大法人日期會重新下載，以取得定版數字。
           </div>
         </div>
       )}
