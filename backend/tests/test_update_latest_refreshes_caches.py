@@ -34,6 +34,17 @@ def test_new_trading_days_refresh_both_caches():
     assert result["caches_refreshed"] is True
 
 
+def test_a_publish_without_new_days_refreshes_both_caches():
+    """Indicators caught up for bars fetched earlier must reach the panels too."""
+    result, enriched, strategy = _run({
+        "ok": True, "already_current": True, "message": "本地資料已是最新",
+        "dates_fetched": 0, "enriched_published": True,
+    })
+    assert enriched.call_count == 1
+    assert strategy.call_count == 1
+    assert result["caches_refreshed"] is True
+
+
 def test_nothing_fetched_leaves_the_caches_alone():
     """Recomputing every strategy over an unchanged store is pure cost."""
     result, enriched, strategy = _run(

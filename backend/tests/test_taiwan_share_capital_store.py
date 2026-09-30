@@ -193,11 +193,12 @@ def test_the_daily_update_refreshes_share_capital_before_publishing():
     import inspect
     import re
 
-    from app.taiwan.daily_update import TaiwanDailyUpdateService
+    from app.taiwan import daily_update
 
-    src = inspect.getsource(TaiwanDailyUpdateService.run_update)
+    assert "publish_enriched(" in inspect.getsource(daily_update.TaiwanDailyUpdateService.run_update)
+    src = inspect.getsource(daily_update.publish_enriched)
     capital = re.search(r"TaiwanShareCapitalStore\(\)\.refresh\(\)", src)
-    publish = re.search(r"TaiwanEnrichedRefreshService\(\)\.refresh_recent\(\)", src)
+    publish = re.search(r"TaiwanEnrichedRefreshService\([^)]*\)\.refresh_recent\(\)", src)
     assert capital and publish, "both steps must run in the daily update"
     assert capital.start() < publish.start()
 

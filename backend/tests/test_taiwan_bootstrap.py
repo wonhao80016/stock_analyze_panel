@@ -335,6 +335,57 @@ def test_update_to_latest_names_the_failed_day_after_a_partial_update(tmp_path: 
     assert "2024-01-04" in res["message"]
 
 
+def _service_with_publish(tmp_path: Path, refresh_result: dict):
+    daily_dir = tmp_path / "taiwan" / "daily"
+    _create_dummy_parquet(daily_dir / "date=2024-01-02" / "part.parquet")
+    mock_refresh = MagicMock()
+    mock_refresh.refresh_dates.return_value = refresh_result
+    calls: list[bool] = []
+    svc = TaiwanBootstrapService(
+        store=TaiwanDailyStore(data_dir=daily_dir),
+        refresh_service=mock_refresh,
+        publish=lambda only_if_behind: calls.append(only_if_behind) or True,
+    )
+    return svc, calls
+
+
+def test_update_to_latest_publishes_the_days_it_fetched(tmp_path: Path):
+    """Screening reads its basis day from the bars, so bars without indicators empty every strategy."""
+    svc, calls = _service_with_publish(tmp_path, {"dates_fetched": 1})
+
+    res = svc.update_to_latest()
+
+    assert calls == [False]
+    assert res["enriched_published"] is True
+
+
+def test_update_to_latest_catches_up_a_lagging_enriched_table_when_current(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
+    svc, calls = _service_with_publish(tmp_path, {"dates_fetched": 0})
+
+    res = svc.update_to_latest()
+
+    assert res["already_current"] is True
+    assert calls == [True]
+    assert res["enriched_published"] is True
+
+
+def test_an_injected_store_never_publishes_into_the_configured_enriched_table(tmp_path: Path, monkeypatch):
+    """The enriched table belongs to the default store; a test or custom store must not overwrite it."""
+    published = MagicMock(return_value=True)
+    monkeypatch.setattr("app.taiwan.bootstrap.publish_enriched", published)
+    daily_dir = tmp_path / "taiwan" / "daily"
+    _create_dummy_parquet(daily_dir / "date=2024-01-02" / "part.parquet")
+    mock_refresh = MagicMock()
+    mock_refresh.refresh_dates.return_value = {"dates_fetched": 1}
+    svc = TaiwanBootstrapService(store=TaiwanDailyStore(data_dir=daily_dir), refresh_service=mock_refresh)
+
+    res = svc.update_to_latest()
+
+    published.assert_not_called()
+    assert res["enriched_published"] is False
+
+
 def test_taiwan_bootstrap_api_endpoints(monkeypatch):
     from starlette.testclient import TestClient
     from app.main import app

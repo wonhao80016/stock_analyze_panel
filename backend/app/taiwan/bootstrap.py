@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from app.config import temp_root
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
-from app.taiwan.daily_update import resolve_target_latest_trading_date
+from app.taiwan.daily_update import publish_enriched, resolve_target_latest_trading_date
 from app.taiwan.data_root import taiwan_data_root
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,10 @@ def locate_taiwan_in_extracted(extract_dir: Path) -> Path:
     raise ValueError(f"Could not locate taiwan data directory in {extract_dir}")
 
 
+def _publish_default(only_if_behind: bool) -> bool:
+    return publish_enriched(only_if_behind=only_if_behind)
+
+
 class TaiwanBootstrapService:
     """Orchestrates bootstrap download, checksum, extraction, and sync."""
 
@@ -188,11 +192,15 @@ class TaiwanBootstrapService:
         expected_sha256: str = EXPECTED_SHA256,
         store: TaiwanDailyStore | None = None,
         refresh_service: TaiwanDailyRefreshService | None = None,
+        publish: Callable[[bool], bool] | None = None,
     ) -> None:
         self.download_url = download_url
         self.expected_sha256 = expected_sha256.lower()
         self.store = store or TaiwanDailyStore()
         self.refresh_service = refresh_service or TaiwanDailyRefreshService(store=self.store)
+        # The configured enriched table belongs to the default store; an injected store
+        # must not publish into it unless the caller supplies a publisher.
+        self._publish = publish or (_publish_default if store is None else (lambda _only_if_behind: False))
 
     def start_bootstrap(self, force: bool = False) -> str:
         """Start bootstrap process in a background thread."""
@@ -437,11 +445,13 @@ class TaiwanBootstrapService:
         target = resolve_target_latest_trading_date()
 
         if latest >= target:
+            published = self._publish(True)
             return {
                 "ok": True,
                 "already_current": True,
-                "message": f"本地資料已是最新 ({latest})",
+                "message": f"本地資料已是最新 ({latest})" + (", 已補算技術指標" if published else ""),
                 "dates_fetched": 0,
+                "enriched_published": published,
             }
 
         start = latest + timedelta(days=1)
@@ -450,6 +460,8 @@ class TaiwanBootstrapService:
         failed = res.get("failed_dates") or []
         if failed and not fetched:
             raise RuntimeError(f"{failed[0]['date']} 行情抓取失敗: {failed[0]['error']}")
+        # Screening takes its basis day from these bars, so their indicators must be published too.
+        published = self._publish(not fetched)
         message = f"成功更新 {fetched} 個交易日 (最新至 {target})"
         if failed:
             message = f"已更新 {fetched} 個交易日, {failed[0]['date']} 行情抓取失敗, 請稍後再試"
@@ -458,6 +470,7 @@ class TaiwanBootstrapService:
             "already_current": False,
             "message": message,
             "dates_fetched": fetched,
+            "enriched_published": published,
             "stats": res,
         }
 

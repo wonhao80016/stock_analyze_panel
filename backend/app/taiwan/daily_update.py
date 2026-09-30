@@ -147,6 +147,31 @@ def resolve_missing_date_range(
     return cur, target_latest
 
 
+def publish_enriched(daily_store: TaiwanDailyStore | None = None, *, only_if_behind: bool = False) -> bool:
+    """Refresh issued shares, then republish the enriched table the engines read.
+
+    Returns whether a publish ran. With only_if_behind it runs only when a recent
+    day's enriched partition is missing or older than its bars.
+    """
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+
+    if only_if_behind and TaiwanEnrichedRefreshService(daily_store=daily_store).stale_since() is None:
+        return False
+    # Issued shares first: the enriched publish reads them as the turnover
+    # denominator, so refreshing afterwards would leave today's partition
+    # priced by yesterday's share counts until the next run.
+    try:
+        TaiwanShareCapitalStore().refresh()
+    except Exception as e:
+        logger.warning("Taiwan share capital refresh failed: %s", e)
+    try:
+        TaiwanEnrichedRefreshService(daily_store=daily_store).refresh_recent()
+    except Exception as e:
+        logger.warning("Taiwan enriched publish failed: %s", e)
+    return True
+
+
 class TaiwanDailyUpdateService:
     """Orchestrator for daily incremental updates of Taiwan market datasets."""
 
@@ -385,22 +410,7 @@ class TaiwanDailyUpdateService:
         # 4b. Publish indicators and signals for the engines that read the enriched table.
         # A partial run never stores a day past a failed new day, so the stored days have no gap to publish across.
         if refresh_daily and daily_stats.status in {"success", "skipped", "partial"}:
-            # Issued shares first: the enriched publish reads them as the turnover
-            # denominator, so refreshing afterwards would leave today's partition
-            # priced by yesterday's share counts until the next run.
-            try:
-                from app.taiwan.share_capital_store import TaiwanShareCapitalStore
-
-                TaiwanShareCapitalStore().refresh()
-            except Exception as e:
-                logger.warning("Taiwan share capital refresh failed: %s", e)
-
-            try:
-                from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
-
-                TaiwanEnrichedRefreshService().refresh_recent()
-            except Exception as e:
-                logger.warning("Taiwan enriched publish failed: %s", e)
+            publish_enriched(self.daily_store)
 
         # 5. Evaluate Freshness and Overall Status
         run_finish = taipei_now()

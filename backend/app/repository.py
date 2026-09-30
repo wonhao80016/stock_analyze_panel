@@ -1420,11 +1420,20 @@ class KlineRepository:
         for the live quote path and advances on a single realtime tick. Anything
         scanning the whole market must use this instead: a nine-symbol realtime
         write would otherwise make an unfinished day look like a complete one.
+
+        A day whose bars are stored but not yet published to the enriched table
+        has no indicators to screen, so the latest published day before it is used.
         """
         from app.taiwan.daily_store import TaiwanDailyStore
 
         dates = TaiwanDailyStore().available_dates()
-        return dates[-1] if dates else None
+        if not dates:
+            return None
+        enriched = Path(self.store.data_dir) / "kline_daily_enriched"
+        for d in reversed(dates):
+            if (enriched / f"date={d.isoformat()}" / "part.parquet").exists():
+                return d
+        return dates[-1]
 
     # ================================================================
     # 热路径: Polars 查询 (Chart / Screener / Signals / Intraday)

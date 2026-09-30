@@ -191,21 +191,26 @@ class TaiwanEnrichedRefreshService:
     def refresh_recent(self, days: int = 5) -> int:
         """Republish the newest partitions, for the daily update job.
 
-        Reaches back to the earliest recent day whose bars were rewritten after its
-        enriched partition, or that has no enriched partition, and republishes from
-        there: every later day was computed from the old bars.
+        Starts at stale_since() instead when that is earlier: every day from there
+        on was published before its current bars, or not at all.
         """
         available = sorted(self.daily_store.available_dates())
         if not available:
             return 0
         start = available[-days:][0]
-        for d in available[-REPAIR_WINDOW_PARTITIONS:]:
-            if d >= start:
-                break
-            if self._published_before_bars(d):
-                start = d
-                break
+        stale = self.stale_since(available)
+        if stale is not None and stale < start:
+            start = stale
         return self.refresh(start=start, end=available[-1])
+
+    def stale_since(self, available: list[date] | None = None) -> date | None:
+        """Earliest recent day whose enriched partition is missing or older than its bars."""
+        if available is None:
+            available = sorted(self.daily_store.available_dates())
+        for d in available[-REPAIR_WINDOW_PARTITIONS:]:
+            if self._published_before_bars(d):
+                return d
+        return None
 
     def _published_before_bars(self, d: date) -> bool:
         bars_written = self.daily_store.partition_mtime(d)

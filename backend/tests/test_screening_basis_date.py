@@ -50,6 +50,32 @@ def test_official_latest_date_ignores_days_the_exchange_has_not_published(tmp_di
     assert store.latest_date() == published
 
 
+def _publish_enriched_partition(data_dir: Path, d: date) -> None:
+    partition = data_dir / "kline_daily_enriched" / f"date={d.isoformat()}"
+    partition.mkdir(parents=True)
+    (partition / "part.parquet").write_bytes(b"")
+
+
+def test_official_latest_date_skips_a_day_whose_indicators_are_not_published(tmp_dir, monkeypatch):
+    """Bars stored without an enriched partition leave nothing to screen, so every strategy came back empty."""
+    from types import SimpleNamespace
+
+    from app.config import settings
+    from app.repository import KlineRepository
+
+    monkeypatch.setattr(settings, "data_dir", tmp_dir)
+    store = TaiwanDailyStore()
+    for d in (date(2026, 9, 23), date(2026, 9, 24)):
+        store.write_batch(_official_rows(d, ["2330.TWSE"]))
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_dir))
+
+    assert KlineRepository.taiwan_official_latest_date(repo) == date(2026, 9, 24)
+    _publish_enriched_partition(tmp_dir, date(2026, 9, 23))
+    assert KlineRepository.taiwan_official_latest_date(repo) == date(2026, 9, 23)
+    _publish_enriched_partition(tmp_dir, date(2026, 9, 24))
+    assert KlineRepository.taiwan_official_latest_date(repo) == date(2026, 9, 24)
+
+
 def test_screener_basis_date_is_official_not_live_cache():
     repo = MagicMock()
     today = date(2026, 9, 18)

@@ -49,6 +49,17 @@ def _published_service(tmp_path) -> TaiwanEnrichedRefreshService:
     return TaiwanEnrichedRefreshService(daily_store=daily, enriched_root=root, share_capital=MagicMock())
 
 
+def test_nothing_is_stale_right_after_a_publish(tmp_path):
+    assert _published_service(tmp_path).stale_since() is None
+
+
+def test_a_day_without_an_enriched_partition_is_stale(tmp_path):
+    """Bars fetched by the settings button reached screening before any enriched partition existed."""
+    service = _published_service(tmp_path)
+    (tmp_path / "enriched" / "date=2026-09-23" / "part.parquet").unlink()
+    assert service.stale_since() == date(2026, 9, 23)
+
+
 def test_refresh_recent_keeps_to_the_newest_days_when_nothing_older_changed(tmp_path):
     service = _published_service(tmp_path)
     with patch.object(service, "refresh", return_value=0) as refresh:

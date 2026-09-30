@@ -144,12 +144,12 @@ def update_taiwan_history_to_latest():
         logger.exception("Update to latest failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"更新至最新交易日失敗: {exc}") from exc
 
-    # New bars on disk are invisible to a running process: the repo caches and the
+    # New bars or indicators on disk are invisible to a running process: the repo caches and the
     # strategy picks file are both built once and never reread. The post-close job
     # refreshes them; doing it here too is what makes this button update the panel
     # rather than only the store behind it. Both helpers log and swallow their own
     # failures, so a refresh problem cannot undo a fetch that succeeded.
-    if result.get("dates_fetched"):
+    if result.get("dates_fetched") or result.get("enriched_published"):
         from app.jobs.daily_pipeline import refresh_enriched_cache, refresh_strategy_cache
 
         refresh_enriched_cache("manual update-latest")
