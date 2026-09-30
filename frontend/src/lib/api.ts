@@ -1061,13 +1061,19 @@ export interface MarketBreadthStats {
   turnover: number
 }
 
-export interface InstitutionalMarketAggregate {
+// Net buy amounts in TWD from the exchanges' official summaries; null when the day has none.
+export interface InstitutionalNetAmounts {
+  foreign_net_amount: number | null
+  investment_trust_net_amount: number | null
+  dealer_net_amount: number | null
+  total_net_amount: number | null
+  has_discrepancy: boolean
+}
+
+export interface InstitutionalMarketAggregate extends InstitutionalNetAmounts {
   trade_date: string | null
-  row_count: number
-  foreign_net: number | null
-  investment_trust_net: number | null
-  dealer_net: number | null
-  total_net: number | null
+  twse: InstitutionalNetAmounts | null
+  tpex: InstitutionalNetAmounts | null
   status: 'current' | 'stale' | 'unavailable'
 }
 
@@ -1222,7 +1228,7 @@ export interface TaiwanStockResearchContext {
     upper_limit_count: number
     lower_limit_count: number
     exchange_turnover: number | null
-    institutional_market_net: number | null
+    institutional_market_net_amount: number | null
     margin_market_change: number | null
     status: string
     meta: EvidenceMeta

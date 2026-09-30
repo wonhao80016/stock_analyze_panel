@@ -64,7 +64,7 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:momentum_10d', source: { type: 'builtin', key: 'momentum_10d' }, label: '10D 動量', visible: false, align: 'center' },
   { id: 'builtin:momentum_20d', source: { type: 'builtin', key: 'momentum_20d' }, label: '20D 動量', visible: false, align: 'center' },
   { id: 'builtin:momentum_30d', source: { type: 'builtin', key: 'momentum_30d' }, label: '30D 動量', visible: false, align: 'center' },
-  { id: 'builtin:momentum_60d', source: { type: 'builtin', key: 'momentum' }, label: '60D 動量', visible: false, align: 'center' },
+  { id: 'builtin:momentum_60d', source: { type: 'builtin', key: 'momentum_60d' }, label: '60D 動量', visible: false, align: 'center' },
   // 連續漲停/跌停 — Phase 8C-C: 後端欄位語意為「連續漲停/跌停天數」
   // (consecutive_limit_ups/downs，見 backend/app/indicators/pipeline.py「連板數/連跌數」)，
   // 對台股永久空值、無產品意義，預設不在台股場景顯示；仍保留註冊表定義供

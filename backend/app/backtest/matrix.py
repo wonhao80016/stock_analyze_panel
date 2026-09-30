@@ -51,7 +51,7 @@ except ImportError:
 
     prange = range
 
-_MATRIX_CACHE_VERSION = 1
+_MATRIX_CACHE_VERSION = 2
 _DIRECT_MATRIX_LOADER_VERSION = 5
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
@@ -3962,6 +3962,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         out = np.full(market.shape, np.nan, dtype=np.float32)
         np.divide(average_gain, denominator, out=out, where=np.isfinite(denominator))
         out = np.float32(100.0) - np.float32(100.0) / (np.float32(1.0) + out)
+        out[np.cumsum(np.isfinite(delta), axis=0) < window] = np.nan
         return out
     if name == "gap_return":
         return _matrix_relative(market.open, valid_shift(market.close, 1, close_valid))

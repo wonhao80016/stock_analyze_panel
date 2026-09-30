@@ -14,7 +14,7 @@ Verifies:
     * 8069.TPEX (TPEx ordinary stock, 10% limit with standard tick tiers)
 - Unit preservation:
     * Turnover in TWD
-    * Institutional net in shares
+    * Institutional net amounts in TWD (see test_taiwan_market_institutional.py)
     * Margin balance in shares
 - Aggregate margin ratio:
     * sum(short) / sum(margin) * 100 (never average of ratios)

@@ -5,7 +5,7 @@ POST /api/taiwan/screener/run
 Architecture:
   TaiwanSecurityMaster (Universe)
   -> TaiwanDailyStore.read_latest_per_symbol() (Batch daily snapshot)
-  -> TaiwanDailyStore.read_range() for batch indicators (MA5/10/20, RSI14, Momentum5d, VolRatio5d)
+  -> Published enriched partition for indicators (MA5/10/20, RSI14, Momentum5d, VolRatio5d, change_pct)
   -> Batch MarketProfile price limits (calc_limits_for_pct with tick size)
   -> Batch Institutional & Margin joins
   -> Strongly typed Pydantic filters (whitelist)
@@ -27,6 +27,7 @@ import polars as pl
 from pydantic import BaseModel, Field
 
 from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.enriched_reader import read_enriched_partition
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_rules import PriceLimitModel
@@ -46,6 +47,8 @@ SortField = Literal[
     "margin_balance_change", "short_balance", "short_margin_ratio",
 ]
 SortDir = Literal["asc", "desc"]
+
+_INDICATOR_COLUMNS = ["change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"]
 
 
 class TaiwanScreenerRequest(BaseModel):
@@ -214,15 +217,15 @@ class TaiwanScreenerService:
 
         daily_as_of = str(latest_daily["date"].max()) if not latest_daily.is_empty() else None
 
-        # Step 3: Compute batch indicators (needs up to 30 trading days of history)
-        df_indicators = self._compute_batch_indicators(valid_symbols)
+        # Indicators come from the published enriched partition, never recomputed here.
+        df_indicators = read_enriched_partition(daily_as_of, _INDICATOR_COLUMNS, valid_symbols)
 
         # Step 4: Join Universe + Latest Daily + Indicators
         combined = universe_df.join(latest_daily, on="symbol", how="inner")
-        if not df_indicators.is_empty():
+        if df_indicators is not None:
             combined = combined.join(df_indicators, on="symbol", how="left")
         else:
-            combined = self._add_null_cols(combined, ["change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"])
+            combined = self._add_null_cols(combined, _INDICATOR_COLUMNS)
 
         # Built-in signals, as published by TaiwanEnrichedRefreshService.
         combined = self._join_signals(combined, daily_as_of)
@@ -232,6 +235,8 @@ class TaiwanScreenerService:
 
         # Step 6: Batch Join Institutional & Margin
         combined, inst_date, margin_date, degraded = self._join_institutional_margin(combined, valid_symbols)
+        if df_indicators is None:
+            degraded = ["indicators", *degraded]
 
         # Step 7: Apply Strongly Typed Filters
         filtered = self._apply_filters(combined, req)
@@ -285,49 +290,6 @@ class TaiwanScreenerService:
             df = df.filter(pl.col("instrument_type") == "etf")
 
         return df.select(["symbol", "name", "exchange", "instrument_type", "industry"]).unique(subset=["symbol"])
-
-    def _compute_batch_indicators(self, symbols: list[str]) -> pl.DataFrame:
-        """Compute rolling indicators from past daily store records in a single batch."""
-        available_dates = self.daily_store.available_dates()
-        if len(available_dates) < 2:
-            return pl.DataFrame()
-
-        # Look back up to 35 available partition dates
-        start_d = available_dates[max(0, len(available_dates) - 35)]
-        end_d = available_dates[-1]
-
-        hist = self.daily_store.read_range(symbols, start_d, end_d)
-        if hist.is_empty():
-            return pl.DataFrame()
-
-        # Sort symbol ASC, date ASC
-        hist = hist.sort(["symbol", "date"])
-
-        # Compute per-symbol metrics using Polars window functions
-        hist = hist.with_columns([
-            (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("change_pct"),
-            pl.col("close").rolling_mean(5).over("symbol").alias("ma5"),
-            pl.col("close").rolling_mean(10).over("symbol").alias("ma10"),
-            pl.col("close").rolling_mean(20).over("symbol").alias("ma20"),
-            (pl.col("close") / pl.col("close").shift(5).over("symbol") - 1.0).alias("momentum_5d"),
-            (pl.col("volume") / pl.col("volume").rolling_mean(5).over("symbol")).alias("vol_ratio_5d"),
-        ])
-
-        # RSI 14 computation
-        diff = pl.col("close").diff().over("symbol")
-        gain = pl.when(diff > 0).then(diff).otherwise(0.0).rolling_mean(14).over("symbol")
-        loss = pl.when(diff < 0).then(-diff).otherwise(0.0).rolling_mean(14).over("symbol")
-        rs = gain / pl.when(loss == 0).then(0.00001).otherwise(loss)
-        rsi = (100.0 - (100.0 / (1.0 + rs))).alias("rsi_14")
-        hist = hist.with_columns(rsi)
-
-        # Keep only the latest row per symbol
-        latest_inds = (
-            hist.with_columns(pl.col("date").max().over("symbol").alias("_max_d"))
-            .filter(pl.col("date") == pl.col("_max_d"))
-            .select(["symbol", "change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"])
-        )
-        return latest_inds
 
     def _enrich_price_limits(self, df: pl.DataFrame) -> pl.DataFrame:
         """Enrich with tick-size aware price limits and distance metrics."""

@@ -455,9 +455,9 @@ def watchlist_enriched(
             logger.warning("taiwan watchlist enrichment failed: %s", e)
             taiwan_rows = [{"symbol": s, "asset_type": "stock"} for s in taiwan_symbols]
 
-    # 合并 + 补齐字段: 两条路径产出的字典 key 集合不同 (Taiwan 没有技术指标列),
-    # 统一补 None 而非让 key 缺失, 遵循"缺数据回 null 不是假造"的既有口径。
-    expected_cols = _WATCHLIST_COLS + ["name", "float_shares", "asset_type", "live_date"] + ext_col_names
+    # The two paths emit different key sets; fill the gaps with None so a missing
+    # value is null rather than an absent key.
+    expected_cols = _WATCHLIST_COLS + ["name", "float_shares", "asset_type", "live_date", "indicator_date"] + ext_col_names
     all_rows = legacy_rows + taiwan_rows
     for row in all_rows:
         for col in expected_cols:

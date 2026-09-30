@@ -36,6 +36,7 @@ from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
     resolve_target_latest_trading_date,
 )
+from app.taiwan.enriched_reader import read_enriched_partition
 from app.taiwan.etf_data import TaiwanETFProfile, TaiwanETFSnapshot
 from app.taiwan.fundamentals import FundamentalRecord, TaiwanFundamentalStore, latest_as_of
 from app.taiwan.industry_intelligence import (
@@ -95,7 +96,7 @@ class MarketContextEvidence(BaseModel):
     upper_limit_count: int
     lower_limit_count: int
     exchange_turnover: float | None = None
-    institutional_market_net: float | None = None
+    institutional_market_net_amount: int | None = None  # TWD, TWSE + TPEx official summaries
     margin_market_change: float | None = None
     status: str = "unavailable"
     meta: EvidenceMeta
@@ -408,16 +409,9 @@ class TaiwanStockResearchContextService:
         l_20d = None
         dist_h20 = None
         dist_l20 = None
-        ma5 = None
-        ma20 = None
-        ma60 = None
-        rsi14 = None
-        dist_ma20 = None
-        vol_ratio = None
 
         if len(hist_df) >= 2:
             closes = hist_df["close"].drop_nulls().to_list()
-            volumes = hist_df["volume"].drop_nulls().to_list()
 
             if len(closes) >= 6:
                 c_5d_base = closes[-6]
@@ -437,34 +431,24 @@ class TaiwanStockResearchContextService:
             if c_price is not None and l_20d is not None and l_20d > 0:
                 dist_l20 = round((c_price / l_20d) - 1.0, 6)
 
-            # Moving Averages
-            if len(closes) >= 5:
-                ma5 = round(sum(closes[-5:]) / 5.0, 4)
-            if len(closes) >= 20:
-                ma20 = round(sum(closes[-20:]) / 20.0, 4)
-                if c_price is not None and ma20 > 0:
-                    dist_ma20 = round((c_price / ma20) - 1.0, 6)
-            if len(closes) >= 60:
-                ma60 = round(sum(closes[-60:]) / 60.0, 4)
+        published = read_enriched_partition(
+            target, ["ma5", "ma20", "ma60", "vol_ratio_5d", "rsi_14"], [canonical]
+        )
+        ind_row = published.row(0, named=True) if published is not None and not published.is_empty() else None
+        def _published(field: str, digits: int) -> float | None:
+            value = ind_row[field] if ind_row else None
+            return round(value, digits) if value is not None else None
 
-            # 5D Volume Ratio
-            if len(volumes) >= 5 and vol is not None:
-                avg_vol_5d = sum(volumes[-5:]) / 5.0
-                if avg_vol_5d > 0:
-                    vol_ratio = round(vol / avg_vol_5d, 2)
-
-            # RSI 14
-            if len(closes) >= 15:
-                diffs = [closes[i] - closes[i - 1] for i in range(len(closes) - 14, len(closes))]
-                gains = [d for d in diffs if d > 0]
-                losses = [-d for d in diffs if d < 0]
-                avg_gain = sum(gains) / 14.0 if gains else 0.0
-                avg_loss = sum(losses) / 14.0 if losses else 0.0
-                if avg_loss == 0:
-                    rsi14 = 100.0
-                else:
-                    rs = avg_gain / avg_loss
-                    rsi14 = round(100.0 - (100.0 / (1.0 + rs)), 2)
+        ma5 = _published("ma5", 4)
+        ma20 = _published("ma20", 4)
+        ma60 = _published("ma60", 4)
+        rsi14 = _published("rsi_14", 2)
+        vol_ratio = _published("vol_ratio_5d", 2)
+        dist_ma20 = (
+            round((c_price / ma20) - 1.0, 6)
+            if (c_price is not None and ma20 is not None and ma20 > 0)
+            else None
+        )
 
         price_evidence = PriceContextEvidence(
             trade_date=str(target),
@@ -500,9 +484,9 @@ class TaiwanStockResearchContextService:
             distance_to_ma20=dist_ma20,
             vol_ratio_5d=vol_ratio,
             meta=EvidenceMeta(
-                classification="DERIVED",
-                source="taiwan_daily_store",
-                formula="rolling_means_and_ratios",
+                classification="DERIVED" if ind_row else "MISSING",
+                source="kline_daily_enriched",
+                formula="published_enriched_partition",
                 as_of=str(target),
             ),
         )
@@ -636,7 +620,7 @@ class TaiwanStockResearchContextService:
             upper_limit_count=market_snap.market_totals.upper_limit_count,
             lower_limit_count=market_snap.market_totals.lower_limit_count,
             exchange_turnover=market_snap.by_exchange.twse.turnover if inst.exchange == "TWSE" else market_snap.by_exchange.tpex.turnover,
-            institutional_market_net=market_snap.institutional.total_net,
+            institutional_market_net_amount=market_snap.institutional.total_net_amount,
             margin_market_change=market_snap.margin.margin_balance_change,
             status=market_snap.data_quality.overall_status,
             meta=EvidenceMeta(
@@ -763,6 +747,7 @@ class TaiwanStockResearchContextService:
             SectionQualityMeta(section="margin", status=m_status, as_of=str(m_as_of)),
             SectionQualityMeta(section="market", status=market_snap.data_quality.overall_status, as_of=market_snap.trade_date),
             SectionQualityMeta(section="industry", status=industry_evidence.status, as_of=str(target)),
+            SectionQualityMeta(section="indicators", status="current" if ind_row else "unavailable", as_of=str(target)),
         ]
         active_statuses = [daily_status, inst_status, m_status]
         if all(s == "current" for s in active_statuses):
@@ -771,6 +756,8 @@ class TaiwanStockResearchContextService:
             overall_status = "partial"
         else:
             overall_status = "unavailable"
+        if overall_status == "complete" and not ind_row:
+            overall_status = "partial"
 
         dq = ResearchDataQuality(
             overall_status=overall_status,

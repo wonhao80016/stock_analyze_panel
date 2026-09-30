@@ -590,6 +590,7 @@ const StockCard = React.memo(function StockCard({
           <span title="換手率">換手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span></span>
           <span title="量比">量比<span className="font-mono ml-0.5">{fmtPrice(r.vol_ratio_5d)}</span></span>
           <span title="RSI14">RSI<span className="font-mono ml-0.5">{r.rsi_14 != null ? r.rsi_14.toFixed(1) : '—'}</span></span>
+          {r.indicator_date && <span title={`指標日期 ${r.indicator_date}`}>指標{String(r.indicator_date).slice(5)}</span>}
           {/* 擴展數據列展示在卡片中 */}
           {extCols.map(col => {
             if (col.source.type !== 'ext') return null

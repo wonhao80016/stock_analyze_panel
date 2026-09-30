@@ -213,6 +213,20 @@ describe('Abnormal diagnostics panel opens the preview card', () => {
   })
 })
 
+describe('Indicator publication notice', () => {
+  it('shows the updating notice when the indicators section is degraded', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue({ ...buildScreenerResponse(), degraded_sections: ['indicators'] } as any)
+    renderScreener()
+    expect(await screen.findByText('技術指標更新中，暫以空值顯示')).toBeTruthy()
+  })
+
+  it('shows no notice when indicators are published', async () => {
+    renderScreener()
+    await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
+    expect(screen.queryByText('技術指標更新中，暫以空值顯示')).toBeNull()
+  })
+})
+
 describe('Main results row direct actions (Phase 8C-A)', () => {
   it('offers 加入自選/加入比較/新增監控/研究 without leaving the page first', async () => {
     renderScreener()
@@ -514,13 +528,39 @@ function buildMarketIntelligence(overrides: Partial<Record<string, any>> = {}) {
     },
     by_exchange: { twse: { turnover: 0 } as any, tpex: { turnover: 0 } as any },
     by_instrument: { stock: {} as any, etf: {} as any },
-    institutional: { trade_date: '2026-09-08', row_count: 0, foreign_net: null, investment_trust_net: null, dealer_net: null, total_net: null, status: 'unavailable' },
+    institutional: { trade_date: null, foreign_net_amount: null, investment_trust_net_amount: null, dealer_net_amount: null, total_net_amount: null, twse: null, tpex: null, status: 'unavailable' },
     margin: { trade_date: '2026-09-08', row_count: 0, margin_balance: null, margin_balance_change: null, short_balance: null, short_balance_change: null, aggregate_short_margin_ratio: null, status: 'unavailable' },
     indexes: { taiex: null, tpex_index: null },
     data_quality: { target_trade_date: '2026-09-08', previous_trade_date: '2026-09-03', overall_status: 'unavailable', universe_supported_symbols: 2375, daily_snapshot_symbols: 0, missing_symbols_count: 2375 },
     ...overrides,
   }
 }
+
+describe('Market institutional amounts', () => {
+  it('shows foreign, trust and dealer net amounts in 100-million TWD and a dash when one is missing', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(buildMarketIntelligence({
+      institutional: { trade_date: '2026-09-08', foreign_net_amount: 39_016_214_118, investment_trust_net_amount: -2_203_631_373, dealer_net_amount: null, total_net_amount: null, twse: null, tpex: null, status: 'current' },
+    }) as any)
+    renderScreener()
+
+    await screen.findByText('交易日: 2026-09-08')
+    expect(screen.getByText('+390.16 億元')).toBeInTheDocument()
+    expect(screen.getByText('-22.04 億元')).toBeInTheDocument()
+    expect(within(screen.getByText('自營商買賣超').parentElement as HTMLElement).getByText('—')).toBeInTheDocument()
+  })
+
+  it('orders the seven stat cards so three columns put the institutional cards on one row', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(buildMarketIntelligence() as any)
+    renderScreener()
+
+    await screen.findByText('交易日: 2026-09-08')
+    const grid = (screen.getByText('自營商買賣超').parentElement as HTMLElement).parentElement as HTMLElement
+    const labels = Array.from(grid.children).map((card) => card.querySelector('span')?.textContent)
+    expect(labels).toEqual(['全市場漲跌家數', '漲跌停家數', '交易所成交額', '外資買賣超', '投信買賣超', '自營商買賣超', '融資餘額增減'])
+    const columns = grid.className.split(' ').filter((c) => c.includes('grid-cols-'))
+    expect(columns).toEqual(['grid-cols-2', 'sm:grid-cols-3', 'lg:grid-cols-4', '2xl:grid-cols-7'])
+  })
+})
 
 describe('Market Intelligence date honesty (Data Freshness & Source Labels batch)', () => {
   it('shows an explicit "no complete data" notice when data_quality.overall_status is not complete, instead of silently presenting all-zero stats as today\'s real market', async () => {

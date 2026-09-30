@@ -34,6 +34,8 @@ This rule registry does not populate Phase 6E structured multiplier/direction fi
 - TPEx institutional: `insti/dailyTrade`
 - TWSE margin/short: `marginTrading/MI_MARGN`
 - TPEx margin/short: `margin/balance`
+- TWSE market-wide institutional amounts: `fund/BFI82U`
+- TPEx market-wide institutional amounts: `insti/summary`
 
 TPEx ETF identity is retained from the official ISIN directory. Product
 classification remains `data_insufficient` until an official structured metadata
@@ -66,6 +68,49 @@ official provider and dataset provenance. FinMind currently supplies price data
 only, so there is no reliable institutional/margin fallback; official failures are
 raised instead of returned as empty success. Rolling flows and ratios remain in
 `app.taiwan.enrichment.factors`, outside raw providers.
+
+## Market-wide institutional amounts
+
+`app.taiwan.enrichment.market_institutional` parses the daily TWSE `fund/BFI82U`
+and TPEx `insti/summary` tables. They are the source of the market-level foreign,
+investment trust and dealer net figures on the dashboard, screener and research
+context. Per-symbol `fund/T86` and `insti/dailyTrade` rows are not summed for these
+figures: they are share counts that mix stocks, ETF units and warrants.
+
+- Amounts are TWD. The unit comes from the TWSE `hints` field and from the bracket
+  in each TPEx amount column title, after NFKC normalization. Only `元` (x1) and
+  `千元` (x1,000) are accepted; any other unit raises.
+- Every official category row is stored. Market aggregates use foreign =
+  `外資及陸資(不含外資自營商)` (TPEx `外資及陸資(不含自營商)`), investment trust =
+  `投信`, dealer = `自營商(自行買賣)` + `自營商(避險)`, and total = the official
+  total row, which excludes foreign dealers.
+- Each row is checked for buy - sell = net, and the official subtotal and total rows
+  are compared with the sum of their categories on buy, sell and net. A mismatch sets
+  `has_discrepancy`; official values are never rewritten.
+- Rows store `provider`, `source`, `source_url`, `retrieved_at` (Asia/Taipei),
+  `trade_date` and `status` as columns. `status` follows the institutional stale
+  policy (more than 4 days after the 13:30 close), so backfilled history is `stale`,
+  meaning fetched late rather than unsettled.
+- A response whose date stamp is missing or differs from the requested day, whose
+  `stat` is not OK, or which has no rows counts as no data. HTTP, JSON, format, unit
+  and missing-category errors raise.
+- A day is written only when both exchanges return rows. When both return nothing,
+  the day is a holiday unless the daily bar store or this store already has that date,
+  in which case it is a failure. A day with only one exchange is not written.
+  Failures after the latest stored day are failures; failures on or before it are
+  repairs that keep the stored rows.
+- Storage is `data/taiwan/market_institutional/date=YYYY-MM-DD/part.parquet`.
+  When institutional flows are refreshed, `run_update` fetches it after the daily
+  bars and institutional flows, refetches provisional days among the newest 20
+  partitions, and reports failures only in the institutional note without changing
+  the institutional status. Backfill with
+  `python -m app.taiwan.market_institutional_refresh --days 60 [--end YYYY-MM-DD]`.
+- `data_quality.institutional_amount` reports whether the target day has amounts.
+  Missing amounts are returned as null and do not change `overall_status`.
+- Known gap: when one run catches up several days, a day whose daily bars also fail
+  and whose two responses are both empty is taken as a holiday. If a later day is
+  stored in the same run, that day is not refetched automatically and needs the
+  backfill command.
 
 ## TPEx quote and historical daily separation
 

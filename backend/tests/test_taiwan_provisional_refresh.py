@@ -22,11 +22,17 @@ from app.taiwan.daily_update import TaiwanDailyUpdateService
 from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
 from app.taiwan.institutional_margin_refresh import TaiwanInstitutionalRefreshService
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
+from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
 from app.taiwan.providers.snapshot_provider import OfficialDailySnapshotAdapter
 from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar
 
 D = date(2026, 9, 23)
 NEXT = date(2026, 9, 24)
+
+
+@pytest.fixture(autouse=True)
+def _no_market_amount_requests(monkeypatch):
+    monkeypatch.setattr(TaiwanMarketInstitutionalRefreshService, "refresh_through", lambda self, target: {})
 
 
 def _taipei(d: date, hour: int, minute: int = 0) -> float:

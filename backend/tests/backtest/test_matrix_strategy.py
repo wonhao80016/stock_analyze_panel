@@ -1158,3 +1158,31 @@ def test_strategy_engine_run_all_builds_one_shared_matrix():
     assert build.call_count == 1
     assert results["macd_golden"].total == 1
     assert results["macd_copy"].total == 1
+
+
+def test_matrix_rsi_is_nan_until_the_asset_has_n_price_changes():
+    start = date(2024, 1, 1)
+    rows = []
+    for asset_id, (symbol, first_offset) in enumerate((("000001.SZ", 0), ("000002.SZ", 20))):
+        for offset in range(first_offset, 50):
+            close = 10.0 + asset_id + offset * 0.05 + np.sin(offset / 3.0)
+            rows.append({
+                "symbol": symbol,
+                "date": start + timedelta(days=offset),
+                "open": close, "high": close + 0.2, "low": close - 0.2, "close": close,
+                "volume": 1000.0,
+            })
+    panel = pl.DataFrame(rows)
+    market = build_market_data_matrix(panel)
+    for name, window in (("rsi_6", 6), ("rsi_14", 14), ("rsi_24", 24)):
+        values = matrix_feature(market, name)
+        expected = compute_indicators(panel, needed={name}).sort(["symbol", "date"])
+        for symbol in market.symbols:
+            asset_id = market.symbols.index(symbol)
+            column = values[:, asset_id]
+            finite_ids = np.flatnonzero(np.isfinite(market.close[:, asset_id]))
+            assert np.isnan(column[finite_ids[:window]]).all()
+            assert np.isfinite(column[finite_ids[window:]]).all()
+            got = column[finite_ids]
+            want = expected.filter(pl.col("symbol") == symbol)[name].to_numpy()
+            np.testing.assert_allclose(got, want, rtol=2e-5, atol=2e-5, equal_nan=True)

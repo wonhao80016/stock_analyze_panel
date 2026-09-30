@@ -32,6 +32,7 @@ from app.taiwan.institutional_margin_refresh import (
 )
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
+from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now, taipei_today
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,7 @@ class TaiwanDailyUpdateService:
         inst_service: TaiwanInstitutionalRefreshService | None = None,
         margin_service: TaiwanMarginRefreshService | None = None,
         calendar: TaiwanTradingCalendar | None = None,
+        market_inst_service: TaiwanMarketInstitutionalRefreshService | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
@@ -199,6 +201,9 @@ class TaiwanDailyUpdateService:
         )
         self.margin_service = margin_service or TaiwanMarginRefreshService(
             store=self.margin_store, calendar=self.calendar
+        )
+        self.market_inst_service = market_inst_service or TaiwanMarketInstitutionalRefreshService(
+            calendar=self.calendar, daily_store=self.daily_store
         )
 
     def _calc_dataset_status(self, as_of: date | None, target: date) -> tuple[DatasetFreshnessStatus, int]:
@@ -248,6 +253,24 @@ class TaiwanDailyUpdateService:
             scheduled_update_time="16:30",
             scheduled_timezone="Asia/Taipei",
         )
+
+    def _refresh_market_institutional(self, target: date) -> str | None:
+        try:
+            res = self.market_inst_service.refresh_through(target)
+        except Exception as e:
+            logger.exception("Market institutional amounts refresh failed: %s", e)
+            return f"Market institutional amounts not refreshed: {e}"
+        parts = []
+        failed = [f["date"] for f in res.get("failed_dates") or []]
+        repair_failed = [f["date"] for f in res.get("repair_failed_dates") or []]
+        if failed:
+            parts.append("Market institutional amounts not stored: " + ", ".join(failed))
+        if repair_failed:
+            parts.append("Earlier market institutional amount days not refreshed: " + ", ".join(repair_failed))
+        if not parts:
+            return None
+        logger.warning("%s", "; ".join(parts))
+        return "; ".join(parts)
 
     def run_update(
         self,
@@ -393,6 +416,12 @@ class TaiwanDailyUpdateService:
                 logger.exception("Institutional refresh failed: %s", e)
                 inst_stats.status = "failed"
                 inst_stats.failed_dates.append({"error": str(e)})
+
+            # Must stay after the daily step: a stored daily partition is what marks an empty answer as a failure.
+            # Market-wide amounts never change the institutional status; their failures only extend its note.
+            market_note = self._refresh_market_institutional(target)
+            if market_note:
+                inst_stats.note = f"{inst_stats.note}; {market_note}" if inst_stats.note else market_note
 
         # 4. Margin Refresh (TWSE + TPEx = 2 HTTP calls per date)
         margin_stats = DatasetRefreshStats()

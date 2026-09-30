@@ -31,9 +31,15 @@ import pytest
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import TaiwanDailyUpdateService
+from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
 from app.taiwan.providers.snapshot_provider import OfficialDailySnapshotAdapter
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar
 from app.taiwan.universe import TaiwanSecurityMaster
+
+
+@pytest.fixture(autouse=True)
+def _no_market_amount_requests(monkeypatch):
+    monkeypatch.setattr(TaiwanMarketInstitutionalRefreshService, "refresh_through", lambda self, target: {})
 
 
 # ── Sample Fixtures ───────────────────────────────────────────────

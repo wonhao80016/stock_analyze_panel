@@ -6,7 +6,7 @@
 // 涵蓋：市場強弱摘要、產業強弱 top/bottom、自選股快覽 (empty/populated)、
 // 市場或產業查詢失敗時 Dashboard 仍可渲染不白屏。
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Dashboard } from './Dashboard'
@@ -23,7 +23,7 @@ function buildMarketIntelligence(overrides: Partial<Record<string, any>> = {}) {
     },
     by_exchange: { twse: {} as any, tpex: {} as any },
     by_instrument: { stock: {} as any, etf: {} as any },
-    institutional: { trade_date: '2026-09-05', row_count: 900, foreign_net: 12_000_000, investment_trust_net: 1_000_000, dealer_net: -500_000, total_net: 12_500_000, status: 'current' },
+    institutional: { trade_date: '2026-09-05', foreign_net_amount: 39_016_214_118, investment_trust_net_amount: 6_087_155_186, dealer_net_amount: 1_896_636_845, total_net_amount: 47_000_006_149, twse: null, tpex: null, status: 'current' },
     margin: { trade_date: '2026-09-05', row_count: 900, margin_balance: 0, margin_balance_change: 0, short_balance: 0, short_balance_change: 0, aggregate_short_margin_ratio: 5, status: 'current' },
     indexes: { taiex: null, tpex_index: null },
     data_quality: { target_trade_date: '2026-09-05', previous_trade_date: '2026-09-04', overall_status: 'complete', universe_supported_symbols: 1000, daily_snapshot_symbols: 950, missing_symbols_count: 0 },
@@ -135,6 +135,23 @@ describe('Dashboard — Market Clarity (Phase 8C-B)', () => {
     expect(screen.getByText('600')).toBeInTheDocument()
     expect(screen.getByText('300')).toBeInTheDocument()
     expect(screen.getByText('監控中心')).toBeInTheDocument()
+  })
+
+  it('shows the market foreign net buy amount in 100-million TWD from the official summary', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(buildMarketIntelligence() as any)
+    renderDashboard()
+
+    expect(await screen.findByText('+390.16 億元')).toBeInTheDocument()
+  })
+
+  it('shows a dash instead of a share count when the day has no official amount summary', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(buildMarketIntelligence({
+      institutional: { trade_date: null, foreign_net_amount: null, investment_trust_net_amount: null, dealer_net_amount: null, total_net_amount: null, twse: null, tpex: null, status: 'stale' },
+    }) as any)
+    renderDashboard()
+
+    const label = await screen.findByText('外資買賣超')
+    expect(within(label.parentElement as HTMLElement).getByText('—')).toBeInTheDocument()
   })
 
   it('renders industry top/bottom strongest and weakest', async () => {

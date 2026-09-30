@@ -18,7 +18,6 @@ Covers:
 """
 from __future__ import annotations
 
-import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -72,11 +71,28 @@ def _seed_daily_store(store: TaiwanDailyStore, days: int = 30):
 
 
 @pytest.fixture
-def tmp_store():
-    with tempfile.TemporaryDirectory() as d:
-        store = TaiwanDailyStore(data_dir=Path(d) / "daily")
-        _seed_daily_store(store, days=30)
-        yield store
+def tmp_store(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+
+    get_security_master()
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    store = TaiwanDailyStore(data_dir=tmp_path / "daily")
+    _seed_daily_store(store, days=30)
+    TaiwanEnrichedRefreshService(
+        daily_store=store,
+        enriched_root=tmp_path / "kline_daily_enriched",
+        share_capital=TaiwanShareCapitalStore(data_dir=tmp_path),
+    ).refresh()
+    yield store
+
+
+def _partition_path(store: TaiwanDailyStore) -> Path:
+    from app.config import settings
+
+    latest = store.latest_date()
+    return Path(settings.data_dir) / "kline_daily_enriched" / f"date={latest.isoformat()}" / "part.parquet"
 
 
 @pytest.fixture
@@ -167,6 +183,48 @@ class TestTaiwanScreenerCore:
         assert tsmc.vol_ratio_5d is not None
         # change_pct is decimal (0.05 = 5%)
         assert abs(tsmc.change_pct) < 0.5
+
+    def test_indicators_equal_the_published_partition(self, screener_service, tmp_store):
+        published = pl.read_parquet(_partition_path(tmp_store)).filter(pl.col("symbol") == "2330.TWSE").row(0, named=True)
+        res = screener_service.run(TaiwanScreenerRequest())
+        tsmc = next(item for item in res.items if item.symbol == "2330.TWSE")
+        for field in ("change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"):
+            assert published[field] is not None
+            assert getattr(tsmc, field) == published[field], field
+        assert "indicators" not in res.degraded_sections
+
+    def test_indicators_follow_the_partition_not_a_recomputation(self, screener_service, tmp_store):
+        path = _partition_path(tmp_store)
+        frame = pl.read_parquet(path).with_columns(
+            pl.when(pl.col("symbol") == "2330.TWSE").then(99.0).otherwise(pl.col("rsi_14")).alias("rsi_14"),
+            pl.when(pl.col("symbol") == "2330.TWSE").then(7.5).otherwise(pl.col("vol_ratio_5d")).alias("vol_ratio_5d"),
+        )
+        frame.write_parquet(path)
+        res = screener_service.run(TaiwanScreenerRequest(rsi_14_min=98.0, vol_ratio_5d_min=7.0))
+        assert [item.symbol for item in res.items] == ["2330.TWSE"]
+        assert res.items[0].rsi_14 == 99.0
+
+    def test_missing_partition_nulls_indicators_and_flags_degraded(self, screener_service, tmp_store):
+        _partition_path(tmp_store).unlink()
+        res = screener_service.run(TaiwanScreenerRequest())
+        assert res.total >= 5
+        assert "indicators" in res.degraded_sections
+        for item in res.items:
+            for field in ("change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"):
+                assert getattr(item, field) is None, field
+
+    def test_basic_columns_only_partition_is_degraded(self, screener_service, tmp_store):
+        path = _partition_path(tmp_store)
+        pl.read_parquet(path).select(["symbol", "date", "open", "high", "low", "close", "volume"]).write_parquet(path)
+        res = screener_service.run(TaiwanScreenerRequest())
+        assert "indicators" in res.degraded_sections
+        assert all(item.rsi_14 is None and item.vol_ratio_5d is None for item in res.items)
+
+    def test_unreadable_partition_is_degraded_not_an_error(self, screener_service, tmp_store):
+        _partition_path(tmp_store).write_bytes(b"not a parquet file")
+        res = screener_service.run(TaiwanScreenerRequest())
+        assert "indicators" in res.degraded_sections
+        assert all(item.rsi_14 is None for item in res.items)
 
     def test_above_ma5_filter(self, screener_service):
         req = TaiwanScreenerRequest(above_ma5=True)

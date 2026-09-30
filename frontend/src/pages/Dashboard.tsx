@@ -283,11 +283,11 @@ function MarketStrengthCard() {
               cls={totals.upper_limit_count >= totals.lower_limit_count ? 'text-bull' : 'text-bear'}
             />
             <MiniMetric label="成交額" value={fmtBigNum(totals.turnover)} />
-            {intel.data && intel.data.institutional.foreign_net != null ? (
+            {intel.data && intel.data.institutional.foreign_net_amount != null ? (
               <MiniMetric
                 label="外資買賣超"
-                value={`${intel.data.institutional.foreign_net > 0 ? '+' : ''}${(intel.data.institutional.foreign_net / 1000).toLocaleString()} 張`}
-                cls={pctClass(intel.data.institutional.foreign_net)}
+                value={`${intel.data.institutional.foreign_net_amount > 0 ? '+' : ''}${(intel.data.institutional.foreign_net_amount / 100_000_000).toFixed(2)} 億元`}
+                cls={pctClass(intel.data.institutional.foreign_net_amount)}
               />
             ) : (
               <MiniMetric label="外資買賣超" value="—" />

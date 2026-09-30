@@ -32,6 +32,13 @@ FinMind 當前沒有可靠的法人／融資融券 adapter，因此官方失敗�
 以空結果或 Yahoo 抓取偽裝 fallback。滾動買賣超與券資比屬於 `enrichment/factors.py`
 的 derived factor，不應放回 raw provider。
 
+市場層級的三大法人買賣金額（TWSE `fund/BFI82U`、TPEx `insti/summary`）同樣在
+`enrichment` 內解析（`enrichment/market_institutional.py`），它是對應另一組端點的
+adapter，不是平行 provider。金額單位是 TWD，屬於「raw 數量統一為 shares」的例外；
+`SourceMeta` 的欄位在 parquet 中拆成獨立欄位保存。stat 非 OK、沒有資料列或日期戳記
+不符視為沒有資料，是否算失敗由 refresh 依日K store 是否有該日判斷，細節見
+[`taiwan-data-sources.md`](taiwan-data-sources.md) 的 Market-wide institutional amounts。
+
 尚未實現、只能在真實需求出現後增加的能力：
 
 - 更多頁面局部插槽。

@@ -18,7 +18,7 @@ Verifies:
 - No AI calls:
     * AI provider monkeypatch assertion ensures research context does not call AI
 """
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
@@ -235,3 +235,131 @@ def test_api_endpoint_zero_market_http_and_no_ai():
         assert mock_urlopen.call_count == 0
         assert mock_httpx_get.call_count == 0
         assert mock_httpx_post.call_count == 0
+
+
+def _indicator_service(d_prev: date, d_curr: date) -> TaiwanStockResearchContextService:
+    # 61 bars: enough history for a local MA5/MA60/RSI14 computation to produce values.
+    dates = [d_curr - timedelta(days=60 - i) for i in range(61)]
+    assert dates[-2] == d_prev
+    closes = [100.0 + (i % 7) * 0.9 + i * 0.05 for i in range(60)] + [105.0]
+    mock_daily = MagicMock()
+    mock_daily.available_dates.return_value = dates
+    mock_daily.read_range.return_value = pl.DataFrame({
+        "symbol": ["TEST.TWSE"] * 61,
+        "date": dates,
+        "open": closes,
+        "high": [c + 1.0 for c in closes],
+        "low": [c - 1.0 for c in closes],
+        "close": closes,
+        "volume": [10000.0 + (i % 5) * 1000.0 for i in range(61)],
+        "amount": [1000000.0] * 61,
+    })
+    mock_inst = MagicMock()
+    mock_inst.symbol = "TEST.TWSE"
+    mock_inst.code = "TEST"
+    mock_inst.name = "Test"
+    mock_inst.exchange = "TWSE"
+    mock_inst.instrument_type = "stock"
+    mock_inst.industry = "Semiconductors"
+    mock_inst.currency = "TWD"
+    mock_inst.listing_status = "active"
+    mock_inst.listing_date = "2020-01-01"
+    mock_inst.updated_at = "2026-08-28"
+    mock_sm = MagicMock()
+    mock_sm.get_instrument.return_value = mock_inst
+    mock_sm.to_dataframe.return_value = pl.DataFrame({
+        "symbol": ["TEST.TWSE"],
+        "name": ["Test"],
+        "exchange": ["TWSE"],
+        "instrument_type": ["stock"],
+        "industry": ["Semiconductors"],
+        "listing_status": ["active"],
+    })
+    return TaiwanStockResearchContextService(daily_store=mock_daily, security_master=mock_sm)
+
+
+def _publish_indicators(tmp_path, monkeypatch, d: date, **values) -> dict:
+    from app.config import settings
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    row = {"symbol": "TEST.TWSE", **values}
+    TaiwanEnrichedRefreshService._write_partition(
+        tmp_path / "kline_daily_enriched" / f"date={d.isoformat()}", pl.DataFrame([row])
+    )
+    return row
+
+
+def test_technical_context_equals_the_published_partition(tmp_path, monkeypatch):
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    row = _publish_indicators(
+        tmp_path, monkeypatch, d_curr,
+        ma5=101.123456, ma20=98.7654321, ma60=95.5, vol_ratio_5d=1.23456789, rsi_14=58.8312345,
+    )
+    tech = _indicator_service(d_prev, d_curr).get_research_context("TEST.TWSE", d_curr).technical_context
+    assert tech.ma5 == round(row["ma5"], 4)
+    assert tech.ma20 == round(row["ma20"], 4)
+    assert tech.ma60 == round(row["ma60"], 4)
+    assert tech.vol_ratio_5d == round(row["vol_ratio_5d"], 2)
+    assert tech.rsi14 == round(row["rsi_14"], 2)
+    assert tech.above_ma20 is True
+    assert tech.meta.source == "kline_daily_enriched"
+
+
+def test_technical_context_reads_the_target_day_partition(tmp_path, monkeypatch):
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    _publish_indicators(tmp_path, monkeypatch, d_curr, ma5=1.0, ma20=1.0, ma60=1.0, vol_ratio_5d=1.0, rsi_14=11.0)
+    older = _publish_indicators(tmp_path, monkeypatch, d_prev, ma5=2.0, ma20=2.0, ma60=2.0, vol_ratio_5d=2.0, rsi_14=22.0)
+    tech = _indicator_service(d_prev, d_curr).get_research_context("TEST.TWSE", d_prev).technical_context
+    assert tech.rsi14 == round(older["rsi_14"], 2)
+
+
+def test_missing_partition_leaves_technical_context_null_and_flags_it(tmp_path, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    ctx = _indicator_service(d_prev, d_curr).get_research_context("TEST.TWSE", d_curr)
+    tech = ctx.technical_context
+    assert (tech.ma5, tech.ma20, tech.ma60, tech.rsi14, tech.vol_ratio_5d) == (None, None, None, None, None)
+    assert tech.above_ma20 is None
+    assert tech.distance_to_ma20 is None
+    assert tech.meta.classification == "MISSING"
+    section = next(s for s in ctx.data_quality.sections if s.section == "indicators")
+    assert section.status == "unavailable"
+    assert ctx.price_context.close == 105.0
+
+
+def test_basic_columns_only_partition_is_not_published(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    TaiwanEnrichedRefreshService._write_partition(
+        tmp_path / "kline_daily_enriched" / f"date={d_curr.isoformat()}",
+        pl.DataFrame([{"symbol": "TEST.TWSE", "close": 105.0, "volume": 15000.0}]),
+    )
+    ctx = _indicator_service(d_prev, d_curr).get_research_context("TEST.TWSE", d_curr)
+    assert ctx.technical_context.rsi14 is None
+    assert ctx.technical_context.ma60 is None
+    assert next(s for s in ctx.data_quality.sections if s.section == "indicators").status == "unavailable"
+
+
+def test_unpublished_indicators_downgrade_the_overall_status_from_complete(tmp_path, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    svc = _indicator_service(d_prev, d_curr)
+    svc.inst_store = MagicMock()
+    svc.inst_store.available_dates.return_value = [d_curr]
+    svc.inst_store.read_range.return_value = pl.DataFrame()
+    svc.margin_store = MagicMock()
+    svc.margin_store.available_dates.return_value = [d_curr]
+    svc.margin_store.read_range.return_value = pl.DataFrame()
+    without = svc.get_research_context("TEST.TWSE", d_curr).data_quality.overall_status
+    _publish_indicators(tmp_path, monkeypatch, d_curr, ma5=1.0, ma20=1.0, ma60=1.0, vol_ratio_5d=1.0, rsi_14=50.0)
+    with_ind = svc.get_research_context("TEST.TWSE", d_curr).data_quality.overall_status
+    assert without == "partial"
+    assert with_ind == "complete"

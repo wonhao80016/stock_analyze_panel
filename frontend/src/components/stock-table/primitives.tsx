@@ -8,7 +8,7 @@
  * 口徑與原 ScreenerTable 對齊（已和自選頁校準過）：amplitude 用 *100、annual_vol/
  * 財務率類用 fmtPct、kdj 用 toFixed(1)、vol_ma 用 fmtBigNum 等。
  */
-import type { ReactNode } from 'react'
+import { cloneElement, isValidElement, type ReactElement, type ReactNode } from 'react'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/list-columns'
 import { NUM_CELL_CLASS } from '@/lib/stock-table'
@@ -39,11 +39,33 @@ function fmtMaybePrice(value: any) {
   return value != null && !Number.isNaN(value) ? fmtPrice(value) : '—'
 }
 
+// Taiwan indicators come from a published enriched partition; these cells carry its date.
+const INDICATOR_DATE_KEYS = new Set([
+  'amplitude', 'vol_ratio', 'annual_vol',
+  'ma5', 'ma10', 'ma20', 'ma60', 'high_60d', 'low_60d',
+  'rsi6', 'rsi14', 'rsi24', 'macd_dif', 'macd_dea', 'macd_hist',
+  'kdj_k', 'kdj_d', 'kdj_j', 'boll_upper', 'boll_lower', 'atr14', 'vol_ma5', 'vol_ma10',
+  'momentum_5d', 'momentum_10d', 'momentum_20d', 'momentum_30d', 'momentum_60d',
+])
+
 /**
  * 渲染一個純數據內置列的 <td>。
  * 返回 null 表示該列不屬於純數據列（symbol/strategies/score/signals/candle 等），由調用方處理。
  */
 export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | null {
+  const cell = renderBuiltinCell(r, col)
+  if (
+    r.indicator_date
+    && col.source.type === 'builtin'
+    && INDICATOR_DATE_KEYS.has(col.source.key)
+    && isValidElement(cell)
+  ) {
+    return cloneElement(cell as ReactElement<{ title?: string }>, { title: `指標日期 ${r.indicator_date}` })
+  }
+  return cell
+}
+
+function renderBuiltinCell(r: any, col: ColumnConfig): ReactNode | null {
   if (col.source.type !== 'builtin') return null
   const key = col.source.key
 

@@ -541,11 +541,14 @@ def compute_indicators(
                 pl.col("_gain").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_gain_{n}"),
                 pl.col("_loss").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"),
             ]).with_columns(
-                (100 - 100 / (1 + pl.col(f"_rsi_avg_gain_{n}") /
-                             pl.when(pl.col(f"_rsi_avg_loss_{n}") == 0)
-                               .then(1e-12)
-                               .otherwise(pl.col(f"_rsi_avg_loss_{n}"))
-                             )).alias(f"rsi_{n}"),
+                pl.when(pl.col("_delta").is_not_null().cast(pl.UInt32).cum_sum().over("symbol") >= n)
+                  .then(100 - 100 / (1 + pl.col(f"_rsi_avg_gain_{n}") /
+                                     pl.when(pl.col(f"_rsi_avg_loss_{n}") == 0)
+                                       .then(1e-12)
+                                       .otherwise(pl.col(f"_rsi_avg_loss_{n}"))
+                                     ))
+                  .otherwise(None)
+                  .alias(f"rsi_{n}"),
             )
 
     # Pass 6: 换手率 (需要 float_shares, 后续在 compute_all 中 JOIN instruments 后补充)

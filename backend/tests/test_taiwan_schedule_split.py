@@ -12,6 +12,12 @@ import pytest
 
 from app.jobs import daily_pipeline
 from app.taiwan.daily_update import TaiwanDailyUpdateService
+from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
+
+
+@pytest.fixture(autouse=True)
+def _no_market_amount_requests(monkeypatch):
+    monkeypatch.setattr(TaiwanMarketInstitutionalRefreshService, "refresh_through", lambda self, target: {})
 
 
 @pytest.fixture

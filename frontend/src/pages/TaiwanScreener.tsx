@@ -557,7 +557,7 @@ export function TaiwanScreener() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-7 gap-3">
             {/* Advance / Decline / Flat (Taiwan colors: Up=Red, Down=Green) */}
             <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5 flex flex-col justify-between">
               <span className="text-zinc-400 text-[11px]">全市場漲跌家數</span>
@@ -602,31 +602,23 @@ export function TaiwanScreener() {
               <span className="text-[10px] text-zinc-500 mt-1">TWSE vs TPEx</span>
             </div>
 
-            {/* Foreign Net (三大法人 - 外資) */}
-            <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5 flex flex-col justify-between">
-              <span className="text-zinc-400 text-[11px]">外資買賣超</span>
-              <div className="font-mono text-sm font-semibold mt-1">
-                {intelData.institutional.foreign_net !== null ? (
-                  <span className={intelData.institutional.foreign_net > 0 ? 'text-red-400' : intelData.institutional.foreign_net < 0 ? 'text-emerald-400' : 'text-zinc-300'}>
-                    {intelData.institutional.foreign_net > 0 ? '+' : ''}{(intelData.institutional.foreign_net / 1000).toLocaleString()} 張
-                  </span>
-                ) : <span className="text-zinc-500">—</span>}
+            {([
+              ['外資買賣超', intelData.institutional.foreign_net_amount],
+              ['投信買賣超', intelData.institutional.investment_trust_net_amount],
+              ['自營商買賣超', intelData.institutional.dealer_net_amount],
+            ] as const).map(([label, amount]) => (
+              <div key={label} className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5 flex flex-col justify-between">
+                <span className="text-zinc-400 text-[11px]">{label}</span>
+                <div className="font-mono text-sm font-semibold mt-1">
+                  {amount != null ? (
+                    <span className={amount > 0 ? 'text-red-400' : amount < 0 ? 'text-emerald-400' : 'text-zinc-300'}>
+                      {amount > 0 ? '+' : ''}{(amount / 100_000_000).toFixed(2)} 億元
+                    </span>
+                  ) : <span className="text-zinc-500">—</span>}
+                </div>
+                <span className="text-[10px] text-zinc-500 mt-1">上市+上櫃 (官方金額)</span>
               </div>
-              <span className="text-[10px] text-zinc-500 mt-1">全市場總計 (股數/1000)</span>
-            </div>
-
-            {/* Investment Trust Net (三大法人 - 投信) */}
-            <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5 flex flex-col justify-between">
-              <span className="text-zinc-400 text-[11px]">投信買賣超</span>
-              <div className="font-mono text-sm font-semibold mt-1">
-                {intelData.institutional.investment_trust_net !== null ? (
-                  <span className={intelData.institutional.investment_trust_net > 0 ? 'text-red-400' : intelData.institutional.investment_trust_net < 0 ? 'text-emerald-400' : 'text-zinc-300'}>
-                    {intelData.institutional.investment_trust_net > 0 ? '+' : ''}{(intelData.institutional.investment_trust_net / 1000).toLocaleString()} 張
-                  </span>
-                ) : <span className="text-zinc-500">—</span>}
-              </div>
-              <span className="text-[10px] text-zinc-500 mt-1">全市場總計 (股數/1000)</span>
-            </div>
+            ))}
 
             {/* Margin Change & Ratio (信用交易) */}
             <div className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg p-2.5 flex flex-col justify-between">
@@ -1501,6 +1493,11 @@ export function TaiwanScreener() {
             {showMoreColumns ? '收起欄位' : '更多欄位（投信・自營商・融資券・技術指標）'}
           </button>
         </div>
+        {data?.degraded_sections?.includes('indicators') && (
+          <div role="status" className="px-4 py-2 text-[11px] text-amber-400 bg-amber-500/10 border-b border-zinc-800">
+            技術指標更新中，暫以空值顯示
+          </div>
+        )}
         {/* Table View */}
         <div id="screener-results-table" className="overflow-x-auto">
           <table className="w-full text-left text-xs text-zinc-300">

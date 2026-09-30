@@ -21,7 +21,13 @@ from app.taiwan.daily_update import (
     resolve_missing_date_range,
     resolve_target_latest_trading_date,
 )
+from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
 from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar
+
+
+@pytest.fixture(autouse=True)
+def _no_market_amount_requests(monkeypatch):
+    monkeypatch.setattr(TaiwanMarketInstitutionalRefreshService, "refresh_through", lambda self, target: {})
 
 
 def test_date_resolution_weekend():

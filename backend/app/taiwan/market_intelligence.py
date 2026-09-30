@@ -5,7 +5,8 @@ Provides deterministic, traceable, structured market intelligence for a given tr
 - Change Distribution: Target-date change buckets over rows with a usable previous close.
 - Trend Participation: Closes at or above MA5/MA20/MA60, plus 60-session new highs and lows.
 - Market Slices: Total Market, By Exchange (TWSE, TPEx), By Instrument (Stock, ETF).
-- Institutional Flows: Market-wide aggregate of Foreign, Investment Trust, and Dealer nets.
+- Institutional Flows: Market-wide Foreign, Investment Trust, and Dealer net buy amounts (TWD) from
+  the exchanges' official summaries.
 - Margin Balances: Market-wide aggregate of Margin Balance/Change and Short Balance/Change.
 - Market Benchmarks: TAIEX and TPEx Index status (if available).
 - Data Quality & Provenance: Target date resolution, per-dataset freshness, coverage counts.
@@ -29,8 +30,16 @@ from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
     resolve_target_latest_trading_date,
 )
+from app.taiwan.enrichment.market_institutional import (
+    DEALER_HEDGE,
+    DEALER_PROPRIETARY,
+    FOREIGN_EXCL_DEALER,
+    INVESTMENT_TRUST,
+    TOTAL,
+)
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
+from app.taiwan.market_institutional_store import TaiwanMarketInstitutionalStore
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.models import MarketProfileBridge
@@ -118,15 +127,31 @@ class MarketTrendStats(BaseModel):
     new_low_60d_count: int = 0
 
 
-class InstitutionalMarketAggregate(BaseModel):
-    """Aggregate market-wide flow of Three Major Institutional Investors (in shares)."""
+class InstitutionalNetAmounts(BaseModel):
+    """Institutional net buy amounts in TWD, as officially published.
+
+    Foreign excludes foreign dealers (already counted under dealers); dealer is
+    proprietary plus hedge; total is the official total row. has_discrepancy is set
+    when a single official row's buy minus sell differs from its net, or when the
+    official components do not add up to their official subtotals or total.
+    """
+
+    foreign_net_amount: int | None = None
+    investment_trust_net_amount: int | None = None
+    dealer_net_amount: int | None = None
+    total_net_amount: int | None = None
+    has_discrepancy: bool = False
+
+
+class InstitutionalMarketAggregate(InstitutionalNetAmounts):
+    """TWSE + TPEx institutional net buy amounts from the official summaries, split by exchange.
+
+    Amounts are null when the day has no stored summary; they never fall back to share counts.
+    """
 
     trade_date: str | None = None
-    row_count: int = 0
-    foreign_net: float | None = None  # in shares
-    investment_trust_net: float | None = None  # in shares
-    dealer_net: float | None = None  # in shares
-    total_net: float | None = None  # in shares (sum of foreign, it, dealer)
+    twse: InstitutionalNetAmounts | None = None
+    tpex: InstitutionalNetAmounts | None = None
     status: DatasetFreshnessStatus = "unavailable"
 
 
@@ -179,6 +204,7 @@ class DataQualityReport(BaseModel):
     overall_status: Literal["complete", "partial", "unavailable"] = "unavailable"
     daily: DatasetQualityMeta
     institutional: DatasetQualityMeta
+    institutional_amount: DatasetQualityMeta
     margin: DatasetQualityMeta
     indexes: DatasetQualityMeta
     universe_supported_symbols: int = 0
@@ -215,12 +241,14 @@ class TaiwanMarketIntelligenceService:
         margin_store: TaiwanMarginStore | None = None,
         calendar: TaiwanTradingCalendar | None = None,
         security_master: TaiwanSecurityMaster | None = None,
+        market_inst_store: TaiwanMarketInstitutionalStore | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
         self.inst_store = inst_store or TaiwanInstitutionalStore()
         self.margin_store = margin_store or TaiwanMarginStore()
         self.security_master = security_master or get_security_master()
+        self.market_inst_store = market_inst_store or TaiwanMarketInstitutionalStore()
 
     def get_previous_trading_date(self, target_date: date) -> date | None:
         """Find the immediately preceding trading date using TaiwanTradingCalendar and store history."""
@@ -234,6 +262,30 @@ class TaiwanMarketIntelligenceService:
         while self.calendar.is_trading_day(cur) is False:
             cur -= timedelta(days=1)
         return cur
+
+    def _institutional_amounts(self, target: date) -> tuple[InstitutionalMarketAggregate, date | None]:
+        """Amounts for *target* and the latest stored day up to it; current only when *target* has both exchanges."""
+        as_of = max((d for d in self.market_inst_store.available_dates() if d <= target), default=None)
+        rows = self.market_inst_store.read_day(target)
+        twse = _net_amounts(rows.filter(pl.col("exchange") == "TWSE"))
+        tpex = _net_amounts(rows.filter(pl.col("exchange") == "TPEX"))
+        if twse is None or tpex is None:
+            return InstitutionalMarketAggregate(status="stale" if as_of else "unavailable"), as_of
+
+        def combined(field: str) -> int:
+            return getattr(twse, field) + getattr(tpex, field)
+
+        return InstitutionalMarketAggregate(
+            trade_date=str(target),
+            foreign_net_amount=combined("foreign_net_amount"),
+            investment_trust_net_amount=combined("investment_trust_net_amount"),
+            dealer_net_amount=combined("dealer_net_amount"),
+            total_net_amount=combined("total_net_amount"),
+            has_discrepancy=twse.has_discrepancy or tpex.has_discrepancy,
+            twse=twse,
+            tpex=tpex,
+            status="current",
+        ), as_of
 
     def _calc_breadth(self, df: pl.DataFrame) -> MarketBreadthStats:
         """Compute MarketBreadthStats from joined current & previous dataframe."""
@@ -492,34 +544,13 @@ class TaiwanMarketIntelligenceService:
         by_instrument = MarketInstrumentBreakdown(stock=stock_breadth, etf=etf_breadth)
 
         # 4. Institutional Aggregation (NO look-ahead)
-        inst_df = self.inst_store.read_range(None, target, target)
         inst_available = self.inst_store.available_dates()
         inst_as_of = max(inst_available) if inst_available else None
         inst_status: DatasetFreshnessStatus = (
             "current" if (inst_as_of and inst_as_of >= target)
             else ("stale" if inst_as_of else "unavailable")
         )
-
-        if not inst_df.is_empty():
-            f_net = float(inst_df["foreign_net"].sum() or 0.0)
-            it_net = float(inst_df["investment_trust_net"].sum() or 0.0)
-            d_net = float(inst_df["dealer_net"].sum() or 0.0)
-            tot_net = f_net + it_net + d_net
-            inst_agg = InstitutionalMarketAggregate(
-                trade_date=str(target),
-                row_count=len(inst_df),
-                foreign_net=f_net,
-                investment_trust_net=it_net,
-                dealer_net=d_net,
-                total_net=tot_net,
-                status=inst_status,
-            )
-        else:
-            inst_agg = InstitutionalMarketAggregate(
-                trade_date=str(target) if inst_as_of else None,
-                row_count=0,
-                status=inst_status,
-            )
+        inst_agg, amount_as_of = self._institutional_amounts(target)
 
         # 5. Margin Aggregation (NO look-ahead)
         m_df = self.margin_store.read_range(None, target, target)
@@ -573,6 +604,8 @@ class TaiwanMarketIntelligenceService:
         )
 
         # 7. Data Quality & Overall Status
+        # Amount coverage is reported in data_quality.institutional_amount only; gating overall_status on it
+        # would drop market context from AI research and flag every day before the amount backfill as partial.
         dataset_statuses = [daily_status, inst_status, m_status]
         if all(s == "current" for s in dataset_statuses):
             overall_status = "complete"
@@ -596,6 +629,12 @@ class TaiwanMarketIntelligenceService:
                 as_of=str(inst_as_of) if inst_as_of else None,
                 status=inst_status,
                 source="taiwan_institutional_store",
+            ),
+            institutional_amount=DatasetQualityMeta(
+                dataset="institutional_amount",
+                as_of=str(amount_as_of) if amount_as_of else None,
+                status=inst_agg.status,
+                source="taiwan_market_institutional_store",
             ),
             margin=DatasetQualityMeta(
                 dataset="margin",
@@ -627,3 +666,18 @@ class TaiwanMarketIntelligenceService:
             indexes=indexes_snapshot,
             data_quality=dq,
         )
+
+
+def _net_amounts(rows: pl.DataFrame) -> InstitutionalNetAmounts | None:
+    """Official net amounts for one exchange's summary rows, or None when a required category is absent."""
+    by_category = dict(zip(rows["category"].to_list(), rows["net_amount"].to_list(), strict=True))
+    needed = (FOREIGN_EXCL_DEALER, INVESTMENT_TRUST, DEALER_PROPRIETARY, DEALER_HEDGE, TOTAL)
+    if any(by_category.get(c) is None for c in needed):
+        return None
+    return InstitutionalNetAmounts(
+        foreign_net_amount=by_category[FOREIGN_EXCL_DEALER],
+        investment_trust_net_amount=by_category[INVESTMENT_TRUST],
+        dealer_net_amount=by_category[DEALER_PROPRIETARY] + by_category[DEALER_HEDGE],
+        total_net_amount=by_category[TOTAL],
+        has_discrepancy=bool(rows["has_discrepancy"].any()),
+    )

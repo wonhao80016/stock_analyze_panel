@@ -12,15 +12,11 @@ network itself; it only orchestrates already-built services:
     close snapshot), extended here with a 5th tier: latest Taiwan daily close
     (``TaiwanDailyStore``), so a closed market / provider outage still shows
     the last known price instead of turning the whole row blank.
-  - ``app.taiwan.technical_indicators.compute_taiwan_daily_indicators()``
-    (Phase 8B-5.0.5) — MA5/10/20/60, vol_ma5/10, RSI14, MACD, momentum_5d/20d,
-    computed from a single batched ``TaiwanDailyStore.read_range()`` call for
-    the whole watchlist, never per symbol.
+  - ``app.taiwan.enriched_reader`` — indicators are read from the newest
+    published enriched partition (one read for the whole watchlist), never
+    recomputed here. Each row carries ``indicator_date``, the partition date.
 
-Deliberately still NOT implemented here (Phase 8B-5.0.5 report §S):
-KDJ, Bollinger, ATR, amplitude, annual_vol_20d, RPS,
-signal_* (limit-up/board-related) — those stay ``None``; faking them would be
-worse than showing "—".
+signal_* (limit-up/board-related) stay ``None``.
 
 ``turnover_rate`` is filled for today's quotes only; see ``_taiwan_turnover_rate``.
 """
@@ -35,12 +31,23 @@ import polars as pl
 
 logger = logging.getLogger(__name__)
 
-# 与 api/watchlist.py 的 _WATCHLIST_COLS 保持同名字段, 缺失的技术指标列一律不写
-# (下游 concat 用 diagonal_relaxed 补 null, 前端沿用既有 "—" 渲染, 不新造字段名)。
+# Row keys share their names with api/watchlist.py::_WATCHLIST_COLS; the indicator
+# fields are added from the enriched partition below.
 _TAIWAN_ROW_FIELDS = (
     "symbol", "name", "asset_type",
     "close", "open", "high", "low", "prev_close",
     "change_amount", "change_pct", "amount", "turnover_rate",
+)
+
+_TAIWAN_INDICATOR_FIELDS = (
+    "amplitude", "annual_vol_20d", "vol_ratio_5d",
+    "ma5", "ma10", "ma20", "ma60", "vol_ma5", "vol_ma10",
+    "high_60d", "low_60d",
+    "rsi_6", "rsi_14", "rsi_24",
+    "macd_dif", "macd_dea", "macd_hist",
+    "kdj_k", "kdj_d", "kdj_j",
+    "boll_upper", "boll_lower", "atr_14",
+    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
 )
 
 
@@ -135,29 +142,15 @@ def _taiwan_daily_fallback_map(symbols: list[str], daily_store: Any) -> dict[str
     return result
 
 
-def _taiwan_indicator_map(symbols: list[str], daily_store: Any) -> dict[str, dict]:
-    """一次性批量读取足够回看窗口的台股日K, 算出技术指标映射 (symbol -> 指标 dict)。
+def _taiwan_indicator_map(symbols: list[str]) -> tuple[dict[str, dict], str | None]:
+    """Indicators of the newest partition that carries them, plus that partition's date."""
+    from app.taiwan.enriched_reader import read_latest_enriched
 
-    只读一次 (最近 150 个可用交易日分区, 足够 MA60/MACD(12,26,9) 稳定暖机),
-    不对每个 symbol 各自打开 parquet。与 _taiwan_daily_fallback_map 是各自
-    独立的批量读取 (窗口大小不同: 14 天 vs 150 个交易日), 两者都是 O(1) 次
-    IO, 不随 symbol 数量增长 —— 没有合并成一次读取, 是刻意的最小改动: 价格
-    fallback 的窗口需求(2 个交易日)远小于指标需求, 合并会让 fallback 路径
-    平白多扫一个大得多的窗口。
-    """
-    from app.taiwan.technical_indicators import compute_taiwan_daily_indicators
-
-    available = daily_store.available_dates()
-    if not available:
-        return {}
-    lookback = available[-150:]
-    start, end = lookback[0], lookback[-1]
-    history = daily_store.read_range(symbols, start, end)
-    if history.is_empty():
-        return {}
-
-    indicators = compute_taiwan_daily_indicators(history)
-    return {row["symbol"]: row for row in indicators.to_dicts()}
+    latest = read_latest_enriched(list(_TAIWAN_INDICATOR_FIELDS), symbols)
+    if latest is None:
+        return {}, None
+    as_of, frame = latest
+    return {row["symbol"]: row for row in frame.to_dicts()}, as_of.isoformat()
 
 
 def enrich_taiwan_watchlist_rows(
@@ -213,11 +206,11 @@ def enrich_taiwan_watchlist_rows(
         quote_map = {}
 
     try:
-        indicator_map = _taiwan_indicator_map(symbols, store)
+        indicator_map, indicator_date = _taiwan_indicator_map(symbols)
     except Exception as e:  # noqa: BLE001
-        # 技术指标计算失败不该连累价格/涨跌欄位 —— 退化为全部指标 null。
-        logger.warning("taiwan watchlist indicator computation failed: %s", e)
-        indicator_map = {}
+        # An indicator read failure must not blank the price fields.
+        logger.warning("taiwan watchlist indicator read failed: %s", e)
+        indicator_map, indicator_date = {}, None
 
     rows: list[dict] = []
     for symbol in symbols:
@@ -253,18 +246,8 @@ def enrich_taiwan_watchlist_rows(
             "quote_time": q.quote_time.isoformat() if q and q.quote_time else None,
             "source_meta": q.source_meta.to_dict() if q and q.source_meta else None,
             "live_date": _taiwan_live_date(q),
-            "ma5": _sanitize_float(ind.get("ma5")),
-            "ma10": _sanitize_float(ind.get("ma10")),
-            "ma20": _sanitize_float(ind.get("ma20")),
-            "ma60": _sanitize_float(ind.get("ma60")),
-            "vol_ma5": _sanitize_float(ind.get("vol_ma5")),
-            "vol_ma10": _sanitize_float(ind.get("vol_ma10")),
-            "rsi_14": _sanitize_float(ind.get("rsi_14")),
-            "macd_dif": _sanitize_float(ind.get("macd_dif")),
-            "macd_dea": _sanitize_float(ind.get("macd_dea")),
-            "macd_hist": _sanitize_float(ind.get("macd_hist")),
-            "momentum_5d": _sanitize_float(ind.get("momentum_5d")),
-            "momentum_20d": _sanitize_float(ind.get("momentum_20d")),
+            "indicator_date": indicator_date if ind else None,
+            **{f: _sanitize_float(ind.get(f)) for f in _TAIWAN_INDICATOR_FIELDS},
             "turnover_rate": _taiwan_turnover_rate(q, asset_type, issued_shares_map.get(symbol), today),
         })
     return rows

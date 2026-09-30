@@ -6,7 +6,6 @@ test_watchlist_market_dispatch.py。
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -316,115 +315,131 @@ def test_realtime_provider_exception_does_not_raise():
     assert rows[0]["close"] is None
 
 
-# ===== Phase 8B-5.0.5: 技术指标透过 enrich_taiwan_watchlist_rows 落到 watchlist 行契约 =====
+# ===== Indicators are read from the published enriched partition =====
 
-def _make_indicator_history(symbol: str, n: int = 70) -> pl.DataFrame:
-    """足够 MA60/MACD 稳定暖机的确定性历史(与 test_taiwan_technical_indicators.py
-    的 fixture 生成方式一致, 各自独立以避免测试间耦合)。"""
-    closes = [round(100.0 + i * 0.5 + 3.0 * math.sin(i / 3.0), 4) for i in range(n)]
-    volumes = [round(1_000_000 + i * 5_000, 1) for i in range(n)]
-    start = date(2026, 1, 1)
-    dates = [start + timedelta(days=i) for i in range(n)]
-    return pl.DataFrame({
-        "symbol": [symbol] * n, "date": dates,
-        "open": closes, "high": closes, "low": closes, "close": closes,
-        "volume": volumes, "amount": [c * v for c, v in zip(closes, volumes)],
-    })
+_INDICATOR_FIELDS = (
+    "amplitude", "annual_vol_20d", "vol_ratio_5d",
+    "ma5", "ma10", "ma20", "ma60", "vol_ma5", "vol_ma10",
+    "high_60d", "low_60d",
+    "rsi_6", "rsi_14", "rsi_24",
+    "macd_dif", "macd_dea", "macd_hist",
+    "kdj_k", "kdj_d", "kdj_j",
+    "boll_upper", "boll_lower", "atr_14",
+    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
+)
 
 
-def test_twse_stock_gets_technical_indicators_populated():
-    """2330.TWSE 有足够日线历史时, ma5/10/20/60、rsi_14、macd_*、momentum_* 都应有值。"""
-    sec_master = _FakeSecurityMaster({
-        "2330.TWSE": _FakeInstrument(name="台積電", instrument_type="stock"),
-    })
+def _enriched_row(symbol: str, base: float) -> dict:
+    return {"symbol": symbol, **{f: base + i * 0.137 for i, f in enumerate(_INDICATOR_FIELDS)}}
+
+
+def _publish(tmp_path, monkeypatch, partitions: dict[date, list[dict]]) -> None:
+    from app.config import settings
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    for d, rows in partitions.items():
+        TaiwanEnrichedRefreshService._write_partition(
+            tmp_path / "kline_daily_enriched" / f"date={d.isoformat()}", pl.DataFrame(rows)
+        )
+
+
+def _enrich_one(symbol: str, name: str, instrument_type: str = "stock") -> dict:
+    sec_master = _FakeSecurityMaster({symbol: _FakeInstrument(name=name, instrument_type=instrument_type)})
     rt_service = _FakeRealtimeService({
-        "2330.TWSE": _FakeQuote(1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85, 1, 1.0),
+        symbol: _FakeQuote(1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85, 1, 1.0),
     })
-    history = _make_indicator_history("2330.TWSE")
-    rows = enrich_taiwan_watchlist_rows(
-        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
-        daily_store=_FakeDailyStore(df=history, latest=history["date"].max()),
-    )
-    row = rows[0]
-    for field in ("ma5", "ma10", "ma20", "ma60", "vol_ma5", "vol_ma10",
-                  "rsi_14", "macd_dif", "macd_dea", "macd_hist",
-                  "momentum_5d", "momentum_20d"):
-        assert row[field] is not None, f"{field} 应有值(70 天历史足够)"
-    assert 0.0 <= row["rsi_14"] <= 100.0
+    return enrich_taiwan_watchlist_rows(
+        [symbol], security_master=sec_master, realtime_service=rt_service,
+        daily_store=_FakeDailyStore(),
+    )[0]
 
 
-def test_tpex_stock_gets_technical_indicators_populated():
-    """6488.TPEX 同样应正常算出技术指标, 不因交易所不同走错分支。"""
-    sec_master = _FakeSecurityMaster({
-        "6488.TPEX": _FakeInstrument(name="環球晶", instrument_type="stock"),
-    })
-    rt_service = _FakeRealtimeService({
-        "6488.TPEX": _FakeQuote(680.0, 675.0, 676.0, 685.0, 674.0, 5.0, 0.74, 1, 1.0),
-    })
-    history = _make_indicator_history("6488.TPEX")
-    rows = enrich_taiwan_watchlist_rows(
-        ["6488.TPEX"], security_master=sec_master, realtime_service=rt_service,
-        daily_store=_FakeDailyStore(df=history, latest=history["date"].max()),
-    )
-    row = rows[0]
-    assert row["ma20"] is not None
-    assert row["macd_dif"] is not None
+def test_twse_stock_indicators_equal_the_published_partition(tmp_path, monkeypatch):
+    published = _enriched_row("2330.TWSE", 10.0)
+    _publish(tmp_path, monkeypatch, {date(2026, 9, 30): [published]})
+    row = _enrich_one("2330.TWSE", "TSMC")
+    for field in _INDICATOR_FIELDS:
+        assert row[field] == published[field], field
+    assert row["indicator_date"] == "2026-09-30"
 
 
-def test_etf_gets_technical_indicators_populated():
-    """Taiwan ETF(0050.TWSE)必须走同一技术指标 flow, 不因 instrument_type==etf 被排除。"""
-    sec_master = _FakeSecurityMaster({
-        "0050.TWSE": _FakeInstrument(name="元大台灣50", instrument_type="etf"),
-    })
-    rt_service = _FakeRealtimeService({
-        "0050.TWSE": _FakeQuote(185.5, 184.0, 184.2, 186.0, 184.0, 1.5, 0.82, 1, 1.0),
-    })
-    history = _make_indicator_history("0050.TWSE")
-    rows = enrich_taiwan_watchlist_rows(
-        ["0050.TWSE"], security_master=sec_master, realtime_service=rt_service,
-        daily_store=_FakeDailyStore(df=history, latest=history["date"].max()),
-    )
-    row = rows[0]
+def test_tpex_stock_indicators_equal_the_published_partition(tmp_path, monkeypatch):
+    published = _enriched_row("6488.TPEX", 20.0)
+    _publish(tmp_path, monkeypatch, {date(2026, 9, 30): [published]})
+    row = _enrich_one("6488.TPEX", "GlobalWafers")
+    assert row["kdj_k"] == published["kdj_k"]
+    assert row["rsi_24"] == published["rsi_24"]
+
+
+def test_etf_indicators_equal_the_published_partition(tmp_path, monkeypatch):
+    published = _enriched_row("0050.TWSE", 30.0)
+    _publish(tmp_path, monkeypatch, {date(2026, 9, 30): [published]})
+    row = _enrich_one("0050.TWSE", "Yuanta 50", "etf")
     assert row["asset_type"] == "etf"
-    assert row["ma5"] is not None
-    assert row["rsi_14"] is not None
+    assert row["vol_ratio_5d"] == published["vol_ratio_5d"]
+    assert row["amplitude"] == published["amplitude"]
 
 
-def test_insufficient_history_leaves_technical_fields_null():
-    """只有 3 天历史: 技术指标应全为 None, 不影响价格/涨跌欄位。"""
-    sec_master = _FakeSecurityMaster({
-        "2330.TWSE": _FakeInstrument(name="台積電", instrument_type="stock"),
+def test_newest_published_partition_wins_and_dates_the_indicators(tmp_path, monkeypatch):
+    older = _enriched_row("2330.TWSE", 1.0)
+    newer = _enriched_row("2330.TWSE", 50.0)
+    _publish(tmp_path, monkeypatch, {date(2026, 9, 29): [older], date(2026, 9, 30): [newer]})
+    row = _enrich_one("2330.TWSE", "TSMC")
+    assert row["rsi_14"] == newer["rsi_14"]
+    assert row["indicator_date"] == "2026-09-30"
+
+
+def test_newer_basic_columns_partition_is_skipped_for_the_last_real_publication(tmp_path, monkeypatch):
+    real = _enriched_row("2330.TWSE", 10.0)
+    _publish(tmp_path, monkeypatch, {
+        date(2026, 9, 29): [real],
+        date(2026, 9, 30): [{"symbol": "2330.TWSE", "close": 1100.0, "volume": 5.0}],
     })
-    rt_service = _FakeRealtimeService({
-        "2330.TWSE": _FakeQuote(1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85, 1, 1.0),
-    })
-    history = _make_indicator_history("2330.TWSE", n=3)
-    rows = enrich_taiwan_watchlist_rows(
-        ["2330.TWSE"], security_master=sec_master, realtime_service=rt_service,
-        daily_store=_FakeDailyStore(df=history, latest=history["date"].max()),
-    )
-    row = rows[0]
-    # 价格/涨跌不受历史不足影响 (来自 realtime quote, 与技术指标是独立数据源)
+    row = _enrich_one("2330.TWSE", "TSMC")
+    assert row["indicator_date"] == "2026-09-29"
+    assert row["rsi_14"] == real["rsi_14"]
+
+
+def test_only_basic_columns_partition_leaves_indicators_and_date_null(tmp_path, monkeypatch):
+    _publish(tmp_path, monkeypatch, {date(2026, 9, 30): [{"symbol": "2330.TWSE", "close": 1100.0}]})
+    row = _enrich_one("2330.TWSE", "TSMC")
+    assert row["indicator_date"] is None
+    assert row["rsi_14"] is None
+
+
+def test_all_null_indicator_partition_is_not_published(tmp_path, monkeypatch):
+    empty = {"symbol": "2330.TWSE", **{f: None for f in _INDICATOR_FIELDS}}
+    _publish(tmp_path, monkeypatch, {date(2026, 9, 30): [empty]})
+    row = _enrich_one("2330.TWSE", "TSMC")
+    assert row["indicator_date"] is None
+
+
+def test_no_published_partition_leaves_indicators_null(tmp_path, monkeypatch):
+    _publish(tmp_path, monkeypatch, {})
+    row = _enrich_one("2330.TWSE", "TSMC")
     assert row["close"] == 1100.0
     assert row["change_pct"] == pytest.approx(0.0185)
-    for field in ("ma5", "ma20", "ma60", "rsi_14", "macd_dif", "momentum_20d"):
-        assert row[field] is None, f"{field} 应为 None(仅 3 天历史)"
+    assert row["indicator_date"] is None
+    for field in _INDICATOR_FIELDS:
+        assert row[field] is None, field
 
 
-def test_indicator_computation_uses_single_batch_read(monkeypatch):
-    """技术指标计算应对整批 symbol 只调用一次 daily_store.read_range(), 不逐 symbol 各读一次。"""
+def test_symbol_missing_from_the_partition_has_null_indicators_and_no_date(tmp_path, monkeypatch):
+    _publish(tmp_path, monkeypatch, {date(2026, 9, 30): [_enriched_row("2317.TWSE", 5.0)]})
+    row = _enrich_one("2330.TWSE", "TSMC")
+    assert row["indicator_date"] is None
+    assert row["rsi_14"] is None
+
+
+def test_indicators_are_read_from_one_partition_for_the_whole_batch(tmp_path, monkeypatch):
+    _publish(tmp_path, monkeypatch, {
+        date(2026, 9, 30): [_enriched_row("2330.TWSE", 10.0), _enriched_row("6488.TPEX", 20.0)],
+    })
     sec_master = _FakeSecurityMaster({
-        "2330.TWSE": _FakeInstrument(name="台積電", instrument_type="stock"),
-        "6488.TPEX": _FakeInstrument(name="環球晶", instrument_type="stock"),
+        "2330.TWSE": _FakeInstrument(name="TSMC", instrument_type="stock"),
+        "6488.TPEX": _FakeInstrument(name="GlobalWafers", instrument_type="stock"),
     })
-    rt_service = _FakeRealtimeService({
-        "2330.TWSE": _FakeQuote(1100.0, 1080.0, 1085.0, 1105.0, 1082.0, 20.0, 1.85, 1, 1.0),
-        "6488.TPEX": _FakeQuote(680.0, 675.0, 676.0, 685.0, 674.0, 5.0, 0.74, 1, 1.0),
-    })
-    h1 = _make_indicator_history("2330.TWSE")
-    h2 = _make_indicator_history("6488.TPEX")
-    combined = pl.concat([h1, h2], how="vertical")
-
     read_range_calls: list[list[str]] = []
 
     class _CountingDailyStore(_FakeDailyStore):
@@ -432,20 +447,12 @@ def test_indicator_computation_uses_single_batch_read(monkeypatch):
             read_range_calls.append(list(symbols) if symbols is not None else [])
             return super().read_range(symbols, start, end)
 
-    store = _CountingDailyStore(df=combined, latest=combined["date"].max())
     rows = enrich_taiwan_watchlist_rows(
-        ["2330.TWSE", "6488.TPEX"], security_master=sec_master, realtime_service=rt_service,
-        daily_store=store,
+        ["2330.TWSE", "6488.TPEX"], security_master=sec_master,
+        realtime_service=_FakeRealtimeService(), daily_store=_CountingDailyStore(latest=date(2026, 9, 30)),
     )
-    assert len(rows) == 2
     assert all(r["ma20"] is not None for r in rows)
-    # 一次是价格 fallback 窗口的 read_range, 一次是技术指标窗口的 read_range ——
-    # 两者都是与 symbol 数量无关的常数次数(各恰好一次), 不随 watchlist 大小增长。
-    assert len(read_range_calls) == 2, (
-        f"预期恰好 2 次 read_range 调用(fallback + indicators), 实际 {len(read_range_calls)}"
-    )
-    for call_symbols in read_range_calls:
-        assert sorted(call_symbols) == ["2330.TWSE", "6488.TPEX"], "每次调用都应是整批 symbol, 不是逐个"
+    assert len(read_range_calls) == 1
 
 
 # ===== Data Freshness & Source Labels batch (Post-8C follow-up): =====
