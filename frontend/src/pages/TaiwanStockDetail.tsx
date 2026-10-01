@@ -20,6 +20,7 @@ import {
   api,
   type TaiwanSearchResult,
   type TaiwanAIStockResearchReport,
+  type TaiwanDailyItem,
   type TaiwanInstitutionalHistoryRow,
   type TaiwanMarginHistoryRow,
 } from '@/lib/api'
@@ -49,6 +50,18 @@ export const signColorClass = (v: number | null | undefined) => {
 }
 
 export const signPrefix = (v: number | null | undefined) => (v != null && v > 0 ? '+' : '')
+
+export const dailyRowsToOHLC = (rows: TaiwanDailyItem[]): OHLC[] =>
+  rows.map(r => ({
+    date: r.date,
+    open: r.open,
+    high: r.high,
+    low: r.low,
+    close: r.close,
+    volume: r.volume,
+    prev_close: r.prev_close ?? null,
+    raw_close: r.raw_close ?? null,
+  }))
 
 interface TaiwanStockDetailProps {
   /** Renders inside the preview dialog, which supplies its own chrome and chart. */
@@ -155,17 +168,10 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const isError = detailQuery.isError
 
   // Format K-line rows for EChartsCandlestick
-  const ohlcRows: OHLC[] = useMemo(() => {
-    if (!data?.daily_history?.rows) return []
-    return data.daily_history.rows.map(r => ({
-      date: r.date,
-      open: r.open,
-      high: r.high,
-      low: r.low,
-      close: r.close,
-      volume: r.volume,
-    }))
-  }, [data?.daily_history?.rows])
+  const ohlcRows: OHLC[] = useMemo(
+    () => dailyRowsToOHLC(data?.daily_history?.rows ?? []),
+    [data?.daily_history?.rows],
+  )
 
   // Price movement classes
   const isUp = (data?.realtime?.change || 0) > 0

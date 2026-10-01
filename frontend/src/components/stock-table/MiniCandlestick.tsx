@@ -1,6 +1,12 @@
 /** 迷你蠟燭圖（自選/策略列表共享）。 */
 import type { KlineRow } from '@/lib/api'
 
+/** The backend's prev_close (the exchange reference on an ex-rights or split session), else the previous close. */
+export function flatBarBase(rows: KlineRow[], i: number): number {
+  const own = rows[i].prev_close
+  return typeof own === 'number' && Number.isFinite(own) && own > 0 ? own : rows[i - 1].close
+}
+
 export function MiniCandlestick({ rows, width = 100, height = 80 }: { rows: KlineRow[]; width?: number; height?: number }) {
   // 空數據：返回等尺寸佔位（不畫內容），保證 kline 加載前後單元格尺寸一致、不閃爍
   if (!rows || rows.length === 0) {
@@ -42,7 +48,7 @@ export function MiniCandlestick({ rows, width = 100, height = 80 }: { rows: Klin
       color = BEAR
     } else {
       // 一字板: open === close, 用前一日收盤價判斷漲跌方向
-      const prevClose = i > 0 ? rows[i - 1].close : null
+      const prevClose = i > 0 ? flatBarBase(rows, i) : null
       if (prevClose && prevClose > 0 && r.close !== prevClose) {
         color = r.close > prevClose ? BULL : BEAR
       } else {

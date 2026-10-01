@@ -31,6 +31,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 import polars as pl
 
+from app.taiwan.corporate_actions import (
+    TaiwanCorporateActionStore,
+    forward_adjusted,
+    read_events_or_empty,
+    reference_prices,
+)
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
@@ -305,18 +311,21 @@ class TaiwanStockResearchContextService:
         security_master: TaiwanSecurityMaster | None = None,
         market_intel_svc: TaiwanMarketIntelligenceService | None = None,
         industry_intel_svc: TaiwanIndustryIntelligenceService | None = None,
+        corporate_actions: TaiwanCorporateActionStore | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
         self.inst_store = inst_store or TaiwanInstitutionalStore()
         self.margin_store = margin_store or TaiwanMarginStore()
         self.security_master = security_master or get_security_master()
+        self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
         self.market_intel_svc = market_intel_svc or TaiwanMarketIntelligenceService(
             daily_store=self.daily_store,
             inst_store=self.inst_store,
             margin_store=self.margin_store,
             calendar=self.calendar,
             security_master=self.security_master,
+            corporate_actions=self.corporate_actions,
         )
         self.industry_intel_svc = industry_intel_svc or TaiwanIndustryIntelligenceService(
             daily_store=self.daily_store,
@@ -324,6 +333,7 @@ class TaiwanStockResearchContextService:
             margin_store=self.margin_store,
             calendar=self.calendar,
             security_master=self.security_master,
+            corporate_actions=self.corporate_actions,
         )
 
     def get_research_context(
@@ -385,6 +395,9 @@ class TaiwanStockResearchContextService:
         # Up to 65 prior trading days for 20D/60D indicators
         window_dates = available_dates[-65:] if len(available_dates) >= 65 else available_dates
         hist_df = self.daily_store.read_range([canonical], window_dates[0] if window_dates else target, target) if window_dates else pl.DataFrame()
+        events = read_events_or_empty(self.corporate_actions, end=target, symbols=[canonical])
+        # Multi-day returns and extremes compare target with earlier sessions on target's scale.
+        hist_df = forward_adjusted(hist_df, events, target)
 
         # Price Context & Technical Metrics
         curr_row = hist_df.filter(pl.col("date") == target).tail(1) if not hist_df.is_empty() else pl.DataFrame()
@@ -398,6 +411,13 @@ class TaiwanStockResearchContextService:
         vol = float(curr_row["volume"][0]) if not curr_row.is_empty() and curr_row["volume"][0] is not None else None
         amt = float(curr_row["amount"][0]) if not curr_row.is_empty() and curr_row["amount"][0] is not None else None
         p_close = float(prev_row["close"][0]) if not prev_row.is_empty() and prev_row["close"][0] is not None else None
+        # A corporate-action session moves from the exchange reference price and has published limits.
+        ref_row = None
+        if target_in_store:
+            ref = reference_prices(events, prev_date, target)
+            ref_row = ref.row(0, named=True) if not ref.is_empty() else None
+        if ref_row is not None:
+            p_close = float(ref_row["ref_price"])
 
         chg = round(c_price - p_close, 4) if (c_price is not None and p_close is not None) else None
         chg_pct = round((c_price / p_close) - 1.0, 6) if (c_price is not None and p_close is not None and p_close > 0) else None
@@ -435,13 +455,20 @@ class TaiwanStockResearchContextService:
             target, ["ma5", "ma20", "ma60", "vol_ratio_5d", "rsi_14"], [canonical]
         )
         ind_row = published.row(0, named=True) if published is not None and not published.is_empty() else None
-        def _published(field: str, digits: int) -> float | None:
+        # Prices stay on the target session's traded scale; raw_close / close undoes later events.
+        to_target = 1.0
+        if ind_row:
+            scale_rows = read_enriched_partition(target, ["close", "raw_close"], [canonical])
+            scale_row = scale_rows.row(0, named=True) if scale_rows is not None and not scale_rows.is_empty() else {}
+            if scale_row.get("close") and scale_row.get("raw_close") and scale_row["close"] > 0:
+                to_target = scale_row["raw_close"] / scale_row["close"]
+        def _published(field: str, digits: int, scale: float = 1.0) -> float | None:
             value = ind_row[field] if ind_row else None
-            return round(value, digits) if value is not None else None
+            return round(value * scale, digits) if value is not None else None
 
-        ma5 = _published("ma5", 4)
-        ma20 = _published("ma20", 4)
-        ma60 = _published("ma60", 4)
+        ma5 = _published("ma5", 4, to_target)
+        ma20 = _published("ma20", 4, to_target)
+        ma60 = _published("ma60", 4, to_target)
         rsi14 = _published("rsi_14", 2)
         vol_ratio = _published("vol_ratio_5d", 2)
         dist_ma20 = (
@@ -712,6 +739,8 @@ class TaiwanStockResearchContextService:
         if p_close is not None and p_close > 0:
             if not is_no_lim and limit_pct is not None:
                 upper_l, lower_l = MarketProfileBridge.calc_limits(p_close, inst)
+                if ref_row is not None and ref_row["limit_up"] is not None and ref_row["limit_down"] is not None:
+                    upper_l, lower_l = ref_row["limit_up"], ref_row["limit_down"]
             tick_sz = TickSizeModel.get_tick_size(p_close)
 
         market_rules_evidence = MarketRulesContextEvidence(

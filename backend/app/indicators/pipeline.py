@@ -98,6 +98,10 @@ ENRICHED_STORAGE_COLS = [
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
     "consecutive_limit_downs",
     "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
+    # Raw-scale exchange reference price and limits on corporate-action sessions (Taiwan only), null otherwise.
+    "ref_prev_close",
+    "ref_limit_up",
+    "ref_limit_down",
 ]
 
 
@@ -244,15 +248,22 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
       - 保持最新价格不变,将历史价格向下调整以消除除权缺口
       - adjusted = raw × cumprod_at_D / total_cumprod
       - 等价于: adjusted = raw / (该日期之后所有事件的 ex_factor 乘积)
+
+    An optional volume_factor column restates volume the same way in the other direction:
+    volume times the product of volume_factor over the events after the bar. Without it volume
+    is untouched.
     """
     if factors.is_empty():
         return raw
 
+    has_volume_factor = "volume_factor" in factors.columns
+    factor_cols = ["ex_factor", *(["volume_factor"] if has_volume_factor else [])]
+
     # 确保类型一致
     factors = factors.with_columns(
         pl.col("trade_date").cast(pl.Date, strict=False),
-        pl.col("ex_factor").cast(pl.Float64, strict=False),
-    ).select("symbol", "trade_date", "ex_factor").drop_nulls()
+        *[pl.col(c).cast(pl.Float64, strict=False) for c in factor_cols],
+    ).select("symbol", "trade_date", *factor_cols).drop_nulls()
 
     if factors.is_empty():
         return raw
@@ -264,14 +275,25 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
         .sort(["symbol", "trade_date"])
         .with_columns(
             pl.col("ex_factor").cum_prod().over("symbol").alias("cum_factor"),
+            *(
+                [pl.col("volume_factor").cum_prod().over("symbol").alias("cum_volume_factor")]
+                if has_volume_factor else []
+            ),
         )
     )
+    cum_cols = ["cum_factor", *(["cum_volume_factor"] if has_volume_factor else [])]
 
     # 每个 symbol 的总累积因子
     total_factors = (
         factors_sorted
         .group_by("symbol")
-        .agg(pl.col("cum_factor").last().alias("total_factor"))
+        .agg(
+            pl.col("cum_factor").last().alias("total_factor"),
+            *(
+                [pl.col("cum_volume_factor").last().alias("total_volume_factor")]
+                if has_volume_factor else []
+            ),
+        )
     )
 
     raw_sorted = raw.sort(["symbol", "date"])
@@ -279,7 +301,7 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
     # join_asof backward: 每根 K 线取 <= 其 date 的最新累积因子
     # 同时带 trade_date 列用于判断除权日标记
     df = raw_sorted.join_asof(
-        factors_sorted.select("symbol", "trade_date", "cum_factor"),
+        factors_sorted.select("symbol", "trade_date", *cum_cols),
         left_on="date",
         right_on="trade_date",
         by="symbol",
@@ -289,16 +311,21 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
     # 补充 total_factor + 前复权 + 除权标记,一次 with_columns 完成
     df = df.join(total_factors, on="symbol", how="left")
 
-    is_ex = pl.col("trade_date") == pl.col("date")
+    is_ex = (pl.col("trade_date") == pl.col("date")).fill_null(False)
     ratio = pl.col("cum_factor").fill_null(1.0) / pl.col("total_factor").fill_null(1.0)
     price_cols = [c for c in ("open", "high", "low", "close") if c in df.columns]
+    volume_exprs = []
+    if has_volume_factor and "volume" in df.columns:
+        volume_ratio = pl.col("total_volume_factor").fill_null(1.0) / pl.col("cum_volume_factor").fill_null(1.0)
+        volume_exprs.append(pl.col("volume") * volume_ratio)
 
     df = df.with_columns(
         [pl.col(c) * ratio for c in price_cols]
+        + volume_exprs
         + [
             is_ex.alias("ex_rights"),
         ]
-    ).drop(["trade_date", "cum_factor", "total_factor"])
+    ).drop(["trade_date", *cum_cols, "total_factor", *(["total_volume_factor"] if has_volume_factor else [])])
 
     return df
 
@@ -357,6 +384,22 @@ def _resolve_needed(needed: set[str] | None) -> set[str]:
     return want
 
 
+def _reference_prev_close(df: pl.DataFrame, prev_close: pl.Expr) -> pl.Expr:
+    """The previous close, replaced by the exchange reference price where a row carries one.
+
+    ref_prev_close is on the raw scale; close / raw_close moves it onto the scale of close,
+    so the base stays right once close is forward-adjusted.
+    """
+    if "ref_prev_close" not in df.columns or "raw_close" not in df.columns:
+        return prev_close
+    on_close_scale = (
+        pl.when(pl.col("raw_close") > 0)
+        .then(pl.col("ref_prev_close") * (pl.col("close") / pl.col("raw_close")))
+        .otherwise(None)
+    )
+    return pl.coalesce(on_close_scale, prev_close)
+
+
 def compute_indicators(
     df: pl.DataFrame,
     needed: set[str] | None = None,
@@ -386,9 +429,10 @@ def compute_indicators(
 
     # Pass 1: 均线 + EMA + MACD 基础 + BOLL 基础 + KDJ 基础 + ATR 基础 + 量价 + 极值
     prev_close = pl.col("close").shift(1).over("symbol")
+    reference_prev_close = _reference_prev_close(df, prev_close)
     _p1: list[pl.Expr] = []
     if "prev_close" in want:
-        _p1.append(prev_close.alias("prev_close"))
+        _p1.append(reference_prev_close.alias("prev_close"))
     if "ma5" in want:
         _p1.append(pl.col("close").rolling_mean(5).over("symbol").alias("ma5"))
     if "ma10" in want:
@@ -501,17 +545,17 @@ def compute_indicators(
     if "momentum_60d" in want:
         _p4mom.append((pl.col("close") / pl.col("close").shift(60).over("symbol") - 1).alias("momentum_60d"))
     if "change_pct" in want:
-        _p4mom.append((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1).alias("change_pct"))
+        _p4mom.append((pl.col("close") / reference_prev_close - 1).alias("change_pct"))
     if _p4mom:
         df = df.with_columns(_p4mom)
     if "change_amount" in want:
         df = df.with_columns(
-            (pl.col("close") - pl.col("close").shift(1).over("symbol")).alias("change_amount"),
+            (pl.col("close") - reference_prev_close).alias("change_amount"),
         )
     if "amplitude" in want:
         df = df.with_columns(
-            pl.when(pl.col("close").shift(1).over("symbol") > 0)
-              .then((pl.col("high") - pl.col("low")) / pl.col("close").shift(1).over("symbol"))
+            pl.when(reference_prev_close > 0)
+              .then((pl.col("high") - pl.col("low")) / reference_prev_close)
               .otherwise(None)
               .alias("amplitude"),
         )
@@ -758,12 +802,15 @@ def compute_limit_signals(
     _adj_today = pl.col("close") / pl.col("raw_close")
     _adj_yesterday = pl.col("close").shift(1).over("symbol") / pl.col("raw_close").shift(1).over("symbol")
     _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
-    df = df.with_columns(
-        pl.when(_adj_changed)
-        .then(pl.col("close").shift(1).over("symbol"))   # 除权: 使用前复权昨收
+    # The limit base must stay on today's raw scale, whatever events follow today.
+    prev_raw_close = (
+        pl.when(_adj_changed & (pl.col("close") > 0))
+        .then(pl.col("close").shift(1).over("symbol") * pl.col("raw_close") / pl.col("close"))
         .otherwise(pl.col("raw_close").shift(1).over("symbol"))  # 正常: 使用原始昨收
-        .alias("_prev_raw_close")
     )
+    if "ref_prev_close" in df.columns:
+        prev_raw_close = pl.coalesce(pl.col("ref_prev_close"), prev_raw_close)
+    df = df.with_columns(prev_raw_close.alias("_prev_raw_close"))
 
     tw_profile = taiwan_limit_profile(df["symbol"].unique().to_list())
     df = df.join(
@@ -818,6 +865,11 @@ def compute_limit_signals(
         ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
     else:
         effective_limit_down = pl.col("_theoretical_limit_down")
+    # Taiwan corporate-action bars carry the exchange's own limits (raw scale).
+    if "ref_limit_up" in df.columns:
+        effective_limit_up = pl.coalesce(pl.col("ref_limit_up"), effective_limit_up)
+    if "ref_limit_down" in df.columns:
+        effective_limit_down = pl.coalesce(pl.col("ref_limit_down"), effective_limit_down)
     effective_exprs: list[pl.Expr] = []
     if need_up:
         effective_exprs.append(effective_limit_up.alias("_effective_limit_up"))
@@ -1415,6 +1467,16 @@ def compute_enriched_single(daily_for_symbol: pl.DataFrame) -> pl.DataFrame:
 # 盘中增量计算: 只算今天 5500 行 (不复算历史)
 # ================================================================
 
+# Enriched columns that carry a price, so forward adjustment rescales them; volume ones scale inversely.
+PRICE_COLUMNS = (
+    "open", "high", "low", "close", "prev_close", "change_amount",
+    "ema5", "ema10", "ema20", "ema30", "ema60", "macd_dif", "macd_dea", "macd_hist",
+    "ma5", "ma10", "ma20", "ma30", "ma60", "boll_upper", "boll_lower",
+    "atr_14", "high_60d", "low_60d",
+)
+VOLUME_COLUMNS = ("volume", "vol_ma5", "vol_ma10")
+
+
 def compute_enriched_today(
     live_agg: pl.DataFrame,
     prev_enriched: pl.DataFrame,
@@ -1449,42 +1511,60 @@ def compute_enriched_today(
     df = today_ohlcv.join(live_state, on="symbol", how="left")
     has_history_state = pl.col("_has_history_state").fill_null(False)
 
+    # A row with _today_factor keeps its traded price as today's close; _adj_factor is ignored for it.
+    today_factor = "_today_factor" in df.columns
+    if "_today_volume_factor" in df.columns:
+        vf = pl.col("_today_volume_factor").fill_null(1.0)
+        df = df.with_columns([
+            pl.col(c) * vf
+            for c in ("_vol_ma5_partial_sum", "_vol_ma10_partial_sum", "_vol_ma5_prev_sum")
+            if c in df.columns
+        ])
+
     # ---- 前复权: 保存原始价 → 调整 OHLCV ----
     df = df.with_columns([
         pl.col("close").alias("raw_close"),
         pl.col("high").alias("raw_high"),
         pl.col("low").alias("raw_low"),
     ])
+    scale: pl.Expr | None = None
     if "_adj_factor" in df.columns:
-        af = pl.col("_adj_factor").fill_null(1.0)
+        scale = pl.col("_adj_factor").fill_null(1.0)
+    if today_factor:
+        tf = pl.col("_today_factor")
+        scale = pl.when(tf.is_not_null()).then(tf).otherwise(1.0 if scale is None else scale)
+    if scale is not None:
         df = df.with_columns([
-            (pl.col("open") * af).alias("open"),
-            (pl.col("high") * af).alias("high"),
-            (pl.col("low") * af).alias("low"),
-            (pl.col("close") * af).alias("close"),
+            (pl.col("open") * scale).alias("open"),
+            (pl.col("high") * scale).alias("high"),
+            (pl.col("low") * scale).alias("low"),
+            (pl.col("close") * scale).alias("close"),
         ])
 
     # ---- volume 统一 Float64 ----
     df = df.with_columns(pl.col("volume").cast(pl.Float64))
 
-    # ---- ex_rights: 盘中除权极罕见, 直接 false ----
-    df = df.with_columns(pl.lit(False).alias("ex_rights"))
+    df = df.with_columns(
+        (pl.col("_today_factor").fill_null(1.0) != 1.0).alias("ex_rights") if today_factor
+        else pl.lit(False).alias("ex_rights")
+    )
 
     # ---- 基础涨跌 ----
     # prev_close: 有则直接用 (来自 API quote_extra, raw), 需要乘 adj_factor 对齐复权价
     if "prev_close" not in df.columns:
         prev_close = pl.col("close_right") if "close_right" in df.columns else pl.col("close")
         df = df.with_columns(prev_close.alias("prev_close"))
-    elif "_adj_factor" in df.columns:
+    elif scale is not None:
         # 保存 API 原始前收盘价 (用于涨跌停价计算)
         df = df.with_columns(pl.col("prev_close").alias("_prev_close_raw"))
         # API 返回的 prev_close 是原始价, 乘复权因子对齐复权价 (用于 change_pct)
-        df = df.with_columns((pl.col("prev_close") * pl.col("_adj_factor").fill_null(1.0)).alias("prev_close"))
+        df = df.with_columns((pl.col("prev_close") * scale).alias("prev_close"))
 
     # change_pct / change_amount / amplitude: 有则直接用, 无则计算
     if "change_pct" not in df.columns:
         df = df.with_columns((pl.col("close") / pl.col("prev_close") - 1).alias("change_pct"))
-    if "change_amount" not in df.columns:
+    quoted_change_amount = "change_amount" in df.columns
+    if not quoted_change_amount:
         df = df.with_columns((pl.col("close") - pl.col("prev_close")).alias("change_amount"))
     if "amplitude" not in df.columns:
         df = df.with_columns(
@@ -1692,6 +1772,13 @@ def compute_enriched_today(
     # ---- 距涨跌停距离 (台股法定涨跌幅, 用于监控规则 near_upper/lower_limit) ----
     df = add_limit_distance_columns(df)
 
+    if today_factor:
+        tf = pl.col("_today_factor").fill_null(1.0)
+        rescaled = [c for c in PRICE_COLUMNS if c in df.columns]
+        if quoted_change_amount:
+            rescaled.remove("change_amount")
+        df = df.with_columns([pl.col(c) / tf for c in rescaled])
+
     # ---- 清理内部列 ----
     drop_cols = [
         "close_right", "high_right", "low_right", "_prev_close_raw",
@@ -1708,7 +1795,7 @@ def compute_enriched_today(
         "_rsi_avg_gain_14", "_rsi_avg_loss_14",
         "_rsi_avg_gain_24", "_rsi_avg_loss_24",
         "_ema12", "_ema26",
-        "_adj_factor",
+        "_adj_factor", "_today_factor", "_today_volume_factor",
         "_vol_19d_pct_sum", "_vol_19d_pct_sq_sum",
         "_prev_consec_up", "_prev_consec_down",
         "_has_history_state",
@@ -1981,7 +2068,14 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
     profile = taiwan_limit_profile(df["symbol"].unique().to_list())
     df = df.join(profile, on="symbol", how="left")
 
-    ref = pl.col("prev_close")
+    # Limits and ticks live on the raw price scale; prev_close and close may be forward-adjusted.
+    if "raw_close" in df.columns:
+        to_raw = pl.when(pl.col("close") > 0).then(pl.col("raw_close") / pl.col("close")).otherwise(1.0)
+        ref = pl.col("prev_close") * to_raw
+        close = pl.col("raw_close")
+    else:
+        ref = pl.col("prev_close")
+        close = pl.col("close")
     up_raw = ref * (1.0 + pl.col("limit_pct"))
     down_raw = pl.max_horizontal(pl.lit(0.01), ref * (1.0 - pl.col("limit_pct")))
     is_etf = pl.col("is_etf_tick").fill_null(False)
@@ -1993,10 +2087,10 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
     usable = (
         pl.col("limit_pct").is_not_null()
         & ref.is_not_null() & (ref > 0)
-        & pl.col("close").is_not_null()
+        & close.is_not_null()
     )
-    raw_up_dist = (limit_up - pl.col("close")) / limit_up
-    raw_down_dist = (pl.col("close") - limit_down) / limit_down
+    raw_up_dist = (limit_up - close) / limit_up
+    raw_down_dist = (close - limit_down) / limit_down
     df = df.with_columns([
         pl.when(usable & (limit_up > 0))
           .then(pl.when(raw_up_dist > 0).then(raw_up_dist).otherwise(0.0))

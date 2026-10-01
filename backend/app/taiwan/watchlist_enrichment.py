@@ -104,7 +104,7 @@ def _taiwan_turnover_rate(
     return _sanitize_float(volume * 100.0 / issued_shares)
 
 
-def _taiwan_daily_fallback_map(symbols: list[str], daily_store: Any) -> dict[str, dict]:
+def _taiwan_daily_fallback_map(symbols: list[str], daily_store: Any, corporate_actions: Any = None) -> dict[str, dict]:
     """一次性批量读取最近窗口的台股日K, 算出「最新收盘 + 前收盘 + 涨跌」映射。
 
     只读一次 (最近 14 个日历天的分区, 足够跨过连假拿到 >= 2 个交易日), 不对每个
@@ -120,9 +120,17 @@ def _taiwan_daily_fallback_map(symbols: list[str], daily_store: Any) -> dict[str
     if df.is_empty():
         return {}
 
-    df = df.sort(["symbol", "date"]).with_columns(
-        pl.col("close").shift(1).over("symbol").alias("prev_close")
+    from app.taiwan.corporate_actions import (
+        REF_PREV_CLOSE,
+        TaiwanCorporateActionStore,
+        attach_reference_prices,
+        read_events_or_empty,
     )
+
+    events = read_events_or_empty(corporate_actions or TaiwanCorporateActionStore(), start, latest, symbols)
+    df = attach_reference_prices(df, events).with_columns(
+        pl.coalesce(pl.col(REF_PREV_CLOSE), pl.col("close").shift(1).over("symbol")).alias("prev_close")
+    ).drop(REF_PREV_CLOSE)
     latest_rows = (
         df.with_columns(pl.col("date").max().over("symbol").alias("_max_date"))
         .filter(pl.col("date") == pl.col("_max_date"))
@@ -160,6 +168,7 @@ def enrich_taiwan_watchlist_rows(
     realtime_service: Any | None = None,
     daily_store: Any | None = None,
     share_capital: Any | None = None,
+    corporate_actions: Any | None = None,
 ) -> list[dict]:
     """返回 canonical Taiwan symbol 的自选股 enriched 行, 字段对齐 legacy A 股口径。
 
@@ -192,7 +201,7 @@ def enrich_taiwan_watchlist_rows(
         logger.warning("taiwan watchlist share capital read failed: %s", e)
         issued_shares_map = {}
 
-    fallback_map = _taiwan_daily_fallback_map(symbols, store)
+    fallback_map = _taiwan_daily_fallback_map(symbols, store, corporate_actions)
 
     def _daily_fallback(canonical: str) -> dict | None:
         return fallback_map.get(canonical)

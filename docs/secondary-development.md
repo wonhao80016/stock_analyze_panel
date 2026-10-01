@@ -39,6 +39,13 @@ adapter，不是平行 provider。金額單位是 TWD，屬於「raw 數量統�
 不符視為沒有資料，是否算失敗由 refresh 依日K store 是否有該日判斷，細節見
 [`taiwan-data-sources.md`](taiwan-data-sources.md) 的 Market-wide institutional amounts。
 
+台股公司行動（除權息、減資、面額變更、ETF 分割）在 `enrichment/corporate_actions.py`
+解析，由 `app/taiwan/corporate_actions.py` 儲存並提供參考價與復權因子。復權因子只能經
+`adjustment_factors` 或 provider 的 `get_adj_factors` 取得，不寫入 `data/adj_factor`。直接讀日K
+store 計算多日指標或報酬時，必須讓同一次輸出的價格類數值維持同一尺度：K 棒區間用
+`forward_adjusted`，單一回看收盤可用 `factors_between`；當日漲跌以事件交易日的官方參考價為基準。細節見
+[`taiwan-data-sources.md`](taiwan-data-sources.md) 的 Corporate actions and forward adjustment。
+
 尚未實現、只能在真實需求出現後增加的能力：
 
 - 更多頁面局部插槽。

@@ -25,6 +25,7 @@ from app.taiwan import (
     share_capital_store,
 )
 from app.taiwan.ai_research import build_evidence_registry
+from app.taiwan.corporate_actions import TaiwanCorporateActionRefreshService
 from app.taiwan.daily_update import TaiwanDailyUpdateService
 from app.taiwan.enrichment.market_institutional import (
     TPEX_CATEGORIES,
@@ -602,6 +603,7 @@ def test_the_backfill_cli_passes_days_and_end(monkeypatch, capsys):
 def quiet_publish(monkeypatch):
     monkeypatch.setattr(share_capital_store.TaiwanShareCapitalStore, "refresh", lambda self: 0)
     monkeypatch.setattr(enriched_refresh.TaiwanEnrichedRefreshService, "refresh_recent", lambda self, days=5: 0)
+    monkeypatch.setattr(TaiwanCorporateActionRefreshService, "refresh_publish_window", lambda self, first, target: {})
 
 
 def _dated_store(latest: date) -> MagicMock:

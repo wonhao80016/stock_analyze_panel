@@ -14,6 +14,10 @@ from datetime import date, timedelta
 
 import polars as pl
 
+from app.enriched_generation import (
+    EnrichedGenerationUnavailableError,
+    enriched_publication_incomplete,
+)
 from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
@@ -39,6 +43,15 @@ class ScreenerService:
         self.asset_type = asset_type
         from app.tickflow.repository import enriched_dirname
         self._enriched_dirname = enriched_dirname(asset_type)
+
+    def _raise_if_publishing(self) -> None:
+        """Refuse to read partitions while an enriched rewrite is half done; they then mix price scales."""
+        if self.asset_type in ("stock", "etf") and enriched_publication_incomplete(
+            self.repo.store.data_dir, self.asset_type
+        ):
+            raise EnrichedGenerationUnavailableError(
+                "enriched data is being published; retry after the update finishes"
+            )
 
     @staticmethod
     def clear_history_cache() -> None:
@@ -80,6 +93,8 @@ class ScreenerService:
                         if "name" not in df.columns:
                             df = df.join(df_i.select(inst_cols), on="symbol", how="left")
                     return df
+
+        self._raise_if_publishing()
 
         # 历史日期: 从 parquet 读取 14 列, 即时计算指标 (慢路径)
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
@@ -159,7 +174,8 @@ class ScreenerService:
         # makes matrix_feature reject it and takes down every strategy that
         # scores on it.
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate",
+                     "ref_prev_close", "ref_limit_up", "ref_limit_down"]
 
         try:
             lf = (
@@ -236,6 +252,8 @@ class ScreenerService:
                 return cached_df
             del _history_cache[cache_key]
 
+        self._raise_if_publishing()
+
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
         logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
                        target_date, lookback_days)
@@ -254,7 +272,8 @@ class ScreenerService:
         # makes matrix_feature reject it and takes down every strategy that
         # scores on it.
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
+                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate",
+                     "ref_prev_close", "ref_limit_up", "ref_limit_down"]
 
         try:
             lf = (

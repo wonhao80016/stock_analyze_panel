@@ -242,3 +242,69 @@ class TestMonitorSummaryFromUnifiedEngine:
 
         assert summary.rule_count == 2
         assert summary.active_count == 1
+
+
+def _adjusting_service(tmp_path, bars: dict[str, list[tuple[date, float, float]]]) -> TaiwanStockDetailService:
+    """Stored bars plus the official event tables that test_taiwan_corporate_actions parses."""
+    import json
+    from pathlib import Path
+
+    from app.taiwan.corporate_actions import TaiwanCorporateActionStore, actions_frame
+    from app.taiwan.daily_store import TaiwanDailyStore
+    from app.taiwan.enrichment.corporate_actions import TwseEtfSplitAdapter, TwseExRightsAdapter
+
+    fixtures = Path(__file__).parent / "fixtures" / "taiwan_corporate_actions"
+    actions = TaiwanCorporateActionStore(data_dir=tmp_path / "corporate_actions")
+    for adapter, name, start in (
+        (TwseEtfSplitAdapter(), "twtcau_2024_2026.json", date(2024, 1, 1)),
+        (TwseExRightsAdapter(), "twt49u_2026_excerpt.json", date(2026, 1, 1)),
+    ):
+        payload = json.loads((fixtures / name).read_text(encoding="utf-8"))
+        actions.upsert(actions_frame(adapter.parse_payload(payload, start, date(2026, 12, 31), "u")))
+    rows = [
+        {"symbol": symbol, "date": d, "open": c, "high": c, "low": c, "close": c, "volume": v,
+         "amount": c * v, "quote_ts": None}
+        for symbol, series in bars.items()
+        for d, c, v in series
+    ]
+    daily = TaiwanDailyStore(data_dir=tmp_path / "daily")
+    daily.write_batch(pl.DataFrame(rows, schema_overrides={"quote_ts": pl.Int64}))
+    return TaiwanStockDetailService(daily_store=daily, hybrid_provider=MagicMock(), corporate_actions=actions)
+
+
+def test_detail_daily_bars_are_forward_adjusted_across_the_0050_split(tmp_path):
+    """0050 split 4-for-1 on 2025-06-18 (188.65, reference 47.16); its 2026 dividend is after the latest session."""
+    svc = _adjusting_service(tmp_path, {"0050.TWSE": [
+        (date(2025, 6, 16), 190.0, 1000.0), (date(2025, 6, 17), 188.65, 1000.0),
+        (date(2025, 6, 18), 47.5, 4000.0), (date(2025, 6, 19), 48.0, 4000.0),
+    ]})
+
+    rows = svc._aggregate_daily("0050.TWSE", 1000).rows
+
+    assert [r.close for r in rows] == pytest.approx([47.5, 47.1625, 47.5, 48.0])
+    assert [r.low for r in rows] == pytest.approx([47.5, 47.1625, 47.5, 48.0])
+    assert [r.volume for r in rows] == [4000] * 4
+    assert [r.raw_close for r in rows] == [190.0, 188.65, 47.5, 48.0]
+    assert rows[0].prev_close is None
+    assert [r.prev_close for r in rows[1:]] == pytest.approx([47.5, 47.16, 47.5])
+
+
+def test_detail_daily_bars_are_forward_adjusted_across_a_dividend(tmp_path):
+    """2379 goes ex-dividend on 2026-09-08 (729, reference 704); 9927's on 10-01 is after the latest session."""
+    days = [date(2026, 9, 4), date(2026, 9, 7), date(2026, 9, 8), date(2026, 9, 30)]
+    svc = _adjusting_service(tmp_path, {
+        "2379.TWSE": list(zip(days, [730.0, 729.0, 692.0, 700.0], [1000.0] * 4, strict=True)),
+        "9927.TWSE": list(zip(days, [70.0, 70.1, 70.2, 70.3], [1000.0] * 4, strict=True)),
+        "2330.TWSE": list(zip(days, [1000.0, 1001.0, 1002.0, 1003.0], [1000.0] * 4, strict=True)),
+    })
+    factor = 729.0 / 704.0
+
+    rows = svc._aggregate_daily("2379.TWSE", 1000).rows
+
+    assert [r.close for r in rows] == pytest.approx([730.0 / factor, 729.0 / factor, 692.0, 700.0])
+    assert rows[2].prev_close == pytest.approx(704.0)
+    assert [r.volume for r in rows] == [1000] * 4
+    assert [r.raw_close for r in rows] == [730.0, 729.0, 692.0, 700.0]
+    for symbol in ("9927.TWSE", "2330.TWSE"):
+        untouched = svc._aggregate_daily(symbol, 1000).rows
+        assert [r.close for r in untouched] == [r.raw_close for r in untouched]

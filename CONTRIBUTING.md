@@ -101,6 +101,12 @@
 - `raw_close/raw_high/raw_low` 為不復權原始價格。
 - 漲停、跌停、一字板、炸板和交易所價格限制必須基於原始價及對應交易日規則判斷。
 - 技術指標和收益序列使用哪種價格，必須與現有指標定義一致，不得在同一公式中混用。
+- 台股的復權因子來自公司行動表（`app/taiwan/corporate_actions.py`），經 `adjustment_factors`
+  或 provider 的 `get_adj_factors` 取得，含現金股利；成交量只在分割、面額變更、減資這類股數型
+  事件隨因子調整，除權息不調整。
+- 台股 enriched 的 `ref_prev_close`、`ref_limit_up`、`ref_limit_down` 是事件交易日的官方參考價與
+  漲跌停價（原始價尺度，其餘交易日為空值）；當日漲跌幅的分母是 `ref_prev_close * close / raw_close`，
+  沒有事件時為前一日收盤。
 
 ### 3.3 日期、交易日和時區
 

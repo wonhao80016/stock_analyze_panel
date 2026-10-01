@@ -63,6 +63,29 @@ describe('patchLiveCandles', () => {
     expect(out['6488.TPEX']).toBeNull()
   })
 
+  it("carries the quote's previous close onto today's candle (8440 ex-dividend, 2026-09-30)", () => {
+    const base = { '8440.TPEX': [{ date: '2026-09-29', open: 21.5, high: 21.5, low: 20.65, close: 20.95, prev_close: 21.5 }] }
+    const live = [{ symbol: '8440.TPEX', live_date: '2026-09-30', open: 20.25, high: 20.4, low: 20.2, close: 20.35, prev_close: 20.6 }]
+
+    expect(patchLiveCandles(base, live)['8440.TPEX'][1]).toEqual({
+      date: '2026-09-30', open: 20.25, high: 20.4, low: 20.2, close: 20.35, prev_close: 20.6,
+    })
+  })
+
+  it("replaces the stored previous close of today's candle with the quote's", () => {
+    const base = { '2379.TWSE': [{ date: '2026-09-08', open: 717, high: 721, low: 680, close: 690, prev_close: 729 }] }
+    const live = [{ symbol: '2379.TWSE', live_date: '2026-09-08', open: 717, high: 721, low: 680, close: 692, prev_close: 704 }]
+
+    expect(patchLiveCandles(base, live)['2379.TWSE'][0]).toMatchObject({ close: 692, prev_close: 704 })
+  })
+
+  it('keeps the stored previous close when the quote has none (regression guard)', () => {
+    const base = { '2379.TWSE': [{ date: '2026-09-08', open: 717, high: 721, low: 680, close: 690, prev_close: 704 }] }
+    const live = [{ symbol: '2379.TWSE', live_date: '2026-09-08', open: 717, high: 721, low: 680, close: 692, prev_close: null }]
+
+    expect(patchLiveCandles(base, live)['2379.TWSE'][0].prev_close).toBe(704)
+  })
+
   it('returns base unchanged when liveRows is empty', () => {
     const base = { '2330.TWSE': rows('2026-09-22') }
     const out = patchLiveCandles(base, [])

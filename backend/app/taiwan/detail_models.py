@@ -78,6 +78,10 @@ class TaiwanDailyRow(BaseModel):
     close: float = Field(..., description="收盤價")
     volume: int = Field(..., description="成交量 (股)")
     amount: Optional[float] = Field(None, description="成交金額 (元)")
+    prev_close: float | None = Field(
+        None, description="Change base on the row's scale; the exchange reference price on a corporate-action session"
+    )
+    raw_close: float | None = Field(None, description="Traded close before forward adjustment")
 
 
 class TaiwanHistoricalDaily(BaseModel):

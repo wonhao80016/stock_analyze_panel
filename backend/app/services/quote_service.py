@@ -35,6 +35,7 @@ import polars as pl
 from app.market_time import cn_now, cn_today
 from app.parquet import scan_daily_parquet
 from app.strategy.intraday_signals import IntradaySignalEvaluator
+from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -1670,6 +1671,7 @@ class QuoteService:
         today_ohlcv = daily_df
         if quote_extra is not None and not quote_extra.is_empty():
             today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
+        today_ohlcv = self._with_today_factors(today_ohlcv)
         # The volume ratio is scaled by the session time elapsed at the quote's trade time.
         progress: float | None = None
         if "quote_ts" in daily_df.columns and not daily_df.is_empty():
@@ -1686,6 +1688,32 @@ class QuoteService:
             session_progress=progress,
         )
         return _fill_taiwan_turnover_rate(enriched)
+
+    def _with_today_factors(self, today_ohlcv: pl.DataFrame) -> pl.DataFrame:
+        """Give every Taiwan row the factor of its events the published enriched scale lacks (1 without one).
+
+        Frames without Taiwan rows are returned unchanged; other markets' rows get nulls and keep _adj_factor.
+        """
+        if today_ohlcv.is_empty() or "symbol" not in today_ohlcv.columns:
+            return today_ohlcv
+        taiwan = pl.col("symbol").str.ends_with(TAIWAN_SUFFIXES[0])
+        for suffix in TAIWAN_SUFFIXES[1:]:
+            taiwan = taiwan | pl.col("symbol").str.ends_with(suffix)
+        if not today_ohlcv.select(taiwan.any()).item():
+            return today_ohlcv
+        from app.taiwan.corporate_actions import TODAY_FACTOR_SCHEMA
+        from app.taiwan.enriched_refresh import unpublished_factors
+
+        try:
+            factors = unpublished_factors(cn_today(), self._repo.get_live_agg_date())
+        except Exception as e:
+            logger.warning("today's corporate-action factors unavailable, intraday indicators unadjusted: %s", e)
+            factors = pl.DataFrame(schema=TODAY_FACTOR_SCHEMA)
+        joined = today_ohlcv.drop([c for c in ("_today_factor", "_today_volume_factor") if c in today_ohlcv.columns])
+        return joined.join(factors, on="symbol", how="left").with_columns([
+            pl.when(taiwan).then(pl.col(c).fill_null(1.0)).otherwise(None).alias(c)
+            for c in ("_today_factor", "_today_volume_factor")
+        ])
 
     def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False) -> None:
         """增量计算今天的 enriched: 用昨天的递推状态 + 今天 OHLCV → 只算今天 5500 行。

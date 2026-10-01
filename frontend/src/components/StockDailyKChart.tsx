@@ -70,6 +70,8 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
       low: Number(r.low),
       close: Number(r.close),
       volume: Number(r.volume ?? 0),
+      prev_close: r.prev_close != null ? Number(r.prev_close) : null,
+      raw_close: r.raw_close != null ? Number(r.raw_close) : null,
       ma5: r.ma5 != null ? Number(r.ma5) : null,
       ma10: r.ma10 != null ? Number(r.ma10) : null,
       ma20: r.ma20 != null ? Number(r.ma20) : null,

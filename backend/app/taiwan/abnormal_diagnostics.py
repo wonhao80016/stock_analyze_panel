@@ -61,6 +61,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 import polars as pl
 
+from app.taiwan.corporate_actions import (
+    TaiwanCorporateActionStore,
+    forward_adjusted,
+    read_events_or_empty,
+    reference_prices,
+)
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import DatasetFreshnessStatus, resolve_target_latest_trading_date
 from app.taiwan.industry_intelligence import TaiwanIndustryIntelligenceService
@@ -185,18 +191,21 @@ class TaiwanAbnormalDiagnosticsService:
         security_master: TaiwanSecurityMaster | None = None,
         market_intel_svc: TaiwanMarketIntelligenceService | None = None,
         industry_intel_svc: TaiwanIndustryIntelligenceService | None = None,
+        corporate_actions: TaiwanCorporateActionStore | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
         self.inst_store = inst_store or TaiwanInstitutionalStore()
         self.margin_store = margin_store or TaiwanMarginStore()
         self.security_master = security_master or get_security_master()
+        self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
         self.market_intel_svc = market_intel_svc or TaiwanMarketIntelligenceService(
             daily_store=self.daily_store,
             inst_store=self.inst_store,
             margin_store=self.margin_store,
             calendar=self.calendar,
             security_master=self.security_master,
+            corporate_actions=self.corporate_actions,
         )
         self.industry_intel_svc = industry_intel_svc or TaiwanIndustryIntelligenceService(
             daily_store=self.daily_store,
@@ -204,6 +213,7 @@ class TaiwanAbnormalDiagnosticsService:
             margin_store=self.margin_store,
             calendar=self.calendar,
             security_master=self.security_master,
+            corporate_actions=self.corporate_actions,
         )
 
     def _resolve_prior_sessions(self, target_date: date) -> tuple[list[date], list[date]]:
@@ -256,6 +266,9 @@ class TaiwanAbnormalDiagnosticsService:
         p20_start = prior_20_dates[0] if prior_20_dates else target
         df_p5_daily = self.daily_store.read_range(stock_symbols, p5_start, prior_5_dates[-1]) if prior_5_dates else pl.DataFrame()
         df_p20_daily = self.daily_store.read_range(stock_symbols, p20_start, prior_20_dates[-1]) if prior_20_dates else pl.DataFrame()
+        events = read_events_or_empty(self.corporate_actions, end=target)
+        # The 5-session volume baseline and 5D return base are restated on target's scale.
+        df_p5_daily = forward_adjusted(df_p5_daily, events, target)
 
         # 4. Batch Read: InstitutionalStore
         df_target_inst = self.inst_store.read_range(stock_symbols, target, target)
@@ -318,6 +331,11 @@ class TaiwanAbnormalDiagnosticsService:
         # Construct lookup maps for fast row generation
         target_daily_map = {r["symbol"]: r for r in df_target_daily.iter_rows(named=True)} if not df_target_daily.is_empty() else {}
         prev_daily_map = {r["symbol"]: r for r in df_prev_daily.iter_rows(named=True)} if not df_prev_daily.is_empty() else {}
+        # A corporate-action session moves from the exchange reference price, not the previous close.
+        ref_price_map = {
+            r["symbol"]: r["ref_price"]
+            for r in reference_prices(events, prev_date, target).iter_rows(named=True)
+        }
         p5_vol_map = {r["symbol"]: r for r in p5_vol_stats.iter_rows(named=True)} if not p5_vol_stats.is_empty() else {}
         target_inst_map = {r["symbol"]: r for r in df_target_inst.iter_rows(named=True)} if not df_target_inst.is_empty() else {}
         p20_inst_map = {r["symbol"]: r for r in p20_inst_stats.iter_rows(named=True)} if not p20_inst_stats.is_empty() else {}
@@ -350,6 +368,8 @@ class TaiwanAbnormalDiagnosticsService:
 
             close_p = float(t_daily["close"]) if t_daily["close"] is not None else None
             prev_close_p = float(p_daily["close"]) if (p_daily and p_daily["close"] is not None) else None
+            if sym in ref_price_map:
+                prev_close_p = float(ref_price_map[sym])
             vol = float(t_daily["volume"]) if t_daily["volume"] is not None else None
             amt = float(t_daily["amount"]) if t_daily["amount"] is not None else None
 

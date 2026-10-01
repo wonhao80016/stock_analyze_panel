@@ -35,6 +35,7 @@ from app.taiwan.detail_models import (
     TaiwanStockRealtime,
 )
 from app.taiwan.benchmarks import get_benchmark, is_benchmark
+from app.taiwan.corporate_actions import TaiwanCorporateActionStore
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.index_daily import get_index_daily_service
 from app.taiwan.enrichment.index import TaiwanIndexProvider
@@ -63,8 +64,10 @@ class TaiwanStockDetailService:
         margin_provider: TaiwanMarginProvider | None = None,
         index_provider: TaiwanIndexProvider | None = None,
         daily_store: TaiwanDailyStore | None = None,
+        corporate_actions: TaiwanCorporateActionStore | None = None,
     ) -> None:
         self.daily_store = daily_store or TaiwanDailyStore()
+        self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
         self.hybrid_provider = hybrid_provider or TaiwanHybridProvider()
         self.institutional_provider = institutional_provider or TaiwanInstitutionalProvider()
         self.margin_provider = margin_provider or TaiwanMarginProvider()
@@ -268,6 +271,28 @@ class TaiwanStockDetailService:
             return get_index_daily_service().read_range(symbol_str, start, end)
         return self.daily_store.scan_range([symbol_str], start, end)
 
+    def _forward_adjusted(self, symbol_str: str, df):
+        """Bars on the enriched publish's scale: the events dated up to the latest stored session.
+
+        Adds raw_close and prev_close, which is the exchange reference price on a
+        corporate-action session.
+        """
+        from app.indicators.pipeline import compute_indicators, filter_halt_days
+        from app.taiwan.corporate_actions import (
+            attach_reference_prices,
+            forward_adjusted,
+            read_events_or_empty,
+        )
+
+        through = df["date"].max()
+        stored = self.daily_store.latest_date()
+        if isinstance(stored, date) and stored > through:
+            through = stored
+        events = read_events_or_empty(self.corporate_actions, end=through, symbols=[symbol_str])
+        bars = attach_reference_prices(filter_halt_days(df), events)
+        bars = bars.with_columns(bars["close"].alias("raw_close"))
+        return compute_indicators(forward_adjusted(bars, events, through), needed={"prev_close"})
+
     def _aggregate_daily(self, symbol_str: str, days: int) -> TaiwanHistoricalDaily:
         """Fetch historical daily bars, preferring the local store over a live fetch.
 
@@ -282,6 +307,8 @@ class TaiwanStockDetailService:
                 df = self.hybrid_provider.get_daily([symbol_str])
                 source = "hybrid_daily"
             if not df.is_empty():
+                if not is_benchmark(symbol_str):
+                    df = self._forward_adjusted(symbol_str, df)
                 rows: list[TaiwanDailyRow] = []
                 # Sort ascending by date
                 sorted_df = df.sort("date")
@@ -297,8 +324,10 @@ class TaiwanStockDetailService:
                             high=float(item.get("high") or 0.0),
                             low=float(item.get("low") or 0.0),
                             close=float(item.get("close") or 0.0),
-                            volume=int(item.get("volume") or 0),
+                            volume=round(item.get("volume") or 0),
                             amount=float(item.get("amount")) if item.get("amount") is not None else None,
+                            prev_close=item.get("prev_close"),
+                            raw_close=item.get("raw_close"),
                         )
                     )
                 latest_date = rows[-1].date if rows else None

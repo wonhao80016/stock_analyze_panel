@@ -51,6 +51,11 @@ export function StockIntradayChart({
   })
 
   const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
+  // The minute endpoint's previous close is on the scale of its bars; the daily one may be forward-adjusted.
+  const minutePrevClose = minute.data?.prev_close
+  const basePrevClose = minutePrevClose != null && Number.isFinite(minutePrevClose) && minutePrevClose > 0
+    ? minutePrevClose
+    : prevClose
   // source=none 表示本地無數據且 TickFlow 也拉不到 (停牌/復牌延遲/非交易日)
   // 此時不彈"是否獲取"詢問窗, 只做靜態提示, 避免誤導用戶去拉明知拉不到的數據
   const sourceIsNone = minute.data?.source === 'none'
@@ -123,7 +128,7 @@ export function StockIntradayChart({
         <EChartsIntraday
           data={minuteRows}
           height={height}
-          prevClose={prevClose}
+          prevClose={basePrevClose}
           date={date}
           priceLimit={minute.data?.price_limit ?? undefined}
           onPriceHover={onPriceHover}

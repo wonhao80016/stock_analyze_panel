@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { TaiwanStockDetail, signColorClass, signPrefix } from './TaiwanStockDetail'
+import { TaiwanStockDetail, dailyRowsToOHLC, signColorClass, signPrefix } from './TaiwanStockDetail'
+import { changeBase, unadjustedClose } from '@/components/EChartsCandlestick'
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -106,5 +107,20 @@ describe('TaiwanStockDetail — sign helpers', () => {
     expect(signColorClass(-0.01)).toBe('text-emerald-500')
     expect(signPrefix(-1)).toBe('')
     expect(signPrefix(-0.01)).toBe('')
+  })
+})
+
+describe('TaiwanStockDetail — daily K rows', () => {
+  it('hands the chart the traded close and the reference price of a split session', () => {
+    const bars = dailyRowsToOHLC([
+      { date: '2025-06-17', open: 47.1625, high: 47.1625, low: 47.1625, close: 47.1625, volume: 4000,
+        prev_close: 47.5, raw_close: 188.65 },
+      { date: '2025-06-18', open: 47.5, high: 47.5, low: 47.5, close: 47.5, volume: 4000,
+        prev_close: 47.16, raw_close: 47.5 },
+    ])
+
+    expect(changeBase(bars, 1)).toBe(47.16)
+    expect(unadjustedClose(bars[0])).toBe(188.65)
+    expect(unadjustedClose(bars[1])).toBeNull()
   })
 })

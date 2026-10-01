@@ -19,10 +19,14 @@ export function patchLiveCandles(
       continue
     }
     const last = arr[arr.length - 1]
+    // The quote's previous close is the exchange reference on an ex-rights or split session.
+    const prevClose = typeof live.prev_close === 'number' && Number.isFinite(live.prev_close) && live.prev_close > 0
+      ? { prev_close: live.prev_close }
+      : {}
     if (last.date === liveDate) {
-      patched[sym] = [...arr.slice(0, -1), { ...last, open, high, low, close }]
+      patched[sym] = [...arr.slice(0, -1), { ...last, open, high, low, close, ...prevClose }]
     } else if (last.date < liveDate) {
-      patched[sym] = [...arr, { date: liveDate, open, high, low, close }]
+      patched[sym] = [...arr, { date: liveDate, open, high, low, close, ...prevClose }]
     } else {
       patched[sym] = arr
     }

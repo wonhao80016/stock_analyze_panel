@@ -6,7 +6,7 @@ import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
-import type { ChartMarker, ChartPriceLine, ChartRange } from '@/components/EChartsCandlestick'
+import { rawChangeBase, type ChartMarker, type ChartPriceLine, type ChartRange } from '@/components/EChartsCandlestick'
 import {
   loadInfoFields,
   saveInfoFields,
@@ -122,11 +122,9 @@ export function StockPanel({
   }, [showIntraday, selectedDate, rows])
 
   const selectedIdx = selectedDate ? rows.findIndex(r => r.date === selectedDate) : -1
-  const prevClose = selectedIdx > 0
-    ? rows[selectedIdx - 1].close
-    : rows.length >= 2
-      ? rows[rows.length - 2].close
-      : undefined
+  const baseIdx = selectedIdx >= 0 ? selectedIdx : rows.length - 1
+  // Minute bars trade at unadjusted prices, so the daily base moves off the forward-adjusted scale.
+  const prevClose = baseIdx >= 0 ? rawChangeBase(rows, baseIdx) ?? undefined : undefined
   if (!symbol) return null
 
   // 財務指標最新一期（metrics 按 period_end 排序，取首項）

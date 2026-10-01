@@ -6,26 +6,43 @@ an empty table and no signal would ever fire. This service computes the same
 enriched frame from ``TaiwanDailyStore`` and writes it to the layout those
 engines already scan.
 
-Limit-board signals stay absent: they need per-instrument limit prices that
-only the A-share instrument table supplies.
+Open, high, low and close are forward-adjusted with the corporate-action factors dated
+on or before the newest stored bar, so the newest close equals the stored price;
+raw_close, raw_high and raw_low keep the stored prices. A new factor rescales all
+history, so whenever the factor set differs from the one last published every
+partition is rewritten under an EnrichedPublication, which makes readers fail
+instead of mixing scales until the rewrite commits.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
 
-from app.indicators.pipeline import compute_enriched
+from app.enriched_generation import EnrichedPublication, enriched_publication_incomplete
+from app.indicators.pipeline import compute_enriched, filter_halt_days
+from app.taiwan.corporate_actions import (
+    REF_LIMIT_DOWN,
+    REF_LIMIT_UP,
+    TaiwanCorporateActionStore,
+    adjustment_factors,
+    attach_reference_prices,
+    today_factors,
+)
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
+from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 
 logger = logging.getLogger(__name__)
 
 ENRICHED_DIR_NAME = "kline_daily_enriched"
+FACTOR_SET_FILE = ".taiwan_enriched_factors.json"
 
 
 def _enriched_root() -> Path:
@@ -42,10 +59,12 @@ class TaiwanEnrichedRefreshService:
         daily_store: TaiwanDailyStore | None = None,
         enriched_root: Path | None = None,
         share_capital: TaiwanShareCapitalStore | None = None,
+        corporate_actions: TaiwanCorporateActionStore | None = None,
     ) -> None:
         self.daily_store = daily_store or TaiwanDailyStore()
         self._root = enriched_root or _enriched_root()
         self.share_capital = share_capital or TaiwanShareCapitalStore()
+        self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
 
     @staticmethod
     def _write_partition(partition_dir: Path, df: pl.DataFrame) -> int:
@@ -70,6 +89,10 @@ class TaiwanEnrichedRefreshService:
         window would give a republished day slightly different values from a full
         rebuild, which is enough to flip a borderline cross. The full market costs
         about a second, so there is nothing to save by truncating.
+
+        When the factor set through *end* differs from the last published one, or the last
+        full publication never committed, the window widens to every stored day: partitions
+        outside it would keep the old scale, and only a full publication can commit.
         """
         available = self.daily_store.available_dates()
         if not available:
@@ -78,6 +101,17 @@ class TaiwanEnrichedRefreshService:
 
         end = end or max(available)
         start = start or min(available)
+        events = self.corporate_actions.read(end=max(available))
+        if (start > min(available) or end < max(available)) and (
+            self.factors_changed(events, end) or self.publication_incomplete()
+        ):
+            logger.info(
+                "taiwan enriched: factors changed or last publication incomplete, republishing every partition"
+            )
+            start, end = min(available), max(available)
+        full = start <= min(available) and end >= max(available)
+        factors = adjustment_factors(events, end)
+
         raw = self.daily_store.scan_range(None, None, end)
         if raw.is_empty():
             logger.info("taiwan enriched refresh skipped: empty window")
@@ -92,7 +126,12 @@ class TaiwanEnrichedRefreshService:
             logger.warning(
                 "taiwan enriched refresh: no share capital on disk, turnover_rate will be null"
             )
-        enriched = compute_enriched(raw, factors=pl.DataFrame(), instruments=instruments)
+        raw = attach_reference_prices(
+            filter_halt_days(raw),
+            events.filter(pl.col("date") <= end),
+            with_limits=True,
+        )
+        enriched = compute_enriched(raw, factors=factors, instruments=instruments)
         if enriched.is_empty():
             return 0
         enriched = self._add_limit_signals(enriched)
@@ -100,18 +139,94 @@ class TaiwanEnrichedRefreshService:
         if enriched.is_empty():
             return 0
 
+        written = (
+            self._publish_all(enriched, factors, end) if full else self._publish_partitions(enriched)
+        )
+        logger.info(
+            "taiwan enriched refresh: %d rows across %s..%s%s",
+            written, start.isoformat(), end.isoformat(), " (every partition)" if full else "",
+        )
+        return written
+
+    def _publish_partitions(self, enriched: pl.DataFrame, publication: EnrichedPublication | None = None) -> int:
         written = 0
         for part_date in enriched["date"].unique().sort().to_list():
             group = enriched.filter(pl.col("date") == part_date)
-            written += self._write_partition(
-                self._root / f"date={part_date.isoformat()}", group
-            )
-
-        logger.info(
-            "taiwan enriched refresh: %d rows across %s..%s",
-            written, start.isoformat(), end.isoformat(),
-        )
+            partition = self._root / f"date={part_date.isoformat()}"
+            if publication is None:
+                written += self._write_partition(partition, group)
+            else:
+                publication.write_parquet(group, partition / "part.parquet")
+                written += group.height
         return written
+
+    def _publish_all(self, enriched: pl.DataFrame, factors: pl.DataFrame, through: date) -> int:
+        """Rewrite every partition as one publication and record its factor set before committing.
+
+        A record that cannot be saved leaves the publication incomplete, so readers never pair
+        the new prices with the previous record and apply pending factors twice.
+        A commit failing after the record is saved leaves event symbols' cached history
+        unadjusted, an ex-rights gap in the daily K, until the next publication commits.
+        """
+        publication = EnrichedPublication(self._root.parent, "stock", recover=True)
+        publication.begin()
+        try:
+            written = self._publish_partitions(enriched, publication)
+            self._record_factor_set(factors, through)
+            publication.commit()
+        except BaseException:
+            publication.abandon()
+            raise
+        return written
+
+    def publication_incomplete(self) -> bool:
+        """Whether the last full publication of this table never committed."""
+        return enriched_publication_incomplete(self._root.parent)
+
+    @property
+    def factor_set_path(self) -> Path:
+        return self._root.parent / FACTOR_SET_FILE
+
+    @staticmethod
+    def _fingerprint(factors: pl.DataFrame) -> str:
+        digest = hashlib.sha256()
+        ordered = factors.sort(["symbol", "trade_date"]).select("symbol", "trade_date", "ex_factor", "volume_factor")
+        for row in ordered.iter_rows():
+            digest.update(repr(row).encode("utf-8"))
+        return digest.hexdigest()
+
+    def _published_fingerprint(self) -> str | None:
+        """The factor set of the last full publish; a table never published with factors counts as none."""
+        try:
+            payload = json.loads(self.factor_set_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return self._fingerprint(adjustment_factors(pl.DataFrame(), date.min))
+        except (OSError, ValueError) as exc:
+            logger.warning("taiwan enriched factor record unreadable, republishing everything: %s", exc)
+            return None
+        return payload.get("fingerprint") if isinstance(payload, dict) else None
+
+    def factors_changed(self, events: pl.DataFrame, through: date) -> bool:
+        """Whether the factors dated on or before *through* differ from the last full publish."""
+        return self._fingerprint(adjustment_factors(events, through)) != self._published_fingerprint()
+
+    def _record_factor_set(self, factors: pl.DataFrame, through: date) -> None:
+        payload = {
+            "fingerprint": self._fingerprint(factors),
+            "factors": factors.height,
+            "through": through.isoformat(),
+            "published_at": datetime.now(TAIPEI).isoformat(),
+        }
+        target = self.factor_set_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".taiwan_enriched_factors_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream)
+            Path(tmp_path).replace(target)
+        except BaseException:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _tick_size_expr(price: pl.Expr, is_etf: pl.Expr) -> pl.Expr:
@@ -158,15 +273,22 @@ class TaiwanEnrichedRefreshService:
         """Derive the Taiwan limit-board signals from the statutory daily limits.
 
         The shared pipeline skips these because it wants an A-share instrument
-        table for the limit prices; Taiwan carries its own rules instead.
+        table for the limit prices; Taiwan carries its own rules instead. Limits and
+        ticks are raw-scale prices, so the comparison uses raw_close / raw_high / raw_low
+        and the previous close moved onto the raw scale; a corporate-action session
+        uses the limits the exchange published.
         """
         cols = ["signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"]
+        enriched = enriched.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias(c)
+            for c in (REF_LIMIT_UP, REF_LIMIT_DOWN) if c not in enriched.columns
+        ])
         profile = self._limit_profile(enriched["symbol"].unique().to_list())
         if profile.is_empty():
             return enriched.with_columns([pl.lit(False).alias(c) for c in cols])
 
         out = enriched.join(profile, on="symbol", how="left")
-        ref = pl.col("prev_close")
+        ref = pl.col("prev_close") * pl.when(pl.col("close") > 0).then(pl.col("raw_close") / pl.col("close"))
         up_raw = ref * (1.0 + pl.col("limit_pct"))
         down_raw = pl.max_horizontal(pl.lit(0.01), ref * (1.0 - pl.col("limit_pct")))
         up_tick = self._tick_size_expr(up_raw, pl.col("is_etf_tick").fill_null(False))
@@ -174,17 +296,19 @@ class TaiwanEnrichedRefreshService:
         limit_up = ((up_raw / up_tick + 1e-9).floor() * up_tick).round(4)
         limit_down = ((down_raw / down_tick - 1e-9).ceil() * down_tick).round(4)
 
+        official = pl.col(REF_LIMIT_UP).is_not_null() & pl.col(REF_LIMIT_DOWN).is_not_null()
+        close, high, low = pl.col("raw_close"), pl.col("raw_high"), pl.col("raw_low")
         out = out.with_columns([
-            limit_up.alias("_limit_up"),
-            limit_down.alias("_limit_down"),
+            pl.when(official).then(pl.col(REF_LIMIT_UP)).otherwise(limit_up).alias("_limit_up"),
+            pl.when(official).then(pl.col(REF_LIMIT_DOWN)).otherwise(limit_down).alias("_limit_down"),
         ])
-        usable = pl.col("limit_pct").is_not_null() & pl.col("prev_close").is_not_null()
+        usable = official | (pl.col("limit_pct").is_not_null() & ref.is_not_null())
         return out.with_columns([
-            (usable & (pl.col("close") >= pl.col("_limit_up"))).fill_null(False).alias("signal_limit_up"),
-            (usable & (pl.col("close") <= pl.col("_limit_down"))).fill_null(False).alias("signal_limit_down"),
-            (usable & (pl.col("high") >= pl.col("_limit_up")) & (pl.col("close") < pl.col("_limit_up")))
+            (usable & (close >= pl.col("_limit_up"))).fill_null(False).alias("signal_limit_up"),
+            (usable & (close <= pl.col("_limit_down"))).fill_null(False).alias("signal_limit_down"),
+            (usable & (high >= pl.col("_limit_up")) & (close < pl.col("_limit_up")))
             .fill_null(False).alias("signal_broken_limit_up"),
-            (usable & (pl.col("low") <= pl.col("_limit_down")) & (pl.col("close") > pl.col("_limit_down")))
+            (usable & (low <= pl.col("_limit_down")) & (close > pl.col("_limit_down")))
             .fill_null(False).alias("signal_limit_down_recovery"),
         ]).drop(["limit_pct", "is_etf_tick", "_limit_up", "_limit_down"])
 
@@ -192,16 +316,23 @@ class TaiwanEnrichedRefreshService:
         """Republish the newest partitions, for the daily update job.
 
         Starts at stale_since() instead when that is earlier: every day from there
-        on was published before its current bars, or not at all.
+        on was published before its current bars, or not at all. A changed factor set or
+        an incomplete last publication turns it into a rewrite of every partition (see refresh).
         """
         available = sorted(self.daily_store.available_dates())
         if not available:
             return 0
+        return self.refresh(start=self._recent_start(available, days), end=available[-1])
+
+    def recent_window(self, days: int = 5) -> tuple[date, date] | None:
+        """First and last day refresh_recent(days) would republish, or None without stored bars."""
+        available = sorted(self.daily_store.available_dates())
+        return (self._recent_start(available, days), available[-1]) if available else None
+
+    def _recent_start(self, available: list[date], days: int) -> date:
         start = available[-days:][0]
         stale = self.stale_since(available)
-        if stale is not None and stale < start:
-            start = stale
-        return self.refresh(start=start, end=available[-1])
+        return stale if stale is not None and stale < start else start
 
     def stale_since(self, available: list[date] | None = None) -> date | None:
         """Earliest recent day whose enriched partition is missing or older than its bars."""
@@ -219,6 +350,29 @@ class TaiwanEnrichedRefreshService:
         except OSError:
             return True
         return bars_written is not None and bars_written > published
+
+
+def published_factor_through(data_dir: Path | None = None) -> date | None:
+    """Newest session whose events the published enriched scale includes, from the last full publish."""
+    path = (Path(data_dir) if data_dir is not None else _enriched_root().parent) / FACTOR_SET_FILE
+    try:
+        return date.fromisoformat(json.loads(path.read_text(encoding="utf-8"))["through"])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("taiwan enriched factor record unreadable: %s", exc)
+        return None
+
+
+def unpublished_factors(today: date, fallback_after: date | None = None) -> pl.DataFrame:
+    """Per symbol, the factors of events the published enriched scale does not include yet.
+
+    Those are the events after the last full publish's through date and on or before
+    *today*; a price quoted today is on their scale, published history is not. Without a
+    record the published table carries no factors and *fallback_after* bounds the window.
+    Columns: symbol, _today_factor, _today_volume_factor.
+    """
+    return today_factors(published_factor_through() or fallback_after, today)
 
 
 def refresh_taiwan_enriched(full: bool = False, repo=None) -> int:

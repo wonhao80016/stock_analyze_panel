@@ -23,6 +23,8 @@ _WRITER_LOCKS: dict[tuple[str, str], threading.RLock] = {}
 _ACTIVE_PUBLICATIONS: weakref.WeakValueDictionary[str, EnrichedPublication] = (
     weakref.WeakValueDictionary()
 )
+_REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.0)
+_WINDOWS_FILE_IN_USE = frozenset({5, 32})
 
 
 def _marker_path(data_dir: Path, asset_type: str) -> Path:
@@ -73,6 +75,19 @@ def _write_marker(path: Path, payload: dict[str, Any]) -> None:
         _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _replace_with_retry(source: Path, target: Path) -> None:
+    # Windows refuses to replace a file while any reader has it open; readers hold a partition only briefly.
+    for delay in _REPLACE_RETRY_DELAYS:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError as exc:
+            if os.name != "nt" or getattr(exc, "winerror", None) not in _WINDOWS_FILE_IN_USE:
+                raise
+        time.sleep(delay)
+    os.replace(source, target)
 
 
 def _unlock_file(stream: BinaryIO) -> None:
@@ -259,7 +274,7 @@ class EnrichedPublication:
                 os.fsync(stream.fileno())
             with _exclusive_generation_lock(self.data_dir, self.asset_type):
                 self._claim_or_verify()
-                os.replace(temporary, out)
+                _replace_with_retry(temporary, out)
                 _fsync_directory(out.parent)
                 self._changed = True
         finally:

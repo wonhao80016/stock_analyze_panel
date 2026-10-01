@@ -32,6 +32,8 @@ from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
+_REFERENCE_LIMIT_COLUMNS = frozenset({"ref_prev_close", "ref_limit_up", "ref_limit_down"})
+
 
 def _matrix_entry_score(matrix: MarketMatrix, time_id: int, asset_id: int) -> float:
     source_time = int(matrix.entry_signal_time[time_id, asset_id])
@@ -405,11 +407,15 @@ class BacktestEngine:
             compute_signals,
         )
 
+        columns = set(feature_plan.base_columns)
+        if "raw_close" in columns:
+            # Optional: only Taiwan partitions carry the exchange's own corporate-action limits.
+            columns |= _REFERENCE_LIMIT_COLUMNS
         df = self.load_panel(
             symbols,
             start,
             end,
-            columns=sorted(feature_plan.base_columns),
+            columns=sorted(columns),
             asset_type=asset_type,
         )
         if df.is_empty():

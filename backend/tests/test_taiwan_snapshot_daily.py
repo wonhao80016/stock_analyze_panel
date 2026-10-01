@@ -28,18 +28,22 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
+from app.taiwan.corporate_actions import TaiwanCorporateActionRefreshService
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import TaiwanDailyUpdateService
 from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
 from app.taiwan.providers.snapshot_provider import OfficialDailySnapshotAdapter
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar
+from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.universe import TaiwanSecurityMaster
 
 
 @pytest.fixture(autouse=True)
 def _no_market_amount_requests(monkeypatch):
     monkeypatch.setattr(TaiwanMarketInstitutionalRefreshService, "refresh_through", lambda self, target: {})
+    monkeypatch.setattr(TaiwanCorporateActionRefreshService, "refresh_publish_window", lambda self, first, target: {})
+    monkeypatch.setattr(TaiwanShareCapitalStore, "refresh", lambda self: 0)
 
 
 # ── Sample Fixtures ───────────────────────────────────────────────

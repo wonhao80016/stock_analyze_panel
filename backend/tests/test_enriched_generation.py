@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from datetime import date
 from types import SimpleNamespace
 
@@ -119,6 +121,37 @@ def test_recovery_takes_over_when_owner_pid_is_dead_on_windows(tmp_path, monkeyp
     assert marker["state"] == "ready"
     assert get_enriched_generation(tmp_path, "stock") == marker["generation"]
     assert pl.read_parquet(out)["close"].item() == pytest.approx(10.0)
+
+
+windows_only = pytest.mark.skipif(os.name != "nt", reason="only Windows refuses to replace an open file")
+
+
+@windows_only
+def test_publication_waits_for_a_reader_to_release_the_partition(tmp_path) -> None:
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    publication = EnrichedPublication(tmp_path, recover=True)
+    publication.write_parquet(_frame(10.0), out)
+    reader = out.open("rb")
+    threading.Timer(0.2, reader.close).start()
+
+    publication.write_parquet(_frame(11.0), out)
+
+    assert reader.closed
+    assert pl.read_parquet(out)["close"].item() == pytest.approx(11.0)
+
+
+@windows_only
+def test_publication_fails_on_a_partition_a_reader_never_releases(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.enriched_generation._REPLACE_RETRY_DELAYS", (0.01, 0.01))
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    publication = EnrichedPublication(tmp_path, recover=True)
+    publication.write_parquet(_frame(10.0), out)
+
+    with out.open("rb"), pytest.raises(PermissionError):
+        publication.write_parquet(_frame(11.0), out)
+
+    assert pl.read_parquet(out)["close"].item() == pytest.approx(10.0)
+    assert list(out.parent.iterdir()) == [out]
 
 
 def test_panel_cache_generation_change_forces_recompute() -> None:

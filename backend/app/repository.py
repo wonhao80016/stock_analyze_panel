@@ -30,6 +30,7 @@ from app.enriched_generation import (
     EnrichedGenerationUnavailableError,
     EnrichedPublication,
     bump_enriched_generation,
+    enriched_publication_incomplete,
     get_enriched_generation,
 )
 from app.market_time import cn_today
@@ -382,6 +383,7 @@ class KlineRepository:
             try:
                 return cursor.execute(sql, params or []).fetchone()
             finally:
+                # A result left unfinished keeps a parquet file open, which blocks replacing it on Windows.
                 cursor.close()
 
     # ================================================================
@@ -571,6 +573,8 @@ class KlineRepository:
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                          "volume", "amount", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
+                # Older partitions and the live-merged one lack these; the scan fills those with null.
+                read_cols.extend(["ref_prev_close", "ref_limit_up", "ref_limit_down"])
                 lf = (
                     scan_enriched_parquet(self._enriched_glob)
                     .filter(pl.col("date") >= start_full)
@@ -1270,6 +1274,10 @@ class KlineRepository:
             return pl.DataFrame()
         return self._live_agg_cache
 
+    def get_live_agg_date(self) -> date | None:
+        """The session get_live_agg()'s state ends on, or None before it is built."""
+        return self._live_agg_cache_date
+
     def get_instruments(self) -> pl.DataFrame:
         """返回缓存的 instruments DataFrame。如无缓存则懒加载。"""
         if self._instruments_cache is None:
@@ -1453,7 +1461,9 @@ class KlineRepository:
         # scan + 列下推直接返回, 跳过 warmup(150天) 与 _compute_enriched_range 全套指标计算。
         # 仍用 enriched_latest 缓存覆盖最新日 (盘中更准), 只保留请求列。
         # 试探 scan 仅读请求的列; 缺列时回退到下方完整计算路径 (代价仅一次轻量 scan)。
-        if columns:
+        # While a rewrite is half done the partitions mix price scales; read the caches only.
+        publishing = self._enriched_publishing()
+        if columns and not publishing:
             df = self._scan_daily_symbol(symbol, start, end, columns)
             if not df.is_empty() and all(c in df.columns for c in columns):
                 cached, cache_date = self.get_enriched_latest()
@@ -1478,13 +1488,13 @@ class KlineRepository:
         if hist is not None and not hist.is_empty() and "date" in hist.columns:
             hist_min = self._enriched_history_start
             hist_max = hist["date"].max()
-            if hist_min is not None and hist_min <= start and hist_max >= start:
+            if hist_min is not None and (publishing or hist_min <= start) and hist_max >= start:
                 df = hist.filter(
                     (pl.col("symbol") == symbol)
                     & (pl.col("date") >= start)
                     & (pl.col("date") <= end)
                 )
-        if df.is_empty():
+        if df.is_empty() and not publishing:
             # 扫描14列 parquet
             df = self._scan_daily_symbol(symbol, warmup_start, end, None)
             if not df.is_empty():
@@ -1522,9 +1532,22 @@ class KlineRepository:
         if cached is not None and not cached.is_empty() and cache_date:
             if start >= cache_date:
                 return self._filter_cached_batch(cached, symbols, columns)
+        if self._enriched_publishing():
+            hist = self._enriched_history_cache
+            if hist is None or hist.is_empty():
+                return pl.DataFrame()
+            df = hist.filter(
+                pl.col("symbol").is_in(symbols) & (pl.col("date") >= start) & (pl.col("date") <= end)
+            ).sort(["symbol", "date"])
+            return df.select([c for c in columns if c in df.columns]) if columns else df
 
         # 回退 scan_parquet
         return self._scan_daily_batch(symbols, start, end, columns)
+
+    def _enriched_publishing(self) -> bool:
+        """Whether a stock enriched publication is rewriting partitions right now."""
+        store = getattr(self, "store", None)
+        return store is not None and enriched_publication_incomplete(store.data_dir, "stock")
 
     def get_index_daily(
         self,
@@ -1877,11 +1900,10 @@ class KlineRepository:
     def latest_minute_date(self, symbol: str, asset_type: str = "stock") -> date | None:
         table = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
         try:
-            with self._lock:
-                row = self.db.execute(
-                    f"SELECT max(CAST(datetime AS DATE)) FROM {table} WHERE symbol = ?",
-                    [symbol],
-                ).fetchone()
+            row = self.execute_one(
+                f"SELECT max(CAST(datetime AS DATE)) FROM {table} WHERE symbol = ?",
+                [symbol],
+            )
             if row and row[0]:
                 return row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0]))
         except duckdb.CatalogException:
@@ -1891,10 +1913,9 @@ class KlineRepository:
     def latest_minute_date_global(self) -> date | None:
         """全市场最近分钟K日期 (不分 symbol)。用于非交易日回退到上一交易日。"""
         try:
-            with self._lock:
-                row = self.db.execute(
-                    "SELECT max(CAST(datetime AS DATE)) FROM kline_minute",
-                ).fetchone()
+            row = self.execute_one(
+                "SELECT max(CAST(datetime AS DATE)) FROM kline_minute",
+            )
             if row and row[0]:
                 return row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0]))
         except Exception:  # noqa: BLE001
@@ -1903,10 +1924,9 @@ class KlineRepository:
     def earliest_daily_date(self) -> date | None:
         """本地日K数据的最早日期。"""
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT min(date) FROM kline_daily",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT min(date) FROM kline_daily",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
@@ -1917,10 +1937,9 @@ class KlineRepository:
     def earliest_minute_date(self) -> date | None:
         """本地分钟K数据的最早日期。"""
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT min(CAST(datetime AS DATE)) FROM kline_minute",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT min(CAST(datetime AS DATE)) FROM kline_minute",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
@@ -1931,10 +1950,9 @@ class KlineRepository:
     def latest_daily_date(self) -> date | None:
         """本地日K数据的最新日期。"""
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT max(date) FROM kline_daily",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT max(date) FROM kline_daily",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
@@ -1986,10 +2004,9 @@ class KlineRepository:
 
     def _latest_enriched_date_duckdb(self) -> date | None:
         try:
-            with self._lock:
-                res = self.db.execute(
-                    "SELECT max(date) FROM kline_enriched",
-                ).fetchone()
+            res = self.execute_one(
+                "SELECT max(date) FROM kline_enriched",
+            )
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))

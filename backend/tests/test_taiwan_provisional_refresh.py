@@ -16,6 +16,7 @@ import polars as pl
 import pytest
 
 from app.taiwan import enriched_refresh, share_capital_store
+from app.taiwan.corporate_actions import TaiwanCorporateActionRefreshService
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import TaiwanDailyUpdateService
@@ -33,6 +34,7 @@ NEXT = date(2026, 9, 24)
 @pytest.fixture(autouse=True)
 def _no_market_amount_requests(monkeypatch):
     monkeypatch.setattr(TaiwanMarketInstitutionalRefreshService, "refresh_through", lambda self, target: {})
+    monkeypatch.setattr(TaiwanCorporateActionRefreshService, "refresh_publish_window", lambda self, first, target: {})
 
 
 def _taipei(d: date, hour: int, minute: int = 0) -> float:

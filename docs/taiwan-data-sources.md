@@ -36,6 +36,12 @@ This rule registry does not populate Phase 6E structured multiplier/direction fi
 - TPEx margin/short: `margin/balance`
 - TWSE market-wide institutional amounts: `fund/BFI82U`
 - TPEx market-wide institutional amounts: `insti/summary`
+- TWSE ex-rights/ex-dividend results: `exRight/TWT49U`
+- TWSE capital reduction resumption prices: `reducation/TWTAUU`
+- TWSE par value change resumption prices: `change/TWTB8U`
+- TWSE ETF split resumption prices: `split/TWTCAU`
+- TPEx ex-rights/ex-dividend results: `bulletin/exDailyQ`
+- TPEx capital reduction resumption prices: `bulletin/revivt`
 
 TPEx ETF identity is retained from the official ISIN directory. Product
 classification remains `data_insufficient` until an official structured metadata
@@ -112,6 +118,87 @@ figures: they are share counts that mix stocks, ETF units and warrants.
   stored in the same run, that day is not refetched automatically and needs the
   backfill command.
 
+## Corporate actions and forward adjustment
+
+`app.taiwan.enrichment.corporate_actions` parses the six corporate-action tables
+listed above; `app.taiwan.corporate_actions` stores them and derives reference prices
+and adjustment factors from them.
+
+- Each row is one `(symbol, date, kind)`, where `kind` is `exdiv`, `reduction`,
+  `par_change` or `etf_split` and `date` is the session the official reference price
+  applies to. It keeps `pre_close`, `ref_price`, `limit_up`, `limit_down`,
+  `open_ref`, `ex_factor` and `official_label` in TWD where they are prices, plus
+  `provider`, `source`, `source_url`, `retrieved_at` (Asia/Taipei), `trade_date` and
+  `status`. The stored `ex_factor` of a split is the unrounded price ratio; consumers
+  take factors from `adjustment_factors`. A row whose prices are `-` (not yet priced)
+  is skipped. When one symbol has several kinds on one date, a reduction wins: TWT49U
+  excludes dividends paid together with a capital-return or split reduction and
+  TWTAUU's resumption price already deducts them. TPEx states no such rule and the
+  same order is assumed.
+- A response counts as no data only when `stat` is OK, the echoed date range equals
+  the request and there are no rows, or when TWSE answers
+  `很抱歉，沒有符合條件的資料!` (compared after NFKC normalization) with no data or
+  fields. Any other `stat`, a different echoed range, a TPEx response without its
+  single table, unit or format errors and HTTP errors raise. ROC dates are
+  normalized: TWT49U's 年/月/日 dates accept two-digit ROC years, while slash or
+  compact dates with two-digit years (TPEx before 2011) raise. Responses with data
+  were verified for 2024 onward.
+- Storage is `data/taiwan/corporate_actions/events.parquet`, rewritten atomically as
+  a whole; a refetch that returns different figures replaces the row and is logged,
+  and rows are never deleted. `fetch_state.json` next to it records, per table, the
+  date range successful fetches cover.
+- Each publish (the scheduled runs and the settings update button) first fetches the
+  window from 10 days before the first republished session to the target session,
+  skipping a table whose recorded coverage already spans it. Failures do not change
+  the run status: the scheduled run adds them to the daily note, the button logs
+  them. Backfill with `python -m app.taiwan.corporate_actions --since 2024-01-01`; it
+  always fetches and exits non-zero when any table fails. Corrections inside an
+  already covered range need the backfill command.
+- The first session on or after an event's date (normally the event session itself)
+  takes the reference price as its previous close: enriched stores it as `ref_prev_close` and the official limits as `ref_limit_up` and
+  `ref_limit_down` (raw price scale, null on other sessions), and `change_pct` uses
+  `ref_prev_close * close / raw_close` as its base. Limit signals always use raw prices
+  and official limits on event sessions. Modules that read the daily store for the
+  one-day change use the same reference price.
+- Forward adjustment: enriched `open/high/low/close` are divided by the product of
+  the factors of all later events, so the newest bar equals the raw price and `raw_*`
+  keep traded prices. The factor is `pre_close / ref_price` for dividends and
+  reductions (cash dividends included); splits and par value changes use the official
+  share ratio recovered from the reference prices (0050 on 2025-06-18 is 4). Only
+  events dated on or before the target session are applied. Volume before splits,
+  par value changes and reductions is multiplied by the share ratio; dividends leave
+  volume unchanged. The reduction volume ratio includes any capital refund and is an
+  approximation.
+- `.taiwan_enriched_factors.json` in the data directory records the factor set of the
+  last full publish. When the factors change, or the previous full publish never
+  committed, every enriched partition is rewritten as one `EnrichedPublication`, and
+  the record is saved before the publication is committed, so a record that cannot be
+  saved leaves the publication incomplete. While a publication is incomplete, daily
+  bars are served from the memory cache and the screener service answers 503 instead
+  of an empty result; the next scheduled run or the settings update button rewrites
+  everything and commits. A full rewrite takes about 20 seconds, and in the dividend
+  season full rewrites are frequent.
+- Intraday, events dated after the recorded factor set are applied on read to the
+  history of the daily chart, the watchlist mini chart and the live indicator state,
+  so an event session does not show a gap before the evening publish. For a few
+  seconds after that publish, until the memory cache is rebuilt, the cached history of
+  that day's event symbols is still on the previous scale. If a publish saves the
+  record but fails to commit, the memory cache keeps the previous scale while the
+  record already has the new one, so those symbols show the gap again until a later
+  publish commits. An event that arrives late and is dated on or before the recorded
+  factor set is applied at the next full publish. The stock detail page's daily bars
+  apply events only through the newest stored session, so on an event day, until
+  that session's bars are stored, they differ by that day's factor from the daily
+  chart dialog while each chart stays consistent in itself.
+- Consumers get factors through `adjustment_factors` or the provider's
+  `get_adj_factors`; nothing is written to `data/adj_factor`. Code that reads the raw
+  daily store for multi-day values puts every price of one output on one scale:
+  `forward_adjusted` for bar ranges, `factors_between` for single lookback closes.
+- Not covered: TPEx par value change and ETF split tables (no official endpoint was
+  found); the reduction tables' ex-rights reference column, which applies only to a
+  loss-offset reduction paired with a cash capital increase; and stock dividends,
+  which change the share count but do not restate volume.
+
 ## TPEx quote and historical daily separation
 
 TPEx publishes multiple official close-style datasets with different coverage.
@@ -155,9 +242,11 @@ Consumers must continue to distinguish `official_quote` from
 ## Historical volume consumers
 
 Taiwan official, FinMind, and Yahoo daily adapters all enter storage with
-`volume` normalized to shares/units. Parquet persistence and enriched data keep
-that number unchanged. Generic consumers resolve the unit from the canonical
-symbol: `.TWSE`/`.TPEX` matrices use `shares`; existing CN matrices retain
+`volume` normalized to shares/units. Parquet persistence keeps that number
+unchanged; enriched restates volume before splits, par value changes and
+reductions in post-event shares (see Corporate actions and forward adjustment).
+Generic consumers resolve the unit from the canonical symbol: `.TWSE`/`.TPEX`
+matrices use `shares`; existing CN matrices retain
 `lots` (100 shares per lot).
 
 Turnover is a percentage against `float_shares`, which is a share count:

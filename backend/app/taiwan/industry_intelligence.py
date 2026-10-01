@@ -24,6 +24,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 import polars as pl
 
+from app.taiwan.corporate_actions import (
+    TaiwanCorporateActionStore,
+    factors_between,
+    read_events_or_empty,
+    reference_prices,
+)
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
@@ -150,12 +156,14 @@ class TaiwanIndustryIntelligenceService:
         margin_store: TaiwanMarginStore | None = None,
         calendar: TaiwanTradingCalendar | None = None,
         security_master: TaiwanSecurityMaster | None = None,
+        corporate_actions: TaiwanCorporateActionStore | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
         self.inst_store = inst_store or TaiwanInstitutionalStore()
         self.margin_store = margin_store or TaiwanMarginStore()
         self.security_master = security_master or get_security_master()
+        self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
 
     def _resolve_lookback_dates(self, target_date: date) -> tuple[date | None, date | None, date | None]:
         """Resolve previous trading day, 5-session lookback base date, and 20-session lookback base date.
@@ -279,6 +287,15 @@ class TaiwanIndustryIntelligenceService:
             base = base.join(prev_sub, on="symbol", how="left")
         else:
             base = base.with_columns(pl.lit(None).cast(pl.Float64).alias("close_prev"))
+        # A corporate-action session's one-day return is measured from the exchange reference price.
+        events = read_events_or_empty(self.corporate_actions, end=target)
+        ref = reference_prices(events, d_prev, target)
+        if not ref.is_empty():
+            base = (
+                base.join(ref.select(["symbol", pl.col("ref_price").alias("_ref_price")]), on="symbol", how="left")
+                .with_columns(pl.coalesce(pl.col("_ref_price"), pl.col("close_prev")).alias("close_prev"))
+                .drop("_ref_price")
+            )
 
         # Join 5D Lookback Close
         if not hist_5d.is_empty():
@@ -293,6 +310,17 @@ class TaiwanIndustryIntelligenceService:
             base = base.join(sub_20d, on="symbol", how="left")
         else:
             base = base.with_columns(pl.lit(None).cast(pl.Float64).alias("close_20d"))
+        # Lookback closes move onto target's scale across the corporate actions in between.
+        for lookback, column in ((d_5d, "close_5d"), (d_20d, "close_20d")):
+            if lookback is None:
+                continue
+            factors = factors_between(events, lookback, target)
+            if not factors.is_empty():
+                base = (
+                    base.join(factors.select("symbol", pl.col("ex_factor").alias("_factor")), on="symbol", how="left")
+                    .with_columns((pl.col(column) / pl.col("_factor").fill_null(1.0)).alias(column))
+                    .drop("_factor")
+                )
 
         # Join Institutional
         if not inst_df.is_empty():

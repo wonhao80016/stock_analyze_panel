@@ -458,6 +458,13 @@ async def capability_denied_handler(request: Request, exc: CapabilityDenied) -> 
         content={"detail": str(exc), "suggestion": exc.suggestion},
     )
 
+
+@app.exception_handler(EnrichedGenerationUnavailableError)
+async def enriched_generation_unavailable_handler(
+    request: Request, exc: EnrichedGenerationUnavailableError
+) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
 # 生产期静态文件(前端 dist)
 _static = Path(settings.static_dir)
 if _static.exists():

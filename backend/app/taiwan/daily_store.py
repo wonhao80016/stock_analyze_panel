@@ -35,6 +35,7 @@ TAIWAN_DAILY_COLUMNS: list[str] = [
     "symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"
 ]
 
+# Stored bars stay raw; the enriched publish forward-adjusts them and keeps these prices as raw_*.
 DEFAULT_TAIWAN_METADATA = SourceMetadata(
     source_name="taiwan_daily_store",
     volume_unit=VolumeUnit.SHARES,

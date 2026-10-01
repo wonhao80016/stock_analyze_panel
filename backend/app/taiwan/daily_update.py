@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
+from app.taiwan.corporate_actions import TaiwanCorporateActionRefreshService
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
 from app.taiwan.institutional_margin_refresh import (
@@ -149,17 +150,49 @@ def resolve_missing_date_range(
     return cur, target_latest
 
 
-def publish_enriched(daily_store: TaiwanDailyStore | None = None, *, only_if_behind: bool = False) -> bool:
-    """Refresh issued shares, then republish the enriched table the engines read.
+def _refresh_corporate_actions(
+    window: tuple[date, date] | None, service: TaiwanCorporateActionRefreshService | None
+) -> str | None:
+    """Fetch the reference prices of the sessions about to be published; returns a failure note."""
+    if window is None:
+        return None
+    try:
+        res = (service or TaiwanCorporateActionRefreshService()).refresh_publish_window(*window)
+    except Exception as e:
+        logger.exception("Corporate action refresh failed: %s", e)
+        return f"Corporate action reference prices not refreshed: {e}"
+    failed = res.get("failed") or []
+    if not failed:
+        return None
+    note = "Corporate action tables not refreshed: " + ", ".join(
+        f"{f['source']} {f['start']}..{f['end']}" for f in failed
+    )
+    logger.warning("%s", note)
+    return note
+
+
+def publish_enriched(
+    daily_store: TaiwanDailyStore | None = None,
+    *,
+    only_if_behind: bool = False,
+    corporate_actions: TaiwanCorporateActionRefreshService | None = None,
+    notes: list[str] | None = None,
+) -> bool:
+    """Refresh issued shares and corporate-action reference prices, then republish the enriched table.
 
     Returns whether a publish ran. With only_if_behind it runs only when a recent
-    day's enriched partition is missing or older than its bars.
+    day's enriched partition is missing or older than its bars, or the last full
+    publication never committed. A failed reference-price
+    fetch never stops the publish, and a failed publish never raises; both are logged and,
+    when *notes* is given, appended to it.
     """
     from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
     from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 
-    if only_if_behind and TaiwanEnrichedRefreshService(daily_store=daily_store).stale_since() is None:
-        return False
+    if only_if_behind:
+        service = TaiwanEnrichedRefreshService(daily_store=daily_store)
+        if service.stale_since() is None and not service.publication_incomplete():
+            return False
     # Issued shares first: the enriched publish reads them as the turnover
     # denominator, so refreshing afterwards would leave today's partition
     # priced by yesterday's share counts until the next run.
@@ -167,10 +200,17 @@ def publish_enriched(daily_store: TaiwanDailyStore | None = None, *, only_if_beh
         TaiwanShareCapitalStore().refresh()
     except Exception as e:
         logger.warning("Taiwan share capital refresh failed: %s", e)
+    note = _refresh_corporate_actions(
+        TaiwanEnrichedRefreshService(daily_store=daily_store).recent_window(), corporate_actions
+    )
+    if note and notes is not None:
+        notes.append(note)
     try:
         TaiwanEnrichedRefreshService(daily_store=daily_store).refresh_recent()
     except Exception as e:
         logger.warning("Taiwan enriched publish failed: %s", e)
+        if notes is not None:
+            notes.append(f"Enriched publish failed: {e}")
     return True
 
 
@@ -187,6 +227,7 @@ class TaiwanDailyUpdateService:
         margin_service: TaiwanMarginRefreshService | None = None,
         calendar: TaiwanTradingCalendar | None = None,
         market_inst_service: TaiwanMarketInstitutionalRefreshService | None = None,
+        corporate_action_service: TaiwanCorporateActionRefreshService | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
@@ -205,6 +246,7 @@ class TaiwanDailyUpdateService:
         self.market_inst_service = market_inst_service or TaiwanMarketInstitutionalRefreshService(
             calendar=self.calendar, daily_store=self.daily_store
         )
+        self.corporate_action_service = corporate_action_service or TaiwanCorporateActionRefreshService()
 
     def _calc_dataset_status(self, as_of: date | None, target: date) -> tuple[DatasetFreshnessStatus, int]:
         if as_of is None:
@@ -455,7 +497,11 @@ class TaiwanDailyUpdateService:
         # 4b. Publish indicators and signals for the engines that read the enriched table.
         # A partial run never stores a day past a failed new day, so the stored days have no gap to publish across.
         if refresh_daily and daily_stats.status in {"success", "skipped", "partial"}:
-            publish_enriched(self.daily_store)
+            # Reference-price and publish failures only extend the daily note, never the daily status.
+            notes: list[str] = []
+            publish_enriched(self.daily_store, corporate_actions=self.corporate_action_service, notes=notes)
+            if notes:
+                daily_stats.note = "; ".join([n for n in (daily_stats.note, *notes) if n])
 
         # 5. Evaluate Freshness and Overall Status
         run_finish = taipei_now()

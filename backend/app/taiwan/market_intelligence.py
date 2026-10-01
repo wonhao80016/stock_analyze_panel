@@ -25,6 +25,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 import polars as pl
 
+from app.taiwan.corporate_actions import (
+    TaiwanCorporateActionStore,
+    forward_adjusted,
+    read_events_or_empty,
+    reference_prices,
+)
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
@@ -242,6 +248,7 @@ class TaiwanMarketIntelligenceService:
         calendar: TaiwanTradingCalendar | None = None,
         security_master: TaiwanSecurityMaster | None = None,
         market_inst_store: TaiwanMarketInstitutionalStore | None = None,
+        corporate_actions: TaiwanCorporateActionStore | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
@@ -249,6 +256,7 @@ class TaiwanMarketIntelligenceService:
         self.margin_store = margin_store or TaiwanMarginStore()
         self.security_master = security_master or get_security_master()
         self.market_inst_store = market_inst_store or TaiwanMarketInstitutionalStore()
+        self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
 
     def get_previous_trading_date(self, target_date: date) -> date | None:
         """Find the immediately preceding trading date using TaiwanTradingCalendar and store history."""
@@ -286,6 +294,21 @@ class TaiwanMarketIntelligenceService:
             tpex=tpex,
             status="current",
         ), as_of
+
+    def _with_reference_prices(self, joined: pl.DataFrame, prev_d: date | None, target: date) -> pl.DataFrame:
+        """A corporate-action session is compared with the exchange reference price and its published limits."""
+        events = reference_prices(read_events_or_empty(self.corporate_actions, end=target), prev_d, target)
+        if events.is_empty():
+            return joined
+        return (
+            joined.join(
+                events.rename({"ref_price": "_ref_price", "limit_up": "_ref_limit_up", "limit_down": "_ref_limit_down"}),
+                on="symbol",
+                how="left",
+            )
+            .with_columns(pl.coalesce(pl.col("_ref_price"), pl.col("prev_close")).alias("prev_close"))
+            .drop("_ref_price")
+        )
 
     def _calc_breadth(self, df: pl.DataFrame) -> MarketBreadthStats:
         """Compute MarketBreadthStats from joined current & previous dataframe."""
@@ -457,6 +480,7 @@ class TaiwanMarketIntelligenceService:
                 joined = curr_daily.join(prev_sub, on="symbol", how="left")
             else:
                 joined = curr_daily.with_columns(pl.lit(None).cast(pl.Float64).alias("prev_close"))
+            joined = self._with_reference_prices(joined, prev_d, target)
 
             # Join metadata
             meta_sub = universe_df.select(["symbol", "exchange", "instrument_type"])
@@ -474,6 +498,12 @@ class TaiwanMarketIntelligenceService:
                 if inst is None or close is None or prev_close is None or prev_close <= 0:
                     limit_up_flags.append(False)
                     limit_down_flags.append(False)
+                    continue
+
+                official_up, official_down = r.get("_ref_limit_up"), r.get("_ref_limit_down")
+                if official_up is not None and official_down is not None:
+                    limit_up_flags.append(bool(close >= official_up))
+                    limit_down_flags.append(bool(close <= official_down))
                     continue
 
                 try:
@@ -523,7 +553,11 @@ class TaiwanMarketIntelligenceService:
             trend_window = sorted(d for d in daily_available if d <= target)[-TREND_LOOKBACK_SESSIONS:]
             if trend_window:
                 trend = self._calc_trend(
-                    self.daily_store.read_range(supported_symbols, trend_window[0], target),
+                    forward_adjusted(
+                        self.daily_store.read_range(supported_symbols, trend_window[0], target),
+                        read_events_or_empty(self.corporate_actions, end=target),
+                        target,
+                    ),
                     target,
                     trend_window[0],
                     len(trend_window),

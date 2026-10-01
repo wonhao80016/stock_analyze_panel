@@ -37,7 +37,13 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.indicators.pipeline import compute_enriched, compute_enriched_single
+from app.indicators.pipeline import (
+    PRICE_COLUMNS,
+    VOLUME_COLUMNS,
+    compute_enriched,
+    compute_enriched_single,
+    compute_indicators,
+)
 from app.market_time import cn_now, cn_today
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
@@ -277,9 +283,15 @@ def _get_previous_closes(
     trade_dates: list[date],
     asset_type: str,
 ) -> dict[date, float | None]:
-    """Return the previous trading day's adjusted close for each session."""
+    """Return each session's previous close on the scale of its minute bars.
+
+    Taiwan minute bars are raw prices, so Taiwan sessions use raw_close, and a
+    corporate-action session uses the exchange reference price instead. Other
+    markets keep the adjusted close.
+    """
     if not trade_dates:
         return {}
+    taiwan = symbol.endswith(TAIWAN_SUFFIXES) and asset_type != "index"
     start = min(trade_dates) - timedelta(days=45)
     end = max(trade_dates)
     try:
@@ -288,15 +300,20 @@ def _get_previous_closes(
             symbol,
             start,
             end,
-            columns=["date", "close"],
+            columns=["date", "close", "raw_close"] if taiwan else ["date", "close"],
         ).sort("date")
     except Exception:
         daily = None
     if daily is None or daily.is_empty():
         return {trade_date: None for trade_date in trade_dates}
 
+    import polars as pl
+
+    price = pl.col("close")
+    if taiwan and "raw_close" in daily.columns:
+        price = pl.coalesce(pl.col("raw_close"), price)
     closes: list[tuple[date, float]] = []
-    for daily_date, close in daily.select(["date", "close"]).iter_rows():
+    for daily_date, close in daily.select(pl.col("date"), price).iter_rows():
         if close is None:
             continue
         numeric = float(close)
@@ -304,12 +321,38 @@ def _get_previous_closes(
             closes.append((daily_date, numeric))
 
     result: dict[date, float | None] = {}
+    previous_dates: dict[date, date | None] = {}
     for trade_date in trade_dates:
-        result[trade_date] = next(
-            (close for daily_date, close in reversed(closes) if daily_date < trade_date),
+        previous = next(
+            ((daily_date, close) for daily_date, close in reversed(closes) if daily_date < trade_date),
             None,
         )
+        previous_dates[trade_date] = previous[0] if previous else None
+        result[trade_date] = previous[1] if previous else None
+    if taiwan:
+        result.update(_taiwan_reference_closes(symbol, previous_dates, start, end))
     return result
+
+
+def _taiwan_reference_closes(
+    symbol: str, previous_dates: dict[date, date | None], start: date, end: date
+) -> dict[date, float]:
+    """Exchange reference prices of the sessions that open after a corporate action."""
+    from app.taiwan.corporate_actions import (
+        TaiwanCorporateActionStore,
+        read_events_or_empty,
+        reference_prices,
+    )
+
+    events = read_events_or_empty(TaiwanCorporateActionStore(), start=start, end=end, symbols=[symbol])
+    found: dict[date, float] = {}
+    if events.is_empty():
+        return found
+    for trade_date, previous in previous_dates.items():
+        ref = reference_prices(events, previous, trade_date)
+        if not ref.is_empty():
+            found[trade_date] = float(ref["ref_price"][0])
+    return found
 
 
 _TAIWAN_INDICATOR_WARMUP_DAYS = 150
@@ -397,6 +440,37 @@ def _read_taiwan_local_daily(symbol: str, start: date, end: date):
         return None
 
 
+def _with_reference_prices(symbol: str, local):
+    """Local Taiwan bars with the exchange reference price on corporate-action sessions."""
+    if not symbol.endswith(TAIWAN_SUFFIXES) or not {"symbol", "date"} <= set(local.columns):
+        return local
+    from app.indicators.pipeline import filter_halt_days
+    from app.taiwan.corporate_actions import (
+        TaiwanCorporateActionStore,
+        attach_reference_prices,
+        read_events_or_empty,
+    )
+
+    events = read_events_or_empty(TaiwanCorporateActionStore(), end=local["date"].max(), symbols=[symbol])
+    return attach_reference_prices(filter_halt_days(local), events)
+
+
+def _taiwan_local_factors(symbol: str, local):
+    """Forward-adjustment factors for local Taiwan bars, matching the published enriched scale."""
+    import polars as pl
+
+    if not symbol.endswith(TAIWAN_SUFFIXES) or "date" not in local.columns or local.is_empty():
+        return pl.DataFrame()
+    from app.taiwan.corporate_actions import (
+        TaiwanCorporateActionStore,
+        adjustment_factors,
+        read_events_or_empty,
+    )
+
+    through = local["date"].max()
+    return adjustment_factors(read_events_or_empty(TaiwanCorporateActionStore(), end=through, symbols=[symbol]), through)
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -432,8 +506,11 @@ def get_daily(
     if _needs_local_history(df, start):
         local = _read_taiwan_local_daily(symbol, start, end)
         if local is not None and not local.is_empty():
-            enriched = compute_enriched(local, factors=pl.DataFrame())
+            enriched = compute_enriched(
+                _with_reference_prices(symbol, local), factors=_taiwan_local_factors(symbol, local)
+            )
             rows = enriched.filter(pl.col("date") >= start).to_dicts()
+            rows = _onto_todays_scale(symbol, rows, local["date"].max(), cn_today())
             rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
             resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info,
                     "rows": rows, "source": "taiwan_local"}
@@ -462,7 +539,7 @@ def get_daily(
         resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}
         return _attach_ext(resp, repo, symbol, ext_columns)
 
-    rows = df.to_dicts()
+    rows = _onto_todays_scale(symbol, df.to_dicts(), _published_scale_through(), cn_today())
 
     # 追加/覆盖今日实时蜡烛
     rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
@@ -509,6 +586,94 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     stock_info["ext"] = ext_values
     resp["stock_info"] = stock_info
     return resp
+
+
+def _published_scale_through() -> date | None:
+    """The newest session whose events the published Taiwan enriched scale includes."""
+    from app.taiwan.enriched_refresh import published_factor_through
+
+    return published_factor_through()
+
+
+def _pending_events(scale_through: date | None, today: date):
+    """Taiwan events a scale ending on *scale_through* lacks, up to *today*; none if unreadable."""
+    import polars as pl
+
+    from app.taiwan.corporate_actions import FACTOR_SCHEMA, pending_factors
+
+    try:
+        return pending_factors(scale_through, today)
+    except Exception as e:
+        logger.warning("pending corporate-action factors unavailable: %s", e)
+        return pl.DataFrame(schema=FACTOR_SCHEMA)
+
+
+def _onto_todays_scale(symbol: str, rows: list[dict], scale_through: date | None, today: date) -> list[dict]:
+    """Move Taiwan rows priced on a scale ending on *scale_through* onto the scale of *today*.
+
+    A row is divided by the factors of the pending events dated after it, and its volumes
+    multiplied by their volume factors; raw_* and the reference columns stay as stored.
+    """
+    if not symbol.endswith(TAIWAN_SUFFIXES) or not rows:
+        return rows
+    import polars as pl
+
+    events = (
+        _pending_events(scale_through, today)
+        .filter(pl.col("symbol") == symbol)
+        .select("trade_date", "ex_factor", "volume_factor")
+        .rows()
+    )
+    if not events:
+        return rows
+    for row in rows:
+        day = str(row.get("date"))[:10]
+        factor = volume_factor = 1.0
+        for event_day, event_factor, event_volume_factor in events:
+            if event_day.isoformat() > day:
+                factor *= event_factor
+                volume_factor *= event_volume_factor
+        if factor == volume_factor == 1.0:
+            continue
+        for key in PRICE_COLUMNS:
+            if isinstance(row.get(key), (int, float)):
+                row[key] = row[key] / factor
+        for key in VOLUME_COLUMNS:
+            if isinstance(row.get(key), (int, float)):
+                row[key] = row[key] * volume_factor
+    return rows
+
+
+def _frame_onto_todays_scale(df, scale_through: date | None, today: date):
+    """_onto_todays_scale for a frame of several symbols."""
+    import polars as pl
+
+    if df.is_empty() or not any(df["symbol"].str.ends_with(suffix).any() for suffix in TAIWAN_SUFFIXES):
+        return df
+    events = _pending_events(scale_through, today)
+    if events.is_empty():
+        return df
+    later = pl.col("_event_date") > pl.col("date")
+    per_row = (
+        df.select("symbol", "date")
+        .unique()
+        .join(events.rename({"trade_date": "_event_date"}), on="symbol")
+        .group_by("symbol", "date")
+        .agg(
+            pl.when(later).then(pl.col("ex_factor")).otherwise(1.0).product().alias("_factor"),
+            pl.when(later).then(pl.col("volume_factor")).otherwise(1.0).product().alias("_volume_factor"),
+        )
+    )
+    factor = pl.col("_factor").fill_null(1.0)
+    volume_factor = pl.col("_volume_factor").fill_null(1.0)
+    return (
+        df.join(per_row, on=["symbol", "date"], how="left", maintain_order="left")
+        .with_columns(
+            [(pl.col(c) / factor).alias(c) for c in PRICE_COLUMNS if c in df.columns]
+            + [(pl.col(c) * volume_factor).alias(c) for c in VOLUME_COLUMNS if c in df.columns]
+        )
+        .drop(["_factor", "_volume_factor"])
+    )
 
 
 def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], asset_type: str = "stock") -> list[dict]:
@@ -573,6 +738,11 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
         "change_pct": q.get("change_pct"),
         "is_live": True,
     }
+    # The quote's previous close is the exchange reference, which differs from the
+    # last daily close on a corporate-action session.
+    live_prev_close = q.get("prev_close")
+    if isinstance(live_prev_close, (int, float)) and math.isfinite(live_prev_close) and live_prev_close > 0:
+        live_row["prev_close"] = live_prev_close
     # 补上 enriched 的技术指标字段
     for key in ("ma5", "ma10", "ma20", "ma30", "ma60",
                 "macd_dif", "macd_dea", "macd_hist",
@@ -639,7 +809,7 @@ def get_daily_batch(request: Request, body: dict):
 
     frames: list[pl.DataFrame] = []
     if stock_symbols:
-        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=cols)
+        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=[*cols, "raw_close", "ref_prev_close"])
         if not df_stock.is_empty():
             frames.append(df_stock)
     for sym in etf_symbols:
@@ -653,7 +823,11 @@ def get_daily_batch(request: Request, body: dict):
 
     if not frames:
         return {"data": {}}
-    df = pl.concat(frames, how="diagonal_relaxed")
+    df = _frame_onto_todays_scale(pl.concat(frames, how="diagonal_relaxed"), _published_scale_through(), cn_today())
+    # The pipeline's own base, so a corporate-action session carries the exchange reference price.
+    df = compute_indicators(df, needed={"prev_close"}).select(
+        [*[c for c in cols if c in df.columns], "prev_close"]
+    )
 
     # 按 symbol 分组, 每只取最近 N 条。
     # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。

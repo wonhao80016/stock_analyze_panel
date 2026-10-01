@@ -28,7 +28,7 @@ class TaiwanHybridProvider:
     capabilities = ProviderCapabilities(
         instruments=True,
         daily=True,
-        adj_factor=False,
+        adj_factor=True,
         minute=False,
         realtime=True,
         financial=True,
@@ -148,8 +148,23 @@ class TaiwanHybridProvider:
         end_time: datetime | None = None,
         asset_type: AssetType = "stock",
     ) -> pl.DataFrame:
-        """Return empty adjustment factors (Phase 2 records raw price semantics)."""
-        return pl.DataFrame()
+        """Forward-adjustment factors from the Taiwan corporate-action table.
+
+        Daily bars are stored raw; the enriched publish divides them by these factors. Only
+        events on or before end_time (default today, Asia/Taipei) are returned, because a
+        later one would also scale the newest bar. start_time keeps events on or after it.
+        Columns: symbol, trade_date, ex_factor, volume_factor. The factors are never
+        written to data/adj_factor.
+        """
+        from app.taiwan.corporate_actions import TaiwanCorporateActionStore, adjustment_factors
+        from app.taiwan.realtime.calendar import taipei_today
+
+        through = end_time.date() if end_time is not None else taipei_today()
+        canonical = [parse_symbol(s).canonical for s in symbols] if symbols else None
+        factors = adjustment_factors(TaiwanCorporateActionStore().read(end=through, symbols=canonical), through)
+        if start_time is not None:
+            factors = factors.filter(pl.col("trade_date") >= start_time.date())
+        return factors
 
     def get_minute(
         self,

@@ -776,6 +776,8 @@ export interface TaiwanDailyItem {
   close: number
   volume: number
   amount?: number | null
+  prev_close?: number | null
+  raw_close?: number | null
 }
 
 export interface TaiwanHistoricalDailyDetail {

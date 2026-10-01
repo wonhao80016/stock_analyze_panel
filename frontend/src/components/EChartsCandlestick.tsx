@@ -10,6 +10,8 @@ export interface OHLC {
   low: number
   close: number
   volume?: number
+  prev_close?: number | null
+  raw_close?: number | null
   ma5?: number | null
   ma10?: number | null
   ma20?: number | null
@@ -25,6 +27,43 @@ export interface OHLC {
   kdj_j?: number | null
   boll_upper?: number | null
   boll_lower?: number | null
+}
+
+/**
+ * Base of bar idx's change: the backend's prev_close, which is the exchange reference
+ * price on an ex-rights or split session, else the previous bar's close.
+ */
+export function changeBase(data: OHLC[], idx: number): number | null {
+  const own = data[idx]?.prev_close
+  if (own != null && Number.isFinite(own) && own > 0) return own
+  return idx > 0 && idx < data.length ? data[idx - 1].close : null
+}
+
+function scaleToRaw(bar: OHLC | undefined): number {
+  const raw = bar?.raw_close
+  if (bar == null || raw == null || !Number.isFinite(raw) || raw <= 0 || !(bar.close > 0)) return 1
+  return raw / bar.close
+}
+
+/**
+ * changeBase moved onto the traded (unadjusted) price scale of bar idx, for charts whose
+ * prices are not forward-adjusted, such as the intraday chart.
+ */
+export function rawChangeBase(data: OHLC[], idx: number): number | null {
+  const base = changeBase(data, idx)
+  return base == null ? null : base * scaleToRaw(data[idx])
+}
+
+/** The bar's traded close when forward adjustment moved its displayed close away from it. */
+export function unadjustedClose(bar: OHLC): number | null {
+  const raw = bar.raw_close
+  if (raw == null || !Number.isFinite(raw) || raw <= 0) return null
+  return raw.toFixed(2) === bar.close.toFixed(2) ? null : raw
+}
+
+export function unadjustedCloseHTML(bar: OHLC, color: string): string {
+  const raw = unadjustedClose(bar)
+  return raw == null ? '' : `<span style="color:${color}">原始收盤</span><span style="color:${color}">${raw.toFixed(2)}</span>`
 }
 
 export interface ChartMarker {
@@ -904,8 +943,8 @@ export function EChartsCandlestick({
       d = data[idx]
     }
     if (!d) return ''
-    const prev = idx > 0 ? data[idx - 1] : null
-    const chg = prev ? d.close - prev.close : 0
+    const base = changeBase(data, idx)
+    const chg = base != null ? d.close - base : 0
     const isUp = chg >= 0
     const clr = isUp ? THEME.bull : THEME.bear
     const floatShares = stockInfo?.float_shares
@@ -922,10 +961,11 @@ export function EChartsCandlestick({
     html += `<span style="color:${CT().text}">收</span>`
     html += `<span style="color:${clr};font-weight:600">${d.close.toFixed(2)}</span>`
     // 漲跌幅 (收盤後, 換手前; 和收間隔一些距離)
-    if (prev) {
-      const chgPct = (chg / prev.close * 100)
+    if (base != null) {
+      const chgPct = (chg / base * 100)
       html += `<span style="color:${clr};margin-left:8px">${isUp ? '+' : ''}${chgPct.toFixed(2)}%</span>`
     }
+    html += unadjustedCloseHTML(d, CT().text)
     if (turnoverRate != null) {
       html += `<span style="color:${CT().text}">換手</span>`
       html += `<span style="color:${CT().text}">${turnoverRate.toFixed(2)}%</span>`
@@ -1168,14 +1208,16 @@ export function EChartsCandlestick({
     html += `<span style="color:${CT().text}">低</span>`
     html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
     html += `<span style="color:${CT().text}">收</span>`
-    const prevClose0 = data[idx-1]?.close ?? d.close
+    const base0 = changeBase(data, idx)
+    const prevClose0 = base0 ?? d.close
     const clr0 = d.close >= prevClose0 ? THEME.bull : THEME.bear
     html += `<span style="color:${clr0};font-weight:600">${d.close.toFixed(2)}</span>`
     // 漲跌幅 (收盤後, 換手前; 和收間隔一些距離)
-    if (idx > 0) {
+    if (base0 != null) {
       const chgPct0 = ((d.close - prevClose0) / prevClose0 * 100)
       html += `<span style="color:${clr0};margin-left:8px">${chgPct0 >= 0 ? '+' : ''}${chgPct0.toFixed(2)}%</span>`
     }
+    html += unadjustedCloseHTML(d, CT().text)
     if (turnoverRate != null) {
       html += `<span style="color:${CT().text}">換手</span>`
       html += `<span style="color:${CT().text}">${turnoverRate.toFixed(2)}%</span>`
