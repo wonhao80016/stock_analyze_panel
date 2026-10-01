@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 import polars as pl
 
+from app.taiwan.providers.snapshot_provider import get_with_retry
 from app.taiwan.providers.taiwan_values import TAIPEI, parse_taiwan_date
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ class TaiwanShareCapitalStore:
 
     def _fetch(self, url: str, suffix: str, code_keys: tuple[str, ...], share_keys: tuple[str, ...],
                date_keys: tuple[str, ...]) -> list[dict[str, Any]]:
-        rows = self.client.get(url).json()
+        rows = get_with_retry(self.client, url).json()
         if not isinstance(rows, list):
             raise ValueError(f"official share capital schema changed: {url}")
         retrieved = datetime.now(TAIPEI).isoformat()

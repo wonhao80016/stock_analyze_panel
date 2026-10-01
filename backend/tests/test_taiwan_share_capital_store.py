@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import httpx
 import polars as pl
 import pytest
 
+from app.taiwan.providers import snapshot_provider
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 
 TWSE_ROWS = [
@@ -78,6 +80,47 @@ def test_both_failing_leaves_the_previous_file_untouched(tmp_path):
     )
     assert broken.refresh() == 0
     assert broken.load().equals(before)
+
+
+def _flaky_tpex_store(tmp_path, monkeypatch, tpex_answers: list):
+    """Store whose TPEx answers replay the script (exceptions are raised, the last repeats); TWSE always answers."""
+    calls = {"tpex": 0}
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "twse" in request.url.host:
+            return httpx.Response(200, json=TWSE_ROWS)
+        calls["tpex"] += 1
+        answer = tpex_answers[min(calls["tpex"], len(tpex_answers)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(snapshot_provider.time, "sleep", sleeps.append)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return TaiwanShareCapitalStore(data_dir=tmp_path, client=client), calls, sleeps
+
+
+def test_a_dropped_response_is_retried_before_the_exchange_counts_as_failed(tmp_path, monkeypatch):
+    store, calls, sleeps = _flaky_tpex_store(
+        tmp_path, monkeypatch, [httpx.ReadTimeout("The read operation timed out"), httpx.Response(200, json=TPEX_ROWS)],
+    )
+
+    assert store.refresh() == 3
+    assert "1240.TPEX" in set(store.load()["symbol"])
+    assert calls["tpex"] == 2
+    assert sleeps == [snapshot_provider.DEFAULT_INITIAL_BACKOFF_SEC]
+
+
+def test_a_persistent_transport_failure_still_fails_that_exchange(tmp_path, monkeypatch):
+    store, calls, sleeps = _flaky_tpex_store(
+        tmp_path, monkeypatch, [httpx.RemoteProtocolError("incomplete chunked read")],
+    )
+
+    assert store.refresh() == 2
+    assert set(store.load()["symbol"]) == {"1101.TWSE", "2330.TWSE"}
+    assert calls["tpex"] == snapshot_provider.DEFAULT_MAX_ATTEMPTS
+    assert sleeps == [1.0, 2.0]
 
 
 @pytest.mark.parametrize("bad", ["", "0", "-5", "n/a", None])

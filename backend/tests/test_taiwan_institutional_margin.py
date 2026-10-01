@@ -403,3 +403,74 @@ class TestHttpRetryHardening:
         # Calendar must strictly remain untainted
         assert target_date not in cal.known_holidays
 
+    @staticmethod
+    def _scripted_reads(monkeypatch, reads: list) -> tuple[dict, list]:
+        """Patch urlopen so each call's read() replays the next scripted outcome; the last one repeats."""
+        from app.taiwan import institutional_margin_refresh
+
+        calls = {"count": 0}
+        sleeps: list[float] = []
+
+        class _Resp:
+            def __init__(self, outcome):
+                self._outcome = outcome
+
+            def read(self):
+                if isinstance(self._outcome, Exception):
+                    raise self._outcome
+                return self._outcome
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def mock_urlopen(req, timeout=None):
+            calls["count"] += 1
+            return _Resp(reads[min(calls["count"], len(reads)) - 1])
+
+        monkeypatch.setattr(institutional_margin_refresh.urllib.request, "urlopen", mock_urlopen)
+        monkeypatch.setattr(institutional_margin_refresh.time, "sleep", sleeps.append)
+        return calls, sleeps
+
+    def test_incomplete_read_is_retried_then_succeeds(self, monkeypatch):
+        """A body cut off mid-transfer is transient; the next attempt usually gets the whole payload."""
+        import http.client
+
+        from app.taiwan import institutional_margin_refresh
+
+        calls, sleeps = self._scripted_reads(
+            monkeypatch, [http.client.IncompleteRead(b"{" * 16), b'{"stat": "OK"}'],
+        )
+
+        assert institutional_margin_refresh._fetch_json_with_retry("http://example.com/T86") == {"stat": "OK"}
+        assert calls["count"] == 2
+        assert sleeps == [institutional_margin_refresh.DEFAULT_INITIAL_BACKOFF_SEC]
+
+    def test_incomplete_read_on_every_attempt_raises_it(self, monkeypatch):
+        import http.client
+
+        from app.taiwan import institutional_margin_refresh
+
+        calls, sleeps = self._scripted_reads(monkeypatch, [http.client.IncompleteRead(b"{" * 16)])
+
+        with pytest.raises(http.client.IncompleteRead):
+            institutional_margin_refresh._fetch_json_with_retry("http://example.com/T86")
+
+        assert calls["count"] == institutional_margin_refresh.DEFAULT_MAX_ATTEMPTS
+        assert sleeps == [1.0, 2.0]
+
+    def test_malformed_json_is_not_retried(self, monkeypatch):
+        import json
+
+        from app.taiwan import institutional_margin_refresh
+
+        calls, sleeps = self._scripted_reads(monkeypatch, [b"<html>blocked</html>", b'{"stat": "OK"}'])
+
+        with pytest.raises(json.JSONDecodeError):
+            institutional_margin_refresh._fetch_json_with_retry("http://example.com/T86")
+
+        assert calls["count"] == 1
+        assert sleeps == []
+

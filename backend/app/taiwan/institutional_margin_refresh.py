@@ -11,6 +11,7 @@ Design:
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -65,6 +66,7 @@ def _fetch_json_with_retry(
     Retryable:
       - Timeouts (TimeoutError, urllib.error.URLError wrapping timeout)
       - Connection reset / network dropped
+      - Truncated or malformed responses (http.client.HTTPException, e.g. IncompleteRead)
       - HTTP 429 (Too Many Requests)
       - HTTP 428 / 307 / 308 — TWSE answers a rate-limited client with these
         instead of 429. The 307 carries no Location, so urllib reports it as a
@@ -100,7 +102,7 @@ def _fetch_json_with_retry(
             )
             time.sleep(backoff)
             backoff *= 2.0
-        except (TimeoutError, urllib.error.URLError, ConnectionError, OSError) as exc:
+        except (TimeoutError, urllib.error.URLError, ConnectionError, OSError, http.client.HTTPException) as exc:
             if attempt >= max_attempts:
                 raise
             logger.warning(

@@ -21,10 +21,13 @@ Validates:
   18. A payload stamped with another trading date yields no rows
   19. A stored partition missing one exchange is refetched
   20. refresh_dates stops at the first failed new date; failures inside the stored range do not block new days
+  21. Transport failures and 5xx are retried a bounded number of times; 4xx and malformed JSON are not
 """
+import json
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import httpx
 import polars as pl
 import pytest
 
@@ -33,7 +36,11 @@ from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import TaiwanDailyUpdateService
 from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
-from app.taiwan.providers.snapshot_provider import OfficialDailySnapshotAdapter
+from app.taiwan.providers import snapshot_provider
+from app.taiwan.providers.snapshot_provider import (
+    IncompleteSnapshotError,
+    OfficialDailySnapshotAdapter,
+)
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.universe import TaiwanSecurityMaster
@@ -291,6 +298,102 @@ def test_a_payload_stamped_with_another_date_yields_no_rows(fetch, payload):
     with patch.object(adapter, "_request_json", return_value=payload("20260923")):
         assert getattr(adapter, fetch)(date(2026, 9, 24)).is_empty()
         assert getattr(adapter, fetch)(date(2026, 9, 23)).height == 1
+
+
+# ── Transient Transport Retry ─────────────────────────────────────
+
+@pytest.fixture
+def sleeps(monkeypatch) -> list[float]:
+    waited: list[float] = []
+    monkeypatch.setattr(snapshot_provider.time, "sleep", waited.append)
+    return waited
+
+
+def _scripted_adapter(tpex_answers: list, twse_answers: list | None = None):
+    """Adapter whose client replays scripted answers per exchange, raising exceptions; the last answer repeats."""
+    calls = {"twse": 0, "tpex": 0}
+    answers = {"twse": twse_answers or [], "tpex": tpex_answers}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        side = "tpex" if "tpex" in request.url.host else "twse"
+        calls[side] += 1
+        script = answers[side]
+        answer = script[min(calls[side], len(script)) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    return OfficialDailySnapshotAdapter(security_master=mock_security_master(), client=client), calls
+
+
+@pytest.mark.parametrize("error", [
+    httpx.RemoteProtocolError("peer closed connection without sending complete message body (incomplete chunked read)"),
+    httpx.ReadTimeout("The read operation timed out"),
+    httpx.ConnectError("[WinError 10054] connection reset"),
+])
+def test_tpex_transport_failure_is_retried_and_the_day_completes(sleeps, error):
+    """A single dropped TPEx response must not fail the whole trading day."""
+    adapter, calls = _scripted_adapter(
+        tpex_answers=[error, httpx.Response(200, json=_tpex_payload("20260924"))],
+        twse_answers=[httpx.Response(200, json=_twse_payload("20260924"))],
+    )
+
+    df = adapter.fetch_date(date(2026, 9, 24))
+
+    assert df["symbol"].to_list() == ["2330.TWSE", "6488.TPEX"]
+    assert calls == {"twse": 1, "tpex": 2}
+    assert sleeps == [snapshot_provider.DEFAULT_INITIAL_BACKOFF_SEC]
+
+
+def test_server_error_is_retried(sleeps):
+    adapter, calls = _scripted_adapter(
+        tpex_answers=[httpx.Response(503), httpx.Response(200, json=_tpex_payload("20260924"))],
+    )
+
+    assert adapter.fetch_tpex(date(2026, 9, 24)).height == 1
+    assert calls["tpex"] == 2
+
+
+def test_a_persistent_transport_failure_still_fails_the_day(sleeps):
+    """Retries are bounded and the last error surfaces, so the day is reported failed rather than stored."""
+    adapter, calls = _scripted_adapter(
+        tpex_answers=[httpx.RemoteProtocolError("incomplete chunked read")],
+        twse_answers=[httpx.Response(200, json=_twse_payload("20260924"))],
+    )
+
+    with pytest.raises(IncompleteSnapshotError, match="incomplete chunked read") as excinfo:
+        adapter.fetch_date(date(2026, 9, 24))
+
+    assert isinstance(excinfo.value.__cause__, httpx.RemoteProtocolError)
+    assert calls["tpex"] == snapshot_provider.DEFAULT_MAX_ATTEMPTS
+    assert sleeps == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("status", [307, 404, 428])
+def test_client_errors_and_redirects_are_not_retried(sleeps, status):
+    adapter, calls = _scripted_adapter(
+        tpex_answers=[httpx.Response(status), httpx.Response(200, json=_tpex_payload("20260924"))],
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        adapter.fetch_tpex(date(2026, 9, 24))
+
+    assert calls["tpex"] == 1
+    assert sleeps == []
+
+
+def test_malformed_json_is_not_retried(sleeps):
+    adapter, calls = _scripted_adapter(
+        tpex_answers=[httpx.Response(200, content=b"<html>blocked</html>"),
+                      httpx.Response(200, json=_tpex_payload("20260924"))],
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        adapter.fetch_tpex(date(2026, 9, 24))
+
+    assert calls["tpex"] == 1
+    assert sleeps == []
 
 
 # ── Refresh Service & HTTP Budget Tests ───────────────────────────

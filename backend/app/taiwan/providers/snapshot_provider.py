@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import date, datetime
 from typing import Any
 
@@ -42,9 +43,47 @@ SNAPSHOT_METADATA = SourceMetadata(
 
 _MISSING_PRICE_SET = {"", "-", "--", "---", "----", "N/A", "null", "None"}
 
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_INITIAL_BACKOFF_SEC = 1.0
+
 
 class IncompleteSnapshotError(RuntimeError):
     """TWSE traded on the date but the TPEx half of the snapshot is missing."""
+
+
+def get_with_retry(
+    client: httpx.Client,
+    url: str,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    initial_backoff: float = DEFAULT_INITIAL_BACKOFF_SEC,
+) -> httpx.Response:
+    """GET *url*, retrying transport errors and HTTP 5xx; any other non-2xx status raises at once.
+
+    The last failure is re-raised unchanged, so callers keep treating it as a failed fetch.
+    """
+    backoff = initial_backoff
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = client.get(url)
+            resp.raise_for_status()
+            return resp
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code < 500 or attempt >= max_attempts:
+                raise
+            logger.warning(
+                "HTTP %d on %s (attempt %d/%d), retrying in %.1fs...",
+                exc.response.status_code, url, attempt, max_attempts, backoff,
+            )
+        except httpx.TransportError as exc:
+            if attempt >= max_attempts:
+                raise
+            logger.warning(
+                "Network/timeout error on %s: %s (attempt %d/%d), retrying in %.1fs...",
+                url, exc, attempt, max_attempts, backoff,
+            )
+        time.sleep(backoff)
+        backoff *= 2.0
+    raise RuntimeError(f"Failed to fetch {url} after {max_attempts} attempts")
 
 
 def _parse_snapshot_number(raw: object) -> float | None:
@@ -312,7 +351,6 @@ class OfficialDailySnapshotAdapter:
         return df.sort(["symbol", "date"])
 
     def _request_json(self, url: str) -> dict[str, Any]:
-        resp = self.client.get(url)
-        resp.raise_for_status()
+        resp = get_with_retry(self.client, url)
         raw = resp.content.decode("utf-8-sig")
         return json.loads(raw)
