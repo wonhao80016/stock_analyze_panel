@@ -3,7 +3,7 @@
 // 狀態分開, 因此測試鎖的是狀態的區分, 不是版面。
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Strategies } from './Strategies'
 import { api } from '@/lib/api'
@@ -12,7 +12,13 @@ vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
   return {
     ...actual,
-    api: { ...actual.api, screenerStrategies: vi.fn(), screenerCached: vi.fn() },
+    api: {
+      ...actual.api,
+      screenerStrategies: vi.fn(),
+      screenerCached: vi.fn(),
+      screenerPickPerformance: vi.fn(),
+      screenerPickPerformanceDetail: vi.fn(),
+    },
   }
 })
 
@@ -20,12 +26,18 @@ vi.mock('@/components/StockPreviewDialog', () => ({
   StockPreviewDialog: ({ symbol }: { symbol: string }) => <div>preview:{symbol}</div>,
 }))
 
-function renderPage() {
+function SearchProbe() {
+  const [params] = useSearchParams()
+  return <output data-testid="search">{params.toString()}</output>
+}
+
+function renderPage(path = '/strategies') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[path]}>
         <Strategies />
+        <SearchProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   )
@@ -396,5 +408,431 @@ describe('策略庫 — 選項顯示計算方式', () => {
     expect(tip).not.toContain('signal_boll_breakout_upper')
     expect(tip).toContain('停損 8.0%')
     expect(tip).toContain('最低量比: 2')
+  })
+})
+
+describe('策略庫 — 事後統計分頁', () => {
+  function horizon(sample: number, extra: Record<string, unknown> = {}) {
+    return {
+      sample_count: sample,
+      sample_days: sample > 0 ? 1 : 0,
+      mean_return: sample > 0 ? 0.0123 : null,
+      median_return: sample > 0 ? -0.005 : null,
+      positive_ratio: sample > 0 ? 0.6 : null,
+      adjustment_not_covered: 0,
+      data_incomplete: 0,
+      prices_incomplete: 0,
+      stale_exit_count: 0,
+      pending_count: 0,
+      ...extra,
+    }
+  }
+
+  function stats(id: string, samples: [number, number, number, number], extra: Record<string, unknown> = {}) {
+    const [h1, h5, h10, h20] = samples
+    return {
+      strategy_id: id,
+      signal_count: 40,
+      signal_days: 8,
+      filled_count: 36,
+      not_filled_limit_up: 3,
+      not_filled_no_trade: 1,
+      limit_check_unknown: 0,
+      pending_entry_count: 0,
+      tracking_count: 30,
+      completed_count: 6,
+      entry_prices_incomplete_count: 0,
+      entry_data_incomplete_count: 0,
+      absent_count: 0,
+      history_degraded_count: 0,
+      excluded: { manifest_missing: 0, recorded_late: 0, universe_incomplete: 0 },
+      horizons: { '1': horizon(h1), '5': horizon(h5), '10': horizon(h10), '20': horizon(h20) },
+      ...extra,
+    }
+  }
+
+  function summary(strategies: unknown[], extra: Record<string, unknown> = {}) {
+    return {
+      method: {
+        entry: 'next_session_open',
+        horizons: [1, 5, 10, 20],
+        price_adjustment: 'forward_adjusted_incl_dividends',
+        costs_included: false,
+        slippage_included: false,
+        exit_fill_simulated: false,
+        return_unit: 'decimal',
+      },
+      adjustment: { status: 'ok', reason: null, covered_through: '2026-09-30' },
+      first_signal_date: '2026-09-01',
+      last_signal_date: '2026-10-01',
+      prices_through: '2026-10-02',
+      strategies,
+      ...extra,
+    }
+  }
+
+  function mockSummary(strategies: unknown[], extra: Record<string, unknown> = {}) {
+    vi.mocked(api.screenerPickPerformance).mockResolvedValue(summary(strategies, extra) as any)
+  }
+
+  const ret = (value: number | null, reason: string | null, staleDays = 0) =>
+    ({ value, reason, stale_exit: staleDays > 0, stale_days: staleDays })
+
+  function record(extra: Record<string, unknown> = {}) {
+    return {
+      signal_date: '2026-09-29',
+      symbol: '2330.TWSE',
+      name: '台積電',
+      rank: 1,
+      entry_date: '2026-09-30',
+      entry_price_raw: 1000,
+      status: 'tracking',
+      limit_check: 'checked',
+      absent_since: null,
+      excluded_reason: null,
+      recorded_late: false,
+      manifest_missing: false,
+      universe_complete: true,
+      history_degraded: false,
+      returns: { '1': ret(0.0123, null), '5': ret(null, 'pending'), '10': ret(null, 'pending'), '20': ret(null, 'pending') },
+      ...extra,
+    }
+  }
+
+  function mockDetail(rows: unknown[] = [record()]) {
+    vi.mocked(api.screenerPickPerformanceDetail).mockResolvedValue({
+      strategy_id: 'boll_breakout',
+      method: summary([]).method,
+      adjustment: summary([]).adjustment,
+      prices_through: '2026-10-02',
+      total: rows.length,
+      signal_days: rows.length > 0 ? 1 : 0,
+      rows,
+    } as any)
+  }
+
+  const FORBIDDEN = /推薦|勝率|建議買進/
+
+  function tab(name: string) {
+    return screen.getByRole('tab', { name })
+  }
+
+  function horizonButton(label: string) {
+    return screen.getByRole('button', { name: label })
+  }
+
+  it('預設分頁仍是原本的策略清單, 不請求事後統計', async () => {
+    mockAll()
+    renderPage()
+
+    expect(await screen.findByText('布林突破')).toBeInTheDocument()
+    expect(screen.getByText('2 檔')).toBeInTheDocument()
+    expect(screen.getByText('選股基準日 2026-09-22')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /未執行 1/ })).toBeInTheDocument()
+    expect(tab('策略清單')).toHaveAttribute('aria-selected', 'true')
+    expect(tab('事後統計')).toHaveAttribute('aria-selected', 'false')
+    expect(api.screenerPickPerformance).not.toHaveBeenCalled()
+  })
+
+  it('切到「事後統計」才發出請求, 網址改為 tab=performance', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    renderPage()
+
+    expect(await screen.findByText('布林突破')).toBeInTheDocument()
+    expect(api.screenerPickPerformance).not.toHaveBeenCalled()
+
+    fireEvent.click(tab('事後統計'))
+
+    expect(await screen.findByText(/以 T\+1 開盤價為計算起點，已含除權息調整，未扣交易成本/)).toBeInTheDocument()
+    expect(api.screenerPickPerformance).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('search')).toHaveTextContent('tab=performance')
+    expect(tab('事後統計')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.queryByText('2 檔')).not.toBeInTheDocument()
+  })
+
+  it('說明列附上資料區間與未計入的成本項目', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    renderPage('/strategies?tab=performance')
+
+    expect(await screen.findByText(/訊號日 2026-09-01 ～ 2026-10-01/)).toBeInTheDocument()
+    expect(screen.getByText(/價格資料至 2026-10-02/)).toBeInTheDocument()
+    expect(screen.getByText(/未扣交易成本、未計滑點、未模擬出場可成交性/)).toBeInTheDocument()
+  })
+
+  it('載入中顯示讀取狀態', async () => {
+    mockAll()
+    vi.mocked(api.screenerPickPerformance).mockReturnValue(new Promise(() => {}))
+    renderPage('/strategies?tab=performance')
+
+    expect(await screen.findByText(/正在讀取事後統計/)).toBeInTheDocument()
+  })
+
+  it('沒有任何選股紀錄時顯示空狀態', async () => {
+    mockAll()
+    mockSummary([], { first_signal_date: null, last_signal_date: null })
+    renderPage('/strategies?tab=performance')
+
+    expect(await screen.findByText(/尚無選股紀錄/)).toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('讀取失敗時依錯誤代碼說明原因', async () => {
+    mockAll()
+    vi.mocked(api.screenerPickPerformance).mockRejectedValue(
+      new Error(JSON.stringify({ code: 'pick_history_unreadable', message: 'Strategy pick snapshots could not be read.' })),
+    )
+    renderPage('/strategies?tab=performance')
+
+    expect(await screen.findByText(/選股紀錄目前無法讀取/)).toBeInTheDocument()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+
+  it('價格資料讀取失敗時有對應的說明', async () => {
+    mockAll()
+    vi.mocked(api.screenerPickPerformance).mockRejectedValue(
+      new Error(JSON.stringify({ code: 'pick_prices_unreadable', message: 'Daily prices could not be read.' })),
+    )
+    renderPage('/strategies?tab=performance')
+
+    expect(await screen.findByText(/日 K 價格資料目前無法讀取/)).toBeInTheDocument()
+  })
+
+  it('除權息資料不可用時顯示橫幅與原因', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [0, 0, 0, 0])], {
+      adjustment: { status: 'unavailable', reason: 'events_missing', covered_through: null },
+    })
+    renderPage('/strategies?tab=performance')
+
+    const banner = await screen.findByRole('alert')
+    expect(banner).toHaveTextContent('除權息資料目前無法使用')
+    expect(banner).toHaveTextContent('除權息資料檔不存在')
+    expect(banner).toHaveTextContent('報酬暫不計算')
+  })
+
+  it('除權息資料正常時不顯示橫幅', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    renderPage('/strategies?tab=performance')
+
+    expect(await screen.findByText(/除權息資料涵蓋至 2026-09-30/)).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('有 T+20 樣本時預設選 T+20, 也能切換', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    renderPage('/strategies?tab=performance')
+
+    await screen.findByText('布林突破')
+    expect(horizonButton('T+20')).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(horizonButton('T+5'))
+    expect(horizonButton('T+5')).toHaveAttribute('aria-pressed', 'true')
+    expect(horizonButton('T+20')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('T+20 沒有樣本時改選有樣本的最長持有期, 樣本為 0 的按鈕停用', async () => {
+    mockAll()
+    mockSummary([
+      stats('boll_breakout', [3, 2, 0, 0]),
+      stats('oversold_bounce', [4, 0, 1, 0]),
+    ])
+    renderPage('/strategies?tab=performance')
+
+    await screen.findByText('布林突破')
+    expect(horizonButton('T+20')).toBeDisabled()
+    expect(horizonButton('T+10')).toBeEnabled()
+    expect(horizonButton('T+10')).toHaveAttribute('aria-pressed', 'true')
+    expect(horizonButton('T+1')).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('所有持有期都沒有樣本時選 T+1, 且全部停用', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [0, 0, 0, 0])])
+    renderPage('/strategies?tab=performance')
+
+    await screen.findByText('布林突破')
+    for (const label of ['T+1', 'T+5', 'T+10', 'T+20']) {
+      expect(horizonButton(label)).toBeDisabled()
+    }
+    expect(horizonButton('T+1')).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('小數報酬乘以 100 顯示為百分比', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [40, 40, 40, 40])])
+    renderPage('/strategies?tab=performance')
+
+    const row = (await screen.findByText('布林突破')).closest('tr')!
+    expect(within(row).getByText('+1.23%')).toBeInTheDocument()
+    expect(within(row).getByText('-0.50%')).toBeInTheDocument()
+    expect(within(row).getByText('60.0%')).toBeInTheDocument()
+    expect(within(row).queryByText(/0\.0123/)).not.toBeInTheDocument()
+  })
+
+  it('用策略名稱並依名稱排序, 訊號日數少於 20 的列標樣本少並為灰字', async () => {
+    mockAll()
+    mockSummary([
+      stats('oversold_bounce', [5, 5, 5, 5], { signal_count: 20, signal_days: 20 }),
+      stats('boll_breakout', [200, 200, 200, 200], { signal_count: 200, signal_days: 19 }),
+    ])
+    renderPage('/strategies?tab=performance')
+
+    const bollRow = (await screen.findByText('布林突破')).closest('tr')!
+    const bounceRow = screen.getByText('超跌反彈').closest('tr')!
+    expect(bollRow.compareDocumentPosition(bounceRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(bollRow).toHaveClass('text-muted')
+    expect(within(bollRow).getByText('樣本少')).toBeInTheDocument()
+    expect(bounceRow).toHaveClass('text-foreground')
+    expect(within(bounceRow).queryByText('樣本少')).not.toBeInTheDocument()
+    expect(screen.getByText(/訊號日數少於 20 日的策略標為「樣本少」/)).toBeInTheDocument()
+  })
+
+  it('彙總表揭露缺席 (停牌或下市) 的筆數', async () => {
+    mockAll()
+    mockSummary([
+      stats('boll_breakout', [5, 5, 5, 5], { absent_count: 2 }),
+      stats('oversold_bounce', [5, 5, 5, 5]),
+    ])
+    renderPage('/strategies?tab=performance')
+
+    const bollRow = (await screen.findByText('布林突破')).closest('tr')!
+    expect(within(bollRow).getByText('缺席 2')).toBeInTheDocument()
+    const bounceRow = screen.getByText('超跌反彈').closest('tr')!
+    expect(within(bounceRow).queryByText(/缺席/)).not.toBeInTheDocument()
+  })
+
+  it('明細讀取失敗時在展開區說明原因', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    vi.mocked(api.screenerPickPerformanceDetail).mockRejectedValue(
+      new Error(JSON.stringify({ code: 'pick_prices_unreadable', message: 'Daily prices could not be read.' })),
+    )
+    renderPage('/strategies?tab=performance')
+
+    fireEvent.click(await screen.findByRole('button', { name: '布林突破 的選股紀錄' }))
+
+    expect(await screen.findByText(/日 K 價格資料目前無法讀取/)).toBeInTheDocument()
+    expect(screen.getByText('布林突破')).toBeInTheDocument()
+  })
+
+  it('明細沒有紀錄時顯示空狀態', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    mockDetail([])
+    renderPage('/strategies?tab=performance')
+
+    fireEvent.click(await screen.findByRole('button', { name: '布林突破 的選股紀錄' }))
+
+    expect(await screen.findByText('這支策略沒有選股紀錄。')).toBeInTheDocument()
+  })
+
+  it('顯示未計入筆數、持有期層級的排除與歷史資料不完整提示', async () => {
+    mockAll()
+    const base = stats('boll_breakout', [5, 5, 5, 5], {
+      excluded: { manifest_missing: 1, recorded_late: 2, universe_incomplete: 0 },
+      history_degraded_count: 4,
+    }) as any
+    base.horizons['20'] = horizon(5, { adjustment_not_covered: 2, prices_incomplete: 1 })
+    mockSummary([base])
+    renderPage('/strategies?tab=performance')
+
+    const row = (await screen.findByText('布林突破')).closest('tr')!
+    expect(within(row).getByText('延遲紀錄／市場不完整／清單缺漏，未計入 3 筆')).toBeInTheDocument()
+    expect(within(row).getByText('另 3 筆未計入')).toBeInTheDocument()
+    expect(within(row).getByText(/4 筆選股產生時歷史資料讀取不完整/)).toBeInTheDocument()
+  })
+
+  it('展開一列後才請求明細, 點標的開啟預覽', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    mockDetail()
+    renderPage('/strategies?tab=performance')
+
+    await screen.findByText('布林突破')
+    expect(api.screenerPickPerformanceDetail).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '布林突破 的選股紀錄' }))
+
+    expect(await screen.findByText('台積電')).toBeInTheDocument()
+    expect(api.screenerPickPerformanceDetail).toHaveBeenCalledWith('boll_breakout', 200)
+    expect(screen.getAllByText('未滿期').length).toBe(3)
+
+    fireEvent.click(screen.getByRole('button', { name: '查看 台積電 走勢' }))
+    expect(screen.getByText('preview:2330.TWSE')).toBeInTheDocument()
+  })
+
+  it('畫面不出現「推薦」「勝率」等用語, 含所有條件式提示', async () => {
+    mockAll()
+    const full = stats('boll_breakout', [5, 5, 5, 5], {
+      signal_days: 3,
+      limit_check_unknown: 2,
+      pending_entry_count: 1,
+      entry_prices_incomplete_count: 1,
+      entry_data_incomplete_count: 1,
+      absent_count: 2,
+      history_degraded_count: 3,
+      excluded: { manifest_missing: 1, recorded_late: 1, universe_incomplete: 1 },
+    }) as any
+    for (const key of ['1', '5', '10', '20']) {
+      full.horizons[key] = horizon(5, {
+        adjustment_not_covered: 1, data_incomplete: 1, prices_incomplete: 1, stale_exit_count: 1, pending_count: 1,
+      })
+    }
+    mockSummary([full], {
+      adjustment: { status: 'unavailable', reason: 'coverage_missing', covered_through: null },
+    })
+    const reasons = ['pending', 'not_filled_limit_up', 'not_filled_no_trade', 'adjustment_not_covered',
+      'data_incomplete', 'prices_incomplete', 'events_missing', 'events_unreadable', 'coverage_missing']
+    const statuses = ['pending_entry', 'tracking', 'completed', 'not_filled_limit_up', 'not_filled_no_trade',
+      'prices_incomplete', 'data_incomplete']
+    mockDetail([
+      ...reasons.map((reason, i) => record({
+        symbol: `R${i}.TWSE`,
+        status: statuses[i % statuses.length],
+        returns: { '1': ret(0.01, null, 2), '5': ret(null, reason), '10': ret(-0.02, null), '20': ret(null, reason) },
+      })),
+      record({ symbol: 'X1.TWSE', excluded_reason: 'recorded_late' }),
+      record({ symbol: 'X2.TWSE', excluded_reason: 'universe_incomplete' }),
+      record({ symbol: 'X3.TWSE', excluded_reason: 'manifest_missing' }),
+      record({ symbol: 'X4.TWSE', absent_since: '2026-09-30', limit_check: 'unknown', history_degraded: true }),
+    ])
+    const { container } = renderPage('/strategies?tab=performance')
+
+    fireEvent.click(await screen.findByRole('button', { name: '布林突破 的選股紀錄' }))
+    await screen.findByText('X4.TWSE')
+
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.getByText('缺席 2')).toBeInTheDocument()
+    expect(screen.getByText('漲停未判定 2')).toBeInTheDocument()
+    expect(screen.getByText('沿用前收 1')).toBeInTheDocument()
+    expect(screen.getByText('2026-09-30 起無資料')).toBeInTheDocument()
+    expect(container.innerHTML).not.toMatch(FORBIDDEN)
+  })
+
+  it('錯誤狀態的畫面也不出現「推薦」「勝率」等用語', async () => {
+    const errors = [
+      new Error(JSON.stringify({ code: 'pick_history_unreadable', message: 'x' })),
+      new Error(JSON.stringify({ code: 'pick_prices_unreadable', message: 'x' })),
+      new Error('500 Internal Server Error'),
+    ]
+    for (const error of errors) {
+      mockAll()
+      vi.mocked(api.screenerPickPerformance).mockRejectedValue(error)
+      const { container, unmount } = renderPage('/strategies?tab=performance')
+      await screen.findByText(/無法讀取/)
+      expect(container.innerHTML).not.toMatch(FORBIDDEN)
+      unmount()
+    }
+
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    vi.mocked(api.screenerPickPerformanceDetail).mockRejectedValue(new Error('500 Internal Server Error'))
+    const { container } = renderPage('/strategies?tab=performance')
+    fireEvent.click(await screen.findByRole('button', { name: '布林突破 的選股紀錄' }))
+    expect(await screen.findByText('目前無法讀取這支策略的選股紀錄。')).toBeInTheDocument()
+    expect(container.innerHTML).not.toMatch(FORBIDDEN)
   })
 })

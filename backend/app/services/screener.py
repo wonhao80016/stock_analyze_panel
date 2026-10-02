@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
+import contextvars
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -19,6 +21,7 @@ from app.enriched_generation import (
     enriched_publication_incomplete,
 )
 from app.parquet import scan_enriched_parquet
+from app.services.strategy_inputs import CURRENT, HISTORY, InputStatus
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
@@ -26,6 +29,69 @@ logger = logging.getLogger(__name__)
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
 _history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
 _HISTORY_CACHE_TTL = 120.0  # 秒
+# Every _history_cache access goes through this lock: refreshes clear it from other threads.
+_history_cache_lock = threading.Lock()
+
+
+def _history_cache_get(key: tuple[str, date, int], now: float) -> pl.DataFrame | None:
+    with _history_cache_lock:
+        entry = _history_cache.get(key)
+        if entry is None:
+            return None
+        ts, cached_df = entry
+        if now - ts < _HISTORY_CACHE_TTL:
+            return cached_df
+        del _history_cache[key]
+        return None
+
+
+def _history_cache_put(key: tuple[str, date, int], now: float, df: pl.DataFrame) -> None:
+    with _history_cache_lock:
+        _history_cache[key] = (now, df)
+        if len(_history_cache) > 10:
+            expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
+            for k in expired:
+                del _history_cache[k]
+
+# Loader outcomes collected by build_strategy_context; None outside that call.
+_input_sink: contextvars.ContextVar[dict[str, InputStatus] | None] = contextvars.ContextVar(
+    "screener_input_sink", default=None
+)
+
+
+def _input_status(state: str, frame: pl.DataFrame | None, target_date: date) -> InputStatus:
+    if frame is None or frame.is_empty():
+        return InputStatus(state=state)
+    at_target = frame
+    dates: tuple[date, ...] = ()
+    if "date" in frame.columns:
+        day = pl.col("date").cast(pl.Date)
+        dates = tuple(frame.select(day.unique().sort()).to_series().drop_nulls().to_list())
+        at_target = frame.filter(day == target_date)
+    exchanges: frozenset[str] = frozenset()
+    if "symbol" in at_target.columns:
+        suffix = pl.col("symbol").cast(pl.Utf8).str.extract(r"\.([^.]+)$", 1)
+        exchanges = frozenset(at_target.select(suffix.drop_nulls().unique()).to_series().to_list())
+    return InputStatus(state=state, rows=frame.height, exchanges_at_t=exchanges, dates=dates)
+
+
+def _report_input(
+    group: str,
+    state: str,
+    frame: pl.DataFrame | None,
+    target_date: date,
+    *,
+    overwrite: bool = True,
+) -> None:
+    """Never raises: status reporting must not change what the loaders return."""
+    sink = _input_sink.get()
+    if sink is None or (not overwrite and group in sink):
+        return
+    try:
+        sink[group] = _input_status(state, frame, target_date)
+    except Exception:
+        logger.exception("input status for %s on %s could not be derived", group, target_date)
+        sink[group] = InputStatus(state="unverified")
 
 
 @dataclass
@@ -59,7 +125,8 @@ class ScreenerService:
 
         清除数据后调用, 避免内存里的旧历史窗口残留导致策略/看板仍命中旧数据。
         """
-        _history_cache.clear()
+        with _history_cache_lock:
+            _history_cache.clear()
 
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
@@ -77,6 +144,7 @@ class ScreenerService:
                 inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in df_i.columns]
                 if "name" not in df.columns:
                     df = df.join(df_i.select(inst_cols), on="symbol", how="left")
+            _report_input(CURRENT, "ok", df, target_date)
             return df
 
         # 尝试从 repo 级预计算历史缓存中提取目标日期 (仅 stock: 该缓存为股票专用)
@@ -92,6 +160,7 @@ class ScreenerService:
                         inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in df_i.columns]
                         if "name" not in df.columns:
                             df = df.join(df_i.select(inst_cols), on="symbol", how="left")
+                    _report_input(CURRENT, "ok", df, target_date)
                     return df
 
         self._raise_if_publishing()
@@ -102,19 +171,23 @@ class ScreenerService:
         target_parquet = enriched_dir / f"date={ds}" / "part.parquet"
 
         if not target_parquet.exists():
+            _report_input(CURRENT, "missing", None, target_date)
             return pl.DataFrame()
 
         try:
             df = pl.read_parquet(target_parquet)
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_for_date failed: %s", e)
+            _report_input(CURRENT, "error", None, target_date)
             return pl.DataFrame()
 
         if df.is_empty():
+            _report_input(CURRENT, "empty", df, target_date)
             return df
 
         # 即时计算指标: 需要加载历史窗口作 warmup
         df_full = self._compute_enriched_full(df, target_date)
+        _report_input(CURRENT, "ok", df_full, target_date, overwrite=False)
         return df_full
 
     def load_prior_consecutive(self, as_of: date, consec_col: str) -> pl.DataFrame:
@@ -190,10 +263,12 @@ class ScreenerService:
             df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
             logger.warning("warmup history load failed: %s", e)
-            df_hist = df_target
+            df_hist = pl.DataFrame()
 
         if df_hist.is_empty():
             df_hist = df_target
+            # Indicators from this single day differ from warmed-up ones, so the result is not ok.
+            _report_input(CURRENT, "error", df_target, target_date)
 
         # 计算指标
         df_full = compute_indicators(df_hist)
@@ -239,18 +314,17 @@ class ScreenerService:
                 elapsed = (time.perf_counter() - t0) * 1000
                 logger.info("_load_enriched_history(%s, %d): repo cache hit, %.1fms, %d rows",
                             target_date, lookback_days, elapsed, len(cached))
+                _report_input(HISTORY, "ok", cached, target_date)
                 return cached
 
         # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
         cache_key = (self.asset_type, target_date, lookback_days)
         now = time.monotonic()
-        ttl_cached = _history_cache.get(cache_key)
-        if ttl_cached is not None:
-            ts, cached_df = ttl_cached
-            if now - ts < _HISTORY_CACHE_TTL:
-                logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
-                return cached_df
-            del _history_cache[cache_key]
+        cached_df = _history_cache_get(cache_key, now)
+        if cached_df is not None:
+            logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
+            _report_input(HISTORY, "ok", cached_df, target_date)
+            return cached_df
 
         self._raise_if_publishing()
 
@@ -285,9 +359,11 @@ class ScreenerService:
             df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_history failed: %s", e)
+            _report_input(HISTORY, "error", None, target_date)
             return pl.DataFrame()
 
         if df_hist.is_empty():
+            _report_input(HISTORY, "empty", None, target_date)
             return pl.DataFrame()
 
         df_full = compute_indicators(df_hist)
@@ -323,12 +399,9 @@ class ScreenerService:
         logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
                     target_date, lookback_days, elapsed, len(df_full))
 
-        _history_cache[cache_key] = (now, df_full)
-        if len(_history_cache) > 10:
-            expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
-            for k in expired:
-                del _history_cache[k]
+        _history_cache_put(cache_key, now, df_full)
 
+        _report_input(HISTORY, "ok", df_full, target_date)
         return df_full
 
     def run(
@@ -411,16 +484,23 @@ class ScreenerService:
         """按调用方要求装配标准策略数据上下文，不解释策略公式。"""
         from app.strategy.engine import StrategyDataContext
 
-        if current is None:
-            current = self._load_enriched_for_date(as_of)
-        history_bars = engine.required_history_bars(
-            strategy_ids,
-            params_map=params_map,
-            overrides_map=overrides_map,
-        )
-        history = None
-        if history_bars > 1:
-            history = self._load_enriched_history(as_of, history_bars)
+        sink: dict[str, InputStatus] = {}
+        token = _input_sink.set(sink)
+        try:
+            if current is None:
+                current = self._load_enriched_for_date(as_of)
+            else:
+                _report_input(CURRENT, "provided", current, as_of)
+            history_bars = engine.required_history_bars(
+                strategy_ids,
+                params_map=params_map,
+                overrides_map=overrides_map,
+            )
+            history = None
+            if history_bars > 1:
+                history = self._load_enriched_history(as_of, history_bars)
+        finally:
+            _input_sink.reset(token)
         return StrategyDataContext(
             asset_type=self.asset_type,
             timeframe=timeframe,
@@ -429,6 +509,10 @@ class ScreenerService:
             history=history,
             market=market,
             cache_key=cache_key,
+            input_status={
+                CURRENT: sink.get(CURRENT, InputStatus()),
+                HISTORY: sink.get(HISTORY, InputStatus()) if history_bars > 1 else None,
+            },
         )
 
     def latest_date(self) -> date | None:

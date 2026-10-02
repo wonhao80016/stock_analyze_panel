@@ -8,12 +8,14 @@ _refresh_single_view 仍被 api/kline.py 的个股分时"获取数据"按钮真�
 from __future__ import annotations
 
 import logging
+from datetime import date
+from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.tickflow.repository import KlineRepository
+from app.tickflow.repository import KlineRepository, enriched_dirname
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +74,9 @@ def refresh_enriched_cache(label: str) -> None:
         logger.exception("enriched cache refresh (%s) failed: %s", label, e)
 
 def refresh_strategy_cache(label: str) -> None:
-    """Recompute the strategy picks cache that the dashboard card reads.
+    """Recompute the dashboard strategy cache for the latest day, then record its pick snapshot.
 
-    GET /api/screener/cached only ever returns what run_all last wrote, so
-    without this step the card stays empty no matter how fresh the price data is.
+    A record failure is only logged and leaves the written cache intact.
     """
     app_state = _get_app_state()
     if app_state is None:
@@ -88,14 +89,50 @@ def refresh_strategy_cache(label: str) -> None:
         return
     try:
         from app.api.screener import compute_and_cache_all
+        from app.services.screener import ScreenerService
+        from app.services.strategy_pick_history import RunReport
 
-        as_of, results = compute_and_cache_all(repo, engine)
+        signal_date = ScreenerService(repo).latest_date()
+        if signal_date is None:
+            logger.warning("strategy cache refresh (%s) skipped: no basis date", label)
+            return
+        ScreenerService.clear_history_cache()
+        data_dir = repo.store.data_dir
+        input_mtime = _enriched_partition_mtime(data_dir, signal_date)
+        report = RunReport()
+        as_of, results = compute_and_cache_all(
+            repo, engine, as_of=signal_date, run_report=report
+        )
         logger.info(
             "strategy cache refreshed (%s): as_of=%s, strategies=%d",
             label, as_of, len(results),
         )
     except Exception as e:
         logger.exception("strategy cache refresh (%s) failed: %s", label, e)
+        return
+    if as_of != signal_date:
+        logger.warning(
+            "strategy picks not recorded (%s): computed as_of %s != %s", label, as_of, signal_date
+        )
+        return
+    try:
+        from app.services import strategy_pick_history
+
+        strategy_pick_history.record(data_dir, signal_date, results, report, label, input_mtime)
+    except Exception:
+        logger.exception("strategy picks record (%s) failed for %s", label, signal_date)
+
+
+def _enriched_partition_mtime(data_dir: Path, day: date) -> float | None:
+    """Never raises: a missing or unreadable mtime only disables the stale-input check."""
+    try:
+        path = Path(data_dir) / enriched_dirname("stock") / f"date={day.isoformat()}" / "part.parquet"
+        return path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    except Exception:
+        logger.warning("enriched partition mtime unreadable for %s", day, exc_info=True)
+        return None
 
 
 def start_scheduler() -> AsyncIOScheduler:

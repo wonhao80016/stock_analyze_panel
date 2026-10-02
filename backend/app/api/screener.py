@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.db_safe import is_valid_ext_ident, quote_ident
-from app.services import strategy_cache
+from app.services import strategy_cache, strategy_pick_history, strategy_pick_performance
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 
@@ -504,6 +504,126 @@ def get_cached_result(
     }
 
 
+PICK_HISTORY_UNREADABLE = "pick_history_unreadable"
+PICK_PRICES_UNREADABLE = "pick_prices_unreadable"
+
+
+def _pick_limit_profile(symbols: list[str]):
+    """Statutory limit per symbol; a lookup failure leaves every limit_check unknown instead of failing."""
+    import polars as pl
+
+    from app.indicators.pipeline import taiwan_limit_profile
+
+    try:
+        return taiwan_limit_profile(symbols)
+    except Exception as e:
+        logger.warning("pick performance: limit profile lookup failed: %s", e)
+        return pl.DataFrame(
+            {"symbol": symbols, "limit_pct": [None] * len(symbols), "is_etf_tick": [False] * len(symbols)},
+            schema={"symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean},
+        )
+
+
+def _pick_outcomes(request: Request, strategy_id: str | None = None):
+    import polars as pl
+
+    data_dir = request.app.state.repo.store.data_dir
+    try:
+        picks = strategy_pick_history.read_picks(data_dir).picks
+    except (strategy_pick_history.PickHistoryReadError, OSError) as e:
+        logger.warning("pick performance: snapshot read failed: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": PICK_HISTORY_UNREADABLE, "message": "Strategy pick snapshots could not be read."},
+        ) from e
+    if strategy_id is not None:
+        picks = picks.filter(pl.col("strategy_id") == strategy_id)
+    try:
+        inputs = strategy_pick_performance.load_inputs(data_dir, picks, _pick_limit_profile)
+    except OSError as e:
+        logger.warning("pick performance: price inputs read failed: %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": PICK_PRICES_UNREADABLE, "message": "Daily prices could not be read."},
+        ) from e
+    outcomes = strategy_pick_performance.compute_outcomes(
+        picks, inputs.bars, inputs.events, inputs.adjustment, inputs.calendar, inputs.limit_profile
+    )
+    return outcomes, inputs
+
+
+def _finite(value: Any) -> Any:
+    return None if isinstance(value, float) and not math.isfinite(value) else value
+
+
+def _iso_or_none(value: Any) -> Any:
+    return value.isoformat() if isinstance(value, (date, datetime)) else value
+
+
+@router.get("/pick-performance")
+def get_pick_performance(request: Request):
+    """Gross decimal returns of recorded picks per strategy; computed on every request."""
+    outcomes, inputs = _pick_outcomes(request)
+    payload = strategy_pick_performance.summarize(outcomes, inputs.adjustment, inputs.calendar.prices_through)
+    for stats in payload["strategies"]:
+        for horizon in stats["horizons"].values():
+            for name in ("mean_return", "median_return", "positive_ratio"):
+                horizon[name] = _finite(horizon[name])
+    return payload
+
+
+@router.get("/pick-performance/{strategy_id}")
+def get_pick_performance_detail(
+    strategy_id: str,
+    request: Request,
+    limit: int = Query(200, ge=1, le=2000),
+):
+    """Most recent picks of one strategy, newest signal day first; an unknown id yields no rows."""
+    outcomes, inputs = _pick_outcomes(request, strategy_id)
+    horizons = strategy_pick_performance.HORIZONS
+    latest = outcomes.sort(["signal_date", "rank"], descending=[True, False]).head(limit)
+    rows = []
+    for row in latest.iter_rows(named=True):
+        rows.append({
+            "signal_date": _iso_or_none(row["signal_date"]),
+            "symbol": row["symbol"],
+            "name": None,
+            "rank": row["rank"],
+            "entry_date": _iso_or_none(row["entry_date"]),
+            "entry_price_raw": _finite(row["entry_price_raw"]),
+            "status": row["status"],
+            "limit_check": row["limit_check"],
+            "absent_since": _iso_or_none(row["absent_since"]),
+            "returns": {
+                str(k): {
+                    "value": _finite(row[f"ret_{k}"]),
+                    "reason": row[f"reason_{k}"],
+                    "stale_exit": bool(row[f"stale_{k}"]),
+                    "stale_days": int(row[f"stale_days_{k}"] or 0),
+                }
+                for k in horizons
+            },
+            "excluded_reason": row["excluded_reason"],
+            "recorded_late": row["recorded_late"],
+            "manifest_missing": row["manifest_missing"],
+            "universe_complete": row["universe_complete"],
+            "history_degraded": row["history_degraded"],
+        })
+    _attach_instrument_names(request.app.state.repo, {"results": {strategy_id: {"rows": rows}}})
+    header = strategy_pick_performance.summarize(
+        outcomes.clear(), inputs.adjustment, inputs.calendar.prices_through
+    )
+    return {
+        "strategy_id": strategy_id,
+        "method": header["method"],
+        "adjustment": header["adjustment"],
+        "prices_through": header["prices_through"],
+        "total": outcomes.height,
+        "signal_days": outcomes.get_column("signal_date").n_unique(),
+        "rows": rows,
+    }
+
+
 @router.get("/market-snapshot")
 def market_snapshot(request: Request):
     """最新全市场轻量行情快照，供板块/概念聚合分析使用。"""
@@ -551,12 +671,11 @@ def compute_and_cache_all(
     timeframe: str = "1d",
     as_of: date | None = None,
     strategy_ids: list[str] | None = None,
+    run_report: strategy_pick_history.RunReport | None = None,
 ) -> tuple[date | None, dict[str, dict]]:
-    """Run every eligible strategy for ``as_of`` and persist the page cache.
+    """Run every eligible strategy for ``as_of`` and persist the cache GET /cached reads.
 
-    Shared by the run_all endpoint and the post-close scheduler; the cache this
-    writes is the only thing GET /cached reads, so nothing calling this path may
-    swallow a write failure silently.
+    Callers must not swallow a write failure; ``run_report``, when given, is filled in place.
     """
     t_total = time.perf_counter()
     svc = ScreenerService(repo, asset_type=asset_type)
@@ -591,6 +710,10 @@ def compute_and_cache_all(
     t0 = time.perf_counter()
     all_overrides = strategy_config.list_overrides(data_dir)
     logger.info("run_all: list_overrides took %.1fms (%d overrides)", (time.perf_counter() - t0) * 1000, len(all_overrides))
+    if run_report is not None:
+        # Same overrides snapshot the strategies run with, so fingerprints describe this run.
+        run_report.fingerprints = strategy_pick_history.strategy_fingerprints(engine, all_overrides, all_ids)
+        run_report.input_groups = strategy_pick_history.strategy_input_groups(engine, all_ids)
 
     params_map = {
         sid: dict((all_overrides.get(sid) or {}).get("params") or {})
@@ -605,6 +728,10 @@ def compute_and_cache_all(
         params_map=params_map,
         overrides_map=overrides_map,
     )
+    if run_report is not None:
+        input_status = getattr(context, "input_status", None) or {}
+        run_report.current = input_status.get(strategy_pick_history.CURRENT) or strategy_pick_history.InputStatus()
+        run_report.history = input_status.get(strategy_pick_history.HISTORY)
     # One strategy that cannot run must not cost the page every other one: the
     # post-close refresh writes this cache unattended, so a single raise would
     # freeze the card on whatever day it last succeeded.

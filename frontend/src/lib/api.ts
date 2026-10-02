@@ -258,6 +258,101 @@ export interface ScreenerCachedResult {
   updated_at: number | null
 }
 
+export type PickHorizon = '1' | '5' | '10' | '20'
+
+/** Returns in these payloads are decimals: 0.0123 means 1.23%. */
+export interface PickPerformanceMethod {
+  entry: string
+  horizons: number[]
+  price_adjustment: string
+  costs_included: boolean
+  slippage_included: boolean
+  exit_fill_simulated: boolean
+  return_unit: 'decimal'
+}
+
+export interface PickAdjustmentState {
+  status: string
+  reason: string | null
+  covered_through: string | null
+}
+
+export interface PickHorizonStats {
+  sample_count: number
+  sample_days: number
+  mean_return: number | null
+  median_return: number | null
+  positive_ratio: number | null
+  adjustment_not_covered: number
+  data_incomplete: number
+  prices_incomplete: number
+  stale_exit_count: number
+  pending_count: number
+}
+
+export interface PickStrategyStats {
+  strategy_id: string
+  signal_count: number
+  signal_days: number
+  filled_count: number
+  not_filled_limit_up: number
+  not_filled_no_trade: number
+  limit_check_unknown: number
+  pending_entry_count: number
+  tracking_count: number
+  completed_count: number
+  entry_prices_incomplete_count: number
+  entry_data_incomplete_count: number
+  absent_count: number
+  history_degraded_count: number
+  excluded: { manifest_missing: number; recorded_late: number; universe_incomplete: number }
+  horizons: Record<PickHorizon, PickHorizonStats>
+}
+
+export interface PickPerformanceSummary {
+  method: PickPerformanceMethod
+  adjustment: PickAdjustmentState
+  first_signal_date: string | null
+  last_signal_date: string | null
+  prices_through: string | null
+  strategies: PickStrategyStats[]
+}
+
+export interface PickHorizonReturn {
+  value: number | null
+  reason: string | null
+  stale_exit: boolean
+  stale_days: number
+}
+
+export interface PickRecord {
+  signal_date: string
+  symbol: string
+  name: string | null
+  rank: number | null
+  entry_date: string | null
+  entry_price_raw: number | null
+  status: string
+  limit_check: string
+  absent_since: string | null
+  excluded_reason: string | null
+  recorded_late: boolean | null
+  manifest_missing: boolean | null
+  universe_complete: boolean | null
+  history_degraded: boolean | null
+  returns: Record<PickHorizon, PickHorizonReturn>
+}
+
+export interface PickPerformanceDetail {
+  strategy_id: string
+  method: PickPerformanceMethod
+  adjustment: PickAdjustmentState
+  prices_through: string | null
+  total: number
+  signal_days: number
+  rows: PickRecord[]
+}
+
 export interface MarketSnapshotRow {
   symbol: string
   name?: string | null
@@ -2558,6 +2653,14 @@ export const api = {
       extColumns
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',
+    ),
+  // quiet: a 503 detail is a {code, message} object the page renders itself.
+  screenerPickPerformance: () =>
+    request<PickPerformanceSummary>('/api/screener/pick-performance', { quiet: true }),
+  screenerPickPerformanceDetail: (strategyId: string, limit = 200) =>
+    request<PickPerformanceDetail>(
+      `/api/screener/pick-performance/${encodeURIComponent(strategyId)}?limit=${limit}`,
+      { quiet: true },
     ),
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),

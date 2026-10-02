@@ -162,6 +162,8 @@ class StrategyDataContext:
     history: pl.DataFrame | None = None
     market: Any | None = None
     cache_key: str | None = None
+    # Loader outcome per input ("current"/"history"); diagnostics only, strategies never read it.
+    input_status: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

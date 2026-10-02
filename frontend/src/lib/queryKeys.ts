@@ -45,6 +45,9 @@ export const QK = {
   screenerCachedResult: (strategyId: string, asOf?: string, ext?: string) => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? ''] as const,
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
+  screenerPickPerformance: ['screener-pick-performance', 'summary'] as const,
+  screenerPickPerformanceDetail: (strategyId: string, limit: number) =>
+    ['screener-pick-performance', 'detail', strategyId, limit] as const,
   marketSnapshot:       ['market-snapshot'] as const,
 
   // Backtest

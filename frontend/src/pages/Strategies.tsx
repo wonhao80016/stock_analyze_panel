@@ -1,11 +1,20 @@
 import { useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, Target } from 'lucide-react'
 import { api, type StrategyDetail } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { StrategyRule, strategyRuleText } from '@/components/StrategyRule'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { StrategyPickPerformance } from '@/components/StrategyPickPerformance'
 import { cn } from '@/lib/cn'
+
+const TABS = [
+  { key: 'list', label: '策略清單' },
+  { key: 'performance', label: '事後統計' },
+] as const
+
+type TabKey = (typeof TABS)[number]['key']
 
 function n(v: number | null | undefined) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -46,6 +55,10 @@ function effectiveLimit(detail: StrategyDetail): number | null {
 }
 
 export function Strategies() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab') as TabKey | null
+  const activeTab = TABS.find(t => t.key === tabParam) ?? TABS[0]
+  const isList = activeTab.key === 'list'
   const [expanded, setExpanded] = useState<string | null>(null)
   const [minHits, setMinHits] = useState<number>(2)
   // Strategies a stock must ALL be picked by. Empty means no constraint, so a
@@ -154,11 +167,11 @@ export function Strategies() {
         <div className="flex items-center gap-2">
           <Target className="h-4 w-4 text-accent" />
           <h1 className="text-sm font-semibold text-foreground">策略庫</h1>
-          {cached.data?.as_of && (
+          {isList && cached.data?.as_of && (
             <span className="font-mono text-[11px] text-muted">選股基準日 {cached.data.as_of}</span>
           )}
         </div>
-        <div className="flex flex-wrap gap-1">
+        {isList && <div className="flex flex-wrap gap-1">
           {FILTERS.map(f => (
             <button
               key={f.key}
@@ -175,10 +188,30 @@ export function Strategies() {
               {f.label} {counts[f.key]}
             </button>
           ))}
-        </div>
+        </div>}
       </div>
 
-      {contributors.length >= 2 && (
+      <div role="tablist" aria-label="策略庫分頁" className="mb-3 flex gap-1 border-b border-border">
+        {TABS.map(t => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={activeTab.key === t.key}
+            onClick={() => setSearchParams({ tab: t.key }, { replace: true })}
+            className={cn(
+              '-mb-px border-b-2 px-3 py-1 text-[12px] transition-colors cursor-pointer',
+              activeTab.key === t.key
+                ? 'border-accent text-accent'
+                : 'border-transparent text-muted hover:text-foreground',
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {isList && contributors.length >= 2 && (
         <section className="mb-3 rounded-card border border-accent/30 bg-surface p-3">
           <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
             <div className="flex items-baseline gap-2">
@@ -331,7 +364,9 @@ export function Strategies() {
         </section>
       )}
 
-      {strategies.isLoading ? (
+      {!isList ? (
+        <StrategyPickPerformance nameById={nameById} onPreview={setPreview} />
+      ) : strategies.isLoading ? (
         <div className="flex items-center gap-2 py-6 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />正在讀取策略清單…
         </div>
