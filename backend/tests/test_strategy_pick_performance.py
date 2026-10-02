@@ -140,6 +140,38 @@ def _one(outcomes: pl.DataFrame, symbol: str = SYM) -> dict:
     return outcomes.filter(pl.col("symbol") == symbol).row(0, named=True)
 
 
+def test_reconstructed_late_picks_enter_returns_but_recorded_late_still_excluded():
+    picks = _picks((D[0], 'rebuilt', SYM), (D[0], 'recorded', SYM), recorded_late=[True, True])
+    picks = picks.with_columns(pl.Series('provenance', ['reconstructed', 'recorded']))
+    out = _run(picks, _market(_rising(SYM, 22), 22))
+    result = summarize(out, OK, D[21])
+    stats = {row['strategy_id']: row for row in result['strategies']}
+    assert stats['rebuilt']['horizons']['5']['sample_count'] == 1
+    assert stats['rebuilt']['horizons']['5']['mean_return'] == pytest.approx(0.05)
+    assert stats['rebuilt']['reconstructed_count'] == 1
+    assert stats['recorded']['horizons']['5']['sample_count'] == 0
+    assert stats['recorded']['excluded']['recorded_late'] == 1
+
+
+def test_scoring_unavailable_keeps_returns_and_reports_unavailable_runs():
+    picks = _picks((D[0], 'rebuilt', SYM)).with_columns(
+        pl.lit('reconstructed').alias('provenance'),
+        pl.lit('scoring_unavailable').alias('calculation_status'),
+        pl.lit('["turnover_rate"]').alias('missing_fields'),
+        pl.lit(None, dtype=pl.Float64).alias('score'))
+    out = _run(picks, _market(_rising(SYM, 22), 22))
+    runs = pl.DataFrame({'strategy_id': ['rebuilt', 'unavailable'], 'signal_date': [D[0], D[0]],
+                         'calculation_status': ['scoring_unavailable', 'input_unavailable'],
+                         'missing_fields': ['["turnover_rate"]', '["turnover_rate"]']})
+    result = summarize(out, OK, D[21], runs)
+    stats = {row['strategy_id']: row for row in result['strategies']}
+    assert stats['rebuilt']['horizons']['5']['mean_return'] == pytest.approx(0.05)
+    assert stats['rebuilt']['scoring_unavailable_count'] == 1
+    assert stats['unavailable']['signal_count'] == 0
+    assert stats['unavailable']['input_unavailable_days'] == 1
+    assert len(result['calculation_issues']) == 2
+
+
 def test_regular_pick_returns_k_th_close_over_next_open_as_decimals():
     out = _run(_picks((D[0], "s1", SYM)), _market(_rising(SYM, 22), 22))
     row = _one(out)

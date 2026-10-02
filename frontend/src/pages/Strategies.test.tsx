@@ -2,7 +2,7 @@
 // 與「根本沒跑」在畫面上長得一樣(都是不存在)。這一頁的存在理由就是把三種
 // 狀態分開, 因此測試鎖的是狀態的區分, 不是版面。
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Strategies } from './Strategies'
@@ -18,6 +18,8 @@ vi.mock('@/lib/api', async () => {
       screenerCached: vi.fn(),
       screenerPickPerformance: vi.fn(),
       screenerPickPerformanceDetail: vi.fn(),
+      screenerPickBackfill: vi.fn(),
+      screenerPickBackfillStatus: vi.fn(),
     },
   }
 })
@@ -412,6 +414,69 @@ describe('策略庫 — 選項顯示計算方式', () => {
 })
 
 describe('策略庫 — 事後統計分頁', () => {
+  it('區分缺必要篩選資料與缺評分資料, 保留有效報酬但不宣稱可靠排名', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5], {
+      scoring_unavailable_count: 5, input_unavailable_days: 2,
+    })])
+    mockDetail([record({ calculation_status: 'scoring_unavailable', missing_fields: ['turnover_rate'] })])
+    renderPage('/strategies?tab=performance')
+    expect(await screen.findByText(/5 筆缺評分資料；保留完整候選與報酬/)).toBeInTheDocument()
+    expect(screen.getByText('2 日缺必要篩選資料，未能計算歷史訊號')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '布林突破 的選股紀錄' }))
+    expect(await screen.findByText('缺評分資料（換手率）；列序不代表有效排名')).toBeInTheDocument()
+  })
+
+  it('補算所選交易日並在完成後刷新事後統計與已展開明細', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5], { reconstructed_count: 5 })])
+    mockDetail()
+    const completed = { job_id: 'history-test', status: 'completed', requested_days: 10,
+      dates: ['2026-09-23', '2026-09-24'], completed_days: 2, written_runs: 4, existing_runs: 1,
+      zero_signal_runs: 1, failures: [], error: null } as const
+    const running = { ...completed, status: 'running' as const, completed_days: 0, dates: [...completed.dates], failures: [] }
+    vi.mocked(api.screenerPickBackfill).mockResolvedValue(running)
+    vi.mocked(api.screenerPickBackfillStatus).mockResolvedValueOnce(running)
+      .mockResolvedValue({ ...completed, dates: [...completed.dates], failures: [] })
+    renderPage('/strategies?tab=performance')
+    fireEvent.click(await screen.findByRole('button', { name: '布林突破 的選股紀錄' }))
+    await screen.findByText('台積電')
+    expect(screen.getByText('依目前策略重建歷史 5 筆')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('歷史回算交易日數'), { target: { value: '10' } })
+    fireEvent.click(screen.getByRole('button', { name: '補算歷史訊號' }))
+    expect(await screen.findByRole('button', { name: '正在補算…' })).toBeDisabled()
+    expect(screen.getByLabelText('歷史回算交易日數')).toBeDisabled()
+    await screen.findByText(/計算進度：0／2 日/)
+    await screen.findByText(/補算完成：2／2 日/, {}, { timeout: 5000 })
+    expect(api.screenerPickBackfill).toHaveBeenCalledWith(10)
+    await waitFor(() => expect(api.screenerPickPerformance).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(api.screenerPickPerformanceDetail).toHaveBeenCalledTimes(2))
+    expect(screen.getByText(/本機僅有 2 個可回算交易日/)).toBeInTheDocument()
+  })
+
+  it('歷史回算狀態讀取失敗後可重試且保留原統計', async () => {
+    mockAll()
+    mockSummary([stats('boll_breakout', [5, 5, 5, 5])])
+    const running = { job_id: 'history-error', status: 'running', requested_days: 5,
+      dates: ['2026-09-23'], completed_days: 0, written_runs: 0, existing_runs: 0,
+      zero_signal_runs: 0, failures: [], error: null } as const
+    vi.mocked(api.screenerPickBackfill).mockResolvedValue({ ...running, dates: [...running.dates], failures: [] })
+    vi.mocked(api.screenerPickBackfillStatus)
+      .mockRejectedValueOnce(new Error('job unavailable'))
+      .mockResolvedValue({ ...running, status: 'completed', completed_days: 1, dates: [...running.dates], failures: [] })
+    renderPage('/strategies?tab=performance')
+    await screen.findByText('布林突破')
+    fireEvent.click(screen.getByRole('button', { name: '補算歷史訊號' }))
+    await screen.findByRole('alert')
+    expect(screen.getByRole('button', { name: '補算歷史訊號' })).toBeEnabled()
+    expect(screen.getByText('布林突破')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '補算歷史訊號' }))
+    await waitFor(() => expect(api.screenerPickBackfill).toHaveBeenCalledTimes(2))
+    await screen.findByText(/補算完成：1／1 日/)
+    expect(api.screenerPickBackfillStatus).toHaveBeenCalledTimes(2)
+  })
+
+
   function horizon(sample: number, extra: Record<string, unknown> = {}) {
     return {
       sample_count: sample,

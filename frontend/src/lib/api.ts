@@ -294,6 +294,9 @@ export interface PickStrategyStats {
   strategy_id: string
   signal_count: number
   signal_days: number
+  reconstructed_count?: number
+  scoring_unavailable_count?: number
+  input_unavailable_days?: number
   filled_count: number
   not_filled_limit_up: number
   not_filled_no_trade: number
@@ -316,6 +319,14 @@ export interface PickPerformanceSummary {
   last_signal_date: string | null
   prices_through: string | null
   strategies: PickStrategyStats[]
+  calculation_issues?: PickCalculationIssue[]
+}
+
+export interface PickCalculationIssue {
+  strategy_id: string
+  date: string
+  status: 'input_unavailable' | 'scoring_unavailable'
+  missing_fields: string[]
 }
 
 export interface PickHorizonReturn {
@@ -327,6 +338,9 @@ export interface PickHorizonReturn {
 
 export interface PickRecord {
   signal_date: string
+  provenance?: 'recorded' | 'reconstructed' | null
+  calculation_status?: 'ok' | 'scoring_unavailable' | 'input_unavailable' | null
+  missing_fields?: string[]
   symbol: string
   name: string | null
   rank: number | null
@@ -351,6 +365,21 @@ export interface PickPerformanceDetail {
   total: number
   signal_days: number
   rows: PickRecord[]
+  calculation_issues?: PickCalculationIssue[]
+}
+
+export interface PickBackfillJob {
+  job_id: string
+  status: 'running' | 'completed' | 'failed'
+  requested_days: number
+  dates: string[]
+  completed_days: number
+  written_runs: number
+  existing_runs: number
+  zero_signal_runs: number
+  scoring_unavailable_runs?: number
+  failures: { date: string; strategy_id: string; reason: string; missing_fields?: string[] }[]
+  error: string | null
 }
 
 export interface MarketSnapshotRow {
@@ -2657,6 +2686,12 @@ export const api = {
   // quiet: a 503 detail is a {code, message} object the page renders itself.
   screenerPickPerformance: () =>
     request<PickPerformanceSummary>('/api/screener/pick-performance', { quiet: true }),
+  screenerPickBackfill: (days = 5) =>
+    request<PickBackfillJob>('/api/screener/pick-performance/backfill', {
+      method: 'POST', body: JSON.stringify({ days }),
+    }),
+  screenerPickBackfillStatus: (jobId: string) =>
+    request<PickBackfillJob>(`/api/screener/pick-performance/backfill/${encodeURIComponent(jobId)}`, { quiet: true }),
   screenerPickPerformanceDetail: (strategyId: string, limit = 200) =>
     request<PickPerformanceDetail>(
       `/api/screener/pick-performance/${encodeURIComponent(strategyId)}?limit=${limit}`,

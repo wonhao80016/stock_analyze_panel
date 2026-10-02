@@ -1,5 +1,5 @@
-import { Fragment, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Loader2 } from 'lucide-react'
 import {
   api,
@@ -126,6 +126,7 @@ export function StrategyPickPerformance({ nameById, onPreview }: Props) {
   return (
     <div className="space-y-3">
       <MethodNote data={data} />
+      <HistoricalBackfill />
 
       {data.adjustment.status !== 'ok' && (
         <div
@@ -228,11 +229,97 @@ function MethodNote({ data }: { data: PickPerformanceSummary }) {
         </span>
       </p>
       <p className="text-[10px] text-muted">
+        成交是以訊號次一交易日開盤價模擬買入；開盤漲停或無成交會列為未成交，並非帳戶的實際成交。
+        T+k 報酬＝訊號後第 k 個交易日的復權收盤價 ÷ 次日復權開盤價 − 1；T+1 是次日開盤到收盤。
         報酬為毛報酬：未扣交易成本、未計滑點、未模擬出場可成交性。
         以下為過去選股紀錄的統計結果，計算方式固定，不構成買賣建議，也不代表未來表現。
       </p>
     </div>
   )
+}
+
+function HistoricalBackfill() {
+  const client = useQueryClient()
+  const [days, setDays] = useState('5')
+  const [jobId, setJobId] = useState<string | null>(null)
+  const mutation = useMutation({
+    mutationFn: () => api.screenerPickBackfill(Number(days)),
+    onSuccess: job => {
+      client.setQueryData(QK.screenerPickBackfill(job.job_id), job)
+      setJobId(job.job_id)
+      void client.invalidateQueries({ queryKey: QK.screenerPickBackfill(job.job_id) })
+    },
+  })
+  const status = useQuery({
+    queryKey: QK.screenerPickBackfill(jobId ?? ''),
+    queryFn: () => api.screenerPickBackfillStatus(jobId!),
+    enabled: jobId !== null,
+    refetchInterval: query => query.state.data?.status === 'running' ? 1500 : false,
+  })
+  const job = status.data ?? (jobId ? mutation.data : undefined)
+  const active = mutation.isPending || (job?.status === 'running' && !status.isError)
+  const valid = Number.isInteger(Number(days)) && Number(days) >= 1 && Number(days) <= 250
+  useEffect(() => {
+    if (job && job.status !== 'running') {
+      void client.invalidateQueries({ queryKey: QK.screenerPickPerformanceAll })
+    }
+  }, [client, job?.job_id, job?.status])
+  return (
+    <section className="space-y-1 rounded border border-border p-2 text-[11px] text-secondary">
+      <div className="flex flex-wrap items-center gap-2">
+        <label htmlFor="pick-backfill-days">歷史回算交易日數</label>
+        <input id="pick-backfill-days" type="number" min={1} max={250} value={days}
+          disabled={active} onChange={event => setDays(event.target.value)}
+          className="w-20 rounded border border-border bg-base px-2 py-1" />
+        <button type="button" disabled={active || !valid} onClick={() => mutation.mutate()}
+          className="rounded border border-border px-2 py-1 disabled:opacity-50">
+          {active ? '正在補算…' : '補算歷史訊號'}
+        </button>
+        {active && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+      </div>
+      <p className="text-[10px] text-muted">
+        補算最新完整日 K 以前 {valid ? days : 'N'} 個本機行情交易日（不含最新日，最多 250 日），只補缺少的策略日。
+        依目前策略、參數與股票池重建歷史，並非當時已記錄的訊號；零訊號的計算日不增加訊號日數。
+      </p>
+      {job && (
+        <p role="status">
+          {job.status === 'running' ? '計算進度' : job.status === 'completed' ? (job.failures.length ? '補算結束（部分未能計算）' : '補算完成') : '補算失敗'}：
+          {job.completed_days}／{job.dates.length} 日，新增 {job.written_runs} 策略日、保留 {job.existing_runs} 策略日，
+          其中零訊號 {job.zero_signal_runs} 策略日。
+          {job.dates.length < job.requested_days && ` 本機僅有 ${job.dates.length} 個可回算交易日。`}
+          {!!job.scoring_unavailable_runs && ` 另 ${job.scoring_unavailable_runs} 策略日缺評分資料，保留完整候選但不顯示分數。`}
+        </p>
+      )}
+      {!!job?.failures.length && (
+        <details className="text-amber-400">
+          <summary>部分尚未補算：有 {job.failures.length} 個策略日未能計算</summary>
+          <ul className="max-h-40 overflow-auto">
+            {job.failures.map((failure, i) => <li key={i}>
+              {failure.date} {failure.strategy_id}：{BACKFILL_REASONS[failure.reason] ?? '計算失敗'}
+              {failure.missing_fields?.length ? `（${fieldLabels(failure.missing_fields)}）` : ''}
+            </li>)}
+          </ul>
+        </details>
+      )}
+      {(mutation.isError || status.isError || job?.status === 'failed') && (
+        <p role="alert" className="text-amber-400">歷史回算暫時無法完成，已寫入的歷史會保留。請確認行情資料後重試。</p>
+      )}
+    </section>
+  )
+}
+
+const BACKFILL_REASONS: Record<string, string> = {
+  daily_incomplete: '當日行情不完整', fingerprint_unavailable: '無法確認策略版本',
+  input_unavailable: '策略所需資料不足', future_input: '歷史資料日期超出訊號日',
+  universe_incomplete: '策略所需市場資料不完整',
+  strategy_failed: '策略執行失敗', as_of_mismatch: '訊號日期不符',
+  invalid_result_rows: '策略結果含不符訊號日或格式錯誤的資料',
+  scoring_selection_unavailable: '評分資料不足，無法可靠決定候選',
+}
+
+function fieldLabels(fields: string[]) {
+  const labels: Record<string, string> = { turnover_rate: '換手率', float_shares: '歷史股本', total_shares: '歷史股本', close: '收盤價', volume: '成交量', history: '歷史行情' }
+  return fields.map(field => labels[field] ?? '必要指標').join('、')
 }
 
 interface RowProps {
@@ -290,6 +377,17 @@ function StrategyRow({ stats: s, name, horizon, open, onToggle, onPreview }: Row
             <div className="mt-0.5 text-[10px] text-amber-400/90">
               其中 {s.history_degraded_count} 筆選股產生時歷史資料讀取不完整，結果可能與資料完整時不同
             </div>
+          )}
+          {!!s.reconstructed_count && (
+            <div className="mt-0.5 text-[10px] text-muted">依目前策略重建歷史 {s.reconstructed_count} 筆</div>
+          )}
+          {!!s.scoring_unavailable_count && (
+            <div className="mt-0.5 text-[10px] text-amber-400/90">
+              {s.scoring_unavailable_count} 筆缺評分資料；保留完整候選與報酬，列序不代表有效評分排名
+            </div>
+          )}
+          {!!s.input_unavailable_days && (
+            <div className="mt-0.5 text-[10px] text-amber-400/90">{s.input_unavailable_days} 日缺必要篩選資料，未能計算歷史訊號</div>
           )}
         </td>
         <td className="py-1.5 pr-2 text-right font-mono">
@@ -379,6 +477,8 @@ function ReturnCell({ ret, selected }: { ret: PickHorizonReturn | undefined; sel
 function recordNote(r: PickRecord) {
   if (r.excluded_reason) return `未計入：${EXCLUDED_LABELS[r.excluded_reason] ?? r.excluded_reason}`
   if (r.absent_since) return `${r.absent_since} 起無資料`
+  if (r.calculation_status === 'scoring_unavailable') return `缺評分資料（${fieldLabels(r.missing_fields ?? [])}）；列序不代表有效排名`
+  if (r.provenance === 'reconstructed') return '依目前策略重建歷史'
   return null
 }
 
@@ -403,13 +503,21 @@ function PickRecords({ strategyId, horizon, onPreview }: {
   if (!detail.data) {
     return <p className="py-2 text-[11px] text-muted">{errorText(detail.error, '目前無法讀取這支策略的選股紀錄。')}</p>
   }
-  const { rows, total, signal_days } = detail.data
+  const { rows, total, signal_days, calculation_issues = [] } = detail.data
   if (rows.length === 0) {
-    return <p className="py-2 text-[11px] text-muted">這支策略沒有選股紀錄。</p>
+    return <div className="py-2 text-[11px] text-muted">
+      {calculation_issues.filter(issue => issue.status === 'input_unavailable').map(issue => (
+        <p key={issue.date}>{issue.date} 缺必要篩選資料（{fieldLabels(issue.missing_fields)}），未能計算，並非零訊號。</p>
+      ))}
+      <p>這支策略沒有選股紀錄。</p>
+    </div>
   }
 
   return (
     <div>
+      {calculation_issues.filter(issue => issue.status === 'input_unavailable').map(issue => (
+        <p key={issue.date} className="mb-1 text-[10px] text-amber-400">{issue.date} 缺必要篩選資料（{fieldLabels(issue.missing_fields)}），未能計算，並非零訊號。</p>
+      ))}
       <p className="mb-1 text-[10px] text-muted">
         最近 {rows.length} 筆，共 {total} 筆、{signal_days} 個訊號日。
       </p>

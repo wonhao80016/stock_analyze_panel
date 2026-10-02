@@ -46,6 +46,8 @@ export const QK = {
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   screenerPickPerformance: ['screener-pick-performance', 'summary'] as const,
+  screenerPickPerformanceAll: ['screener-pick-performance'] as const,
+  screenerPickBackfill: (jobId: string) => ['screener-pick-backfill', jobId] as const,
   screenerPickPerformanceDetail: (strategyId: string, limit: number) =>
     ['screener-pick-performance', 'detail', strategyId, limit] as const,
   marketSnapshot:       ['market-snapshot'] as const,

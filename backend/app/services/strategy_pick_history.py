@@ -60,6 +60,9 @@ RUN_SCHEMA: dict[str, pl.DataType] = {
     "first_recorded_at": pl.Datetime("us", "UTC"),
     "last_recorded_at": pl.Datetime("us", "UTC"),
     "run_label": pl.Utf8(),
+    "provenance": pl.Utf8(),
+    "calculation_status": pl.Utf8(),
+    "missing_fields": pl.Utf8(),
 }
 
 _MANIFEST_COLUMNS = (
@@ -68,6 +71,9 @@ _MANIFEST_COLUMNS = (
     "history_degraded",
     "first_recorded_at",
     "recorded_late",
+    "provenance",
+    "calculation_status",
+    "missing_fields",
 )
 
 # Readers take this lock per partition so they never pair a new part.parquet with an old runs.parquet.
@@ -89,6 +95,8 @@ class RunReport:
     history: InputStatus | None = None
     input_groups: dict[str, frozenset[str]] = field(default_factory=dict)
     fingerprints: dict[str, str | None] = field(default_factory=dict)
+    calculation_statuses: dict[str, str] = field(default_factory=dict)
+    missing_fields: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -215,6 +223,9 @@ def _read_frame(path: Path, schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
         return _empty(schema)
     try:
         frame = pl.read_parquet(path)
+        for name, default in (("provenance", "recorded"), ("calculation_status", "ok"), ("missing_fields", "[]")):
+            if name in schema and name not in frame.columns:
+                frame = frame.with_columns(pl.lit(default).alias(name))
         missing = [name for name in schema if name not in frame.columns]
         if missing:
             raise ValueError(f"missing columns {missing}")
@@ -346,12 +357,16 @@ def record(
     run_label: str,
     input_mtime: float | None,
     now: datetime | None = None,
+    *,
+    provenance: str = "recorded",
 ) -> RecordOutcome:
     """Replace (signal day, strategy) snapshots that pass availability and freeze rules.
 
     Raises PickHistoryReadError on unreadable files and OSError on a failed replace.
     """
     signal_date = _as_date(as_of)
+    if provenance not in ("recorded", "reconstructed"):
+        raise ValueError("unknown snapshot provenance")
     now = taipei_now() if now is None else now
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
@@ -370,6 +385,9 @@ def record(
             )
             continue
         groups = frozenset(run_report.input_groups.get(sid) or ())
+        if provenance == "reconstructed" and not run_report.fingerprints.get(sid):
+            rejected[sid] = "fingerprint_unavailable"
+            continue
         if not groups or not all(_group_available(run_report, g, signal_date) for g in groups):
             rejected[sid] = REJECT_INPUT_UNAVAILABLE
             logger.warning(
@@ -403,7 +421,15 @@ def record(
         for sid, (total, rows, groups) in candidates.items():
             old_run = old_by_sid.get(sid)
             fingerprint = run_report.fingerprints.get(sid)
-            if sid in missing:
+            reconstruct_retry = (
+                provenance == "reconstructed" and old_run is not None and not missing.get(sid, True)
+                and old_run.get("provenance") == "reconstructed"
+                and old_run.get("calculation_status") == "input_unavailable"
+            )
+            if provenance == "reconstructed" and sid in missing and not reconstruct_retry:
+                rejected[sid] = "existing_snapshot"
+                continue
+            if sid in missing and not reconstruct_retry:
                 reason = _overwrite_rejection(
                     old_run, not missing[sid], fingerprint, input_mtime, hard_frozen, soft_frozen
                 )
@@ -436,6 +462,9 @@ def record(
                 "first_recorded_at": old_run["first_recorded_at"] if old_run else now_utc,
                 "last_recorded_at": now_utc,
                 "run_label": run_label,
+                "provenance": provenance,
+                "calculation_status": run_report.calculation_statuses.get(sid, "ok"),
+                "missing_fields": json.dumps(run_report.missing_fields.get(sid, [])),
             })
             written.append(sid)
 
@@ -531,6 +560,9 @@ def read_picks(
             pl.lit(None, dtype=pl.Datetime("us", "UTC")).alias("first_recorded_at"),
             pl.lit(None, dtype=pl.Boolean).alias("recorded_late"),
             pl.lit(None, dtype=pl.Boolean).alias("manifest_missing"),
+            pl.lit(None, dtype=pl.Utf8).alias("provenance"),
+            pl.lit(None, dtype=pl.Utf8).alias("calculation_status"),
+            pl.lit(None, dtype=pl.Utf8).alias("missing_fields"),
         )
         empty_runs = _empty(RUN_SCHEMA).with_columns(
             pl.lit(None, dtype=pl.Boolean).alias("manifest_missing"),

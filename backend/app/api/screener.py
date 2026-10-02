@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import glob as _glob
+import json
 import logging
 import math
 import os
@@ -12,10 +13,15 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db_safe import is_valid_ext_ident, quote_ident
-from app.services import strategy_cache, strategy_pick_history, strategy_pick_performance
+from app.services import (
+    strategy_cache,
+    strategy_pick_backfill,
+    strategy_pick_history,
+    strategy_pick_performance,
+)
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
 
@@ -529,7 +535,8 @@ def _pick_outcomes(request: Request, strategy_id: str | None = None):
 
     data_dir = request.app.state.repo.store.data_dir
     try:
-        picks = strategy_pick_history.read_picks(data_dir).picks
+        snapshots = strategy_pick_history.read_picks(data_dir)
+        picks, runs = snapshots.picks, snapshots.runs
     except (strategy_pick_history.PickHistoryReadError, OSError) as e:
         logger.warning("pick performance: snapshot read failed: %s", e)
         raise HTTPException(
@@ -538,6 +545,7 @@ def _pick_outcomes(request: Request, strategy_id: str | None = None):
         ) from e
     if strategy_id is not None:
         picks = picks.filter(pl.col("strategy_id") == strategy_id)
+        runs = runs.filter(pl.col("strategy_id") == strategy_id)
     try:
         inputs = strategy_pick_performance.load_inputs(data_dir, picks, _pick_limit_profile)
     except OSError as e:
@@ -549,7 +557,7 @@ def _pick_outcomes(request: Request, strategy_id: str | None = None):
     outcomes = strategy_pick_performance.compute_outcomes(
         picks, inputs.bars, inputs.events, inputs.adjustment, inputs.calendar, inputs.limit_profile
     )
-    return outcomes, inputs
+    return outcomes, inputs, runs
 
 
 def _finite(value: Any) -> Any:
@@ -563,13 +571,36 @@ def _iso_or_none(value: Any) -> Any:
 @router.get("/pick-performance")
 def get_pick_performance(request: Request):
     """Gross decimal returns of recorded picks per strategy; computed on every request."""
-    outcomes, inputs = _pick_outcomes(request)
-    payload = strategy_pick_performance.summarize(outcomes, inputs.adjustment, inputs.calendar.prices_through)
+    outcomes, inputs, runs = _pick_outcomes(request)
+    payload = strategy_pick_performance.summarize(outcomes, inputs.adjustment, inputs.calendar.prices_through, runs)
     for stats in payload["strategies"]:
         for horizon in stats["horizons"].values():
             for name in ("mean_return", "median_return", "positive_ratio"):
                 horizon[name] = _finite(horizon[name])
     return payload
+
+
+class PickBackfillRequest(BaseModel):
+    days: int = Field(default=5, ge=1, le=250)
+
+
+@router.post("/pick-performance/backfill", status_code=202)
+def start_pick_backfill(body: PickBackfillRequest, request: Request):
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Strategy engine is unavailable")
+    try:
+        return strategy_pick_backfill.start(request.app.state.repo, engine, body.days)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/pick-performance/backfill/{job_id}")
+def get_pick_backfill(job_id: str, request: Request):
+    job = strategy_pick_backfill.get(request.app.state.repo.store.data_dir, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Historical reconstruction job was not found")
+    return job
 
 
 @router.get("/pick-performance/{strategy_id}")
@@ -579,7 +610,7 @@ def get_pick_performance_detail(
     limit: int = Query(200, ge=1, le=2000),
 ):
     """Most recent picks of one strategy, newest signal day first; an unknown id yields no rows."""
-    outcomes, inputs = _pick_outcomes(request, strategy_id)
+    outcomes, inputs, runs = _pick_outcomes(request, strategy_id)
     horizons = strategy_pick_performance.HORIZONS
     latest = outcomes.sort(["signal_date", "rank"], descending=[True, False]).head(limit)
     rows = []
@@ -608,10 +639,13 @@ def get_pick_performance_detail(
             "manifest_missing": row["manifest_missing"],
             "universe_complete": row["universe_complete"],
             "history_degraded": row["history_degraded"],
+            "provenance": row["provenance"],
+            "calculation_status": row["calculation_status"],
+            "missing_fields": json.loads(row["missing_fields"] or "[]"),
         })
     _attach_instrument_names(request.app.state.repo, {"results": {strategy_id: {"rows": rows}}})
     header = strategy_pick_performance.summarize(
-        outcomes.clear(), inputs.adjustment, inputs.calendar.prices_through
+        outcomes.clear(), inputs.adjustment, inputs.calendar.prices_through, runs
     )
     return {
         "strategy_id": strategy_id,
@@ -620,6 +654,7 @@ def get_pick_performance_detail(
         "prices_through": header["prices_through"],
         "total": outcomes.height,
         "signal_days": outcomes.get_column("signal_date").n_unique(),
+        "calculation_issues": header["calculation_issues"],
         "rows": rows,
     }
 

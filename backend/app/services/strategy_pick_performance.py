@@ -5,6 +5,7 @@ Gross decimal returns (0.01 = 1%) on one forward-adjusted scale, never on unadju
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -349,6 +350,8 @@ def _prepare_picks(picks: pl.DataFrame) -> pl.DataFrame:
     missing = [c for c in ("signal_date", "strategy_id", "symbol", *_PICK_FLAGS) if c not in picks.columns]
     if missing:
         raise ValueError(f"picks lack columns: {', '.join(missing)}")
+    if "provenance" not in picks.columns:
+        picks = picks.with_columns(pl.lit("recorded").alias("provenance"))
     return picks.with_columns(pl.col("signal_date").cast(pl.Date), *[pl.col(c).cast(pl.Boolean) for c in _PICK_FLAGS])
 
 
@@ -356,7 +359,8 @@ def _excluded_reason_expr() -> pl.Expr:
     # Exclusive in this order; a null flag cannot be confirmed, so it excludes the pick.
     return (
         pl.when(pl.col("manifest_missing").fill_null(True)).then(pl.lit("manifest_missing"))
-        .when(pl.col("recorded_late").fill_null(True)).then(pl.lit("recorded_late"))
+        .when(pl.col("recorded_late").fill_null(True) & (pl.col("provenance") != "reconstructed").fill_null(True))
+        .then(pl.lit("recorded_late"))
         .when(~pl.col("universe_complete").fill_null(False)).then(pl.lit("universe_incomplete"))
         .otherwise(pl.lit(None, dtype=pl.String))
     )
@@ -493,6 +497,9 @@ def _strategy_summary(strategy_id: str, rows: pl.DataFrame) -> dict[str, Any]:
         "strategy_id": strategy_id,
         "signal_count": rows.height,
         "signal_days": rows.get_column("signal_date").n_unique(),
+        "reconstructed_count": int((rows.get_column("provenance") == "reconstructed").sum()),
+        "scoring_unavailable_count": int((rows.get_column("calculation_status") == "scoring_unavailable").sum())
+        if "calculation_status" in rows.columns else 0,
         "filled_count": filled.height,
         "not_filled_limit_up": int((statuses == NOT_FILLED_LIMIT_UP).sum()),
         "not_filled_no_trade": int((statuses == NOT_FILLED_NO_TRADE).sum()),
@@ -519,13 +526,28 @@ def _iso(d: date | None) -> str | None:
 
 
 def summarize(
-    outcomes: pl.DataFrame, adjustment_state: AdjustmentState, prices_through: date | None
+    outcomes: pl.DataFrame, adjustment_state: AdjustmentState, prices_through: date | None,
+    runs: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Per-strategy statistics; only picks with a null excluded_reason enter counts and horizons.
 
     The excluded counts plus the per-status counts sum to signal_count; positive_ratio counts returns > 0.
     """
     signal_dates = outcomes.get_column("signal_date")
+    ids = set(outcomes.get_column("strategy_id").unique().to_list())
+    issues = []
+    if runs is not None and "calculation_status" in runs.columns:
+        issues = [
+            {"strategy_id": row["strategy_id"], "date": _iso(row["signal_date"]),
+             "status": row["calculation_status"], "missing_fields": json.loads(row["missing_fields"] or "[]")}
+            for row in runs.filter(pl.col("calculation_status") != "ok").iter_rows(named=True)
+        ]
+        ids.update(issue["strategy_id"] for issue in issues)
+    strategies = []
+    for sid in sorted(ids):
+        stats = _strategy_summary(sid, outcomes.filter(pl.col("strategy_id") == sid))
+        stats["input_unavailable_days"] = sum(issue["strategy_id"] == sid and issue["status"] == "input_unavailable" for issue in issues)
+        strategies.append(stats)
     return {
         "method": {
             "entry": "next_session_open",
@@ -544,8 +566,6 @@ def summarize(
         "first_signal_date": _iso(signal_dates.min()) if not outcomes.is_empty() else None,
         "last_signal_date": _iso(signal_dates.max()) if not outcomes.is_empty() else None,
         "prices_through": _iso(prices_through),
-        "strategies": [
-            _strategy_summary(strategy_id, outcomes.filter(pl.col("strategy_id") == strategy_id))
-            for strategy_id in sorted(outcomes.get_column("strategy_id").unique().to_list())
-        ],
+        "strategies": strategies,
+        "calculation_issues": issues,
     }
