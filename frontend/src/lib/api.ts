@@ -244,6 +244,45 @@ export interface ScreenerResultSummary {
   as_of: string
 }
 
+export type PickGrade = 'buy' | 'watch'
+export type PickGradeReason = 'outside_top_n' | 'zero_score' | 'market_below_ma20'
+export type MarketFilter = 'applied' | 'passed' | 'unavailable'
+
+/** TAIEX close against its 20-day average on the post-close basis date. */
+export interface MarketState {
+  as_of: string
+  index_symbol: string
+  close: number | null
+  ma: number | null
+  window: number
+  below_ma: boolean | null
+  status: 'ok' | 'unavailable'
+  reason: 'index_missing' | 'insufficient_history' | 'index_gap' | null
+}
+
+export interface PickGrading {
+  top_n: number
+  market_filter: MarketFilter
+}
+
+export interface ScreenerCachedRow {
+  symbol: string
+  name?: string
+  grade?: PickGrade
+  grade_reason?: PickGradeReason | null
+  [field: string]: any
+}
+
+export interface ScreenerCached {
+  as_of: string | null
+  results: Record<string, { total: number; as_of: string; rows: ScreenerCachedRow[] }>
+  today_ever_matched: Record<string, string[]> | null
+  today_ever_rows: Record<string, Record<string, any>> | null
+  updated_at: number | null
+  market_state?: MarketState | null
+  grading?: PickGrading
+}
+
 export interface ScreenerCachedSummary {
   as_of: string | null
   results: Record<string, ScreenerResultSummary>
@@ -1095,6 +1134,11 @@ export interface TaiwanScreenerRequest {
   page_size?: number
 }
 
+// Run-only fields; keep them off TaiwanScreenerRequest, which the NL translator returns.
+export interface TaiwanScreenerRunRequest extends TaiwanScreenerRequest {
+  volume_patterns?: string[] | null
+}
+
 export interface ScreenerResultItem {
   symbol: string
   name: string
@@ -1102,6 +1146,7 @@ export interface ScreenerResultItem {
   instrument_type: string
   industry?: string | null
   signals?: string[]
+  volume_patterns?: string[]
   close?: number | null
   change_pct?: number | null
   volume?: number | null
@@ -2678,7 +2723,7 @@ export const api = {
         : `/api/screener/cached-result/${encodeURIComponent(strategyId)}`,
     ),
   screenerCached: (extColumns?: string) =>
-    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_matched: Record<string, string[]> | null; today_ever_rows: Record<string, Record<string, any>> | null; updated_at: number | null }>(
+    request<ScreenerCached>(
       extColumns
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',
@@ -3057,7 +3102,7 @@ export const api = {
       `/api/taiwan/stocks/${encodeURIComponent(symbol)}/margin-history?days=${days}`,
     ),
 
-  taiwanScreenerRun: (payload: TaiwanScreenerRequest) =>
+  taiwanScreenerRun: (payload: TaiwanScreenerRunRequest) =>
     request<TaiwanScreenerResponse>('/api/taiwan/screener/run', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -3324,6 +3369,8 @@ export interface TaiwanUpdateLatestResult {
   dates_fetched: number
   /** Set when the backend also rebuilt the caches the panels read. */
   caches_refreshed?: boolean
+  /** Latest stored TAIEX date after the refresh, null when it could not be refreshed. */
+  benchmark_index_latest_date?: string | null
   stats?: Record<string, any>
 }
 

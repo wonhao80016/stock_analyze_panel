@@ -38,6 +38,7 @@ from app.taiwan.corporate_actions import (
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
 from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+from app.taiwan.volume_patterns import add_volume_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,7 @@ class TaiwanEnrichedRefreshService:
         if enriched.is_empty():
             return 0
         enriched = self._add_limit_signals(enriched)
+        enriched = add_volume_patterns(enriched, available)
         enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if enriched.is_empty():
             return 0

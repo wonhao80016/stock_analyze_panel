@@ -581,3 +581,168 @@ describe('Market Intelligence date honesty (Data Freshness & Source Labels batch
     expect(screen.queryByText('尚無完整市場資料，以下統計非今日實際行情')).not.toBeInTheDocument()
   })
 })
+
+function lastRunPayload() {
+  return vi.mocked(api.taiwanScreenerRun).mock.calls.at(-1)![0] as any
+}
+
+function resultsTable() {
+  return within(document.getElementById('screener-results-table') as HTMLElement)
+}
+
+function volumePatternCell(symbol: string) {
+  const table = resultsTable()
+  const headers = table.getAllByRole('columnheader')
+  const index = headers.findIndex(h => h.textContent === '量價型態')
+  const row = table.getByRole('button', { name: symbol }).closest('tr') as HTMLElement
+  return within(row).getAllByRole('cell')[index]
+}
+
+function withPatterns(volume_patterns: string[] | undefined, extra: Record<string, unknown> = {}) {
+  const base = buildScreenerResponse()
+  return { ...base, items: [{ ...base.items[0], volume_patterns }], ...extra }
+}
+
+async function openAdvancedFilters() {
+  fireEvent.click(await screen.findByRole('button', { name: /進階條件/ }))
+}
+
+describe('Volume pattern filters', () => {
+  it('sends no volume patterns by default', async () => {
+    renderScreener()
+    await waitFor(() => expect(api.taiwanScreenerRun).toHaveBeenCalled())
+    expect(lastRunPayload().volume_patterns).toBeNull()
+  })
+
+  it('sends a single selected pattern id', async () => {
+    renderScreener()
+    await openAdvancedFilters()
+    fireEvent.click(screen.getByRole('button', { name: '倍量' }))
+    await waitFor(() => expect(lastRunPayload().volume_patterns).toEqual(['vp_double']))
+    expect(screen.getByRole('button', { name: '倍量' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('sends every selected pattern id when several are selected', async () => {
+    renderScreener()
+    await openAdvancedFilters()
+    fireEvent.click(screen.getByRole('button', { name: '低量' }))
+    fireEvent.click(screen.getByRole('button', { name: '放量滯漲' }))
+    fireEvent.click(screen.getByRole('button', { name: '梯量' }))
+    await waitFor(() =>
+      expect(lastRunPayload().volume_patterns).toEqual(['vp_low', 'vp_up_stall', 'vp_step_up']),
+    )
+    expect(lastRunPayload().signals).toBeNull()
+  })
+
+  it('clearing the selection sends null again', async () => {
+    renderScreener()
+    await openAdvancedFilters()
+    fireEvent.click(screen.getByRole('button', { name: '平量' }))
+    fireEvent.click(screen.getByRole('button', { name: '縮量' }))
+    await waitFor(() => expect(lastRunPayload().volume_patterns).toEqual(['vp_flat', 'vp_step_down']))
+    fireEvent.click(screen.getByRole('button', { name: '清除量價型態' }))
+    expect(screen.getByRole('button', { name: '平量' })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: '縮量' })).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '站上 MA5' }))
+    await waitFor(() => expect(lastRunPayload().above_ma5).toBe(true))
+    expect(lastRunPayload().volume_patterns).toBeNull()
+  })
+
+  it('reset clears the selected patterns', async () => {
+    renderScreener()
+    await openAdvancedFilters()
+    fireEvent.click(screen.getByRole('button', { name: '倍量' }))
+    await waitFor(() => expect(lastRunPayload().volume_patterns).toEqual(['vp_double']))
+    fireEvent.click(screen.getByRole('button', { name: '重置所有篩選' }))
+    expect(screen.getByRole('button', { name: '倍量' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('lists the six patterns under the AND label, each with its formula tooltip', async () => {
+    renderScreener()
+    await openAdvancedFilters()
+    expect(screen.getByText('量價型態（多選為且）')).toBeInTheDocument()
+    const expected: Record<string, string> = {
+      倍量: '今日量 ≥ 前一交易日量 2 倍；兩日皆須有成交（量 > 0）',
+      梯量: '連 3 個交易日量遞增，且今日收盤 > 2 日前收盤；3 日皆須有成交（量 > 0）',
+      縮量: '連 3 個交易日量遞減，且今日收盤 < 2 日前收盤；3 日皆須有成交（量 > 0）',
+      低量: '今日量 < 前 20 個交易日中有成交日均量的 60%；今日須有成交，前 20 日至少 15 日有成交（量 > 0）',
+      平量: '連 3 個交易日 (最大量−最小量)／最大量 < 15%；3 日皆須有成交（量 > 0）',
+      放量滯漲: '今日量 ≥ 前 5 個交易日均量 1.5 倍，且符合任一：收盤 < 開盤；實體 > 0 且上影 > 2 倍實體；0 ≤ 漲幅 < 1%。今日與前 5 日皆須有成交（量 > 0）',
+    }
+    for (const [name, formula] of Object.entries(expected)) {
+      expect(screen.getByRole('button', { name })).toHaveAttribute('title', formula)
+    }
+  })
+})
+
+describe('Volume pattern results column', () => {
+  it('places the column right after volume', async () => {
+    renderScreener()
+    await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
+    const headers = resultsTable().getAllByRole('columnheader').map(h => h.textContent)
+    const index = headers.indexOf('量價型態')
+    expect(index).toBeGreaterThan(0)
+    expect(headers[index - 1]).toContain('成交量')
+  })
+
+  it('shows matched pattern names in definition order with formula tooltips', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue(withPatterns(['vp_up_stall', 'vp_double']) as any)
+    renderScreener()
+    await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
+    const cell = volumePatternCell('2330.TWSE')
+    expect(cell).toHaveTextContent('倍量放量滯漲')
+    expect(within(cell).getByText('倍量')).toHaveAttribute('title', '今日量 ≥ 前一交易日量 2 倍；兩日皆須有成交（量 > 0）')
+  })
+
+  it('shows a dash when the row matched no pattern', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue(withPatterns([]) as any)
+    renderScreener()
+    await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
+    expect(volumePatternCell('2330.TWSE')).toHaveTextContent(/^—$/)
+  })
+
+  it('shows a dash when the response omits the field', async () => {
+    renderScreener()
+    await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
+    expect(volumePatternCell('2330.TWSE')).toHaveTextContent(/^—$/)
+  })
+
+  it('keeps empty-state rows spanning every column', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue({ ...buildScreenerResponse(), items: [], total: 0 } as any)
+    renderScreener()
+    const empty = await screen.findByText('沒有符合當前條件的台股標的')
+    expect(empty.closest('td')).toHaveAttribute('colspan', String(resultsTable().getAllByRole('columnheader').length))
+    fireEvent.click(screen.getByRole('button', { name: /更多欄位/ }))
+    const expanded = await screen.findByText('沒有符合當前條件的台股標的')
+    expect(expanded.closest('td')).toHaveAttribute('colspan', String(resultsTable().getAllByRole('columnheader').length))
+  })
+})
+
+describe('Volume pattern publication notice', () => {
+  it('shows the notice when volume patterns are degraded', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue(
+      withPatterns(undefined, { degraded_sections: ['volume_patterns'] }) as any,
+    )
+    renderScreener()
+    expect(await screen.findByText('量價型態尚未發佈')).toHaveAttribute('role', 'status')
+    expect(screen.queryByText('技術指標更新中，暫以空值顯示')).toBeNull()
+    expect(volumePatternCell('2330.TWSE')).toHaveTextContent(/^—$/)
+  })
+
+  it('shows both notices when indicators and volume patterns are degraded', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue({
+      ...buildScreenerResponse(),
+      degraded_sections: ['indicators', 'volume_patterns'],
+    } as any)
+    renderScreener()
+    expect(await screen.findByText('量價型態尚未發佈')).toBeInTheDocument()
+    expect(screen.getByText('技術指標更新中，暫以空值顯示')).toBeInTheDocument()
+  })
+
+  it('shows no notice when volume patterns are published', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue(withPatterns([], { degraded_sections: [] }) as any)
+    renderScreener()
+    await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
+    expect(screen.queryByText('量價型態尚未發佈')).toBeNull()
+  })
+})

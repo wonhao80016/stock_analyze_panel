@@ -7,6 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { StrategyRule, strategyRuleText } from '@/components/StrategyRule'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { StrategyPickPerformance } from '@/components/StrategyPickPerformance'
+import { MarketFilterNote, PickGradeBadge } from '@/components/PickGrade'
 import { cn } from '@/lib/cn'
 
 const TABS = [
@@ -190,6 +191,14 @@ export function Strategies() {
           ))}
         </div>}
       </div>
+      {isList && cached.data && (
+        <MarketFilterNote
+          grading={cached.data.grading}
+          marketState={cached.data.market_state}
+          resultDates={Object.values(results).map(r => r?.as_of)}
+          className="-mt-2 mb-3"
+        />
+      )}
 
       <div role="tablist" aria-label="策略庫分頁" className="mb-3 flex gap-1 border-b border-border">
         {TABS.map(t => (
@@ -429,7 +438,14 @@ export function Strategies() {
                             className="flex w-full items-center justify-between gap-2 rounded-md border border-transparent bg-elevated/40 px-2 py-1.5 text-left transition-colors hover:border-border/60 hover:bg-elevated"
                           >
                             <div className="min-w-0">
-                              <div className="truncate text-[11px] text-foreground">{r.name || r.symbol}</div>
+                              <div className="flex min-w-0 items-center gap-1">
+                                <span className="truncate text-[11px] text-foreground">{r.name || r.symbol}</span>
+                                <PickGradeBadge
+                                  row={r}
+                                  marketState={cached.data?.market_state}
+                                  topN={cached.data?.grading?.top_n}
+                                />
+                              </div>
                               <div className="font-mono text-[9px] text-muted">{r.symbol}</div>
                             </div>
                             <div className="shrink-0 text-right">

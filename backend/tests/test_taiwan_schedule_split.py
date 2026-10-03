@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -126,3 +127,80 @@ def test_defaults_still_refresh_everything(monkeypatch):
 
     svc.run_update(force=True)
     assert set(calls) == {"daily", "institutional", "margin"}
+
+
+class _UpdateService:
+    def __init__(self, order: list[str], daily_status: str = "success", error: Exception | None = None):
+        self.order = order
+        self.daily_status = daily_status
+        self.error = error
+
+    def __call__(self):
+        return self
+
+    def run_update(self, **_kwargs):
+        self.order.append("update")
+        if self.error is not None:
+            raise self.error
+        status = SimpleNamespace(status=self.daily_status, note=None)
+        return SimpleNamespace(
+            overall_status=self.daily_status, daily=status, institutional=status, margin=status
+        )
+
+
+def _run_first_shift(jobs, monkeypatch, service: _UpdateService, order: list[str]) -> None:
+    from app.taiwan import daily_update
+
+    monkeypatch.setattr(daily_update, "TaiwanDailyUpdateService", service)
+    monkeypatch.setattr(daily_pipeline, "refresh_enriched_cache", lambda _l: order.append("enriched"))
+    monkeypatch.setattr(daily_pipeline, "refresh_strategy_cache", lambda _l: order.append("strategy"))
+    job = jobs["taiwan_daily_update"]
+    job.func(**job.kwargs)
+
+
+def _record_benchmark(monkeypatch, order: list[str]) -> None:
+    monkeypatch.setattr(
+        daily_pipeline, "refresh_benchmark_index", lambda _l: order.append("benchmark")
+    )
+
+
+def test_scheduled_update_refreshes_the_index_before_the_update(jobs, monkeypatch):
+    order: list[str] = []
+    _record_benchmark(monkeypatch, order)
+
+    _run_first_shift(jobs, monkeypatch, _UpdateService(order), order)
+
+    assert order == ["benchmark", "update", "enriched", "strategy"]
+
+
+def test_scheduled_update_refreshes_the_index_even_when_the_update_raises(jobs, monkeypatch):
+    order: list[str] = []
+    _record_benchmark(monkeypatch, order)
+
+    _run_first_shift(jobs, monkeypatch, _UpdateService(order, error=RuntimeError("boom")), order)
+
+    assert order == ["benchmark", "update"]
+
+
+def test_scheduled_update_refreshes_the_index_when_daily_bars_failed(jobs, monkeypatch):
+    order: list[str] = []
+    _record_benchmark(monkeypatch, order)
+
+    _run_first_shift(jobs, monkeypatch, _UpdateService(order, daily_status="failed"), order)
+
+    assert order == ["benchmark", "update"]
+
+
+@pytest.mark.real_benchmark_refresh
+def test_a_failed_index_refresh_still_recomputes_the_picks(jobs, monkeypatch):
+    from app.taiwan import index_daily
+
+    def unreachable():
+        raise RuntimeError("exchange unreachable")
+
+    monkeypatch.setattr(index_daily, "get_index_daily_service", unreachable)
+    order: list[str] = []
+
+    _run_first_shift(jobs, monkeypatch, _UpdateService(order), order)
+
+    assert order == ["update", "enriched", "strategy"]

@@ -59,6 +59,7 @@ export function TaiwanHistoryDataCard() {
       } else {
         qc.invalidateQueries({ queryKey: QK.taiwanHistoryStatus })
         qc.invalidateQueries({ queryKey: QK.taiwanDataStatus })
+        qc.invalidateQueries({ queryKey: QK.screenerCached() })
       }
     },
     onError: (err: any) => {

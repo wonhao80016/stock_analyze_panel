@@ -11,6 +11,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Dashboard } from './Dashboard'
 import { api } from '@/lib/api'
+import { INVESTMENT_DISCLAIMER } from '@/lib/disclaimer'
 
 function buildMarketIntelligence(overrides: Partial<Record<string, any>> = {}) {
   return {
@@ -433,5 +434,124 @@ describe('Dashboard — 策略選股展開', () => {
     expect(screen.getByText('標的1')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /展開/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /收合/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('Dashboard — 策略分級與大盤濾鏡', () => {
+  const marketBelow = {
+    as_of: '2026-09-30', index_symbol: 't00.TWSE', close: 21000.5, ma: 21500.25, window: 20,
+    below_ma: true, status: 'ok', reason: null,
+  }
+
+  function mockGraded(overrides: Record<string, any> = {}, rows?: any[], resultAsOf = '2026-09-30') {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.screenerStrategies).mockResolvedValue({
+      presets: [{ id: 'bottom_reversal', name: '深跌止穩反彈' }] as any,
+      load_errors: [],
+    } as any)
+    vi.mocked(api.screenerCached).mockResolvedValue({
+      as_of: '2026-09-30',
+      results: {
+        bottom_reversal: {
+          total: 2,
+          as_of: resultAsOf,
+          rows: rows ?? [
+            { symbol: '2377.TWSE', name: '微星', close: 210.5, change_pct: 0.031, grade: 'buy', grade_reason: null },
+            { symbol: '3231.TWSE', name: '緯創', close: 118.0, change_pct: -0.012, grade: 'watch', grade_reason: 'zero_score' },
+          ],
+        },
+      },
+      today_ever_matched: null,
+      today_ever_rows: null,
+      updated_at: null,
+      market_state: { ...marketBelow, below_ma: false, close: 22000 },
+      grading: { top_n: 5, market_filter: 'passed' },
+      ...overrides,
+    } as any)
+  }
+
+  function statusLine() {
+    return screen.getByText(INVESTMENT_DISCLAIMER).closest('p') as HTMLElement
+  }
+
+  it('買進與觀察各自顯示徽章, 觀察的滑鼠提示說明原因', async () => {
+    mockGraded()
+    renderDashboard()
+
+    const buy = await screen.findByText('買進')
+    expect(buy.closest('button')).toHaveTextContent('微星')
+    const watch = screen.getByText('觀察')
+    expect(watch.closest('button')).toHaveTextContent('緯創')
+    expect(watch).toHaveAttribute('title', '評分為 0 或無法計算')
+  })
+
+  it('跌破 20 日均線時徽章標出大盤降級, 並寫出指數收盤與均線', async () => {
+    mockGraded({ market_state: marketBelow, grading: { top_n: 5, market_filter: 'applied' } }, [
+      { symbol: '2377.TWSE', name: '微星', close: 210.5, change_pct: 0.031, grade: 'watch', grade_reason: 'market_below_ma20' },
+    ])
+    renderDashboard()
+
+    const badge = await screen.findByText('觀察・大盤')
+    expect(badge).toHaveAttribute(
+      'title',
+      '加權指數 2026-09-30 收盤 21000.50 低於 20 日均線 21500.25（價格指數，不含股利）',
+    )
+    expect(screen.queryByText('買進')).not.toBeInTheDocument()
+    expect(statusLine()).toHaveTextContent('大盤：跌破 20 日均線，買進已降為觀察')
+  })
+
+  it('未跌破時顯示對應文字並附投資風險提示', async () => {
+    mockGraded()
+    renderDashboard()
+
+    await screen.findByText('買進')
+    expect(statusLine()).toHaveTextContent('大盤：未跌破 20 日均線')
+    expect(statusLine()).toHaveTextContent(INVESTMENT_DISCLAIMER)
+  })
+
+  it('大盤狀態無法判定時說明濾鏡未套用', async () => {
+    mockGraded({
+      market_state: { ...marketBelow, close: null, ma: null, below_ma: null, status: 'unavailable', reason: 'index_gap' },
+      grading: { top_n: 5, market_filter: 'unavailable' },
+    })
+    renderDashboard()
+
+    await screen.findByText('買進')
+    expect(statusLine()).toHaveTextContent('大盤狀態無法判定，濾鏡未套用')
+    expect(screen.getByText('大盤狀態無法判定，濾鏡未套用')).toHaveAttribute('title', '加權指數近 20 個交易日有缺漏')
+    expect(screen.queryByText(/大盤狀態依/)).not.toBeInTheDocument()
+  })
+
+  it('盤中覆蓋的結果註明大盤狀態依哪一天收盤', async () => {
+    mockGraded({}, undefined, '2026-10-01')
+    renderDashboard()
+
+    await screen.findByText('買進')
+    expect(statusLine()).toHaveTextContent('（大盤狀態依 2026-09-30 收盤）')
+  })
+
+  it('快取為空時仍顯示大盤狀態列', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(null as any)
+    vi.mocked(api.screenerCached).mockResolvedValue({
+      as_of: null, results: {}, updated_at: null, market_state: null,
+      grading: { top_n: 5, market_filter: 'unavailable' },
+    } as any)
+    renderDashboard()
+
+    expect(await screen.findByText('今日尚無策略選股結果')).toBeInTheDocument()
+    expect(statusLine()).toHaveTextContent('大盤狀態無法判定，濾鏡未套用')
+  })
+
+  it('舊版回應沒有分級欄位時不顯示徽章與大盤狀態列', async () => {
+    mockGraded({ market_state: undefined, grading: undefined }, [
+      { symbol: '2377.TWSE', name: '微星', close: 210.5, change_pct: 0.031 },
+    ])
+    renderDashboard()
+
+    expect(await screen.findByText('微星')).toBeInTheDocument()
+    expect(screen.queryByText('買進')).not.toBeInTheDocument()
+    expect(screen.queryByText(INVESTMENT_DISCLAIMER)).not.toBeInTheDocument()
   })
 })

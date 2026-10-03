@@ -9,6 +9,7 @@ import { fmtBigNum, fmtPct } from '@/lib/format'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { cn } from '@/lib/cn'
 import { StrategyRule } from '@/components/StrategyRule'
+import { MarketFilterNote, PickGradeBadge } from '@/components/PickGrade'
 import { cnSignal } from '@/lib/signals'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -451,6 +452,14 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
         title="策略當日推薦"
         hint={cached.data?.as_of ? `${cached.data.as_of} · ${totalPicks} 檔` : undefined}
       />
+      {cached.data && (
+        <MarketFilterNote
+          grading={cached.data.grading}
+          marketState={cached.data.market_state}
+          resultDates={Object.values(results).map(r => r?.as_of)}
+          className="-mt-1 mb-1.5"
+        />
+      )}
       {cached.isLoading ? (
         <div className="flex items-center gap-2 py-4 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />正在讀取策略選股結果…
@@ -516,7 +525,14 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
                     className="flex w-full items-center justify-between gap-2 rounded-md bg-elevated/40 px-2 py-1.5 text-left hover:bg-elevated hover:brightness-110 transition-colors border border-transparent hover:border-border/60"
                   >
                     <div className="min-w-0">
-                      <div className="truncate text-[11px] text-foreground">{r.name || r.symbol}</div>
+                      <div className="flex min-w-0 items-center gap-1">
+                        <span className="truncate text-[11px] text-foreground">{r.name || r.symbol}</span>
+                        <PickGradeBadge
+                          row={r}
+                          marketState={cached.data?.market_state}
+                          topN={cached.data?.grading?.top_n}
+                        />
+                      </div>
                       <div className="font-mono text-[9px] text-muted">{r.symbol}</div>
                     </div>
                     <div className="text-right shrink-0">

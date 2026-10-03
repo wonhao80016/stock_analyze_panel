@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
-from app.strategy.ai_generator import GUIDE_PATH, AIStrategyGenerator
+from app.api.monitor_rules import get_options
+from app.indicators.pipeline import ENRICHED_COLUMNS
+from app.services import kline_sync
+from app.strategy.ai_generator import _POLARS_SCORING_FIELDS, GUIDE_PATH, AIStrategyGenerator
 from app.strategy.prompt_builder import build_step1, build_step2
+from app.taiwan.volume_patterns import VOLUME_PATTERN_COLUMNS
 
 
 def test_ai_strategy_generator_uses_compact_guide():
@@ -14,6 +21,16 @@ def test_ai_strategy_generator_uses_compact_guide():
     assert "AI 策略生成精简指南" in guide
     assert "策略示例" not in guide
     assert len(guide) < 5000
+
+
+def test_volume_patterns_stay_out_of_strategy_scoring_and_monitor_fields(monkeypatch):
+    patterns = set(VOLUME_PATTERN_COLUMNS)
+    assert not patterns & set(ENRICHED_COLUMNS)
+    assert not patterns & _POLARS_SCORING_FIELDS
+
+    monkeypatch.setattr(kline_sync, "intraday_monitor_support", lambda capset: {})
+    options = get_options(SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace())))
+    assert '"vp_' not in json.dumps(options, ensure_ascii=False)
 
 
 def test_build_step1_keeps_user_prompt_compact():

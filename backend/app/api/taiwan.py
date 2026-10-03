@@ -54,7 +54,7 @@ from app.taiwan.market_intelligence import (
     TaiwanMarketIntelligenceService,
     TaiwanMarketIntelligenceSnapshot,
 )
-from app.taiwan.screener import TaiwanScreenerRequest, TaiwanScreenerResponse
+from app.taiwan.screener import TaiwanScreenerResponse, TaiwanScreenerRunRequest
 from app.taiwan.screener_nl import (
     TaiwanScreenerTranslateQuery,
     TaiwanScreenerTranslation,
@@ -135,6 +135,9 @@ async def stream_taiwan_bootstrap_job(job_id: str):
 @router.post("/bootstrap/update-latest")
 def update_taiwan_history_to_latest():
     """已有歷史資料時，直接增量補齊至當前最新交易日（不重新下載整包）。"""
+    from app.jobs.daily_pipeline import refresh_benchmark_index
+
+    benchmark_latest = refresh_benchmark_index("manual update-latest")
     svc = TaiwanBootstrapService()
     try:
         result = svc.update_to_latest()
@@ -156,6 +159,9 @@ def update_taiwan_history_to_latest():
         refresh_strategy_cache("manual update-latest")
         result["caches_refreshed"] = True
 
+    result["benchmark_index_latest_date"] = (
+        benchmark_latest.isoformat() if benchmark_latest is not None else None
+    )
     return result
 
 
@@ -422,7 +428,7 @@ def get_taiwan_abnormal_diagnostics(
 
 
 @router.post("/screener/run", response_model=TaiwanScreenerResponse)
-def run_taiwan_screener(request: TaiwanScreenerRequest):
+def run_taiwan_screener(request: TaiwanScreenerRunRequest):
     """執行台股批次選股 (基於本地 Parquet 持久化資料庫與 Security Master)。"""
     from app.taiwan.screener import TaiwanScreenerService
     svc = TaiwanScreenerService()

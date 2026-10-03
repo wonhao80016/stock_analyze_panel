@@ -18,6 +18,21 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "real_auth: keep the real auth state instead of the unauthenticated-local stub"
     )
+    config.addinivalue_line(
+        "markers",
+        "real_benchmark_refresh: keep the real benchmark index refresh instead of the offline stub",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _benchmark_refresh_is_offline(request, monkeypatch):
+    """The scheduled and manual updates refetch TAIEX first; no test may reach the exchange."""
+    if request.node.get_closest_marker("real_benchmark_refresh"):
+        return
+
+    from app.jobs import daily_pipeline
+
+    monkeypatch.setattr(daily_pipeline, "refresh_benchmark_index", lambda _label: None)
 
 
 @pytest.fixture(autouse=True)

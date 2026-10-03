@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import (
+    pick_grades,
     strategy_cache,
     strategy_pick_backfill,
     strategy_pick_history,
@@ -407,15 +408,19 @@ def get_cached(
       被监控的策略拿到新鲜数据, 非监控策略仍用盘后缓存。
     """
     cached = _cached_with_realtime(request)
+    engine = getattr(request.app.state, "strategy_engine", None)
+    data_dir = request.app.state.repo.store.data_dir
 
     # 无任何数据 (盘后缓存空 + 无实时结果) → 返回空标记, 前端据此提示
     if not cached.get("results") and cached.get("as_of") is None:
-        return {"as_of": None, "results": {}, "updated_at": None}
+        empty = {"as_of": None, "results": {}, "updated_at": None}
+        return pick_grades.grade_cached_payload(empty, engine, data_dir)
 
     ext_values = _load_ext_value_maps(request.app.state.repo, ext_columns)
-    return _attach_instrument_names(
+    payload = _attach_instrument_names(
         request.app.state.repo, _cache_payload_with_ext(cached, ext_values)
     )
+    return pick_grades.grade_cached_payload(payload, engine, data_dir)
 
 
 @router.get("/cached-summary")

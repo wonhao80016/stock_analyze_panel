@@ -50,11 +50,24 @@ def test_a_publish_without_new_days_refreshes_both_caches():
     assert result["caches_refreshed"] is True
 
 
-def test_nothing_fetched_leaves_the_caches_alone():
-    """Recomputing every strategy over an unchanged store is pure cost."""
-    result, enriched, strategy = _run(
-        {"ok": True, "already_current": True, "message": "本地資料已是最新", "dates_fetched": 0}
-    )
+def test_nothing_fetched_refreshes_the_index_but_leaves_the_caches_alone():
+    """Recomputing every strategy over an unchanged store is pure cost; the index may still lag."""
+    svc = MagicMock()
+    svc.update_to_latest.return_value = {
+        "ok": True, "already_current": True, "message": "本地資料已是最新", "dates_fetched": 0,
+    }
+    with (
+        patch("app.api.taiwan.TaiwanBootstrapService", return_value=svc),
+        patch("app.jobs.daily_pipeline.refresh_enriched_cache") as enriched,
+        patch("app.jobs.daily_pipeline.refresh_strategy_cache") as strategy,
+        patch(
+            "app.jobs.daily_pipeline.refresh_benchmark_index", return_value=date(2026, 9, 30)
+        ) as benchmark,
+    ):
+        result = update_taiwan_history_to_latest()
+
+    benchmark.assert_called_once_with("manual update-latest")
+    assert result["benchmark_index_latest_date"] == "2026-09-30"
     assert enriched.call_count == 0
     assert strategy.call_count == 0
     assert "caches_refreshed" not in result
@@ -82,17 +95,28 @@ def test_the_caches_are_refreshed_in_order():
 
 
 def test_a_failed_fetch_still_raises_and_refreshes_nothing():
+    order: list[str] = []
+
+    def fail():
+        order.append("update")
+        raise ValueError("本地尚無資料，請先下載歷史資料包")
+
     svc = MagicMock()
-    svc.update_to_latest.side_effect = ValueError("本地尚無資料，請先下載歷史資料包")
+    svc.update_to_latest.side_effect = fail
     with (
         patch("app.api.taiwan.TaiwanBootstrapService", return_value=svc),
         patch("app.jobs.daily_pipeline.refresh_enriched_cache") as enriched,
         patch("app.jobs.daily_pipeline.refresh_strategy_cache") as strategy,
+        patch(
+            "app.jobs.daily_pipeline.refresh_benchmark_index",
+            side_effect=lambda _label: order.append("benchmark"),
+        ),
         pytest.raises(HTTPException) as exc,
     ):
         update_taiwan_history_to_latest()
 
     assert exc.value.status_code == 400
+    assert order == ["benchmark", "update"]
     assert enriched.call_count == 0
     assert strategy.call_count == 0
 
@@ -305,3 +329,67 @@ def test_update_button_records_picks_through_the_same_refresh(tmp_path):
     record.assert_called_once()
     assert record.call_args.args[:2] == (tmp_path, SIGNAL_DAY)
     assert record.call_args.args[4] == "manual update-latest"
+
+
+def test_benchmark_refresh_is_stubbed_offline_by_default():
+    from app.jobs import daily_pipeline
+
+    with patch("app.taiwan.index_daily.get_index_daily_service") as service:
+        assert daily_pipeline.refresh_benchmark_index("test") is None
+
+    assert service.call_count == 0
+
+
+class _IndexService:
+    def __init__(self, dates: list[date]) -> None:
+        self.dates = dates
+        self.calls: list[tuple] = []
+
+    def read_range(self, symbol, start, end, *, refresh_current_month=False):
+        self.calls.append((symbol, start, end, refresh_current_month))
+        return pl.DataFrame({"date": self.dates}, schema={"date": pl.Date})
+
+
+@pytest.mark.real_benchmark_refresh
+def test_benchmark_refresh_rereads_60_days_of_taiex_bypassing_the_cache_period():
+    from app.jobs import daily_pipeline
+    from app.taiwan.benchmarks import TAIEX
+
+    service = _IndexService([date(2026, 9, 29), date(2026, 9, 30)])
+    with (
+        patch("app.taiwan.index_daily.get_index_daily_service", return_value=service),
+        patch("app.taiwan.realtime.calendar.taipei_today", return_value=date(2026, 10, 1)),
+    ):
+        latest = daily_pipeline.refresh_benchmark_index("test")
+
+    assert latest == date(2026, 9, 30)
+    assert service.calls == [(TAIEX.symbol, date(2026, 8, 2), date(2026, 10, 1), True)]
+
+
+@pytest.mark.real_benchmark_refresh
+def test_benchmark_refresh_without_bars_returns_none():
+    from app.jobs import daily_pipeline
+
+    with patch("app.taiwan.index_daily.get_index_daily_service", return_value=_IndexService([])):
+        assert daily_pipeline.refresh_benchmark_index("test") is None
+
+
+@pytest.mark.real_benchmark_refresh
+def test_a_failed_benchmark_refresh_does_not_block_the_update():
+    svc = MagicMock()
+    svc.update_to_latest.return_value = {"ok": True, "dates_fetched": 1}
+    with (
+        patch(
+            "app.taiwan.index_daily.get_index_daily_service",
+            side_effect=RuntimeError("exchange unreachable"),
+        ),
+        patch("app.api.taiwan.TaiwanBootstrapService", return_value=svc),
+        patch("app.jobs.daily_pipeline.refresh_enriched_cache") as enriched,
+        patch("app.jobs.daily_pipeline.refresh_strategy_cache") as strategy,
+    ):
+        result = update_taiwan_history_to_latest()
+
+    assert result["benchmark_index_latest_date"] is None
+    assert result["caches_refreshed"] is True
+    assert enriched.call_count == 1
+    assert strategy.call_count == 1

@@ -8,7 +8,7 @@ _refresh_single_view 仍被 api/kline.py 的个股分时"获取数据"按钮真�
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -123,6 +123,34 @@ def refresh_strategy_cache(label: str) -> None:
         logger.exception("strategy picks record (%s) failed for %s", label, signal_date)
 
 
+BENCHMARK_REFRESH_DAYS = 60
+
+
+def refresh_benchmark_index(label: str) -> date | None:
+    """Refetch recent TAIEX bars, bypassing the current-month cache period.
+
+    Returns the latest stored index date in the window afterwards. Never raises.
+    """
+    try:
+        from app.taiwan.benchmarks import TAIEX
+        from app.taiwan.index_daily import get_index_daily_service
+        from app.taiwan.realtime.calendar import taipei_today
+
+        today = taipei_today()
+        frame = get_index_daily_service().read_range(
+            TAIEX.symbol,
+            today - timedelta(days=BENCHMARK_REFRESH_DAYS),
+            today,
+            refresh_current_month=True,
+        )
+        latest = frame["date"].max() if not frame.is_empty() else None
+        logger.info("benchmark index refreshed (%s): latest=%s", label, latest)
+        return latest
+    except Exception as e:
+        logger.exception("benchmark index refresh (%s) failed: %s", label, e)
+        return None
+
+
 def _enriched_partition_mtime(data_dir: Path, day: date) -> float | None:
     """Never raises: a missing or unreadable mtime only disables the stale-input check."""
     try:
@@ -180,6 +208,7 @@ def start_scheduler() -> AsyncIOScheduler:
         refresh_institutional: bool,
         refresh_margin: bool,
     ) -> None:
+        refresh_benchmark_index(label)
         try:
             from app.taiwan.daily_update import TaiwanDailyUpdateService
             svc = TaiwanDailyUpdateService()

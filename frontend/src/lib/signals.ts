@@ -319,3 +319,24 @@ export const ABNORMAL_SIGNAL_LABELS: Record<string, string> =
     acc[sig.id] = sig.name
     return acc
   }, {})
+
+export interface VolumePatternDefinition {
+  id: string
+  name: string
+  /** Trigger expression, mirroring backend taiwan/volume_patterns.py. Keep both in step. */
+  formula: string
+}
+
+/** Volume-price patterns; ids are the published vp_* columns. */
+export const VOLUME_PATTERN_DEFINITIONS: VolumePatternDefinition[] = [
+  { id: 'vp_double', name: '倍量', formula: '今日量 ≥ 前一交易日量 2 倍；兩日皆須有成交（量 > 0）' },
+  { id: 'vp_step_up', name: '梯量', formula: '連 3 個交易日量遞增，且今日收盤 > 2 日前收盤；3 日皆須有成交（量 > 0）' },
+  { id: 'vp_step_down', name: '縮量', formula: '連 3 個交易日量遞減，且今日收盤 < 2 日前收盤；3 日皆須有成交（量 > 0）' },
+  { id: 'vp_low', name: '低量', formula: '今日量 < 前 20 個交易日中有成交日均量的 60%；今日須有成交，前 20 日至少 15 日有成交（量 > 0）' },
+  { id: 'vp_flat', name: '平量', formula: '連 3 個交易日 (最大量−最小量)／最大量 < 15%；3 日皆須有成交（量 > 0）' },
+  {
+    id: 'vp_up_stall',
+    name: '放量滯漲',
+    formula: '今日量 ≥ 前 5 個交易日均量 1.5 倍，且符合任一：收盤 < 開盤；實體 > 0 且上影 > 2 倍實體；0 ≤ 漲幅 < 1%。今日與前 5 日皆須有成交（量 > 0）',
+  },
+]

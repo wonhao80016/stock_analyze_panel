@@ -1,6 +1,23 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { api } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
+import { TaiwanHistoryDataCard } from './TaiwanHistoryDataCard'
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    taiwanHistoryStatus: vi.fn(),
+    taiwanUpdateLatest: vi.fn(),
+    taiwanBootstrapRun: vi.fn(),
+    taiwanBootstrapJob: vi.fn(),
+  },
+}))
+
+vi.mock('@/components/Toast', () => ({ toast: vi.fn() }))
 
 const read = (relativePath: string) => readFileSync(resolve(__dirname, relativePath), 'utf-8')
 
@@ -40,5 +57,32 @@ describe('Taiwan History Daily Data Bootstrap & UI Card', () => {
 
     const qkCode = read('../../lib/queryKeys.ts')
     expect(qkCode).toContain('taiwanHistoryStatus:')
+  })
+})
+
+describe('TaiwanHistoryDataCard update to latest', () => {
+  it('invalidates the cached screener results even when no new dates were fetched', async () => {
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue({
+      has_data: true,
+      earliest_date: '2024-01-02',
+      latest_date: '2026-10-02',
+      trading_days: 670,
+      needs_bootstrap: false,
+    })
+    vi.mocked(api.taiwanUpdateLatest).mockResolvedValue({
+      ok: true,
+      already_current: true,
+      message: 'already current',
+      dates_fetched: 0,
+      benchmark_index_latest_date: '2026-10-02',
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(QK.screenerCached(), { results: [] })
+    render(createElement(QueryClientProvider, { client: queryClient }, createElement(TaiwanHistoryDataCard)))
+
+    fireEvent.click(await screen.findByRole('button', { name: '更新到最新' }))
+
+    await waitFor(() => expect(api.taiwanUpdateLatest).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(queryClient.getQueryState(QK.screenerCached())?.isInvalidated).toBe(true))
   })
 })

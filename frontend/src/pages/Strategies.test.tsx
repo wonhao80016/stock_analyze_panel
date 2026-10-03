@@ -899,3 +899,86 @@ describe('策略庫 — 事後統計分頁', () => {
     expect(container.textContent).toContain(INVESTMENT_DISCLAIMER)
   })
 })
+
+describe('策略庫 — 分級與大盤濾鏡', () => {
+  const marketState = {
+    as_of: '2026-09-22', index_symbol: 't00.TWSE', close: 21000, ma: 21500, window: 20,
+    below_ma: true, status: 'ok', reason: null,
+  }
+
+  function mockGraded(marketFilter: 'applied' | 'passed' | 'unavailable', rows: any[]) {
+    vi.mocked(api.screenerStrategies).mockResolvedValue({ presets: PRESETS, load_errors: [] } as any)
+    vi.mocked(api.screenerCached).mockResolvedValue({
+      as_of: '2026-09-22',
+      results: { boll_breakout: { total: rows.length, as_of: '2026-09-22', rows } },
+      updated_at: null,
+      market_state: marketFilter === 'unavailable'
+        ? { ...marketState, close: null, ma: null, below_ma: null, status: 'unavailable', reason: 'insufficient_history' }
+        : { ...marketState, below_ma: marketFilter === 'applied' },
+      grading: { top_n: 5, market_filter: marketFilter },
+    } as any)
+  }
+
+  const GRADED_ROWS = [
+    { symbol: '2330.TWSE', name: '台積電', close: 1000, change_pct: 0.02, score: 80, grade: 'buy', grade_reason: null },
+    { symbol: '2317.TWSE', name: '鴻海', close: 200, change_pct: -0.01, score: 70, grade: 'watch', grade_reason: 'outside_top_n' },
+  ]
+
+  async function expandBoll() {
+    fireEvent.click(await screen.findByRole('button', { name: '布林突破 的細節' }))
+    await screen.findByText('台積電')
+  }
+
+  it('選股列表每一列標出買進或觀察', async () => {
+    mockGraded('passed', GRADED_ROWS)
+    renderPage()
+    await expandBoll()
+
+    expect(screen.getByText('買進').closest('button')).toHaveTextContent('台積電')
+    const watch = screen.getByText('觀察')
+    expect(watch.closest('button')).toHaveTextContent('鴻海')
+    expect(watch).toHaveAttribute('title', '排名在前 5 名之外')
+  })
+
+  it('選股基準日旁的大盤狀態列附上投資風險提示', async () => {
+    mockGraded('passed', GRADED_ROWS)
+    renderPage()
+
+    expect(await screen.findByText('選股基準日 2026-09-22')).toBeInTheDocument()
+    const line = screen.getByText(INVESTMENT_DISCLAIMER).closest('p') as HTMLElement
+    expect(line).toHaveTextContent('大盤：未跌破 20 日均線')
+  })
+
+  it('跌破時列出大盤降級的徽章與說明', async () => {
+    mockGraded('applied', [{ ...GRADED_ROWS[0], grade: 'watch', grade_reason: 'market_below_ma20' }])
+    renderPage()
+    await expandBoll()
+
+    expect(screen.getByText('觀察・大盤')).toHaveAttribute(
+      'title',
+      '加權指數 2026-09-22 收盤 21000.00 低於 20 日均線 21500.00（價格指數，不含股利）',
+    )
+    expect(screen.getByText('大盤：跌破 20 日均線，買進已降為觀察')).toBeInTheDocument()
+    expect(screen.queryByText('買進')).not.toBeInTheDocument()
+  })
+
+  it('無法判定時說明濾鏡未套用', async () => {
+    mockGraded('unavailable', GRADED_ROWS)
+    renderPage()
+
+    expect(await screen.findByText('大盤狀態無法判定，濾鏡未套用')).toHaveAttribute('title', '交易日不足 20 天')
+  })
+
+  it('事後統計分頁不出現徽章與大盤狀態列', async () => {
+    mockGraded('applied', GRADED_ROWS)
+    vi.mocked(api.screenerPickPerformance).mockReturnValue(new Promise(() => {}))
+    renderPage('/strategies?tab=performance')
+
+    await waitFor(() => expect(api.screenerPickPerformance).toHaveBeenCalled())
+    await waitFor(() => expect(api.screenerCached).toHaveBeenCalled())
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(screen.queryByText(/^大盤/)).not.toBeInTheDocument()
+    expect(screen.queryByText('買進')).not.toBeInTheDocument()
+    expect(screen.queryByText('觀察')).not.toBeInTheDocument()
+  })
+})

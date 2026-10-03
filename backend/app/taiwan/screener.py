@@ -34,6 +34,7 @@ from app.taiwan.market_rules import PriceLimitModel
 from app.taiwan.symbol import parse_symbol
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.models import MarketProfileBridge
+from app.taiwan.volume_patterns import VOLUME_PATTERN_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,13 @@ class TaiwanScreenerRequest(BaseModel):
     page_size: int = Field(50, ge=1, le=200)
 
 
+class TaiwanScreenerRunRequest(TaiwanScreenerRequest):
+    """Run-endpoint request; fields here stay out of the NL translation whitelist."""
+
+    # Volume pattern ids (VOLUME_PATTERN_COLUMNS): a row must carry every requested one.
+    volume_patterns: list[str] | None = None
+
+
 class ScreenerResultItem(BaseModel):
     """Single instrument screening result."""
 
@@ -120,6 +128,7 @@ class ScreenerResultItem(BaseModel):
     industry: str | None = None
     # Built-in signal ids that fired on the quote date.
     signals: list[str] = []
+    volume_patterns: list[str] = []
 
     # Quotes & Volumes
     close: float | None = None
@@ -229,6 +238,7 @@ class TaiwanScreenerService:
 
         # Built-in signals, as published by TaiwanEnrichedRefreshService.
         combined = self._join_signals(combined, daily_as_of)
+        patterns_published = all(c in combined.columns for c in VOLUME_PATTERN_COLUMNS)
 
         # Step 5: MarketProfile Price Limits & Distance Calculation
         combined = self._enrich_price_limits(combined)
@@ -237,6 +247,8 @@ class TaiwanScreenerService:
         combined, inst_date, margin_date, degraded = self._join_institutional_margin(combined, valid_symbols)
         if df_indicators is None:
             degraded = ["indicators", *degraded]
+        if not patterns_published:
+            degraded.append("volume_patterns")
 
         # Step 7: Apply Strongly Typed Filters
         filtered = self._apply_filters(combined, req)
@@ -356,7 +368,8 @@ class TaiwanScreenerService:
                 "distance_to_lower_limit": dist_dn,
             })
 
-        return pl.DataFrame(rows)
+        # Nullable boolean columns can be all-null in the first rows; infer from every row.
+        return pl.DataFrame(rows, infer_schema_length=None)
 
     def _join_institutional_margin(
         self, df: pl.DataFrame, symbols: list[str]
@@ -529,6 +542,12 @@ class TaiwanScreenerService:
                 return df.clear()
             df = df.filter(pl.col(sig).fill_null(False))
 
+        # Undecidable (null) patterns never match; an unknown or unpublished id matches nothing.
+        for pattern in getattr(req, "volume_patterns", None) or []:
+            if pattern not in VOLUME_PATTERN_COLUMNS or pattern not in df.columns:
+                return df.clear()
+            df = df.filter(pl.col(pattern).fill_null(False))
+
         return df
 
     def _apply_sort(self, df: pl.DataFrame, sort_by: str, sort_order: str) -> pl.DataFrame:
@@ -561,7 +580,11 @@ class TaiwanScreenerService:
         except Exception as exc:
             logger.warning("signal partition unreadable for %s: %s", as_of, exc)
             return combined
-        cols = ["symbol", *self._signal_columns(frame)]
+        cols = [
+            "symbol",
+            *self._signal_columns(frame),
+            *(c for c in VOLUME_PATTERN_COLUMNS if c in frame.columns),
+        ]
         if len(cols) == 1:
             return combined
         return combined.join(frame.select(cols), on="symbol", how="left")
@@ -569,9 +592,11 @@ class TaiwanScreenerService:
     def _build_items(self, df: pl.DataFrame) -> list[ScreenerResultItem]:
         items = []
         signal_cols = self._signal_columns(df)
+        pattern_cols = [c for c in VOLUME_PATTERN_COLUMNS if c in df.columns]
         for r in df.iter_rows(named=True):
             items.append(ScreenerResultItem(
                 signals=[c for c in signal_cols if r.get(c)],
+                volume_patterns=[c for c in pattern_cols if r.get(c)],
                 symbol=r["symbol"],
                 name=r.get("name") or r["symbol"],
                 exchange=r.get("exchange") or "TWSE",

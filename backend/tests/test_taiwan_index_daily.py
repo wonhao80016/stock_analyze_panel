@@ -128,3 +128,42 @@ def test_month_empty_while_current_is_fetched_once_it_has_passed(tmp_path, monke
     client.months["202608"] = _rows(AUGUST_TRADING_DAYS)
     today[0] = date(2026, 9, 7)
     assert _read_august(service) == AUGUST_TRADING_DAYS
+
+
+def _current_august(tmp_path, monkeypatch) -> tuple[TaiwanIndexDailyService, _FakeClient, list[float]]:
+    clock = _freeze_clock(monkeypatch)
+    monkeypatch.setattr(index_daily, "_today", lambda: date(2026, 8, 20), raising=False)
+    client = _FakeClient({"202608": _rows(AUGUST_TRADING_DAYS)})
+    service = _service(tmp_path, client)
+    _read_august(service)
+    clock[0] += 60
+    return service, client, clock
+
+
+def test_current_month_is_cached_by_default(tmp_path, monkeypatch):
+    service, client, _ = _current_august(tmp_path, monkeypatch)
+
+    _read_august(service)
+
+    assert client.calls == ["202608"]
+
+
+def test_refresh_current_month_refetches_within_the_cache_period(tmp_path, monkeypatch):
+    service, client, _ = _current_august(tmp_path, monkeypatch)
+
+    service.read_range(TAIEX.symbol, AUGUST, AUGUST_END, refresh_current_month=True)
+
+    assert client.calls == ["202608", "202608"]
+
+
+def test_refresh_current_month_leaves_past_months_alone(tmp_path, monkeypatch):
+    clock = _freeze_clock(monkeypatch)
+    monkeypatch.setattr(index_daily, "_today", lambda: date(2026, 9, 7), raising=False)
+    client = _FakeClient({"202608": _rows(AUGUST_TRADING_DAYS)})
+    service = _service(tmp_path, client)
+    service.store.write_batch(service._rows_to_frame(TAIEX.symbol, _rows(AUGUST_TRADING_DAYS)))
+    clock[0] += 60
+
+    service.read_range(TAIEX.symbol, AUGUST, AUGUST_END, refresh_current_month=True)
+
+    assert client.calls == []

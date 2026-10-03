@@ -183,11 +183,18 @@ class TaiwanIndexDailyService:
             return False
         return True
 
-    def ensure_range(self, symbol: str, start: date, end: date) -> None:
-        """Backfill any month in the window that the store does not fully hold."""
+    def ensure_range(
+        self, symbol: str, start: date, end: date, *, refresh_current_month: bool = False
+    ) -> None:
+        """Backfill any month in the window that the store does not fully hold.
+
+        refresh_current_month refetches the current month even within its cache period.
+        """
         bench = get_benchmark(symbol)
         if bench is None:
             return
+        if refresh_current_month:
+            self._current_month_fetched_at.pop(symbol, None)
         today = _today()
         months = _month_starts(start, min(end, today))
         if not months:
@@ -221,9 +228,11 @@ class TaiwanIndexDailyService:
             if is_current:
                 self._current_month_fetched_at[symbol] = time.monotonic()
 
-    def read_range(self, symbol: str, start: date, end: date) -> pl.DataFrame:
+    def read_range(
+        self, symbol: str, start: date, end: date, *, refresh_current_month: bool = False
+    ) -> pl.DataFrame:
         with self._symbol_locks[symbol]:
-            self.ensure_range(symbol, start, end)
+            self.ensure_range(symbol, start, end, refresh_current_month=refresh_current_month)
             return self.store.scan_range([symbol], start, end)
 
 

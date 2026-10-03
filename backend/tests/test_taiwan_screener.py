@@ -30,9 +30,11 @@ from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.screener import (
     TaiwanScreenerRequest,
     TaiwanScreenerResponse,
+    TaiwanScreenerRunRequest,
     TaiwanScreenerService,
 )
 from app.taiwan.universe import get_security_master
+from app.taiwan.volume_patterns import VOLUME_PATTERN_COLUMNS
 
 
 def _seed_daily_store(store: TaiwanDailyStore, days: int = 30):
@@ -357,3 +359,94 @@ class TestTaiwanScreenerCore:
         assert "data_dates" in data
         assert data["total"] >= 5
         assert len(data["items"]) >= 5
+
+
+def _set_patterns(store: TaiwanDailyStore, values: dict[str, dict[str, bool | None]]) -> None:
+    """Overwrite the published pattern columns: every pattern False except the given values."""
+    path = _partition_path(store)
+    frame = pl.read_parquet(path)
+    frame = frame.with_columns([
+        pl.Series(c, [values.get(s, {}).get(c, False) for s in frame["symbol"]], dtype=pl.Boolean)
+        for c in VOLUME_PATTERN_COLUMNS
+    ])
+    frame.write_parquet(path)
+
+
+class TestTaiwanScreenerVolumePatterns:
+    def test_the_nl_whitelist_stays_without_volume_patterns(self):
+        assert "volume_patterns" not in TaiwanScreenerRequest.model_fields
+        assert "volume_patterns" in TaiwanScreenerRunRequest.model_fields
+
+    def test_published_partition_carries_every_pattern(self, screener_service, tmp_store):
+        assert set(VOLUME_PATTERN_COLUMNS) <= set(pl.read_parquet(_partition_path(tmp_store)).columns)
+        res = screener_service.run(TaiwanScreenerRequest())
+        assert "volume_patterns" not in res.degraded_sections
+
+    def test_rows_list_their_patterns_and_a_base_request_still_runs(self, screener_service, tmp_store):
+        _set_patterns(tmp_store, {"2330.TWSE": {"vp_double": True, "vp_low": True}, "0050.TWSE": {"vp_flat": None}})
+        res = screener_service.run(TaiwanScreenerRequest())
+        by_symbol = {item.symbol: item for item in res.items}
+        assert by_symbol["2330.TWSE"].volume_patterns == ["vp_double", "vp_low"]
+        assert by_symbol["0050.TWSE"].volume_patterns == []
+        assert all(not p.startswith("vp_") for item in res.items for p in item.signals)
+
+    def test_several_patterns_must_all_hit(self, screener_service, tmp_store):
+        _set_patterns(tmp_store, {
+            "2330.TWSE": {"vp_double": True, "vp_low": True},
+            "0050.TWSE": {"vp_double": True},
+            "8069.TPEX": {"vp_double": None, "vp_low": True},
+        })
+        both = screener_service.run(TaiwanScreenerRunRequest(volume_patterns=["vp_double", "vp_low"]))
+        assert [item.symbol for item in both.items] == ["2330.TWSE"]
+        single = screener_service.run(TaiwanScreenerRunRequest(volume_patterns=["vp_double"]))
+        assert [item.symbol for item in single.items] == ["0050.TWSE", "2330.TWSE"]
+
+    def test_an_undecidable_pattern_never_matches(self, screener_service, tmp_store):
+        _set_patterns(tmp_store, {s: {"vp_up_stall": None} for s in pl.read_parquet(_partition_path(tmp_store))["symbol"]})
+        res = screener_service.run(TaiwanScreenerRunRequest(volume_patterns=["vp_up_stall"]))
+        assert res.total == 0
+
+    def test_an_unknown_pattern_matches_nothing(self, screener_service, tmp_store):
+        _set_patterns(tmp_store, {"2330.TWSE": {"vp_double": True}})
+        for unknown in (["vp_unknown"], ["signal_limit_up"], ["vp_double", "close"]):
+            assert screener_service.run(TaiwanScreenerRunRequest(volume_patterns=unknown)).total == 0
+
+    def test_a_partition_published_before_the_patterns_is_degraded(self, screener_service, tmp_store):
+        path = _partition_path(tmp_store)
+        pl.read_parquet(path).drop(list(VOLUME_PATTERN_COLUMNS)).write_parquet(path)
+
+        res = screener_service.run(TaiwanScreenerRequest())
+        assert res.total >= 5
+        assert "volume_patterns" in res.degraded_sections
+        assert "indicators" not in res.degraded_sections
+        assert all(item.volume_patterns == [] for item in res.items)
+        filtered = screener_service.run(TaiwanScreenerRunRequest(volume_patterns=["vp_double"]))
+        assert filtered.total == 0
+        assert "volume_patterns" in filtered.degraded_sections
+
+    def test_a_missing_partition_is_degraded(self, screener_service, tmp_store):
+        _partition_path(tmp_store).unlink()
+        res = screener_service.run(TaiwanScreenerRequest())
+        assert {"indicators", "volume_patterns"} <= set(res.degraded_sections)
+
+    def test_rebuilding_rows_keeps_sparse_pattern_columns(self, screener_service):
+        rows = pl.DataFrame({
+            "symbol": [f"T{i:04d}.TWSE" for i in range(150)],
+            "close": [None] * 150,
+            "vp_double": [None] * 149 + [True],
+        }, schema={"symbol": pl.String, "close": pl.Float64, "vp_double": pl.Boolean})
+        rebuilt = screener_service._enrich_price_limits(rows)
+        assert rebuilt["vp_double"].to_list() == [None] * 149 + [True]
+
+    def test_api_route_accepts_volume_patterns(self, tmp_store, monkeypatch):
+        from app.taiwan import screener
+
+        monkeypatch.setattr(screener, "TaiwanDailyStore", lambda *args, **kwargs: tmp_store)
+        _set_patterns(tmp_store, {"8069.TPEX": {"vp_step_up": True}})
+        client = TestClient(app, client=("127.0.0.1", 50000))
+
+        resp = client.post("/api/taiwan/screener/run", json={"volume_patterns": ["vp_step_up"]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [item["symbol"] for item in data["items"]] == ["8069.TPEX"]
+        assert data["items"][0]["volume_patterns"] == ["vp_step_up"]

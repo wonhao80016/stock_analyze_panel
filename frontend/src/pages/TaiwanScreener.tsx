@@ -29,7 +29,7 @@ import {
 } from 'lucide-react'
 import {
   api,
-  type TaiwanScreenerRequest,
+  type TaiwanScreenerRunRequest,
   type ScreenerResultItem,
   type TaiwanScreenerTranslation,
 } from '@/lib/api'
@@ -38,7 +38,7 @@ import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { Modal } from '@/components/Modal'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
-import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS } from '@/lib/signals'
+import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS, VOLUME_PATTERN_DEFINITIONS } from '@/lib/signals'
 import { useStockPreview } from '@/components/StockPreviewProvider'
 
 export function TaiwanScreener() {
@@ -85,6 +85,7 @@ export function TaiwanScreener() {
   const [volRatioMin, setVolRatioMin] = useState<string>('')
   const { openPreview } = useStockPreview()
   const [selectedSignals, setSelectedSignals] = useState<string[]>([])
+  const [selectedVolumePatterns, setSelectedVolumePatterns] = useState<string[]>([])
   const [aboveMa5, setAboveMa5] = useState<boolean | null>(null)
   const [aboveMa20, setAboveMa20] = useState<boolean | null>(null)
   const [nearUpperLimit, setNearUpperLimit] = useState<boolean>(false)
@@ -188,14 +189,15 @@ export function TaiwanScreener() {
     setMarginBalanceChangeMinLots('')
     setShortBalanceMinLots('')
     setShortMarginRatioMin('')
+    setSelectedVolumePatterns([])
     setSortBy('symbol')
     setSortOrder('asc')
     setPage(1)
   }
 
   // Request payload construction
-  const payload = useMemo<TaiwanScreenerRequest>(() => {
-    const p: TaiwanScreenerRequest = {
+  const payload = useMemo<TaiwanScreenerRunRequest>(() => {
+    const p: TaiwanScreenerRunRequest = {
       exchange,
       instrument,
       industry: industry !== 'ALL' ? industry : null,
@@ -225,6 +227,7 @@ export function TaiwanScreener() {
       short_balance_min: shortBalanceMinLots ? parseFloat(shortBalanceMinLots) * 1000.0 : null,
       short_margin_ratio_min: shortMarginRatioMin ? parseFloat(shortMarginRatioMin) : null,
       signals: selectedSignals.length ? selectedSignals : null,
+      volume_patterns: selectedVolumePatterns.length ? selectedVolumePatterns : null,
       sort_by: sortBy,
       sort_order: sortOrder,
       page,
@@ -235,7 +238,7 @@ export function TaiwanScreener() {
     exchange, instrument, industry, priceMin, priceMax, changePctMin, changePctMax,
     volumeMinLots, amountMinMln, rsiMin, rsiMax, momentumMin, volRatioMin,
     aboveMa5, aboveMa20, nearUpperLimit, nearLowerLimit,
-    selectedSignals,
+    selectedSignals, selectedVolumePatterns,
     foreignNetMinLots, foreignNetMaxLots, investmentTrustNetMinLots, dealerNetMinLots,
     marginBalanceChangeMinLots, shortBalanceMinLots, shortMarginRatioMin,
     sortBy, sortOrder, page,
@@ -290,9 +293,8 @@ export function TaiwanScreener() {
   })
 
   const totalPages = data ? Math.ceil(data.total / data.page_size) : 1
-  // Phase 8C-C: 結果表格預設 8 個資料欄 + 操作欄 = 9; 展開「更多欄位」後為
-  // 完整 17 個資料欄 + 操作欄 = 18 (與 loading/error/empty 列的 colSpan 對齊)。
-  const resultColSpan = showMoreColumns ? 18 : 9
+  // Data columns plus the actions column (9+1 default, 18+1 expanded); must match the header.
+  const resultColSpan = showMoreColumns ? 19 : 10
 
   const handleSort = (col: string) => {
     if (sortBy === col) {
@@ -316,6 +318,24 @@ export function TaiwanScreener() {
   const formatPrice = (val?: number | null) => {
     if (val === null || val === undefined) return '-'
     return val >= 1000 ? val.toFixed(0) : val.toFixed(2)
+  }
+
+  const renderVolumePatterns = (ids?: string[]) => {
+    const matched = VOLUME_PATTERN_DEFINITIONS.filter(vp => ids?.includes(vp.id))
+    if (matched.length === 0) return <span className="text-zinc-600">—</span>
+    return (
+      <div className="flex gap-1">
+        {matched.map(vp => (
+          <span
+            key={vp.id}
+            title={vp.formula}
+            className="text-[10px] bg-purple-500/10 text-purple-300 px-1.5 py-0.5 rounded border border-purple-500/30"
+          >
+            {vp.name}
+          </span>
+        ))}
+      </div>
+    )
   }
 
   const formatVolumeLots = (shares?: number | null) => {
@@ -1328,6 +1348,45 @@ export function TaiwanScreener() {
                   </div>
                 </div>
 
+                <div className="sm:col-span-2 md:col-span-4">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] text-zinc-400">量價型態（多選為且）</span>
+                    {selectedVolumePatterns.length > 0 && (
+                      <button
+                        onClick={() => { setSelectedVolumePatterns([]); setPage(1) }}
+                        aria-label="清除量價型態"
+                        className="text-[11px] text-zinc-400 hover:text-zinc-200"
+                      >
+                        清除
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {VOLUME_PATTERN_DEFINITIONS.map(vp => {
+                      const on = selectedVolumePatterns.includes(vp.id)
+                      return (
+                        <button
+                          key={vp.id}
+                          type="button"
+                          title={vp.formula}
+                          aria-pressed={on}
+                          onClick={() => {
+                            setSelectedVolumePatterns(prev => on ? prev.filter(id => id !== vp.id) : [...prev, vp.id])
+                            setPage(1)
+                          }}
+                          className={`px-2 py-1 text-[11px] font-medium rounded-md border transition-all ${
+                            on
+                              ? 'bg-purple-600 border-purple-500 text-white'
+                              : 'bg-zinc-800/80 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+                          }`}
+                        >
+                          {vp.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+
                 <div className="sm:col-span-2 md:col-span-2 flex flex-wrap items-end gap-2">
                   <button
                     onClick={() => { setAboveMa5(prev => (prev === true ? null : true)); setPage(1) }}
@@ -1498,6 +1557,11 @@ export function TaiwanScreener() {
             技術指標更新中，暫以空值顯示
           </div>
         )}
+        {data?.degraded_sections?.includes('volume_patterns') && (
+          <div role="status" className="px-4 py-2 text-[11px] text-amber-400 bg-amber-500/10 border-b border-zinc-800">
+            量價型態尚未發佈
+          </div>
+        )}
         {/* Table View */}
         <div id="screener-results-table" className="overflow-x-auto">
           <table className="w-full text-left text-xs text-zinc-300">
@@ -1529,6 +1593,7 @@ export function TaiwanScreener() {
                     {sortBy === 'volume' && (sortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-purple-400" /> : <ArrowDown className="w-3 h-3 text-purple-400" />)}
                   </div>
                 </th>
+                <th className="py-3 px-3 font-semibold">量價型態</th>
                 <th className="py-3 px-3 font-semibold cursor-pointer hover:text-zinc-100 text-right" onClick={() => handleSort('amount')}>
                   <div className="flex items-center justify-end gap-1">
                     成交金額
@@ -1656,6 +1721,10 @@ export function TaiwanScreener() {
                     {/* Volume (Lots) */}
                     <td className="py-3 px-3 text-right font-mono text-zinc-300 whitespace-nowrap">
                       {formatVolumeLots(item.volume)}
+                    </td>
+
+                    <td className="py-3 px-3 whitespace-nowrap">
+                      {renderVolumePatterns(item.volume_patterns)}
                     </td>
 
                     {/* Amount */}
