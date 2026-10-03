@@ -52,7 +52,7 @@
 - O6 依 `strategy_fingerprint` 分段統計。
 - O7 多策略共振的統計。
 - O8 圖表：累積報酬、報酬分布。
-- O9 看板卡顯示摘要，並把標題「策略當日推薦」改名（`frontend/src/pages/Dashboard.tsx:451`）。
+- O9 看板卡顯示摘要，並把標題「策略當日推薦」改名（`frontend/src/pages/Dashboard.tsx:451`）。（註：原則已於 2026-10-02 調整，見 market-filter-volume-patterns-plan 第 1 節）
 - O10 啟動補記：啟動後以 `latest_date()` 走與排程相同的記錄路徑，完全套用 3.1 的規則，不是例外。（執行清單已移入 MVP。）
 - O11 結果記憶化（實測超過 1 秒才做）、CSV 匯出，以及在畫面上切換是否納入延遲紀錄或資料不完整日。
 
@@ -225,7 +225,7 @@
 |---|---|---|---|---|
 | A 策略庫新分頁 `?tab=performance` | L3 | `api.ts`、`queryKeys.ts` | `Strategies.tsx`（不是熱點）、新元件 | 與策略規則、當日選股同頁對照 |
 | B 擴充路由新頁 `frontend/src/custom/<ns>/extension.tsx` | L2 | 同 A：請求與查詢鍵必須集中（`docs/secondary-development.md:182-183`） | 新增二開目錄；不必改 `router.tsx`（自動發現：`frontend/src/extensions/bootstrap.ts:4-6`；側欄：`frontend/src/components/Layout.tsx:321-328`） | 側欄末端多一項，要切頁才能對照 |
-| C 看板卡加欄位 | L3 | 同 A | `Dashboard.tsx` | 空間不足，數字放首頁容易被讀成推薦 |
+| C 看板卡加欄位 | L3 | 同 A | `Dashboard.tsx` | 空間不足，數字放首頁容易被讀成推薦（註：原則已於 2026-10-02 調整，見 market-filter-volume-patterns-plan 第 1 節） |
 
 - 結論：選 A。A 與 B 都要改 `api.ts`、`queryKeys.ts` 這兩個熱點（`docs/secondary-development.md:298-299`），B 唯一省下的 `Strategies.tsx` 並不是熱點。此外，B 把核心功能放進二次開發目錄（「前端二次開發目錄」，`frontend/src/custom/README.md:1-3`），還把統計和策略規則拆到兩頁。A 不需要動 `router.tsx`；`navigation.ts` 本來就不在熱點清單（`docs/secondary-development.md:292-300`）。
 - 畫面內容：
@@ -240,6 +240,7 @@
 
 ### 3.8 文字合規
 
+- 註：原則已於 2026-10-02 調整，見 market-filter-volume-patterns-plan 第 1 節；本節原文保留作為紀錄。
 - 依據：產品「不推薦個股」（`README.md:34`）；AI 禁語包含「勝率評分」「強烈推薦」（`backend/app/taiwan/ai_research.py:323-327`）。
 - 命名：API 用 `pick`、`signal`、`positive_ratio`，不用 `recommend`、`win_rate`、`rating`；UI 用「選股紀錄」「事後統計」「報酬為正比例」，不用「推薦」「勝率排行」「最佳策略」；「進場」改說「以 T+1 開盤價為計算起點」。
 - 固定說明文字：「以下為過去選股紀錄的統計結果，計算方式固定，不構成買賣建議，也不代表未來表現。」
@@ -300,7 +301,7 @@
    - 驗證：`$d="$env:TEMP\spt-$(Get-Random)"; New-Item -ItemType Directory -Force "$d\taiwan" | Out-Null; Copy-Item -LiteralPath data\taiwan\security_master.parquet -Destination "$d\taiwan\"; $s={Get-ChildItem -LiteralPath data -Recurse -Force | ForEach-Object {"$($_.FullName)|$($_.LastWriteTimeUtc.Ticks)|$($_.Length)"}}; $b=& $s; cmd /c "set DATA_DIR=$d&& uv run --directory backend --frozen pytest tests/test_screener_pick_performance_api.py tests/test_screener_cache_api.py tests/test_screener_cached_names.py tests/test_screener_builtin_params.py tests/test_kline_hot_path_memory.py tests/test_update_latest_refreshes_caches.py tests/backtest/test_factor_rank_research.py -q && uv run --directory backend --frozen ruff check app/api/screener.py tests/test_screener_pick_performance_api.py"; Compare-Object $b (& $s)`
 5. **前端分頁**（M5）
    - 修改 `frontend/src/lib/api.ts`、`frontend/src/lib/queryKeys.ts`、`frontend/src/pages/Strategies.tsx`；新增 `frontend/src/components/StrategyPickPerformance.tsx`。
-   - 擴充 `frontend/src/pages/Strategies.test.tsx`。測試案例：預設分頁的內容不變；切到「事後統計」才發請求；載入、空、錯誤、除權息不可用四種狀態；樣本為 0 的持有期按鈕呈停用；不出現「推薦」「勝率」。無權限狀態不另做：401 由全域 `QueryCache` 導向登入（`frontend/src/main.tsx:30-33`），此頁沒有額外的權限分級（`CONTRIBUTING.md:203`）。
+   - 擴充 `frontend/src/pages/Strategies.test.tsx`。測試案例：預設分頁的內容不變；切到「事後統計」才發請求；載入、空、錯誤、除權息不可用四種狀態；樣本為 0 的持有期按鈕呈停用；不出現「推薦」「勝率」（註：原則已於 2026-10-02 調整，見 market-filter-volume-patterns-plan 第 1 節）。無權限狀態不另做：401 由全域 `QueryCache` 導向登入（`frontend/src/main.tsx:30-33`），此頁沒有額外的權限分級（`CONTRIBUTING.md:203`）。
    - 驗證：`$env:Path="$env:APPDATA\npm;$env:Path"; pnpm --dir frontend test -- Strategies; pnpm --dir frontend build`。`frontend/vite.config.d.ts` 與 `frontend/pnpm-lock.yaml` 已有未提交的修改，不要還原，也不要混進本功能的提交。
 6. **前後端聯調**（依 `CONTRIBUTING.md:230-231`）
    - 使用者的後端重載到新程式後，以 `Invoke-RestMethod http://127.0.0.1:3018/api/screener/pick-performance` 核對回傳欄位。
@@ -320,7 +321,7 @@
 - R6 還原權值：缺檔、讀取失敗、覆蓋落後都能偵測並 fail-closed。只有官方表在已覆蓋區間內本身漏列事件時偵測不到。
 - R7 漲跌停分類取現況，歷史分類可能不同，畫面要顯示 `limit_check=unknown` 的筆數。
 - R8 暫定值修正：日 K 會被重抓，即時計算的報酬可能小幅變動。
-- R9 合規：依 3.8 的命名規則，並用前端測試鎖住禁用字眼。
+- R9 合規：依 3.8 的命名規則，並用前端測試鎖住禁用字眼。（註：原則已於 2026-10-02 調整，見 market-filter-volume-patterns-plan 第 1 節）
 - R10 時區：凍結與延遲判定一律用 Asia/Taipei，因為伺服器時區不得成為隱式輸入（`CONTRIBUTING.md:114`）。
 - R11 效能：一年約 25 萬列，預估 1 秒內（推測，未實測）；超過才做 O11。
 - R12 判定與實際來源：可用性與 `universe_complete` 都取自策略實際讀到的資料，兩者一致；程序級 TTL 快取（`backend/app/services/screener.py:28,244-253`）由 hook 在計算前清除。殘餘：覆寫參數使最大暖機降到 90 根以下時，會命中 repo 歷史快取（`backend/app/repository.py:572,1182-1184`）；若之前的 refresh 失敗，策略可能讀到 T 的舊版本。這類失敗會被 `backend/app/repository.py:676-677` 吞掉，`backend/app/repository.py:552-565` 也是靜默 return，refresh 回報不了，所以本計畫不緩解。影響只是 T 日資料的新舊，沒有前視。

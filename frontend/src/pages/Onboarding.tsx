@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { INVESTMENT_DISCLAIMER } from '@/lib/disclaimer'
 import { Logo } from '@/components/Logo'
 
 // ===== 引導頁：4 步流程 =====
@@ -176,7 +177,7 @@ function DisclaimerStep({ onNext }: { onNext: () => void }) {
               <span className="text-warning">無官方關聯</span>。資料能力依賴第三方資料服務提供。
             </p>
             <p>
-              僅供學習研究使用,不構成任何投資建議。股市有風險,使用本專案產生的任何盈虧由使用者自行承擔。
+              僅供學習研究使用。{INVESTMENT_DISCLAIMER}本專案不做自動下單。股市有風險,使用本專案產生的任何盈虧由使用者自行承擔。
             </p>
             <p>
               本專案基於 MIT 授權開源。使用本專案時,請遵守所用資料來源的服務條款;第三方介面套件存在著作權與反爬蟲風險,使用需自行評估合規責任。

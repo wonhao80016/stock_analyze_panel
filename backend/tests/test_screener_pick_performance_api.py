@@ -1,7 +1,6 @@
 """Pick performance endpoints over snapshots written by record() and synthetic daily K under tmp_path."""
 from __future__ import annotations
 
-import json
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,8 +24,6 @@ OTC = "6510.TPEX"
 LATE_SYM = "2317.TWSE"
 FILLERS = ("1101.TWSE", "6488.TPEX")
 NAMES = {SYM: "Alpha", OTC: "Beta"}
-# Unicode escapes keep this source ASCII; they spell the two Chinese terms banned by the compliance rule.
-BANNED = ("recommend", "win_rate", "winrate", "rating", "\u52dd\u7387", "\u80dc\u7387", "\u63a8\u85a6", "\u63a8\u8350")
 
 
 def _bar(symbol: str, d: date, o: float, c: float) -> dict:
@@ -281,12 +278,6 @@ def test_unreadable_prices_are_503_with_a_stable_code(client, populated, monkeyp
     response = client.get("/api/screener/pick-performance")
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "pick_prices_unreadable"
-
-
-def test_payload_keys_and_texts_avoid_banned_wording(client, populated):
-    for path in ("/api/screener/pick-performance", "/api/screener/pick-performance/s_main"):
-        text = json.dumps(client.get(path).json(), ensure_ascii=False).lower()
-        assert not any(word in text for word in BANNED)
 
 
 def test_limit_profile_failure_leaves_limit_unknown(monkeypatch):

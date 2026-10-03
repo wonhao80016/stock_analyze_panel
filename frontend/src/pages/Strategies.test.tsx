@@ -7,6 +7,7 @@ import { MemoryRouter, useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Strategies } from './Strategies'
 import { api } from '@/lib/api'
+import { INVESTMENT_DISCLAIMER } from '@/lib/disclaimer'
 
 vi.mock('@/lib/api', async () => {
   const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
@@ -576,8 +577,6 @@ describe('策略庫 — 事後統計分頁', () => {
     } as any)
   }
 
-  const FORBIDDEN = /推薦|勝率|建議買進/
-
   function tab(name: string) {
     return screen.getByRole('tab', { name })
   }
@@ -829,7 +828,7 @@ describe('策略庫 — 事後統計分頁', () => {
     expect(screen.getByText('preview:2330.TWSE')).toBeInTheDocument()
   })
 
-  it('畫面不出現「推薦」「勝率」等用語, 含所有條件式提示', async () => {
+  it('含所有條件式提示的畫面附上投資風險提示', async () => {
     mockAll()
     const full = stats('boll_breakout', [5, 5, 5, 5], {
       signal_days: 3,
@@ -874,10 +873,10 @@ describe('策略庫 — 事後統計分頁', () => {
     expect(screen.getByText('漲停未判定 2')).toBeInTheDocument()
     expect(screen.getByText('沿用前收 1')).toBeInTheDocument()
     expect(screen.getByText('2026-09-30 起無資料')).toBeInTheDocument()
-    expect(container.innerHTML).not.toMatch(FORBIDDEN)
+    expect(container.textContent).toContain(INVESTMENT_DISCLAIMER)
   })
 
-  it('錯誤狀態的畫面也不出現「推薦」「勝率」等用語', async () => {
+  it('摘要讀取失敗時顯示原因; 只有明細失敗時仍附投資風險提示', async () => {
     const errors = [
       new Error(JSON.stringify({ code: 'pick_history_unreadable', message: 'x' })),
       new Error(JSON.stringify({ code: 'pick_prices_unreadable', message: 'x' })),
@@ -886,9 +885,8 @@ describe('策略庫 — 事後統計分頁', () => {
     for (const error of errors) {
       mockAll()
       vi.mocked(api.screenerPickPerformance).mockRejectedValue(error)
-      const { container, unmount } = renderPage('/strategies?tab=performance')
+      const { unmount } = renderPage('/strategies?tab=performance')
       await screen.findByText(/無法讀取/)
-      expect(container.innerHTML).not.toMatch(FORBIDDEN)
       unmount()
     }
 
@@ -898,6 +896,6 @@ describe('策略庫 — 事後統計分頁', () => {
     const { container } = renderPage('/strategies?tab=performance')
     fireEvent.click(await screen.findByRole('button', { name: '布林突破 的選股紀錄' }))
     expect(await screen.findByText('目前無法讀取這支策略的選股紀錄。')).toBeInTheDocument()
-    expect(container.innerHTML).not.toMatch(FORBIDDEN)
+    expect(container.textContent).toContain(INVESTMENT_DISCLAIMER)
   })
 })

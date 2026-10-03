@@ -785,7 +785,7 @@ export function TaiwanScreener() {
               <span className="font-semibold text-zinc-200 text-sm">台股市場異常異動與資金流向診斷 (Abnormal Diagnostics)</span>
               {abnormalData && (
                 <span className="text-zinc-500 font-mono text-[11px]">
-                  全市場偵測到 {abnormalData.diagnostic_count} 檔標的觸發客觀異常訊號 (純確定性無推薦)
+                  全市場偵測到 {abnormalData.diagnostic_count} 檔標的觸發客觀異常訊號 (規則判定)
                 </span>
               )}
             </div>
@@ -833,7 +833,7 @@ export function TaiwanScreener() {
           {showAbnormalGuide && (
             <div id="abnormal-signal-guide" className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
               <p className="text-[11px] text-zinc-400 leading-5">
-                以下訊號於盤後由日線、三大法人與融資融券資料計算，屬客觀統計判定，不含任何買賣建議。
+                以下訊號於盤後由日線、三大法人與融資融券資料計算，屬規則判定，僅供參考。
                 資料不足時該訊號不評估，不會以缺值當成未觸發。
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">

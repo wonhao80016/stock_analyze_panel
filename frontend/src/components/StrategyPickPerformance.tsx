@@ -11,6 +11,7 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
+import { INVESTMENT_DISCLAIMER } from '@/lib/disclaimer'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 
 const HORIZONS: readonly PickHorizon[] = ['1', '5', '10', '20']
@@ -232,7 +233,8 @@ function MethodNote({ data }: { data: PickPerformanceSummary }) {
         成交是以訊號次一交易日開盤價模擬買入；開盤漲停或無成交會列為未成交，並非帳戶的實際成交。
         T+k 報酬＝訊號後第 k 個交易日的復權收盤價 ÷ 次日復權開盤價 − 1；T+1 是次日開盤到收盤。
         報酬為毛報酬：未扣交易成本、未計滑點、未模擬出場可成交性。
-        以下為過去選股紀錄的統計結果，計算方式固定，不構成買賣建議，也不代表未來表現。
+        以下為過去選股紀錄的統計結果，計算方式固定；過去表現不代表未來。
+        {INVESTMENT_DISCLAIMER}
       </p>
     </div>
   )
