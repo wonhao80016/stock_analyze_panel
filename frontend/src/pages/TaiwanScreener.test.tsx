@@ -228,14 +228,30 @@ describe('Indicator publication notice', () => {
 })
 
 describe('Main results row direct actions (Phase 8C-A)', () => {
-  it('offers 加入自選/加入比較/新增監控/研究 without leaving the page first', async () => {
+  it('offers 加入自選/加入比較/新增監控/回測/研究 without leaving the page first', async () => {
     renderScreener()
     await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
 
     expect(await screen.findByRole('button', { name: '將 2330.TWSE 加入自選' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '將 2330.TWSE 加入比較' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '為 2330.TWSE 新增監控' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '使用 2330.TWSE 回測' })).toHaveAttribute(
+      'href',
+      '/backtest?symbol=2330.TWSE&asset_type=stock',
+    )
     expect(screen.getByRole('button', { name: '開啟 2330.TWSE 個股視窗' })).toBeInTheDocument()
+  })
+
+  it('passes ETF rows to the backtest workspace as ETF assets', async () => {
+    const response = buildScreenerResponse()
+    response.items[0].instrument_type = 'etf'
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue(response as any)
+    renderScreener()
+
+    expect(await screen.findByRole('link', { name: '使用 2330.TWSE 回測' })).toHaveAttribute(
+      'href',
+      '/backtest?symbol=2330.TWSE&asset_type=etf',
+    )
   })
 
   it('加入自選 is a genuine 1-click quick-add — no group picker in the way (Phase 8C-A fix)', async () => {

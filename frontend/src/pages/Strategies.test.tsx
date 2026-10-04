@@ -107,6 +107,18 @@ describe('策略庫', () => {
     expect(screen.getByText('突破布林上軌加放量')).toBeInTheDocument()
   })
 
+  it('展開策略後可將策略 ID 帶入回測工作區', async () => {
+    mockAll()
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: '布林突破 的細節' }))
+
+    expect(screen.getByRole('link', { name: '回測此策略' })).toHaveAttribute(
+      'href',
+      '/backtest?strategy_id=boll_breakout',
+    )
+  })
+
   it('篩選器可以只看未執行的策略', async () => {
     mockAll()
     renderPage()

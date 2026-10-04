@@ -3,11 +3,12 @@
 // 真的接上了它 —— 不再寫死「返回即時監控」文案/目的地, 且能在有可信 in-app
 // 來源(如監控中心)時正確返回該來源, 直接網址進入時安全落到台股選股 fallback。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { act, render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { TaiwanStockDetail, dailyRowsToOHLC, signColorClass, signPrefix } from './TaiwanStockDetail'
 import { changeBase, unadjustedClose } from '@/components/EChartsCandlestick'
+import { api } from '@/lib/api'
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -16,16 +17,43 @@ vi.mock('@/lib/api', () => ({
     watchlistAdd: vi.fn(),
     watchlistRemove: vi.fn(),
     watchlistGroups: vi.fn().mockResolvedValue({ groups: [] }),
-    taiwanStockDetail: vi.fn().mockResolvedValue({
-      identity: { name: '台積電', exchange: 'TWSE' },
-      realtime: { close: 100, change: 0, change_pct: 0 },
-      daily_history: { rows: [] },
-    }),
+    taiwanStockDetail: vi.fn(),
     taiwanCurrentData: vi.fn().mockResolvedValue(null),
     taiwanStockResearchContext: vi.fn().mockResolvedValue(null),
     taiwanStockAIResearch: vi.fn(),
   },
 }))
+
+function buildDetailResponse(instrumentType: string = 'stock') {
+  return {
+    symbol: '2330.TWSE',
+    identity: {
+      symbol: '2330.TWSE',
+      code: '2330',
+      name: '台積電',
+      exchange: 'TWSE',
+      instrument_type: instrumentType,
+      is_supported: true,
+    },
+    price_limit: { is_no_limit: false, rule_type: 'standard' },
+    realtime: {
+      last_price: 100,
+      change: 0,
+      change_pct: 0,
+      market_status: 'closed',
+      bids: [],
+      asks: [],
+    },
+    daily_history: { status: 'available', rows: [] },
+    institutional: { status: 'unavailable' },
+    margin: { status: 'unavailable' },
+    factors: { status: 'unavailable' },
+    market_context: { benchmark_symbol: 't00.TWSE', benchmark_name: '發行量加權股價指數' },
+    monitor_summary: { rule_count: 0, active_count: 0, rules: [] },
+    recent_alerts: [],
+    overall_data_quality: 'partial',
+  }
+}
 
 function renderAt(entries: string[], initialIndex: number) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -44,6 +72,7 @@ function renderAt(entries: string[], initialIndex: number) {
 
 beforeEach(() => {
   window.history.replaceState(null, '')
+  vi.mocked(api.taiwanStockDetail).mockResolvedValue(buildDetailResponse() as any)
 })
 
 afterEach(() => {
@@ -52,6 +81,51 @@ afterEach(() => {
 })
 
 describe('TaiwanStockDetail — back navigation (DAILY_USE_CORE_UX_FIXES P1-2)', () => {
+  it('將個股代號與資產類型帶入回測工作區', async () => {
+    renderAt(['/stocks/2330.TWSE'], 0)
+
+    expect(await screen.findByRole('link', { name: '回測' })).toHaveAttribute(
+      'href',
+      '/backtest?symbol=2330.TWSE&asset_type=stock',
+    )
+  })
+
+  it('waits for ETF identity before exposing the backtest link', async () => {
+    let resolveDetail!: (value: ReturnType<typeof buildDetailResponse>) => void
+    const detail = new Promise<ReturnType<typeof buildDetailResponse>>(resolve => {
+      resolveDetail = resolve
+    })
+    vi.mocked(api.taiwanStockDetail).mockReturnValue(detail)
+    renderAt(['/stocks/0050.TWSE'], 0)
+
+    expect(screen.queryByRole('link', { name: '回測' })).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveDetail({
+        ...buildDetailResponse('etf'),
+        symbol: '0050.TWSE',
+        identity: {
+          ...buildDetailResponse('etf').identity,
+          symbol: '0050.TWSE',
+          code: '0050',
+          name: '元大台灣50',
+        },
+      })
+    })
+
+    expect(await screen.findByRole('link', { name: '回測' })).toHaveAttribute(
+      'href',
+      '/backtest?symbol=0050.TWSE&asset_type=etf',
+    )
+  })
+
+  it('指數詳情不顯示回測入口', async () => {
+    renderAt(['/stocks/t00.TWSE'], 0)
+
+    await screen.findAllByText('台積電')
+    expect(screen.queryByRole('link', { name: '回測' })).not.toBeInTheDocument()
+  })
+
   it('never shows the old hardcoded "返回即時監控" label', async () => {
     renderAt(['/stocks/2330.TWSE'], 0)
 

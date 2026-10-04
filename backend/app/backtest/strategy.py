@@ -301,8 +301,6 @@ def build_matrix_cache_profile(
         "enabled": True,
         "amount_min": 0.0,
         "turnover_min": 0.0,
-        "market_cap_min": 0.0,
-        "float_cap_min": 0.0,
         "exclude_st": True,
     }
     definitions = (

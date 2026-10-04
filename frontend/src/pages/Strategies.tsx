@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, Target } from 'lucide-react'
+import { BarChart3, Loader2, Target } from 'lucide-react'
 import { api, type StrategyDetail } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { StrategyRule, strategyRuleText } from '@/components/StrategyRule'
@@ -426,6 +426,15 @@ export function Strategies() {
 
                 {open && (
                   <>
+                    <div className="mt-2 flex justify-end">
+                      <Link
+                        to={`/backtest?${new URLSearchParams({ strategy_id: detail.id })}`}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-elevated px-2 py-1 text-[11px] font-medium text-secondary transition-colors hover:border-accent/50 hover:text-accent"
+                      >
+                        <BarChart3 className="h-3.5 w-3.5" />
+                        回測此策略
+                      </Link>
+                    </div>
                     <StrategyRule detail={detail} className="mt-2" />
                     {ran && total > 0 && (
                       <div className="mt-2 max-h-80 space-y-1 overflow-y-auto pr-0.5">

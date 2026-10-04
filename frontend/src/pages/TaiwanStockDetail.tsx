@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { Link, useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
@@ -15,6 +15,7 @@ import {
   Star,
   ChevronDown,
   History,
+  BarChart3,
 } from 'lucide-react'
 import {
   api,
@@ -166,6 +167,9 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const data = detailQuery.data
   const isLoading = detailQuery.isLoading
   const isError = detailQuery.isError
+  const backtestAssetType = data?.identity?.instrument_type === 'stock' || data?.identity?.instrument_type === 'etf'
+    ? data.identity.instrument_type
+    : null
 
   // Format K-line rows for EChartsCandlestick
   const ohlcRows: OHLC[] = useMemo(
@@ -262,6 +266,18 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
               <Scale className="h-3 w-3" />
               加入比較
             </button>
+            {!isIndex && backtestAssetType && (
+              <Link
+                to={`/backtest?${new URLSearchParams({
+                  symbol,
+                  asset_type: backtestAssetType,
+                })}`}
+                className="flex items-center gap-1 rounded-lg border border-border/60 bg-base px-1.5 py-0.5 text-[10px] font-medium text-muted transition-colors hover:border-accent/50 hover:text-accent"
+              >
+                <BarChart3 className="h-3 w-3" />
+                回測
+              </Link>
+            )}
           </div>
         </div>
 
@@ -454,11 +470,6 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                   </div>
                 </div>
 
-                {/* 操作按鈕 */}
-                {/* Phase 8B-4.2.1: 移除原本連到 /backtest?symbol=... 的「查看回測」
-                    按鈕 —— 該回測工作台的標的選擇器目前仍呼叫 A 股 instrumentSearch,
-                    無法真正選取台股標的,留著會是誤導使用者的死路連結。route/component
-                    本身未刪除,待台股回測真正可用後再視情況加回。 */}
                 {/* Embedded mode delegates to the host so no modal opens inside the dialog. */}
                 <div className="flex flex-col gap-1.5">
                   <button

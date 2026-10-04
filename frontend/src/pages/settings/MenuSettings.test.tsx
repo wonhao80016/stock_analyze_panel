@@ -36,7 +36,7 @@ afterEach(() => {
 })
 
 describe('MenuSettings — Taiwan-first consistency (Phase 8B-2.1)', () => {
-  it('shows exactly the 5 Taiwan core nav items', async () => {
+  it('shows the Taiwan core navigation items', async () => {
     vi.mocked(usePreferences).mockReturnValue({ data: { nav_order: [], nav_hidden: [] } } as any)
     renderPanel()
 
@@ -45,6 +45,7 @@ describe('MenuSettings — Taiwan-first consistency (Phase 8B-2.1)', () => {
     expect(screen.getByText('自選股')).toBeInTheDocument()
     expect(screen.getByText('看板')).toBeInTheDocument()
     expect(screen.getByText('監控中心')).toBeInTheDocument()
+    expect(screen.getByText('策略回測')).toBeInTheDocument()
   })
 
   it('individually hiding a Taiwan core item calls saveNavHidden', async () => {

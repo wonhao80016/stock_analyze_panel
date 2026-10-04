@@ -108,12 +108,12 @@ describe('Layout — Taiwan-first navigation (Phase 8B-2)', () => {
     expect(screen.queryByText('中國 A 股（選配）')).not.toBeInTheDocument()
   })
 
-  it('Phase 8B-4.2.1: /backtest 預設不在核心導航中顯示', async () => {
+  it('shows the Taiwan strategy backtest workspace in core navigation', async () => {
     vi.mocked(usePreferences).mockReturnValue({ data: {} } as any)
     renderLayout()
 
     await screen.findByText('台股選股')
-    expect(screen.queryByText('A 股回測')).not.toBeInTheDocument()
+    expect(screen.getByText('策略回測')).toBeInTheDocument()
   })
 })
 

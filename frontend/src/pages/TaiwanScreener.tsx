@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   Filter,
   ArrowUp,
@@ -1855,6 +1855,17 @@ export function TaiwanScreener() {
                         >
                           <RadioTower className="w-3.5 h-3.5" />
                         </button>
+                        <Link
+                          to={`/backtest?${new URLSearchParams({
+                            symbol: item.symbol,
+                            asset_type: item.instrument_type === 'etf' ? 'etf' : 'stock',
+                          })}`}
+                          title="開啟回測"
+                          aria-label={`使用 ${item.symbol} 回測`}
+                          className="inline-flex items-center justify-center w-6 h-6 rounded text-zinc-400 hover:bg-zinc-800 hover:text-sky-400 transition-colors"
+                        >
+                          <BarChart3 className="w-3.5 h-3.5" />
+                        </Link>
                         <button
                           type="button"
                           onClick={() => openPreview(item.symbol, item.name)}

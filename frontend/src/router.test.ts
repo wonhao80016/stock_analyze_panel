@@ -1,7 +1,3 @@
-// Phase 8C-D — Legacy Product Removal: 確認 /screener, /backtest, /mining
-// 三個 legacy A 股 route 已從 router 移除, 且沒有殘留的 lazy import 掛在
-// router 設定上(pending route element 本身不會在此測試觸發 lazy() 執行,
-// 但至少能鎖住 path 集合本身不再包含這三個 legacy path)。
 import { describe, expect, it } from 'vitest'
 import { router } from './router'
 
@@ -14,12 +10,12 @@ function collectPaths(routes: typeof router.routes): string[] {
   return paths
 }
 
-describe('router — Legacy A-share route removal (Phase 8C-D)', () => {
+describe('router', () => {
   const allPaths = collectPaths(router.routes)
 
-  it('does not register /screener, /backtest, or /mining', () => {
+  it('registers the Taiwan backtest workspace without restoring legacy routes', () => {
     expect(allPaths).not.toContain('screener')
-    expect(allPaths).not.toContain('backtest')
+    expect(allPaths).toContain('backtest')
     expect(allPaths).not.toContain('mining')
   })
 
