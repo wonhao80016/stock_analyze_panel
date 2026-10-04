@@ -46,11 +46,39 @@ from app.taiwan.enrichment.market_institutional import (
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_institutional_store import TaiwanMarketInstitutionalStore
+from app.taiwan.providers.taiwan_values import parse_taiwan_date
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.models import MarketProfileBridge
 
 logger = logging.getLogger(__name__)
+
+
+def _listing_date(raw: object) -> date | None:
+    if raw is None or not str(raw).strip():
+        return None
+    value = str(raw).strip()
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        try:
+            return parse_taiwan_date(value)
+        except ValueError:
+            return None
+
+
+def _security_master_as_of(universe: pl.DataFrame) -> date | None:
+    if universe.is_empty() or "updated_at" not in universe.columns:
+        return None
+    dates: set[date] = set()
+    for raw in universe["updated_at"].to_list():
+        if raw is None or not str(raw).strip():
+            return None
+        try:
+            dates.add(datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00")).date())
+        except ValueError:
+            return None
+    return next(iter(dates)) if len(dates) == 1 else None
 
 # Band bounds are decimal change (0.05 = 5%), lower inclusive / upper exclusive.
 CHANGE_DISTRIBUTION_BANDS: tuple[tuple[str, float | None, float | None], ...] = (
@@ -198,7 +226,7 @@ class DatasetQualityMeta(BaseModel):
 
     dataset: str
     as_of: str | None = None
-    status: DatasetFreshnessStatus = "unavailable"
+    status: Literal["current", "stale", "provisional", "unavailable"] = "unavailable"
     source: str = "local_store"
 
 
@@ -207,7 +235,7 @@ class DataQualityReport(BaseModel):
 
     target_trade_date: str
     previous_trade_date: str | None = None
-    overall_status: Literal["complete", "partial", "unavailable"] = "unavailable"
+    overall_status: Literal["complete", "provisional", "partial", "unavailable"] = "unavailable"
     daily: DatasetQualityMeta
     institutional: DatasetQualityMeta
     institutional_amount: DatasetQualityMeta
@@ -216,6 +244,10 @@ class DataQualityReport(BaseModel):
     universe_supported_symbols: int = 0
     daily_snapshot_symbols: int = 0
     missing_symbols_count: int = 0
+    twse_supported_symbols: int = 0
+    twse_snapshot_symbols: int = 0
+    tpex_supported_symbols: int = 0
+    tpex_snapshot_symbols: int = 0
 
 
 class TaiwanMarketIntelligenceSnapshot(BaseModel):
@@ -451,6 +483,14 @@ class TaiwanMarketIntelligenceService:
         if not universe_df.is_empty():
             universe_df = universe_df.filter(pl.col("listing_status") == "active")
             universe_df = universe_df.filter(pl.col("instrument_type").is_in(["stock", "etf"]))
+        universe_as_of = _security_master_as_of(universe_df)
+        if not universe_df.is_empty() and "listing_date" in universe_df.columns:
+            eligible_symbols = [
+                row["symbol"]
+                for row in universe_df.select(["symbol", "listing_date"]).iter_rows(named=True)
+                if (listed := _listing_date(row["listing_date"])) is None or listed <= target
+            ]
+            universe_df = universe_df.filter(pl.col("symbol").is_in(eligible_symbols))
         supported_symbols = universe_df["symbol"].to_list() if not universe_df.is_empty() else []
         supported_count = len(supported_symbols)
 
@@ -458,16 +498,34 @@ class TaiwanMarketIntelligenceService:
         curr_daily = self.daily_store.read_range(supported_symbols, target, target)
         prev_daily = self.daily_store.read_range(supported_symbols, prev_d, prev_d) if prev_d else pl.DataFrame()
 
-        # Check daily status
         daily_available = self.daily_store.available_dates()
-        daily_as_of = max(daily_available) if daily_available else None
-        daily_status: DatasetFreshnessStatus = (
-            "current" if (daily_as_of and daily_as_of >= target)
-            else ("stale" if daily_as_of else "unavailable")
-        )
+        daily_as_of = max((d for d in daily_available if d <= target), default=None)
+        provisional_dates = self.daily_store.provisional_dates([target])
+        is_daily_provisional = target in provisional_dates
+        if curr_daily.is_empty():
+            daily_status = "unavailable"
+        elif is_daily_provisional:
+            daily_status = "provisional"
+        elif daily_as_of == target:
+            daily_status = "current"
+        else:
+            daily_status = "stale"
 
-        matched_symbols_count = len(curr_daily)
+        snapshot_symbols = set(curr_daily["symbol"].to_list()) if not curr_daily.is_empty() else set()
+        matched_symbols_count = len(snapshot_symbols)
         missing_count = max(0, supported_count - matched_symbols_count)
+        twse_symbols = (
+            set(universe_df.filter(pl.col("exchange") == "TWSE")["symbol"].to_list())
+            if not universe_df.is_empty()
+            else set()
+        )
+        tpex_symbols = (
+            set(universe_df.filter(pl.col("exchange") == "TPEX")["symbol"].to_list())
+            if not universe_df.is_empty()
+            else set()
+        )
+        twse_snapshot_count = len(snapshot_symbols & twse_symbols)
+        tpex_snapshot_count = len(snapshot_symbols & tpex_symbols)
 
         # 3. Compute price limits and comparisons
         if not curr_daily.is_empty():
@@ -579,9 +637,9 @@ class TaiwanMarketIntelligenceService:
 
         # 4. Institutional Aggregation (NO look-ahead)
         inst_available = self.inst_store.available_dates()
-        inst_as_of = max(inst_available) if inst_available else None
+        inst_as_of = max((d for d in inst_available if d <= target), default=None)
         inst_status: DatasetFreshnessStatus = (
-            "current" if (inst_as_of and inst_as_of >= target)
+            "current" if inst_as_of == target
             else ("stale" if inst_as_of else "unavailable")
         )
         inst_agg, amount_as_of = self._institutional_amounts(target)
@@ -589,9 +647,9 @@ class TaiwanMarketIntelligenceService:
         # 5. Margin Aggregation (NO look-ahead)
         m_df = self.margin_store.read_range(None, target, target)
         m_available = self.margin_store.available_dates()
-        m_as_of = max(m_available) if m_available else None
+        m_as_of = max((d for d in m_available if d <= target), default=None)
         m_status: DatasetFreshnessStatus = (
-            "current" if (m_as_of and m_as_of >= target)
+            "current" if m_as_of == target
             else ("stale" if m_as_of else "unavailable")
         )
 
@@ -637,13 +695,26 @@ class TaiwanMarketIntelligenceService:
             ),
         )
 
-        # 7. Data Quality & Overall Status
-        # Amount coverage is reported in data_quality.institutional_amount only; gating overall_status on it
-        # would drop market context from AI research and flag every day before the amount backfill as partial.
+        expected_exchanges_present = bool(twse_symbols) and bool(tpex_symbols)
+        snapshot_exchanges_present = twse_snapshot_count > 0 and tpex_snapshot_count > 0
+        daily_coverage_complete = (
+            supported_count > 0
+            and matched_symbols_count > 0
+            and missing_count == 0
+            and expected_exchanges_present
+            and snapshot_exchanges_present
+            and universe_as_of == target
+        )
         dataset_statuses = [daily_status, inst_status, m_status]
-        if all(s == "current" for s in dataset_statuses):
+        if supported_count == 0 or matched_symbols_count == 0:
+            overall_status = "unavailable"
+        elif not daily_coverage_complete:
+            overall_status = "partial"
+        elif daily_status == "provisional" and all(s == "current" for s in (inst_status, m_status)):
+            overall_status = "provisional"
+        elif all(s == "current" for s in dataset_statuses):
             overall_status = "complete"
-        elif any(s == "current" for s in dataset_statuses) or any(s == "stale" for s in dataset_statuses):
+        elif any(s in ("current", "stale", "provisional") for s in dataset_statuses):
             overall_status = "partial"
         else:
             overall_status = "unavailable"
@@ -685,6 +756,10 @@ class TaiwanMarketIntelligenceService:
             universe_supported_symbols=supported_count,
             daily_snapshot_symbols=matched_symbols_count,
             missing_symbols_count=missing_count,
+            twse_supported_symbols=len(twse_symbols),
+            twse_snapshot_symbols=twse_snapshot_count,
+            tpex_supported_symbols=len(tpex_symbols),
+            tpex_snapshot_symbols=tpex_snapshot_count,
         )
 
         return TaiwanMarketIntelligenceSnapshot(

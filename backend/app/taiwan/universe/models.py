@@ -69,6 +69,7 @@ class TaiwanInstrument:
     classification_source: str | None = None  # ClassificationSource value
     underlying_scope: str | None = None       # "domestic" | "foreign" | "unknown"
     leverage_multiplier: float = 1.0          # e.g. 1.0, 2.0, -1.0
+    etf_management_style: str | None = None   # "active" | "passive" | None
     currency: str = "TWD"
     lot_size: int = 1000
 
@@ -109,7 +110,11 @@ class MarketProfileBridge:
             # Strictly audit: Only plain-vanilla bond ETFs (multiplier == 1.0) are exempt (0% tax).
             # Leveraged/Inverse bond ETFs (e.g. 00688L/00689R) are subject to statutory 0.1% tax
             # under Ministry of Finance ruling (台財稅字第10504709410號).
-            if cat == EtfCategory.BOND.value and abs(instrument.leverage_multiplier - 1.0) < 1e-6:
+            if (
+                cat == EtfCategory.BOND.value
+                and instrument.etf_management_style == "passive"
+                and abs(instrument.leverage_multiplier - 1.0) < 1e-6
+            ):
                 return TaxClass.BOND_ETF
             return TaxClass.DOMESTIC_ETF
         return TaxClass.ORDINARY_STOCK

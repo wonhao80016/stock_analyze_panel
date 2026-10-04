@@ -467,6 +467,7 @@ class TestEtfClassificationAndSafety:
             classification_source="cfi_code",
             underlying_scope="foreign",
             leverage_multiplier=1.0,
+            etf_management_style="passive",
         )
         assert MarketProfileBridge.get_tax_class(bond_etf) == TaxClass.BOND_ETF
         assert MarketProfileBridge.get_price_limit_pct(bond_etf) is None

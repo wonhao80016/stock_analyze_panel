@@ -740,10 +740,45 @@ def _intel(store: TaiwanMarketInstitutionalStore, current_on: date | None = None
         empty.available_dates.return_value = []
         empty.read_range.return_value = pl.DataFrame()
         daily = inst = margin = empty
+        security_master = MagicMock()
+        security_master.to_dataframe.return_value = pl.DataFrame()
     else:
-        daily, inst, margin = _current_store(current_on), _current_store(current_on), _current_store(current_on)
+        daily = _current_store(current_on)
+        daily.provisional_dates.return_value = []
+        daily.read_range.return_value = pl.DataFrame({
+            "symbol": ["A.TWSE", "B.TPEX"],
+            "date": [current_on, current_on],
+            "open": [100.0, 100.0],
+            "high": [101.0, 101.0],
+            "low": [99.0, 99.0],
+            "close": [100.0, 100.0],
+            "volume": [1000.0, 1000.0],
+            "amount": [100000.0, 100000.0],
+            "quote_ts": [None, None],
+        })
+        inst, margin = _current_store(current_on), _current_store(current_on)
+        security_master = MagicMock()
+        security_master.to_dataframe.return_value = pl.DataFrame({
+            "symbol": ["A.TWSE", "B.TPEX"],
+            "exchange": ["TWSE", "TPEX"],
+            "instrument_type": ["stock", "stock"],
+            "listing_status": ["active", "active"],
+            "listing_date": [str(current_on), str(current_on)],
+            "updated_at": [
+                f"{current_on.isoformat()}T08:00:00+08:00",
+                f"{current_on.isoformat()}T08:00:00+08:00",
+            ],
+        })
+        security_master.get_instrument.return_value = None
+    corporate_actions = MagicMock()
+    corporate_actions.read.return_value = pl.DataFrame()
     return TaiwanMarketIntelligenceService(
-        daily_store=daily, inst_store=inst, margin_store=margin, market_inst_store=store
+        daily_store=daily,
+        inst_store=inst,
+        margin_store=margin,
+        market_inst_store=store,
+        security_master=security_master,
+        corporate_actions=corporate_actions,
     )
 
 

@@ -11,10 +11,14 @@ Covers:
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+
 import polars as pl
 import pytest
 
+from app.backtest.engine import MatcherConfig
+from app.backtest.strategy import _configure_taiwan_matcher
 from app.data_providers.registry import get_provider
 from app.taiwan.market_rules import PriceLimitClass, TaxClass, TickSizeClass
 from app.taiwan.universe import (
@@ -61,6 +65,11 @@ class TestTaiwanSecurityMasterOffline:
 
     def test_persistence_cache_roundtrip(self, offline_master: TaiwanSecurityMaster, tmp_path: Path):
         save_file = tmp_path / "saved_master.parquet"
+        etf = offline_master.get_instrument("0050.TWSE")
+        offline_master._instruments["0050.TWSE"] = replace(
+            etf,
+            etf_management_style="passive",
+        )
         offline_master.save_cache(save_file)
         assert save_file.exists()
 
@@ -69,6 +78,83 @@ class TestTaiwanSecurityMasterOffline:
         assert success is True
         assert new_master.get_instrument("2330.TWSE") is not None
         assert new_master.get_instrument("2330.TWSE").name == "台積電"
+        assert new_master.get_instrument("0050.TWSE").etf_management_style == "passive"
+
+    def test_legacy_cache_without_management_style_reads_as_unknown(self, tmp_path: Path):
+        cache_file = tmp_path / "legacy_master.parquet"
+        pl.DataFrame({
+            "symbol": ["00720B.TPEX"],
+            "code": ["00720B"],
+            "exchange": ["TPEX"],
+            "name": ["元大投資級公司債"],
+            "instrument_type": ["etf"],
+            "listing_status": ["active"],
+            "industry": [None],
+            "is_supported": [True],
+            "etf_category": ["bond"],
+            "classification_source": ["cfi_code"],
+            "underlying_scope": ["foreign"],
+            "leverage_multiplier": [1.0],
+            "lot_size": [1000],
+        }).write_parquet(cache_file)
+
+        master = TaiwanSecurityMaster(cache_path=cache_file)
+
+        assert master.load_cache() is True
+        assert master.get_instrument("00720B.TPEX").etf_management_style is None
+
+    @pytest.mark.parametrize(
+        ("include_lot_size", "lot_size", "expected_lot_size", "invalid"),
+        [
+            pytest.param(False, None, 1000, False, id="missing-column"),
+            pytest.param(True, None, 1000, False, id="null"),
+            pytest.param(True, 0, 0, True, id="zero"),
+            pytest.param(True, -100, -100, True, id="negative"),
+        ],
+    )
+    def test_legacy_cache_lot_size_compatibility_and_validation(
+        self,
+        tmp_path: Path,
+        include_lot_size: bool,
+        lot_size: int | None,
+        expected_lot_size: int,
+        invalid: bool,
+    ):
+        cache_file = tmp_path / "legacy_lot_master.parquet"
+        frame = pl.DataFrame({
+            "symbol": ["2330.TWSE"],
+            "code": ["2330"],
+            "exchange": ["TWSE"],
+            "name": ["台積電"],
+            "instrument_type": ["stock"],
+            "listing_status": ["active"],
+            "industry": [None],
+            "is_supported": [True],
+        })
+        if include_lot_size:
+            frame = frame.with_columns(
+                pl.lit(lot_size, dtype=pl.Int64).alias("lot_size")
+            )
+        frame.write_parquet(cache_file)
+        master = TaiwanSecurityMaster(cache_path=cache_file)
+
+        assert master.load_cache() is True
+        assert master.get_instrument("2330.TWSE").lot_size == expected_lot_size
+        if invalid:
+            with pytest.raises(ValueError, match="invalid trading unit"):
+                _configure_taiwan_matcher(
+                    MatcherConfig(),
+                    ["2330.TWSE"],
+                    security_master=master,
+                )
+        else:
+            config = MatcherConfig()
+            _configure_taiwan_matcher(
+                config,
+                ["2330.TWSE"],
+                security_master=master,
+            )
+            assert config.lot_size("2330.TWSE") == 1000
 
     def test_universe_generation(self, offline_master: TaiwanSecurityMaster):
         all_univ = offline_master.get_universe(UniverseType.TAIWAN_ALL)

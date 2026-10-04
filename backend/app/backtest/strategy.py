@@ -515,6 +515,83 @@ def _resolve_base_columns(features: set[str]) -> frozenset[str]:
     return frozenset(base & storage)
 
 
+def _minute_fill_reference(close: np.ndarray, entry_fill: str) -> np.ndarray:
+    result = np.full(close.shape, np.nan, dtype=np.float32)
+    if entry_fill == "open_t+1" and close.shape[0] > 1:
+        daily_mean = rolling_mean(close, 5)
+        result[1:] = daily_mean[:-1]
+    result.setflags(write=False)
+    return result
+
+
+def _configure_taiwan_matcher(
+    matcher_config: MatcherConfig,
+    symbols: list[str] | tuple[str, ...],
+    security_master=None,
+) -> None:
+    all_symbols = sorted({str(symbol) for symbol in symbols})
+    taiwan_symbols = sorted({
+        str(symbol)
+        for symbol in all_symbols
+        if str(symbol).endswith((".TWSE", ".TPEX"))
+    })
+    if not taiwan_symbols:
+        return
+    if len(taiwan_symbols) != len(all_symbols):
+        raise ValueError("mixed Taiwan and non-Taiwan backtest universes are unsupported")
+
+    from app.taiwan.market_rules import (
+        TAIWAN_SIMULATION_COMMISSION_RATE,
+        BacktestMode,
+        LotModel,
+        TaiwanMarketProfile,
+        TradingCostModel,
+    )
+    from app.taiwan.universe import get_security_master
+    from app.taiwan.universe.models import MarketProfileBridge
+
+    master = security_master or get_security_master()
+    tax_classes = {}
+    lot_sizes = {}
+    for symbol in taiwan_symbols:
+        try:
+            instrument = master.get_instrument(symbol)
+        except Exception as exc:
+            raise ValueError(f"Taiwan Security Master unavailable for {symbol}: {exc}") from exc
+        if instrument is None:
+            raise ValueError(f"Taiwan Security Master has no execution profile for {symbol}")
+        lot_size = int(instrument.lot_size)
+        if lot_size <= 0:
+            raise ValueError(f"Taiwan Security Master has invalid trading unit for {symbol}")
+        tax_classes[symbol] = MarketProfileBridge.get_tax_class(instrument)
+        lot_sizes[symbol] = lot_size
+
+    matcher_config.market_profile = TaiwanMarketProfile(
+        mode=(
+            BacktestMode.DAY_TRADING
+            if matcher_config.minimum_holding_sessions == 0
+            else BacktestMode.STANDARD_CASH
+        ),
+        cost=TradingCostModel(
+            commission_rate=(
+                matcher_config.commission_pct
+                if matcher_config.commission_pct is not None
+                else TAIWAN_SIMULATION_COMMISSION_RATE
+            ),
+            discount=matcher_config.commission_discount,
+            minimum_commission=matcher_config.minimum_commission,
+        ),
+        lot=LotModel(mode=matcher_config.lot_mode),
+    )
+    matcher_config.tax_class_by_symbol = tax_classes
+    matcher_config.lot_size_by_symbol = lot_sizes
+    eligible_symbols = set(matcher_config.day_trade_eligible_symbols)
+    matcher_config.day_trade_eligible_by_symbol = {
+        symbol: symbol in eligible_symbols
+        for symbol in taiwan_symbols
+    }
+
+
 @dataclass
 class StrategyBacktestConfig:
     strategy_id: str
@@ -529,6 +606,8 @@ class StrategyBacktestConfig:
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     fees_pct: float = 0.0002
     commission_pct: float | None = None
+    commission_discount: float = 1.0
+    minimum_commission: float = 0.0
     stamp_tax_pct: float | None = None
     slippage_bps: float = 5.0
     max_positions: int = 10
@@ -537,7 +616,10 @@ class StrategyBacktestConfig:
     position_sizing: Literal["equal", "score_weight"] = "equal"
     mode: Literal["position", "full"] = "position"
     asset_type: str = "stock"
+    lot_mode: Literal["board_lot", "odd_lot"] = "board_lot"
     holding_days: int = 5
+    minimum_holding_sessions: int = 1
+    day_trade_eligible_symbols: tuple[str, ...] = ()
     # 分钟K精确成交: 开启后用当日分钟K确定穿越价/VWAP (需 Pro+ 分钟K能力)
     minute_fill: bool = False
     # 市场环境过滤: {"states": ["strong",...], "min_score": 60}。
@@ -549,6 +631,10 @@ class StrategyBacktestConfig:
             self.entry_fill = self.matching
         if self.exit_fill is None:
             self.exit_fill = self.matching
+        if self.minimum_holding_sessions < 0:
+            raise ValueError("minimum_holding_sessions must be non-negative")
+        if not 0 <= self.commission_discount <= 1:
+            raise ValueError("commission_discount must be between 0 and 1")
 
 
 @dataclass
@@ -640,7 +726,8 @@ class PreparedMatrixBacktest:
     exit_time_mask: np.ndarray
     start_id: int
     stop_id: int
-    reference_price: np.ndarray | None
+    entry_reference_price: np.ndarray | None
+    exit_reference_price: np.ndarray | None
     prepare_timing_ms: dict[str, float]
     compute_cache: MatrixComputeCache
 
@@ -945,8 +1032,13 @@ class StrategyBacktestService:
             raise ValueError("正式回测区间内无数据")
         start_id = int(time_ids[0])
         stop_id = int(time_ids[-1]) + 1
-        reference_price = (
-            rolling_mean(market_data.close, 5)[start_id:stop_id]
+        entry_reference_price = (
+            _minute_fill_reference(market_data.close, first.entry_fill)[start_id:stop_id]
+            if first.minute_fill
+            else None
+        )
+        exit_reference_price = (
+            _minute_fill_reference(market_data.close, first.exit_fill)[start_id:stop_id]
             if first.minute_fill
             else None
         )
@@ -963,7 +1055,8 @@ class StrategyBacktestService:
             exit_time_mask=exit_time_mask,
             start_id=start_id,
             stop_id=stop_id,
-            reference_price=reference_price,
+            entry_reference_price=entry_reference_price,
+            exit_reference_price=exit_reference_price,
             prepare_timing_ms=timing_ms,
             compute_cache=compute_cache,
         )
@@ -1202,6 +1295,8 @@ class StrategyBacktestService:
             exit_fill=config.exit_fill,
             fees_pct=config.fees_pct,
             commission_pct=config.commission_pct,
+            commission_discount=config.commission_discount,
+            minimum_commission=config.minimum_commission,
             stamp_tax_pct=config.stamp_tax_pct,
             slippage_bps=config.slippage_bps,
             stop_loss_pct=stop_loss,
@@ -1210,6 +1305,8 @@ class StrategyBacktestService:
             trailing_take_profit_activate_pct=trailing_take_profit_activate,
             trailing_take_profit_drawdown_pct=trailing_take_profit_drawdown,
             max_hold_days=max_hold_days,
+            minimum_holding_sessions=config.minimum_holding_sessions,
+            day_trade_eligible_symbols=tuple(config.day_trade_eligible_symbols),
             max_positions=config.max_positions,
             max_exposure_pct=config.max_exposure_pct,
             score_min=score_min,
@@ -1217,7 +1314,24 @@ class StrategyBacktestService:
             initial_capital=config.initial_capital,
             position_sizing=config.position_sizing,
             minute_fill=config.minute_fill,
+            asset_type=config.asset_type,
+            lot_mode=config.lot_mode,
         )
+        if market_data is not None:
+            execution_symbols = list(market_data.symbols)
+        elif prepared is not None:
+            execution_symbols = list(prepared.market_data.symbols)
+        elif panel is not None:
+            execution_symbols = [
+                str(value)
+                for value in panel.get_column("symbol").unique().to_list()
+            ]
+        else:
+            return _err("回测缺少可执行标的")
+        try:
+            _configure_taiwan_matcher(matcher_config, execution_symbols)
+        except ValueError as e:
+            return _err(str(e))
         t_signal = time.perf_counter()
         selection_stats: dict[str, int | bool]
 
@@ -1262,8 +1376,19 @@ class StrategyBacktestService:
             stop_id = int(time_ids[-1]) + 1
             panel_rows = int(np.isfinite(market_data.close[start_id:stop_id]).sum())
             panel_columns = len(feature_plan.matrix_columns)
-            reference_price = (
-                rolling_mean(market_data.close, 5)[start_id:stop_id]
+            entry_reference_price = (
+                _minute_fill_reference(
+                    market_data.close,
+                    str(matcher_config.entry_fill),
+                )[start_id:stop_id]
+                if matcher_config.minute_fill
+                else None
+            )
+            exit_reference_price = (
+                _minute_fill_reference(
+                    market_data.close,
+                    str(matcher_config.exit_fill),
+                )[start_id:stop_id]
                 if matcher_config.minute_fill
                 else None
             )
@@ -1310,7 +1435,8 @@ class StrategyBacktestService:
                 sim_signal_matrix,
                 entry_delay_bars=1 if matcher_config.entry_fill == "open_t+1" else 0,
                 exit_delay_bars=1 if matcher_config.exit_fill == "open_t+1" else 0,
-                reference_price=reference_price,
+                entry_reference_price=entry_reference_price,
+                exit_reference_price=exit_reference_price,
                 minute_exit_trigger=matcher_config.exit_fill == "signal_next_minute",
             )
             timing_ms["matrix_build"] = round((time.perf_counter() - t_matrix) * 1000, 1)
@@ -1327,7 +1453,8 @@ class StrategyBacktestService:
                 exit_time_mask = prepared.exit_time_mask
                 start_id = prepared.start_id
                 stop_id = prepared.stop_id
-                reference_price = prepared.reference_price
+                entry_reference_price = prepared.entry_reference_price
+                exit_reference_price = prepared.exit_reference_price
                 panel_rows = int(np.isfinite(market_data.close[start_id:stop_id]).sum())
                 panel_columns = len(feature_plan.matrix_columns)
             else:
@@ -1366,8 +1493,19 @@ class StrategyBacktestService:
                 stop_id = int(time_ids[-1]) + 1
                 panel_rows = int(np.isfinite(market_data.close[start_id:stop_id]).sum())
                 panel_columns = len(feature_plan.matrix_columns)
-                reference_price = (
-                    rolling_mean(market_data.close, 5)[start_id:stop_id]
+                entry_reference_price = (
+                    _minute_fill_reference(
+                        market_data.close,
+                        str(matcher_config.entry_fill),
+                    )[start_id:stop_id]
+                    if matcher_config.minute_fill
+                    else None
+                )
+                exit_reference_price = (
+                    _minute_fill_reference(
+                        market_data.close,
+                        str(matcher_config.exit_fill),
+                    )[start_id:stop_id]
                     if matcher_config.minute_fill
                     else None
                 )
@@ -1428,7 +1566,8 @@ class StrategyBacktestService:
                 sim_signal_matrix,
                 entry_delay_bars=1 if matcher_config.entry_fill == "open_t+1" else 0,
                 exit_delay_bars=1 if matcher_config.exit_fill == "open_t+1" else 0,
-                reference_price=reference_price,
+                entry_reference_price=entry_reference_price,
+                exit_reference_price=exit_reference_price,
                 minute_exit_trigger=matcher_config.exit_fill == "signal_next_minute",
             )
             timing_ms["matrix_build"] = round((time.perf_counter() - t_matrix) * 1000, 1)
@@ -2101,6 +2240,8 @@ class StrategyBacktestService:
             ),
             "fees_pct": c.fees_pct,
             "commission_pct": c.commission_pct,
+            "commission_discount": c.commission_discount,
+            "minimum_commission": c.minimum_commission,
             "stamp_tax_pct": c.stamp_tax_pct,
             "slippage_bps": c.slippage_bps,
             "max_positions": c.max_positions,
@@ -2109,6 +2250,10 @@ class StrategyBacktestService:
             "position_sizing": c.position_sizing,
             "mode": c.mode,
             "holding_days": c.holding_days,
+            "minimum_holding_sessions": c.minimum_holding_sessions,
+            "day_trade_eligible_symbols": list(c.day_trade_eligible_symbols),
+            "asset_type": c.asset_type,
+            "lot_mode": c.lot_mode,
             "minute_fill": c.minute_fill,
             "regime_filter": c.regime_filter,
         }

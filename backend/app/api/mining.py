@@ -56,8 +56,8 @@ class MiningStartRequest(BaseModel):
     start: date | None = None
     end: date | None = None
     budget_profile: Literal["exploratory", "balanced", "strict"] = "balanced"
-    commission_pct: float = Field(0.0002, ge=0.0, le=0.05, allow_inf_nan=False)
-    stamp_tax_pct: float = Field(0.0005, ge=0.0, le=0.05, allow_inf_nan=False)
+    commission_pct: float | None = Field(None, ge=0.0, le=0.05, allow_inf_nan=False)
+    stamp_tax_pct: None = None
     slippage_bps: float = Field(5.0, ge=0.0, le=1000.0, allow_inf_nan=False)
     correlation_threshold: float = Field(0.75, gt=0.0, le=1.0, allow_inf_nan=False)
     max_combination_factors: int = Field(4, ge=1, le=MAX_COMBINATION_SIZE)

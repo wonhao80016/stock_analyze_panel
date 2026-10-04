@@ -105,8 +105,8 @@ class RuntimeRequest:
     end: date
     profile: Literal["exploratory", "balanced", "strict"]
     forward_horizon: int
-    commission_pct: float
-    stamp_tax_pct: float
+    commission_pct: float | None
+    stamp_tax_pct: None
     slippage_bps: float
     correlation_threshold: float
     max_finalists: int
@@ -292,9 +292,9 @@ class MatcherCandidateEvaluator:
             matching="open_t+1",
             entry_fill="open_t+1",
             exit_fill="open_t+1",
-            fees_pct=self.request.commission_pct,
+            fees_pct=0.0002,
             commission_pct=self.request.commission_pct,
-            stamp_tax_pct=self.request.stamp_tax_pct,
+            stamp_tax_pct=None,
             slippage_bps=self.request.slippage_bps,
             max_positions=10,
             max_exposure_pct=1.0,
@@ -478,8 +478,9 @@ def run_mining_runtime(
         start=request.start,
         end=request.end,
         asset_type=request.asset_type,
+        fees_pct=0.0002,
         commission_pct=request.commission_pct,
-        stamp_tax_pct=request.stamp_tax_pct,
+        stamp_tax_pct=None,
         slippage_bps=request.slippage_bps,
     )
     phase_ms: dict[str, float] = {}
@@ -892,12 +893,14 @@ def _decode_runtime_request(
         1.0,
         exclusive_min=True,
     )
-    commission_pct = _bounded_float(
-        request.get("commission_pct", 0.0002), "commission_pct", 0.0, 0.05
+    commission_value = request.get("commission_pct")
+    commission_pct = (
+        None
+        if commission_value is None
+        else _bounded_float(commission_value, "commission_pct", 0.0, 0.05)
     )
-    stamp_tax_pct = _bounded_float(
-        request.get("stamp_tax_pct", 0.0005), "stamp_tax_pct", 0.0, 0.05
-    )
+    if request.get("stamp_tax_pct") is not None:
+        raise ValueError("stamp_tax_pct cannot override per-instrument Taiwan tax rules")
     slippage_bps = _bounded_float(
         request.get("slippage_bps", 5.0), "slippage_bps", 0.0, 1000.0
     )
@@ -930,7 +933,7 @@ def _decode_runtime_request(
         profile=profile,  # type: ignore[arg-type]
         forward_horizon=forward_horizon,
         commission_pct=commission_pct,
-        stamp_tax_pct=stamp_tax_pct,
+        stamp_tax_pct=None,
         slippage_bps=slippage_bps,
         correlation_threshold=correlation_threshold,
         max_finalists=max_finalists,

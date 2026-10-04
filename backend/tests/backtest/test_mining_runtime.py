@@ -12,6 +12,7 @@ from app.backtest.mining import (
     generate_nested_folds,
 )
 from app.backtest.mining_runtime import (
+    MatcherCandidateEvaluator,
     TrainingMetricProvider,
     _decode_runtime_request,
     _load_compact_factor_panel,
@@ -22,6 +23,45 @@ from app.backtest.mining_runtime import (
     attach_single_forward_return,
 )
 from app.services import regime_builder
+
+
+@pytest.mark.parametrize("commission_pct", [None, 0.0008])
+def test_mining_candidate_uses_taiwan_cost_profile_defaults(
+    tmp_path,
+    commission_pct: float | None,
+) -> None:
+    request = SimpleNamespace(
+        symbols=["2330.TWSE"],
+        commission_pct=commission_pct,
+        stamp_tax_pct=None,
+        slippage_bps=0.0,
+        asset_type="stock",
+        forward_horizon=5,
+    )
+    evaluator = MatcherCandidateEvaluator(
+        service=SimpleNamespace(),
+        strategy_engine=SimpleNamespace(),
+        data_dir=tmp_path,
+        request=request,
+        base_market=None,
+        cancel_check=None,
+    )
+
+    config = evaluator._backtest_config(
+        {
+            "kind": "factor_rank",
+            "scoring": {"turnover_rate": 1.0},
+            "directions": {"turnover_rate": "high"},
+        },
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        "overall",
+    )
+
+    assert config.fees_pct == pytest.approx(0.0002)
+    assert config.commission_pct == commission_pct
+    assert config.stamp_tax_pct is None
+    assert config.lot_mode == "board_lot"
 
 
 def test_runtime_rejects_insufficient_balanced_range_before_loading_panel(
@@ -54,6 +94,51 @@ def test_runtime_rejects_insufficient_balanced_range_before_loading_panel(
         ),
     ):
         _decode_runtime_request(payload, tmp_path, SimpleNamespace())
+
+
+def test_runtime_preserves_optional_commission_and_rejects_global_tax_override(
+    tmp_path,
+) -> None:
+    first = date(2024, 1, 1)
+    for offset in range(219):
+        value = first + timedelta(days=offset)
+        partition = tmp_path / "kline_daily_enriched" / f"date={value.isoformat()}"
+        partition.mkdir(parents=True)
+        (partition / "part.parquet").touch()
+    request = {
+        "factor_names": ["turnover_rate"],
+        "strategy_ids": [],
+        "asset_type": "stock",
+        "budget_profile": "exploratory",
+    }
+
+    decoded = _decode_runtime_request(
+        {"run_id": "default-cost", "request": request},
+        tmp_path,
+        SimpleNamespace(),
+    )
+    assert decoded.commission_pct is None
+    assert decoded.stamp_tax_pct is None
+
+    explicit_zero = _decode_runtime_request(
+        {
+            "run_id": "zero-commission",
+            "request": {**request, "commission_pct": 0.0},
+        },
+        tmp_path,
+        SimpleNamespace(),
+    )
+    assert explicit_zero.commission_pct == 0.0
+
+    with pytest.raises(ValueError, match="cannot override per-instrument Taiwan tax"):
+        _decode_runtime_request(
+            {
+                "run_id": "global-tax",
+                "request": {**request, "stamp_tax_pct": 0.0005},
+            },
+            tmp_path,
+            SimpleNamespace(),
+        )
 
 
 def test_single_forward_label_uses_global_trading_axis_without_jump() -> None:

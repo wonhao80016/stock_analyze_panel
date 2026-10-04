@@ -61,6 +61,7 @@ class RegulatoryRuleUnavailableError(ValueError):
 
 # ── 1. Trading Cost (Commission) Model ─────────────────────────
 
+TAIWAN_SIMULATION_COMMISSION_RATE: float = 0.001425
 EXAMPLE_BROKER_MIN_COMMISSION: float = 20.0  # Common broker floor for reference only
 
 
@@ -73,7 +74,7 @@ class TradingCostModel:
     Minimum commission is strictly broker-specific. The statutory default is 0.0 (no exchange floor).
     Specific broker settings (e.g. 20 TWD standard, 1 TWD odd-lot) must be explicitly configured.
     """
-    commission_rate: float = 0.001425  # Legacy backtest default; broker configuration in production.
+    commission_rate: float = TAIWAN_SIMULATION_COMMISSION_RATE
     discount: float = 1.0              # 1.0 = full price; 0.6 = 60%; 0.28 = 28%
     minimum_commission: float = 0.0    # Statutory default 0.0 (broker-specific when > 0)
 
@@ -106,6 +107,7 @@ class SecuritiesTaxModel:
 
     # Statutory expiry dates from enacted legislation
     day_trade_expiry: date = date(2027, 12, 31)
+    bond_etf_start: date = date(2017, 1, 1)
     bond_etf_expiry: date = date(2026, 12, 31)
 
     def get_tax_rate(
@@ -124,6 +126,8 @@ class SecuritiesTaxModel:
             return self.day_trade_stock_rate
 
         if tax_class == TaxClass.BOND_ETF:
+            if trade_date is not None and trade_date < self.bond_etf_start:
+                return self.domestic_etf_rate
             if trade_date is not None and trade_date > self.bond_etf_expiry:
                 raise RegulatoryRuleUnavailableError(
                     f"Bond ETF 0% tax exemption expired on {self.bond_etf_expiry}. "

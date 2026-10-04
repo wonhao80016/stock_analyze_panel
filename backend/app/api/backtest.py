@@ -333,6 +333,8 @@ class StrategyBacktestRequest(BaseModel):
     exit_fill: Literal["close_t", "open_t+1", "signal_next_minute"] | None = None
     fees_pct: float = 0.0002
     commission_pct: float | None = None
+    commission_discount: float = Field(1.0, ge=0.0, le=1.0)
+    minimum_commission: float = Field(0.0, ge=0.0)
     stamp_tax_pct: float | None = None
     slippage_bps: float = 5.0
     max_positions: int = 10
@@ -341,7 +343,10 @@ class StrategyBacktestRequest(BaseModel):
     position_sizing: Literal["equal", "score_weight"] = "equal"
     mode: Literal["position", "full"] = "position"
     holding_days: int = 5
+    minimum_holding_sessions: int = Field(1, ge=0)
+    day_trade_eligible_symbols: list[str] = Field(default_factory=list)
     asset_type: str = "stock"
+    lot_mode: Literal["board_lot", "odd_lot"] = "board_lot"
     minute_fill: bool = False
     regime_filter: dict | None = None
 
@@ -368,6 +373,8 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         exit_fill=req.exit_fill,
         fees_pct=req.fees_pct,
         commission_pct=req.commission_pct,
+        commission_discount=req.commission_discount,
+        minimum_commission=req.minimum_commission,
         stamp_tax_pct=req.stamp_tax_pct,
         slippage_bps=req.slippage_bps,
         max_positions=req.max_positions,
@@ -376,7 +383,10 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         position_sizing=req.position_sizing,
         mode=req.mode,
         holding_days=req.holding_days,
+        minimum_holding_sessions=req.minimum_holding_sessions,
+        day_trade_eligible_symbols=tuple(req.day_trade_eligible_symbols),
         asset_type=req.asset_type,
+        lot_mode=req.lot_mode,
         minute_fill=req.minute_fill,
         regime_filter=req.regime_filter,
     )
@@ -453,8 +463,13 @@ def _make_job_key(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    minimum_holding_sessions: int = 1,
+    minimum_commission: float = 0.0,
+    lot_mode: str = "board_lot",
+    commission_discount: float = 1.0,
+    day_trade_eligible_symbols: str | tuple[str, ...] = "",
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}"
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{minimum_holding_sessions}|{minimum_commission}|{lot_mode}|{commission_discount}|{day_trade_eligible_symbols}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -483,6 +498,11 @@ async def strategy_stream(
     asset_type: str = "stock",
     minute_fill: bool = False,
     regime_filter: str | None = None,
+    minimum_holding_sessions: int = 1,
+    minimum_commission: float = 0.0,
+    lot_mode: str = "board_lot",
+    commission_discount: float = 1.0,
+    day_trade_eligible_symbols: str = "",
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -523,6 +543,11 @@ async def strategy_stream(
         asset_type=asset_type,
         minute_fill=minute_fill,
         regime_filter=regime_filter,
+        minimum_holding_sessions=minimum_holding_sessions,
+        minimum_commission=minimum_commission,
+        lot_mode=lot_mode,
+        commission_discount=commission_discount,
+        day_trade_eligible_symbols=day_trade_eligible_symbols,
     )
 
     _cleanup_stale_jobs()
@@ -573,6 +598,8 @@ async def strategy_stream(
                 exit_fill=exit_fill,
                 fees_pct=fees_pct,
                 commission_pct=commission_pct,
+                commission_discount=float(commission_discount),
+                minimum_commission=float(minimum_commission),
                 stamp_tax_pct=stamp_tax_pct,
                 slippage_bps=slippage_bps,
                 max_positions=int(max_positions),
@@ -581,7 +608,14 @@ async def strategy_stream(
                 position_sizing=position_sizing,
                 mode=mode,
                 holding_days=int(holding_days),
+                minimum_holding_sessions=int(minimum_holding_sessions),
+                day_trade_eligible_symbols=tuple(
+                    symbol.strip()
+                    for symbol in day_trade_eligible_symbols.split(",")
+                    if symbol.strip()
+                ),
                 asset_type=asset_type,
+                lot_mode=lot_mode,
                 minute_fill=minute_fill,
                 regime_filter=json.loads(regime_filter) if regime_filter else None,
             )
@@ -689,6 +723,11 @@ async def strategy_cancel(request: Request):
         commission_pct=_get_opt_float("commission_pct"),
         stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
         asset_type=_get("asset_type", "stock"),
+        minimum_holding_sessions=int(_get("minimum_holding_sessions", "1")),
+        minimum_commission=float(_get("minimum_commission", "0")),
+        lot_mode=_get("lot_mode", "board_lot"),
+        commission_discount=float(_get("commission_discount", "1")),
+        day_trade_eligible_symbols=_get("day_trade_eligible_symbols", ""),
     )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
@@ -719,9 +758,11 @@ def _json_safe(obj):
 
 # 透传给每组回测的 StrategyBacktestConfig 字段 (作为 backtest_kwargs)。
 _OPT_BT_FIELDS = [
-    "matching", "fees_pct", "commission_pct", "stamp_tax_pct", "slippage_bps",
+    "matching", "fees_pct", "commission_pct", "commission_discount", "minimum_commission",
+    "stamp_tax_pct", "slippage_bps",
     "max_positions", "max_exposure_pct", "initial_capital", "position_sizing",
-    "mode", "holding_days",
+    "mode", "holding_days", "minimum_holding_sessions", "lot_mode",
+    "day_trade_eligible_symbols",
 ]
 
 
@@ -748,11 +789,16 @@ def _make_opt_job_key(
 def _opt_backtest_kwargs(
     matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
     max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+    minimum_commission=0.0, minimum_holding_sessions=1, lot_mode="board_lot",
+    commission_discount=1.0,
+    day_trade_eligible_symbols="",
 ) -> dict:
     return {
         "matching": matching,
         "fees_pct": fees_pct,
         "commission_pct": commission_pct,
+        "commission_discount": float(commission_discount),
+        "minimum_commission": float(minimum_commission),
         "stamp_tax_pct": stamp_tax_pct,
         "slippage_bps": slippage_bps,
         "max_positions": int(max_positions),
@@ -761,6 +807,13 @@ def _opt_backtest_kwargs(
         "position_sizing": position_sizing,
         "mode": mode,
         "holding_days": int(holding_days),
+        "minimum_holding_sessions": int(minimum_holding_sessions),
+        "lot_mode": lot_mode,
+        "day_trade_eligible_symbols": tuple(
+            symbol.strip()
+            for symbol in day_trade_eligible_symbols.split(",")
+            if symbol.strip()
+        ),
     }
 
 
@@ -789,6 +842,11 @@ async def optimize_stream(
     position_sizing: str = "equal",
     mode: str = "position",
     holding_days: int = 5,
+    minimum_commission: float = 0.0,
+    minimum_holding_sessions: int = 1,
+    lot_mode: str = "board_lot",
+    commission_discount: float = 1.0,
+    day_trade_eligible_symbols: str = "",
 ):
     """SSE 流式参数优化: 并行跑各参数组回测, 按 objective 排序。
 
@@ -816,6 +874,8 @@ async def optimize_stream(
     bt_kwargs = _opt_backtest_kwargs(
         matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
         max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+        minimum_commission, minimum_holding_sessions, lot_mode, commission_discount,
+        day_trade_eligible_symbols,
     )
     bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
     job_key = _make_opt_job_key(
@@ -1012,6 +1072,11 @@ async def walkforward_stream(
     position_sizing: str = "equal",
     mode: str = "position",
     holding_days: int = 5,
+    minimum_commission: float = 0.0,
+    minimum_holding_sessions: int = 1,
+    lot_mode: str = "board_lot",
+    commission_discount: float = 1.0,
+    day_trade_eligible_symbols: str = "",
 ):
     """SSE 流式 walk-forward: 每折训练区间网格优化 -> 测试区间 OOS 回测。
 
@@ -1032,6 +1097,8 @@ async def walkforward_stream(
     bt_kwargs = _opt_backtest_kwargs(
         matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
         max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
+        minimum_commission, minimum_holding_sessions, lot_mode, commission_discount,
+        day_trade_eligible_symbols,
     )
     bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
     windows = f"{train_days}/{test_days}/{step_days}"

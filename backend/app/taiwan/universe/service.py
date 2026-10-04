@@ -91,6 +91,7 @@ class TaiwanSecurityMaster:
             rows = df.to_dicts()
             loaded: dict[str, TaiwanInstrument] = {}
             for r in rows:
+                raw_lot_size = r.get("lot_size")
                 inst = TaiwanInstrument(
                     symbol=r["symbol"],
                     code=r["code"],
@@ -117,8 +118,9 @@ class TaiwanSecurityMaster:
                     classification_source=r.get("classification_source"),
                     underlying_scope=r.get("underlying_scope"),
                     leverage_multiplier=float(r.get("leverage_multiplier") or 1.0),
+                    etf_management_style=r.get("etf_management_style"),
                     currency=r.get("currency") or "TWD",
-                    lot_size=int(r.get("lot_size") or 1000),
+                    lot_size=1000 if raw_lot_size is None else int(raw_lot_size),
                 )
                 loaded[inst.symbol] = inst
 
@@ -250,6 +252,7 @@ class TaiwanSecurityMaster:
             "classification_source": pl.String,
             "underlying_scope": pl.String,
             "leverage_multiplier": pl.Float64,
+            "etf_management_style": pl.String,
             "currency": pl.String,
             "lot_size": pl.Int64,
         }

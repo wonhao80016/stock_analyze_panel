@@ -546,7 +546,8 @@ class MarketMatrix:
     tradable: np.ndarray
     limit_up_locked: np.ndarray
     limit_down_locked: np.ndarray
-    reference_price: np.ndarray
+    entry_reference_price: np.ndarray
+    exit_reference_price: np.ndarray
 
     entry_signal_time: np.ndarray
     exit_signal_time: np.ndarray
@@ -2326,7 +2327,8 @@ def build_market_matrix_from_signals(
     *,
     entry_delay_bars: int = 0,
     exit_delay_bars: int = 0,
-    reference_price: np.ndarray | None = None,
+    entry_reference_price: np.ndarray | None = None,
+    exit_reference_price: np.ndarray | None = None,
     minute_exit_trigger: bool = False,
 ) -> MarketMatrix:
     """Combine base data and strategy signals into the matcher input matrix."""
@@ -2348,18 +2350,27 @@ def build_market_matrix_from_signals(
         exit_delay_bars,
     )
 
-    if reference_price is not None:
-        if reference_price.shape != market.shape:
-            raise ValueError("reference_price shape does not match MarketDataMatrix")
-        resolved_reference_price = np.array(reference_price, dtype=np.float32, copy=True)
-    else:
-        resolved_reference_price = np.full(market.shape, np.nan, dtype=np.float32)
-        for column in ("ma5", "ma10", "ma20"):
-            values = market.fields.get(column)
-            if values is None:
-                continue
-            use = ~np.isfinite(resolved_reference_price) & np.isfinite(values) & (values > 0)
-            resolved_reference_price[use] = values[use]
+    base_reference = np.full(market.shape, np.nan, dtype=np.float32)
+    for column in ("ma5", "ma10", "ma20"):
+        values = market.fields.get(column)
+        if values is None:
+            continue
+        use = ~np.isfinite(base_reference) & np.isfinite(values) & (values > 0)
+        base_reference[use] = values[use]
+
+    def _resolve_reference(reference: np.ndarray | None, delay_bars: int) -> np.ndarray:
+        if reference is not None:
+            if reference.shape != market.shape:
+                raise ValueError("reference price shape does not match MarketDataMatrix")
+            return np.array(reference, dtype=np.float32, copy=True)
+        resolved = np.array(base_reference, copy=True)
+        if delay_bars == 1:
+            resolved[1:] = base_reference[:-1]
+            resolved[0] = np.nan
+        return resolved
+
+    resolved_entry_reference = _resolve_reference(entry_reference_price, entry_delay_bars)
+    resolved_exit_reference = _resolve_reference(exit_reference_price, exit_delay_bars)
 
     if minute_exit_trigger:
         trigger_reference = build_minute_exit_reference(
@@ -2369,12 +2380,13 @@ def build_market_matrix_from_signals(
             signals.exit_signal_ids,
         )
         trigger_mask = signals.exit != 0
-        resolved_reference_price[trigger_mask] = trigger_reference[trigger_mask]
+        resolved_exit_reference[trigger_mask] = trigger_reference[trigger_mask]
 
     _make_read_only(
         entry,
         exit_,
-        resolved_reference_price,
+        resolved_entry_reference,
+        resolved_exit_reference,
         entry_signal_time,
         exit_signal_time,
         entry_signal_code,
@@ -2398,7 +2410,8 @@ def build_market_matrix_from_signals(
         tradable=market.tradable,
         limit_up_locked=market.limit_up_locked,
         limit_down_locked=market.limit_down_locked,
-        reference_price=resolved_reference_price,
+        entry_reference_price=resolved_entry_reference,
+        exit_reference_price=resolved_exit_reference,
         entry_signal_time=entry_signal_time,
         exit_signal_time=exit_signal_time,
         entry_signal_code=entry_signal_code,

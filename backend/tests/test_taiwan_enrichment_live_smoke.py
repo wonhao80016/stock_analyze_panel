@@ -101,7 +101,12 @@ class TestTaiwanEnrichmentLiveSmoke:
         if bond_etf:
             assert bond_etf.etf_category == EtfCategory.BOND.value
             assert MarketProfileBridge.get_price_limit_class(bond_etf).value == "no_limit"
-            assert MarketProfileBridge.get_tax_class(bond_etf).value == "bond_etf"
+            expected_tax_class = (
+                "bond_etf"
+                if bond_etf.etf_management_style == "passive"
+                else "domestic_etf"
+            )
+            assert MarketProfileBridge.get_tax_class(bond_etf).value == expected_tax_class
 
         # 3. Foreign Component ETF: dynamically select from master (00646 S&P 500)
         foreign_etf = master.get_instrument("00646.TWSE")

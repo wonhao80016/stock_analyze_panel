@@ -25,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.taiwan.ai_research import build_evidence_registry
 from app.taiwan.research_context import (
     TaiwanStockResearchContext,
     TaiwanStockResearchContextService,
@@ -290,6 +291,23 @@ def _publish_indicators(tmp_path, monkeypatch, d: date, **values) -> dict:
     return row
 
 
+def _market_snapshot(status: str, d: date) -> MagicMock:
+    snapshot = MagicMock()
+    snapshot.trade_date = str(d)
+    snapshot.market_totals.turnover = 1_000_000.0
+    snapshot.market_totals.advance_count = 1
+    snapshot.market_totals.decline_count = 1
+    snapshot.market_totals.flat_count = 0
+    snapshot.market_totals.upper_limit_count = 0
+    snapshot.market_totals.lower_limit_count = 0
+    snapshot.by_exchange.twse.turnover = 600_000.0
+    snapshot.by_exchange.tpex.turnover = 400_000.0
+    snapshot.institutional.total_net_amount = 1000
+    snapshot.margin.margin_balance_change = 100.0
+    snapshot.data_quality.overall_status = status
+    return snapshot
+
+
 def test_technical_context_equals_the_published_partition(tmp_path, monkeypatch):
     d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
     row = _publish_indicators(
@@ -358,8 +376,41 @@ def test_unpublished_indicators_downgrade_the_overall_status_from_complete(tmp_p
     svc.margin_store = MagicMock()
     svc.margin_store.available_dates.return_value = [d_curr]
     svc.margin_store.read_range.return_value = pl.DataFrame()
+    svc.market_intel_svc = MagicMock()
+    svc.market_intel_svc.get_snapshot.return_value = _market_snapshot("complete", d_curr)
     without = svc.get_research_context("TEST.TWSE", d_curr).data_quality.overall_status
     _publish_indicators(tmp_path, monkeypatch, d_curr, ma5=1.0, ma20=1.0, ma60=1.0, vol_ratio_5d=1.0, rsi_14=50.0)
     with_ind = svc.get_research_context("TEST.TWSE", d_curr).data_quality.overall_status
     assert without == "partial"
     assert with_ind == "complete"
+
+
+def test_provisional_market_is_provisional_and_excluded_from_ai_evidence(tmp_path, monkeypatch):
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    _publish_indicators(
+        tmp_path,
+        monkeypatch,
+        d_curr,
+        ma5=1.0,
+        ma20=1.0,
+        ma60=1.0,
+        vol_ratio_5d=1.0,
+        rsi_14=50.0,
+    )
+    svc = _indicator_service(d_prev, d_curr)
+    svc.inst_store = MagicMock()
+    svc.inst_store.available_dates.return_value = [d_curr]
+    svc.inst_store.read_range.return_value = pl.DataFrame()
+    svc.margin_store = MagicMock()
+    svc.margin_store.available_dates.return_value = [d_curr]
+    svc.margin_store.read_range.return_value = pl.DataFrame()
+    svc.market_intel_svc = MagicMock()
+    svc.market_intel_svc.get_snapshot.return_value = _market_snapshot("provisional", d_curr)
+
+    context = svc.get_research_context("TEST.TWSE", d_curr)
+    payload, _, missing = build_evidence_registry(context, None)
+
+    assert context.market_context.status == "provisional"
+    assert context.data_quality.overall_status == "provisional"
+    assert "market_context" not in payload
+    assert "market_context" in missing

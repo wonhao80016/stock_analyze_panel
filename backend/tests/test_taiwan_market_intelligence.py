@@ -48,6 +48,184 @@ def mock_calendar():
     return cal
 
 
+def _quality_service(
+    target: date,
+    universe_symbols: list[str],
+    snapshot_symbols: list[str],
+    *,
+    provisional: bool = False,
+    zero_volume_symbols: set[str] | None = None,
+) -> TaiwanMarketIntelligenceService:
+    zero_volume_symbols = zero_volume_symbols or set()
+    previous = date.fromordinal(target.toordinal() - 1)
+    universe = pl.DataFrame({
+        "symbol": universe_symbols,
+        "exchange": [symbol.rsplit(".", 1)[1] for symbol in universe_symbols],
+        "instrument_type": ["stock"] * len(universe_symbols),
+        "listing_status": ["active"] * len(universe_symbols),
+        "listing_date": [target.isoformat()] * len(universe_symbols),
+        "updated_at": [f"{target.isoformat()}T08:00:00+08:00"] * len(universe_symbols),
+    })
+
+    def rows(symbols: list[str], d: date) -> pl.DataFrame:
+        return pl.DataFrame({
+            "symbol": symbols,
+            "date": [d] * len(symbols),
+            "open": [100.0] * len(symbols),
+            "high": [101.0] * len(symbols),
+            "low": [99.0] * len(symbols),
+            "close": [100.0] * len(symbols),
+            "volume": [0.0 if symbol in zero_volume_symbols else 1000.0 for symbol in symbols],
+            "amount": [0.0 if symbol in zero_volume_symbols else 100000.0 for symbol in symbols],
+            "quote_ts": [None] * len(symbols),
+        })
+
+    current = rows(snapshot_symbols, target)
+    prior = rows(snapshot_symbols, previous)
+    daily = MagicMock()
+    daily.available_dates.return_value = [previous, target]
+    daily.provisional_dates.return_value = [target] if provisional else []
+    daily.read_range.side_effect = lambda _symbols, start, end: (
+        current if start == target and end == target
+        else prior if start == previous and end == previous
+        else pl.concat([prior, current])
+    )
+
+    inst_store = MagicMock()
+    inst_store.available_dates.return_value = [target]
+    inst_store.read_range.return_value = pl.DataFrame()
+    margin_store = MagicMock()
+    margin_store.available_dates.return_value = [target]
+    margin_store.read_range.return_value = pl.DataFrame()
+    security_master = MagicMock()
+    security_master.to_dataframe.return_value = universe
+    security_master.get_instrument.return_value = None
+    market_inst = MagicMock()
+    market_inst.available_dates.return_value = []
+    market_inst.read_day.return_value = pl.DataFrame(schema={
+        "exchange": pl.String,
+        "category": pl.String,
+        "net_amount": pl.Int64,
+        "has_discrepancy": pl.Boolean,
+    })
+    corporate_actions = MagicMock()
+    corporate_actions.read.return_value = pl.DataFrame()
+    return TaiwanMarketIntelligenceService(
+        daily_store=daily,
+        inst_store=inst_store,
+        margin_store=margin_store,
+        security_master=security_master,
+        market_inst_store=market_inst,
+        corporate_actions=corporate_actions,
+    )
+
+
+@pytest.mark.parametrize(
+    ("snapshot_symbols", "missing_exchange"),
+    [(["B.TPEX"], "TWSE"), (["A.TWSE"], "TPEX")],
+)
+def test_missing_exchange_is_partial(snapshot_symbols, missing_exchange):
+    target = date(2026, 8, 28)
+    snapshot = _quality_service(target, ["A.TWSE", "B.TPEX"], snapshot_symbols).get_snapshot(target)
+
+    assert snapshot.data_quality.overall_status == "partial"
+    assert snapshot.data_quality.missing_symbols_count == 1
+    assert getattr(snapshot.data_quality, f"{missing_exchange.lower()}_snapshot_symbols") == 0
+
+
+def test_large_universe_gap_is_partial():
+    target = date(2026, 8, 28)
+    universe = [f"{i:04d}.TWSE" for i in range(10)] + [f"{i:04d}.TPEX" for i in range(10, 20)]
+    snapshot = _quality_service(target, universe, ["0000.TWSE", "0010.TPEX"]).get_snapshot(target)
+
+    assert snapshot.data_quality.overall_status == "partial"
+    assert snapshot.data_quality.missing_symbols_count == 18
+
+
+def test_provisional_partition_is_not_complete():
+    target = date(2026, 8, 28)
+    snapshot = _quality_service(
+        target,
+        ["A.TWSE", "B.TPEX"],
+        ["A.TWSE", "B.TPEX"],
+        provisional=True,
+    ).get_snapshot(target)
+
+    assert snapshot.data_quality.daily.status == "provisional"
+    assert snapshot.data_quality.overall_status == "provisional"
+
+
+def test_complete_dual_market_snapshot_is_complete():
+    target = date(2026, 8, 28)
+    snapshot = _quality_service(
+        target,
+        ["A.TWSE", "B.TPEX"],
+        ["A.TWSE", "B.TPEX"],
+    ).get_snapshot(target)
+
+    assert snapshot.data_quality.overall_status == "complete"
+    assert snapshot.data_quality.missing_symbols_count == 0
+
+
+def test_historical_target_without_point_in_time_universe_is_partial():
+    target = date(2026, 8, 27)
+    service = _quality_service(
+        target,
+        ["A.TWSE", "B.TPEX", "FUTURE.TWSE"],
+        ["A.TWSE", "B.TPEX"],
+    )
+    service.security_master.to_dataframe.return_value = (
+        service.security_master.to_dataframe.return_value.with_columns([
+            pl.when(pl.col("symbol") == "FUTURE.TWSE")
+            .then(pl.lit("2026-08-28"))
+            .otherwise(pl.col("listing_date"))
+            .alias("listing_date"),
+            pl.lit("2026-08-28T08:00:00+08:00").alias("updated_at"),
+        ])
+    )
+
+    snapshot = service.get_snapshot(target)
+
+    assert snapshot.data_quality.universe_supported_symbols == 2
+    assert snapshot.data_quality.missing_symbols_count == 0
+    assert snapshot.data_quality.overall_status == "partial"
+
+
+def test_current_universe_filters_non_products_and_keeps_zero_volume_products():
+    target = date(2026, 8, 28)
+    service = _quality_service(
+        target,
+        ["HALT.TWSE", "ETF.TPEX", "FUTURE.TWSE", "TDR.TWSE", "OLD.TPEX", "UNSUPPORTED.TPEX"],
+        ["HALT.TWSE", "ETF.TPEX"],
+        zero_volume_symbols={"HALT.TWSE"},
+    )
+    service.security_master.to_dataframe.return_value = pl.DataFrame({
+        "symbol": ["HALT.TWSE", "ETF.TPEX", "FUTURE.TWSE", "TDR.TWSE", "OLD.TPEX", "UNSUPPORTED.TPEX"],
+        "exchange": ["TWSE", "TPEX", "TWSE", "TWSE", "TPEX", "TPEX"],
+        "instrument_type": ["stock", "etf", "stock", "tdr", "stock", "stock"],
+        "listing_status": ["active", "active", "active", "active", "suspended", "unsupported"],
+        "listing_date": ["20200101", "1150828", "2026/08/29", "20200101", "20200101", "20200101"],
+        "updated_at": ["2026-08-28T08:00:00+08:00"] * 6,
+    })
+
+    snapshot = service.get_snapshot(target)
+
+    assert snapshot.data_quality.overall_status == "complete"
+    assert snapshot.data_quality.universe_supported_symbols == 2
+    assert snapshot.market_totals.snapshot_row_count == 2
+    assert snapshot.market_totals.traded_count == 1
+    assert snapshot.by_instrument.stock.supported_count == 1
+    assert snapshot.by_instrument.etf.supported_count == 1
+
+
+def test_empty_daily_snapshot_is_unavailable():
+    target = date(2026, 8, 28)
+    snapshot = _quality_service(target, ["A.TWSE", "B.TPEX"], []).get_snapshot(target)
+
+    assert snapshot.data_quality.daily.status == "unavailable"
+    assert snapshot.data_quality.overall_status == "unavailable"
+
+
 def test_deterministic_breadth_fixture(mock_calendar):
     """3 symbols: 1 up, 1 down, 1 flat, plus 1 uncompared and 1 zero-volume."""
     d_curr = date(2026, 8, 28)
@@ -220,23 +398,9 @@ def test_aggregate_short_margin_ratio():
 def test_partial_state_reporting():
     """Daily current, Inst stale, Margin unavailable -> overall status partial."""
     d = date(2026, 8, 28)
-    mock_daily = MagicMock()
-    mock_daily.available_dates.return_value = [d]
-    mock_daily.read_range.return_value = pl.DataFrame()
-
-    mock_inst = MagicMock()
-    mock_inst.available_dates.return_value = [date(2026, 8, 27)]  # stale
-    mock_inst.read_range.return_value = pl.DataFrame()
-
-    mock_margin = MagicMock()
-    mock_margin.available_dates.return_value = []  # unavailable
-    mock_margin.read_range.return_value = pl.DataFrame()
-
-    svc = TaiwanMarketIntelligenceService(
-        daily_store=mock_daily,
-        inst_store=mock_inst,
-        margin_store=mock_margin,
-    )
+    svc = _quality_service(d, ["A.TWSE", "B.TPEX"], ["A.TWSE", "B.TPEX"])
+    svc.inst_store.available_dates.return_value = [date(2026, 8, 27)]
+    svc.margin_store.available_dates.return_value = []
     snapshot = svc.get_snapshot(d)
     dq = snapshot.data_quality
     assert dq.daily.status == "current"

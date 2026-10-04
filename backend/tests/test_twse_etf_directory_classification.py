@@ -62,6 +62,27 @@ def test_foreign_component_etf_is_unchanged(_fake_directory):
     assert inst.leverage_multiplier == 1.0
 
 
+@pytest.mark.parametrize(
+    ("fund_type", "expected_style"),
+    [
+        ("債券成分證券指數股票型基金", "passive"),
+        ("主動式債券交易所交易基金", "active"),
+        ("債券型基金", None),
+    ],
+)
+def test_bond_etf_management_style_uses_explicit_official_metadata(
+    _fake_directory,
+    fund_type: str,
+    expected_style: str | None,
+):
+    _fake_directory([_row("00999B", "測試債券ETF", fund_type)])
+
+    inst = adapters._official_twse_etf_directory()[0]
+
+    assert inst.etf_category == "bond"
+    assert inst.etf_management_style == expected_style
+
+
 def test_leveraged_price_limit_band_follows_multiplier(_fake_directory):
     """The statutory band is 10% * |multiplier|; this is why the bug mattered."""
     from app.taiwan.universe.models import MarketProfileBridge

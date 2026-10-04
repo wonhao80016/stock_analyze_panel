@@ -1290,10 +1290,14 @@ export interface TaiwanMarketIntelligenceSnapshot {
   data_quality: {
     target_trade_date: string
     previous_trade_date: string | null
-    overall_status: 'complete' | 'partial' | 'unavailable'
+    overall_status: 'complete' | 'provisional' | 'partial' | 'unavailable'
     universe_supported_symbols: number
     daily_snapshot_symbols: number
     missing_symbols_count: number
+    twse_supported_symbols: number
+    twse_snapshot_symbols: number
+    tpex_supported_symbols: number
+    tpex_snapshot_symbols: number
   }
 }
 
@@ -1516,7 +1520,7 @@ export interface TaiwanStockResearchContext {
     meta: EvidenceMeta
   }
   data_quality: {
-    overall_status: 'complete' | 'partial' | 'unavailable'
+    overall_status: 'complete' | 'provisional' | 'partial' | 'unavailable'
     sections: { section: string; status: string; as_of: string | null }[]
     target_trade_date: string
   }
@@ -2036,6 +2040,32 @@ export interface StrategyBacktestTrade {
   blocked_exit_days?: number
   entry_signal_id?: string | null
   exit_signal_id?: string | null
+}
+
+export interface StrategyBacktestRunPayload {
+  strategy_id: string
+  symbols?: string[] | null
+  start?: string | null
+  end?: string | null
+  params?: Record<string, any> | null
+  overrides?: Record<string, any> | null
+  matching?: 'close_t' | 'open_t+1'
+  entry_fill?: 'close_t' | 'open_t+1' | null
+  exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
+  fees_pct?: number
+  commission_pct?: number
+  commission_discount?: number
+  minimum_commission?: number
+  stamp_tax_pct?: number
+  slippage_bps?: number
+  max_positions?: number
+  initial_capital?: number
+  position_sizing?: 'equal' | 'score_weight'
+  minimum_holding_sessions?: number
+  day_trade_eligible_symbols?: string[]
+  asset_type?: 'stock' | 'etf' | 'index'
+  lot_mode?: 'board_lot' | 'odd_lot'
+  minute_fill?: boolean
 }
 
 export interface StrategyBacktestResult {
@@ -2896,26 +2926,7 @@ export const api = {
       method: 'DELETE',
     }),
 
-  strategyBacktestRun: (payload: {
-    strategy_id: string
-    symbols?: string[] | null
-    start?: string | null
-    end?: string | null
-    params?: Record<string, any> | null
-    overrides?: Record<string, any> | null
-    matching?: 'close_t' | 'open_t+1'
-    entry_fill?: 'close_t' | 'open_t+1' | null
-    exit_fill?: 'close_t' | 'open_t+1' | 'signal_next_minute' | null
-    fees_pct?: number
-    commission_pct?: number
-    stamp_tax_pct?: number
-    slippage_bps?: number
-    max_positions?: number
-    initial_capital?: number
-    position_sizing?: 'equal' | 'score_weight'
-    asset_type?: 'stock' | 'etf' | 'index'
-    minute_fill?: boolean
-  }) =>
+  strategyBacktestRun: (payload: StrategyBacktestRunPayload) =>
     request<StrategyBacktestResult>('/api/backtest/strategy/run', {
       method: 'POST',
       body: JSON.stringify(payload),

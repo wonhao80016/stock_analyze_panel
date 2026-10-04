@@ -94,6 +94,15 @@ def leverage_multiplier_of(code: str, name: str) -> float:
     return 1.0
 
 
+def etf_management_style_of(fund_type: str) -> str | None:
+    normalized = str(fund_type).strip()
+    if "主動" in normalized:
+        return "active"
+    if "指數" in normalized:
+        return "passive"
+    return None
+
+
 def classify_etf_provenance(
     code: str,
     name: str,
@@ -239,6 +248,7 @@ def parse_isin_html(
         classification_source: str | None = None
         underlying_scope: str | None = None
         leverage_multiplier: float = 1.0
+        etf_management_style: str | None = None
 
         if "etf" in cat_lower:
             instrument_type = "etf"
@@ -250,6 +260,11 @@ def parse_isin_html(
                 cfi_code=cfi_code,
                 official_product_types=official_product_types,
             )
+            product_meta = (official_product_types or {}).get(code)
+            if isinstance(product_meta, OfficialEtfProductMeta):
+                etf_management_style = etf_management_style_of(product_meta.fund_type)
+            elif product_meta is not None:
+                etf_management_style = etf_management_style_of(str(product_meta))
         elif "股票" in current_category or "創新板" in current_category:
             instrument_type = "stock"
             is_supported = True
@@ -283,6 +298,7 @@ def parse_isin_html(
             classification_source=classification_source,
             underlying_scope=underlying_scope,
             leverage_multiplier=leverage_multiplier,
+            etf_management_style=etf_management_style,
         )
         instruments.append(inst)
 
@@ -439,7 +455,10 @@ def _official_twse_etf_directory() -> list[TaiwanInstrument]:
         # understates the statutory price limit band.
         multiplier = leverage_multiplier_of(code, display_name)
         is_leveraged_type = "槓桿" in fund_type or "反向" in fund_type
-        if is_leveraged_type:
+        is_bond_type = "債券" in fund_type
+        if is_bond_type:
+            category = "bond"
+        elif is_leveraged_type:
             category = "inverse" if multiplier < 0 else "leveraged"
         else:
             category = "foreign_equity" if scope == "foreign" else "domestic_equity" if scope == "domestic" else "unknown"
@@ -448,8 +467,13 @@ def _official_twse_etf_directory() -> list[TaiwanInstrument]:
             listing_status="active", listing_date=str(row.get("上市日期") or "").strip() or None,
             isin=None, industry=None, cfi_code=None, raw_category=fund_type, is_supported=True,
             source="TWSE_OPENAPI", updated_at=now, etf_category=category,
-            classification_source="official_metadata" if (fund_type in ordinary_types or is_leveraged_type) else None,
+            classification_source=(
+                "official_metadata"
+                if fund_type in ordinary_types or is_leveraged_type or is_bond_type
+                else None
+            ),
             underlying_scope=scope,
             leverage_multiplier=multiplier,
+            etf_management_style=etf_management_style_of(fund_type),
         ))
     return instruments

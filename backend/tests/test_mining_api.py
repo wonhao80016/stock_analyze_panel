@@ -216,6 +216,8 @@ def test_start_is_strict_and_projects_server_signature(tmp_path):
     assert body["status"] == "queued"
     assert body["signature"] == store.get(body["run_id"])["run_signature"]
     assert body["request"]["factor_names"] == ["turnover_rate"]
+    assert body["request"]["commission_pct"] is None
+    assert body["request"]["stamp_tax_pct"] is None
     assert "force" not in body["request"]
     assert body["source"] == "manual"
     assert client.post(
@@ -225,6 +227,10 @@ def test_start_is_strict_and_projects_server_signature(tmp_path):
     assert client.post(
         "/api/backtest/mining/runs",
         json={"factor_names": ["unknown_factor"]},
+    ).status_code == 422
+    assert client.post(
+        "/api/backtest/mining/runs",
+        json={"factor_names": ["turnover_rate"], "stamp_tax_pct": 0.0005},
     ).status_code == 422
 
 

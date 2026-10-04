@@ -9,10 +9,10 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import polars as pl
@@ -57,6 +57,8 @@ class MatcherConfig:
     # 未设 commission_pct 时回退到 fees_pct 作为双边佣金 (向后兼容, 无印花税)。
     fees_pct: float = 0.0002
     commission_pct: float | None = None
+    commission_discount: float = 1.0
+    minimum_commission: float = 0.0
     stamp_tax_pct: float | None = None
     slippage_bps: float = 5.0
     stop_loss_pct: float | None = None
@@ -65,6 +67,7 @@ class MatcherConfig:
     trailing_take_profit_activate_pct: float | None = None
     trailing_take_profit_drawdown_pct: float | None = None
     max_hold_days: int | None = None
+    minimum_holding_sessions: int = 1
     max_positions: int = 10
     max_exposure_pct: float = 1.0
     score_min: float | None = None
@@ -74,8 +77,13 @@ class MatcherConfig:
     # 分钟K精确成交: 开启后, 信号触发日的成交价用当日分钟K优化
     # (有参考线→穿越价, 无参考线→VWAP)。数据缺失时降级为日K口径。
     minute_fill: bool = False
-    # 市场制度与规则配置 (例如 TaiwanMarketProfile): 未设置时回退 A 股默认规则
+    asset_type: str = "stock"
+    lot_mode: Literal["board_lot", "odd_lot"] = "board_lot"
     market_profile: Any | None = None
+    tax_class_by_symbol: Mapping[str, Any] | None = None
+    lot_size_by_symbol: Mapping[str, int] | None = None
+    day_trade_eligible_symbols: tuple[str, ...] = ()
+    day_trade_eligible_by_symbol: Mapping[str, bool] | None = None
 
     def __post_init__(self) -> None:
         # 解析最终口径: 优先 entry_fill/exit_fill, 否则回退到 matching (向后兼容)。
@@ -83,12 +91,24 @@ class MatcherConfig:
             self.entry_fill = self.matching
         if self.exit_fill is None:
             self.exit_fill = self.matching
+        if self.minimum_holding_sessions < 0:
+            raise ValueError("minimum_holding_sessions must be non-negative")
+        if self.minimum_commission < 0:
+            raise ValueError("minimum_commission must be non-negative")
+        if not 0 <= self.commission_discount <= 1:
+            raise ValueError("commission_discount must be between 0 and 1")
+        if self.lot_mode not in {"board_lot", "odd_lot"}:
+            raise ValueError("lot_mode must be board_lot or odd_lot")
+
+    def _commission_rate(self) -> float:
+        if self.market_profile is not None and hasattr(self.market_profile, "cost"):
+            return self.market_profile.cost.commission_rate
+        return self.commission_pct if self.commission_pct is not None else self.fees_pct
 
     def _commission_pct(self) -> float:
         if self.market_profile is not None and hasattr(self.market_profile, "cost"):
-            return self.market_profile.cost.commission_rate * self.market_profile.cost.discount
-        # commission_pct 显式给出时优先, 否则回退 fees_pct (向后兼容双边佣金)。
-        return self.commission_pct if self.commission_pct is not None else self.fees_pct
+            return self._commission_rate() * self.market_profile.cost.discount
+        return self._commission_rate() * self.commission_discount
 
     def buy_cost_pct(self) -> float:
         # 买入腿: 佣金 + 滑点。
@@ -101,6 +121,97 @@ class MatcherConfig:
             return self._commission_pct() + stamp + self.slippage_bps / 10000.0
         stamp = self.stamp_tax_pct if self.stamp_tax_pct is not None else 0.0
         return self._commission_pct() + stamp + self.slippage_bps / 10000.0
+
+    def lot_size(self, symbol: str) -> int:
+        if (
+            self.market_profile is not None
+            and hasattr(self.market_profile, "lot")
+            and getattr(self.market_profile.lot, "mode", None) == "odd_lot"
+        ):
+            return int(self.market_profile.lot.lot_size)
+        if self.lot_size_by_symbol is not None and symbol in self.lot_size_by_symbol:
+            return max(int(self.lot_size_by_symbol[symbol]), 1)
+        if self.market_profile is not None and hasattr(self.market_profile, "lot"):
+            return max(int(self.market_profile.lot.lot_size), 1)
+        return 100
+
+    def buy_transaction_cost(self, trade_value: float) -> float:
+        if trade_value <= 0:
+            return 0.0
+        if self.market_profile is not None and hasattr(self.market_profile, "cost"):
+            commission = float(self.market_profile.cost.calc_commission(trade_value))
+        else:
+            commission = trade_value * self._commission_pct()
+        return commission + trade_value * self.slippage_bps / 10000.0
+
+    def sell_transaction_cost(
+        self,
+        trade_value: float,
+        symbol: str,
+        trade_date: date | str | None,
+        is_day_trade: bool = False,
+    ) -> float:
+        if trade_value <= 0:
+            return 0.0
+        if self.market_profile is not None and hasattr(self.market_profile, "cost"):
+            commission = float(self.market_profile.cost.calc_commission(trade_value))
+        else:
+            commission = trade_value * self._commission_pct()
+        if self.stamp_tax_pct is not None:
+            tax = trade_value * self.stamp_tax_pct
+        elif (
+            self.market_profile is not None
+            and hasattr(self.market_profile, "tax")
+            and self.tax_class_by_symbol is not None
+            and symbol in self.tax_class_by_symbol
+        ):
+            parsed_date = date.fromisoformat(trade_date[:10]) if isinstance(trade_date, str) else trade_date
+            tax_class = self.tax_class_by_symbol[symbol]
+            eligible_day_trade = bool(
+                is_day_trade
+                and self.day_trade_eligible_by_symbol is not None
+                and self.day_trade_eligible_by_symbol.get(symbol, False)
+                and getattr(tax_class, "value", tax_class) == "ordinary_stock"
+            )
+            tax = float(self.market_profile.tax.calc_tax(
+                trade_value,
+                tax_class=tax_class,
+                is_day_trade=eligible_day_trade,
+                trade_date=parsed_date,
+            ))
+        else:
+            tax = 0.0
+        return commission + tax + trade_value * self.slippage_bps / 10000.0
+
+    def can_exit_after_sessions(self, symbol: str, holding_sessions: int) -> bool:
+        if holding_sessions < self.minimum_holding_sessions:
+            return False
+        if holding_sessions > 0:
+            return True
+        eligible = bool(
+            symbol in self.day_trade_eligible_symbols
+            or (
+                self.day_trade_eligible_by_symbol is not None
+                and self.day_trade_eligible_by_symbol.get(symbol, False)
+            )
+        )
+        if not eligible:
+            return False
+        if self.market_profile is None:
+            return True
+        return bool(self.market_profile.can_same_day_exit(eligible))
+
+    def align_shares(self, allocation: float, price: float, symbol: str) -> float:
+        if allocation <= 0 or price <= 0:
+            return 0.0
+        lot_size = self.lot_size(symbol)
+        estimated = int(allocation / (price * (1 + self.buy_cost_pct())) // lot_size) * lot_size
+        while estimated > 0:
+            trade_value = estimated * price
+            if trade_value + self.buy_transaction_cost(trade_value) <= allocation + 1e-9:
+                break
+            estimated -= lot_size
+        return float(estimated)
 
 
 
@@ -772,9 +883,13 @@ class BacktestEngine:
 
                     if exit_triggered:
                         exit_price = float(sym_exit_prices[i])
-                        pnl_pct = (exit_price - entry_price) / entry_price if entry_price > 0 else 0.0
-                        fee_cost = config.buy_cost_pct() + config.sell_cost_pct()
-                        pnl_pct -= fee_cost
+                        entry_value = entry_price + config.buy_transaction_cost(entry_price)
+                        exit_value = exit_price - config.sell_transaction_cost(
+                            exit_price,
+                            str(sym),
+                            self._date_str(sym_dates[i]),
+                        )
+                        pnl_pct = (exit_value - entry_value) / entry_value if entry_value > 0 else 0.0
 
                         e_date = sym_dates[entry_idx]
                         x_date = sym_dates[i]
@@ -853,8 +968,6 @@ class BacktestEngine:
         options = options or SimulationOptions()
         entry_prices = matrix.open if config.entry_fill == "open_t+1" else matrix.close
         exit_prices = matrix.open if config.exit_fill == "open_t+1" else matrix.close
-        buy_cost_pct = config.buy_cost_pct()
-        sell_cost_pct = config.sell_cost_pct()
         trades: list[TradeRecord] = []
         execution_stats = {
             "buy_invalid_price": 0,
@@ -865,6 +978,7 @@ class BacktestEngine:
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_minimum_holding": 0,
             "sell_no_future": 0,
             "pending_exit": 0,
         }
@@ -875,7 +989,12 @@ class BacktestEngine:
             dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
             symbols = {matrix.symbols[int(a)] for a in trigger_assets}
             if dates and symbols:
-                loaded = self._load_minute_for_fills(self.repo, list(symbols), dates, "stock")
+                loaded = self._load_minute_for_fills(
+                    self.repo,
+                    list(symbols),
+                    dates,
+                    config.asset_type,
+                )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
         def _count(key: str) -> None:
@@ -899,12 +1018,21 @@ class BacktestEngine:
         def _refill(time_id: int, asset_id: int, side: str, daily_price: float) -> float:
             if not config.minute_fill or not minute_cache:
                 return daily_price
+            if side == "buy" and config.entry_fill != "open_t+1":
+                return daily_price
+            if side == "sell" and config.exit_fill == "close_t":
+                return daily_price
             rows = minute_cache.get((matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10]))
             if rows is None:
                 return daily_price
-            reference = float(matrix.reference_price[time_id, asset_id])
+            reference_matrix = (
+                matrix.entry_reference_price if side == "buy" else matrix.exit_reference_price
+            )
+            reference = float(reference_matrix[time_id, asset_id])
+            if not _valid_price(reference):
+                return daily_price
             precise = self._resolve_minute_fill(
-                rows, reference if _valid_price(reference) else None, side,
+                rows, reference, side,
             )
             return precise if precise is not None else daily_price
 
@@ -914,7 +1042,7 @@ class BacktestEngine:
             rows = minute_cache.get((matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10]))
             if rows is None:
                 return None
-            reference = float(matrix.reference_price[time_id, asset_id])
+            reference = float(matrix.exit_reference_price[time_id, asset_id])
             return self._resolve_minute_exit_trigger(
                 rows,
                 reference if _valid_price(reference) else None,
@@ -993,6 +1121,22 @@ class BacktestEngine:
             signal_date: str,
             override: float | None = None,
         ) -> bool:
+            symbol = matrix.symbols[asset_id]
+            if not config.can_exit_after_sessions(symbol, int(pos["hold_days"])):
+                if not pos.get("pending_exit_reason"):
+                    pos["pending_exit_reason"] = reason
+                    pos["pending_exit_signal_date"] = signal_date
+                    pos["pending_exit_signal_id"] = (
+                        _signal_id(
+                            int(matrix.exit_signal_code[time_id, asset_id]),
+                            matrix.exit_signal_ids,
+                        )
+                        if reason == "signal" else None
+                    )
+                    _count("pending_exit")
+                pos["blocked_exit_days"] += 1
+                _count("sell_minimum_holding")
+                return False
             signal_id = (
                 _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
                 if reason == "signal" else None
@@ -1029,12 +1173,19 @@ class BacktestEngine:
             exit_price = float(override) if override is not None else _refill(
                 time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
             )
-            shares = 100.0
-            entry_value = shares * pos["entry_price"] * (1 + buy_cost_pct)
-            exit_value = shares * exit_price * (1 - sell_cost_pct)
+            shares = float(config.lot_size(symbol))
+            entry_gross = shares * pos["entry_price"]
+            exit_gross = shares * exit_price
+            entry_value = entry_gross + config.buy_transaction_cost(entry_gross)
+            exit_value = exit_gross - config.sell_transaction_cost(
+                exit_gross,
+                symbol,
+                matrix.timestamp_labels[time_id][:10],
+                is_day_trade=pos["entry_date"] == matrix.timestamp_labels[time_id][:10],
+            )
             pnl_amount = exit_value - entry_value
             trades.append(TradeRecord(
-                symbol=matrix.symbols[asset_id],
+                symbol=symbol,
                 name=matrix.names[asset_id],
                 entry_date=pos["entry_date"],
                 exit_date=matrix.timestamp_labels[time_id][:10],
@@ -1085,13 +1236,6 @@ class BacktestEngine:
             if config.score_max is not None and score > config.score_max:
                 _count("buy_score_filter")
                 continue
-            future_times = [
-                future for future in range(time_id + 1, matrix.shape[0])
-                if _present(future, asset_id)
-            ]
-            if not future_times:
-                _count("sell_no_future")
-                continue
             entry_price = _refill(time_id, asset_id, "buy", float(entry_prices[time_id, asset_id]))
             entry_date = matrix.timestamp_labels[time_id][:10]
             pos = {
@@ -1106,13 +1250,31 @@ class BacktestEngine:
                 "entry_price": entry_price,
                 "entry_score": score,
                 "hold_days": 0,
-                "max_high": max(entry_price, float(matrix.high[time_id, asset_id])),
+                "max_high": (
+                    max(entry_price, float(matrix.high[time_id, asset_id]))
+                    if config.entry_fill == "open_t+1"
+                    else entry_price
+                ),
                 "pending_exit_reason": None,
                 "pending_exit_signal_date": None,
                 "pending_exit_signal_id": None,
                 "pending_exit_next_open": False,
                 "blocked_exit_days": 0,
             }
+            if matrix.exit[time_id, asset_id]:
+                signal_date = _signal_date(
+                    int(matrix.exit_signal_time[time_id, asset_id]),
+                    entry_date,
+                )
+                if _try_close(pos, time_id, asset_id, "signal", signal_date):
+                    continue
+            future_times = [
+                future for future in range(time_id + 1, matrix.shape[0])
+                if _present(future, asset_id)
+            ]
+            if not future_times:
+                _count("sell_no_future")
+                continue
             closed = False
             for future in future_times:
                 pos["hold_days"] += 1
@@ -1243,7 +1405,7 @@ class BacktestEngine:
                     _trigger_symbols.add(str(panel_symbols[_idx]))
             if _trigger_dates and _trigger_symbols:
                 _loaded = self._load_minute_for_fills(
-                    self.repo, list(_trigger_symbols), _trigger_dates, "stock",
+                    self.repo, list(_trigger_symbols), _trigger_dates, config.asset_type,
                 )
                 for _key, _marr in _loaded.items():
                     if _marr is not None and len(_marr) > 0:
@@ -1252,21 +1414,32 @@ class BacktestEngine:
         def _refill_price(idx: int, side: str, daily_price: float) -> float:
             if not config.minute_fill or not minute_cache:
                 return daily_price
+            if side == "buy" and config.entry_fill != "open_t+1":
+                return daily_price
+            if side == "sell" and config.exit_fill == "close_t":
+                return daily_price
             _sym = str(panel_symbols[idx])
             _d = self._date_str(panel_dates[idx])
             _marr = minute_cache.get((_sym, _d))
             if _marr is None:
                 return daily_price
             _ref = None
+            previous_idx = idx - 1
             for _col in ("ma5", "ma10", "ma20"):
-                if _col in panel.columns:
+                if (
+                    _col in panel.columns
+                    and previous_idx >= 0
+                    and panel_symbols[previous_idx] == panel_symbols[idx]
+                ):
                     try:
-                        _fv = float(panel[_col][idx])
+                        _fv = float(panel[_col][previous_idx])
                         if _fv > 0 and np.isfinite(_fv):
                             _ref = _fv
                             break
                     except (TypeError, ValueError):
                         pass
+            if _ref is None:
+                return daily_price
             _precise = self._resolve_minute_fill(_marr, _ref, side)
             return _precise if _precise is not None else daily_price
 
@@ -1295,8 +1468,6 @@ class BacktestEngine:
             row_pos_in_symbol[i] = len(rows)
             rows.append(i)
 
-        buy_cost_pct = config.buy_cost_pct()
-        sell_cost_pct = config.sell_cost_pct()
         score_min = getattr(config, "score_min", None)
         score_max = getattr(config, "score_max", None)
         trades: list[TradeRecord] = []
@@ -1309,6 +1480,7 @@ class BacktestEngine:
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_minimum_holding": 0,
             "sell_no_future": 0,
             "pending_exit": 0,
         }
@@ -1431,13 +1603,20 @@ class BacktestEngine:
                 exit_price = float(exit_price_override)
             else:
                 exit_price = _refill_price(idx, "sell", float(exit_prices[idx]))
-            shares = 100.0
-            entry_value = shares * float(pos["entry_price"]) * (1 + buy_cost_pct)
-            exit_value = shares * exit_price * (1 - sell_cost_pct)
+            symbol = str(pos["symbol"])
+            shares = float(config.lot_size(symbol))
+            entry_gross = shares * float(pos["entry_price"])
+            exit_gross = shares * exit_price
+            entry_value = entry_gross + config.buy_transaction_cost(entry_gross)
+            exit_value = exit_gross - config.sell_transaction_cost(
+                exit_gross,
+                symbol,
+                self._date_str(panel_dates[idx]),
+            )
             pnl_amount = exit_value - entry_value
             pnl_pct = pnl_amount / entry_value if entry_value > 0 else 0.0
             trades.append(TradeRecord(
-                symbol=str(pos["symbol"]),
+                symbol=symbol,
                 name=str(pos.get("name", "")),
                 entry_date=pos["entry_date"],
                 exit_date=self._date_str(panel_dates[idx]),
@@ -1513,7 +1692,7 @@ class BacktestEngine:
                 "blocked_exit_days": 0,
             }
             hi = float(high_prices[entry_idx])
-            if _valid_price(hi):
+            if config.entry_fill == "open_t+1" and _valid_price(hi):
                 pos["max_high"] = max(float(pos["max_high"]), hi)
 
             closed = False
@@ -1752,8 +1931,6 @@ class BacktestEngine:
         time_count, asset_count = matrix.shape
         entry_prices = matrix.open if config.entry_fill == "open_t+1" else matrix.close
         exit_prices = matrix.open if config.exit_fill == "open_t+1" else matrix.close
-        buy_cost_pct = config.buy_cost_pct()
-        sell_cost_pct = config.sell_cost_pct()
         cash = float(config.initial_capital)
         peak = cash
         max_positions = max(int(config.max_positions), 0)
@@ -1778,6 +1955,7 @@ class BacktestEngine:
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_minimum_holding": 0,
             "pending_exit": 0,
         }
 
@@ -1787,12 +1965,8 @@ class BacktestEngine:
             trigger_dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
             trigger_symbols = {matrix.symbols[int(a)] for a in trigger_assets}
             if trigger_dates and trigger_symbols:
-                asset_type = "etf" if all(
-                    symbol.endswith(".SH") and symbol.startswith("5")
-                    for symbol in list(trigger_symbols)[:5]
-                ) else "stock"
                 loaded = self._load_minute_for_fills(
-                    self.repo, list(trigger_symbols), trigger_dates, asset_type,
+                    self.repo, list(trigger_symbols), trigger_dates, config.asset_type,
                 )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
@@ -1820,15 +1994,22 @@ class BacktestEngine:
         def _refill_price(time_id: int, asset_id: int, side: str, daily_price: float) -> float:
             if not config.minute_fill or not minute_cache:
                 return daily_price
+            if side == "buy" and config.entry_fill != "open_t+1":
+                return daily_price
+            if side == "sell" and config.exit_fill == "close_t":
+                return daily_price
             key = (matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10])
             minute_rows = minute_cache.get(key)
             if minute_rows is None:
                 return daily_price
-            reference = float(matrix.reference_price[time_id, asset_id])
+            reference_matrix = (
+                matrix.entry_reference_price if side == "buy" else matrix.exit_reference_price
+            )
+            reference = float(reference_matrix[time_id, asset_id])
+            if not _valid_price(reference):
+                return daily_price
             precise = self._resolve_minute_fill(
-                minute_rows,
-                reference if _valid_price(reference) else None,
-                side,
+                minute_rows, reference, side,
             )
             return precise if precise is not None else daily_price
 
@@ -1839,7 +2020,7 @@ class BacktestEngine:
             minute_rows = minute_cache.get(key)
             if minute_rows is None:
                 return None
-            reference = float(matrix.reference_price[time_id, asset_id])
+            reference = float(matrix.exit_reference_price[time_id, asset_id])
             return self._resolve_minute_exit_trigger(
                 minute_rows,
                 reference if _valid_price(reference) else None,
@@ -1909,7 +2090,14 @@ class BacktestEngine:
             exit_price = float(override) if override is not None else _refill_price(
                 time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
             )
-            exit_value = pos["shares"] * exit_price * (1 - sell_cost_pct)
+            symbol = matrix.symbols[asset_id]
+            exit_gross = pos["shares"] * exit_price
+            exit_value = exit_gross - config.sell_transaction_cost(
+                exit_gross,
+                symbol,
+                matrix.timestamp_labels[time_id][:10],
+                is_day_trade=pos["entry_date"] == matrix.timestamp_labels[time_id][:10],
+            )
             cash += exit_value
             pnl_amount = exit_value - pos["entry_value"]
             pnl_pct = pnl_amount / pos["entry_value"] if pos["entry_value"] > 0 else 0.0
@@ -1949,6 +2137,12 @@ class BacktestEngine:
             sold_today: set[int],
             override: float | None = None,
         ) -> bool:
+            pos = positions[asset_id]
+            symbol = matrix.symbols[asset_id]
+            if not config.can_exit_after_sessions(symbol, int(pos["hold_days"])):
+                _mark_pending(asset_id, reason, signal_date)
+                _count("sell_minimum_holding")
+                return False
             signal_id = (
                 _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
                 if reason == "signal" else None
@@ -2111,8 +2305,11 @@ class BacktestEngine:
                             entry_price = _refill_price(
                                 time_id, asset_id, "buy", float(entry_prices[time_id, asset_id])
                             )
-                            shares = np.floor(allocation / (entry_price * (1 + buy_cost_pct)) / 100) * 100
-                            entry_value = shares * entry_price * (1 + buy_cost_pct)
+                            symbol = matrix.symbols[asset_id]
+                            lot_size = config.lot_size(symbol)
+                            shares = config.align_shares(allocation, entry_price, symbol)
+                            entry_gross = shares * entry_price
+                            entry_value = entry_gross + config.buy_transaction_cost(entry_gross)
                             if shares <= 0:
                                 _count("buy_lot_size")
                                 continue
@@ -2134,7 +2331,7 @@ class BacktestEngine:
                                 "entry_price": entry_price,
                                 "entry_value": entry_value,
                                 "shares": shares,
-                                "lots": shares / 100,
+                                "lots": shares / lot_size,
                                 "position_pct": entry_value / equity_before if equity_before > 0 else 0.0,
                                 "entry_score": entry_score,
                                 "max_high": entry_price,
@@ -2145,10 +2342,27 @@ class BacktestEngine:
                                 "pending_exit_next_open": False,
                                 "blocked_exit_days": 0,
                             }
+                            if (
+                                config.minimum_holding_sessions == 0
+                                and matrix.exit[time_id, asset_id]
+                            ):
+                                _try_sell(
+                                    time_id,
+                                    asset_id,
+                                    "signal",
+                                    _signal_date(
+                                        int(matrix.exit_signal_time[time_id, asset_id]),
+                                        date_text,
+                                    ),
+                                    sold_today,
+                                )
 
             for asset_id, pos in positions.items():
                 high_price = float(matrix.high[time_id, asset_id])
-                if _valid_price(high_price):
+                if (
+                    config.entry_fill == "open_t+1"
+                    or pos["entry_date"] != date_text
+                ) and _valid_price(high_price):
                     pos["max_high"] = max(float(pos["max_high"]), high_price)
             valid_closes = np.isfinite(matrix.close[time_id]) & (matrix.close[time_id] > 0)
             last_close[valid_closes] = matrix.close[time_id, valid_closes]
@@ -2295,8 +2509,6 @@ class BacktestEngine:
         if not all_dates:
             return self._empty_result()
 
-        buy_cost_pct = config.buy_cost_pct()
-        sell_cost_pct = config.sell_cost_pct()
         cash = float(config.initial_capital)
         peak = cash
         max_positions = max(int(config.max_positions), 0)
@@ -2318,11 +2530,8 @@ class BacktestEngine:
                     trigger_dates.add(self._date_str(panel_dates[idx]))
                     trigger_symbols.add(str(panel_symbols[idx]))
             if trigger_dates and trigger_symbols:
-                asset_type = "etf" if all(
-                    str(s).endswith(".SH") and str(s).startswith("5") for s in list(trigger_symbols)[:5]
-                ) else "stock"
                 loaded = self._load_minute_for_fills(
-                    self.repo, list(trigger_symbols), trigger_dates, asset_type,
+                    self.repo, list(trigger_symbols), trigger_dates, config.asset_type,
                 )
                 for key, marr in loaded.items():
                     if marr is not None and len(marr) > 0:
@@ -2332,16 +2541,24 @@ class BacktestEngine:
             """分钟K精确成交价; 无数据则降级为 daily_price。"""
             if not config.minute_fill or not minute_cache:
                 return daily_price
+            if side == "buy" and config.entry_fill != "open_t+1":
+                return daily_price
+            if side == "sell" and config.exit_fill == "close_t":
+                return daily_price
             sym = str(panel_symbols[idx])
             d_str = self._date_str(panel_dates[idx])
             marr = minute_cache.get((sym, d_str))
             if marr is None:
                 return daily_price
-            # 参考线: 从 panel 取 ma5/ma10/ma20 作为近似 (均线类信号)
             ref = None
+            previous_idx = idx - 1
             for col in ("ma5", "ma10", "ma20"):
-                if col in panel.columns:
-                    val = panel[col][idx]
+                if (
+                    col in panel.columns
+                    and previous_idx >= 0
+                    and panel_symbols[previous_idx] == panel_symbols[idx]
+                ):
+                    val = panel[col][previous_idx]
                     try:
                         fv = float(val)
                         if fv > 0 and np.isfinite(fv):
@@ -2349,6 +2566,8 @@ class BacktestEngine:
                             break
                     except (TypeError, ValueError):
                         pass
+            if ref is None:
+                return daily_price
             precise = self._resolve_minute_fill(marr, ref, side)
             return precise if precise is not None else daily_price
 
@@ -2367,6 +2586,7 @@ class BacktestEngine:
             "sell_invalid_price": 0,
             "sell_suspended": 0,
             "sell_limit_down": 0,
+            "sell_minimum_holding": 0,
             "pending_exit": 0,
         }
 
@@ -2456,7 +2676,12 @@ class BacktestEngine:
                 exit_price = float(exit_price_override)
             else:
                 exit_price = _refill_price(idx, "sell", float(exit_prices[idx]))
-            exit_value = pos["shares"] * exit_price * (1 - sell_cost_pct)
+            exit_gross = pos["shares"] * exit_price
+            exit_value = exit_gross - config.sell_transaction_cost(
+                exit_gross,
+                sym,
+                self._date_str(panel_dates[idx]),
+            )
             cash += exit_value
             pnl_amount = exit_value - pos["entry_value"]
             pnl_pct = (exit_value - pos["entry_value"]) / pos["entry_value"] if pos["entry_value"] > 0 else 0.0
@@ -2664,11 +2889,10 @@ class BacktestEngine:
                     _count("buy_exposure")
                     continue
                 entry_price = _refill_price(idx, "buy", float(entry_prices[idx]))
-                lot_size = 100
-                if config.market_profile is not None and hasattr(config.market_profile, "lot"):
-                    lot_size = config.market_profile.lot.lot_size
-                shares = np.floor(allocation / (entry_price * (1 + buy_cost_pct)) / lot_size) * lot_size
-                entry_value = shares * entry_price * (1 + buy_cost_pct)
+                lot_size = config.lot_size(sym)
+                shares = config.align_shares(allocation, entry_price, sym)
+                entry_gross = shares * entry_price
+                entry_value = entry_gross + config.buy_transaction_cost(entry_gross)
                 if shares <= 0:
                     _count("buy_lot_size")
                     continue
@@ -2734,7 +2958,10 @@ class BacktestEngine:
                 idx = row_by_symbol.get(sym)
                 if idx is not None:
                     hi = float(high_prices[idx])
-                    if _valid_price(hi):
+                    if (
+                        config.entry_fill == "open_t+1"
+                        or pos["entry_date"] != d_str
+                    ) and _valid_price(hi):
                         pos["max_high"] = max(float(pos.get("max_high", pos["entry_price"])), hi)
 
             for i in idxs:

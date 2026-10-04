@@ -260,7 +260,7 @@ class SectionQualityMeta(BaseModel):
 class ResearchDataQuality(BaseModel):
     """Comprehensive data quality tracking across all evidence domains."""
 
-    overall_status: Literal["complete", "partial", "unavailable"]
+    overall_status: Literal["complete", "provisional", "partial", "unavailable"]
     sections: list[SectionQualityMeta]
     target_trade_date: str
 
@@ -780,12 +780,16 @@ class TaiwanStockResearchContextService:
         ]
         active_statuses = [daily_status, inst_status, m_status]
         if all(s == "current" for s in active_statuses):
-            overall_status = "complete"
+            overall_status = (
+                market_snap.data_quality.overall_status
+                if market_snap.data_quality.overall_status in ("complete", "provisional")
+                else "partial"
+            )
         elif any(s in ("current", "stale") for s in active_statuses):
             overall_status = "partial"
         else:
             overall_status = "unavailable"
-        if overall_status == "complete" and not ind_row:
+        if overall_status in ("complete", "provisional") and not ind_row:
             overall_status = "partial"
 
         dq = ResearchDataQuality(
