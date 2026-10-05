@@ -595,6 +595,29 @@ describe('Market Intelligence date honesty (Data Freshness & Source Labels batch
 
     await screen.findByText('交易日: 2026-09-08')
     expect(screen.queryByText('尚無完整市場資料，以下統計非今日實際行情')).not.toBeInTheDocument()
+    expect(screen.queryByText('盤後初值，次日校正')).not.toBeInTheDocument()
+  })
+
+  it('shows the provisional label instead of the no-complete-data notice when overall_status is provisional', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(
+      buildMarketIntelligence({ data_quality: { target_trade_date: '2026-09-08', previous_trade_date: '2026-09-05', overall_status: 'provisional', universe_supported_symbols: 2377, daily_snapshot_symbols: 2336, missing_symbols_count: 41 } }) as any,
+    )
+    renderScreener()
+
+    await screen.findByText('交易日: 2026-09-08')
+    expect(screen.getByText('盤後初值，次日校正')).toBeInTheDocument()
+    expect(screen.queryByText('尚無完整市場資料，以下統計非今日實際行情')).not.toBeInTheDocument()
+  })
+
+  it('keeps the no-complete-data notice when overall_status is partial', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(
+      buildMarketIntelligence({ data_quality: { target_trade_date: '2026-09-08', previous_trade_date: '2026-09-05', overall_status: 'partial', universe_supported_symbols: 2377, daily_snapshot_symbols: 2300, missing_symbols_count: 77 } }) as any,
+    )
+    renderScreener()
+
+    await screen.findByText('交易日: 2026-09-08')
+    expect(screen.getByText('尚無完整市場資料，以下統計非今日實際行情')).toBeInTheDocument()
+    expect(screen.queryByText('盤後初值，次日校正')).not.toBeInTheDocument()
   })
 })
 

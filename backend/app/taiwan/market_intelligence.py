@@ -97,6 +97,9 @@ TREND_EXTREME_WINDOW = 60
 # Longest rolling window above decides how many sessions the trend read must cover.
 TREND_LOOKBACK_SESSIONS = max(*TREND_MA_WINDOWS, TREND_EXTREME_WINDOW)
 
+# The security master keeps terminated or halted symbols without daily bars, so 100% is unreachable.
+DAILY_COVERAGE_COMPLETE_RATIO = 0.98
+
 
 # ── Pydantic Response Contract Models ─────────────────────────
 
@@ -700,10 +703,12 @@ class TaiwanMarketIntelligenceService:
         daily_coverage_complete = (
             supported_count > 0
             and matched_symbols_count > 0
-            and missing_count == 0
+            and matched_symbols_count / supported_count >= DAILY_COVERAGE_COMPLETE_RATIO
             and expected_exchanges_present
             and snapshot_exchanges_present
-            and universe_as_of == target
+            # A master refreshed after target is not point-in-time for it; an older one is accepted.
+            and universe_as_of is not None
+            and universe_as_of <= target
         )
         dataset_statuses = [daily_status, inst_status, m_status]
         if supported_count == 0 or matched_symbols_count == 0:

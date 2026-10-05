@@ -55,8 +55,10 @@ def _quality_service(
     *,
     provisional: bool = False,
     zero_volume_symbols: set[str] | None = None,
+    master_updated_at: date | None = None,
 ) -> TaiwanMarketIntelligenceService:
     zero_volume_symbols = zero_volume_symbols or set()
+    master_updated_at = master_updated_at or target
     previous = date.fromordinal(target.toordinal() - 1)
     universe = pl.DataFrame({
         "symbol": universe_symbols,
@@ -64,7 +66,7 @@ def _quality_service(
         "instrument_type": ["stock"] * len(universe_symbols),
         "listing_status": ["active"] * len(universe_symbols),
         "listing_date": [target.isoformat()] * len(universe_symbols),
-        "updated_at": [f"{target.isoformat()}T08:00:00+08:00"] * len(universe_symbols),
+        "updated_at": [f"{master_updated_at.isoformat()}T08:00:00+08:00"] * len(universe_symbols),
     })
 
     def rows(symbols: list[str], d: date) -> pl.DataFrame:
@@ -165,6 +167,103 @@ def test_complete_dual_market_snapshot_is_complete():
 
     assert snapshot.data_quality.overall_status == "complete"
     assert snapshot.data_quality.missing_symbols_count == 0
+
+
+_PROD_TARGET = date(2026, 10, 1)
+_PROD_MASTER_DATE = date(2026, 9, 17)
+_PROD_UNIVERSE = [f"{i:04d}.TWSE" for i in range(1300)] + [f"{i:04d}.TPEX" for i in range(1300, 2377)]
+
+
+def test_master_older_than_target_can_be_complete():
+    snapshot = _quality_service(
+        _PROD_TARGET,
+        _PROD_UNIVERSE,
+        _PROD_UNIVERSE[:2336],
+        master_updated_at=_PROD_MASTER_DATE,
+    ).get_snapshot(_PROD_TARGET)
+
+    assert snapshot.data_quality.daily.status == "current"
+    assert snapshot.data_quality.missing_symbols_count == 41
+    assert snapshot.data_quality.overall_status == "complete"
+
+
+@pytest.mark.parametrize(
+    ("snapshot_count", "expected"),
+    [(2336, "complete"), (2330, "complete"), (2329, "partial"), (2300, "partial")],
+)
+def test_daily_coverage_threshold_boundary(snapshot_count, expected):
+    snapshot = _quality_service(
+        _PROD_TARGET,
+        _PROD_UNIVERSE,
+        _PROD_UNIVERSE[:snapshot_count],
+        master_updated_at=_PROD_MASTER_DATE,
+    ).get_snapshot(_PROD_TARGET)
+
+    assert snapshot.data_quality.daily_snapshot_symbols == snapshot_count
+    assert snapshot.data_quality.overall_status == expected
+
+
+def test_daily_coverage_exactly_at_threshold_is_complete():
+    twse = [f"{i:04d}.TWSE" for i in range(50)]
+    tpex = [f"{i:04d}.TPEX" for i in range(50, 100)]
+    snapshot = _quality_service(
+        _PROD_TARGET,
+        twse + tpex,
+        twse[:49] + tpex[:49],
+        master_updated_at=_PROD_MASTER_DATE,
+    ).get_snapshot(_PROD_TARGET)
+
+    assert snapshot.data_quality.daily_snapshot_symbols == 98
+    assert snapshot.data_quality.overall_status == "complete"
+
+
+@pytest.mark.parametrize(
+    ("universe", "snapshot_symbols"),
+    [
+        ([f"{i:04d}.TWSE" for i in range(100)], [f"{i:04d}.TWSE" for i in range(100)]),
+        (
+            [f"{i:04d}.TWSE" for i in range(2337)] + [f"{i:04d}.TPEX" for i in range(2337, 2377)],
+            [f"{i:04d}.TWSE" for i in range(2337)],
+        ),
+    ],
+    ids=["single_exchange_universe", "high_coverage_without_tpex"],
+)
+def test_single_exchange_is_partial(universe, snapshot_symbols):
+    snapshot = _quality_service(
+        _PROD_TARGET,
+        universe,
+        snapshot_symbols,
+        master_updated_at=_PROD_MASTER_DATE,
+    ).get_snapshot(_PROD_TARGET)
+
+    assert snapshot.data_quality.tpex_snapshot_symbols == 0
+    assert snapshot.data_quality.overall_status == "partial"
+
+
+def test_provisional_daily_with_current_chips_and_older_master_is_provisional():
+    snapshot = _quality_service(
+        _PROD_TARGET,
+        _PROD_UNIVERSE,
+        _PROD_UNIVERSE[:2336],
+        provisional=True,
+        master_updated_at=_PROD_MASTER_DATE,
+    ).get_snapshot(_PROD_TARGET)
+
+    assert snapshot.data_quality.daily.status == "provisional"
+    assert snapshot.data_quality.institutional.status == "current"
+    assert snapshot.data_quality.margin.status == "current"
+    assert snapshot.data_quality.overall_status == "provisional"
+
+
+def test_master_without_single_as_of_date_is_partial():
+    service = _quality_service(_PROD_TARGET, ["A.TWSE", "B.TPEX"], ["A.TWSE", "B.TPEX"])
+    service.security_master.to_dataframe.return_value = (
+        service.security_master.to_dataframe.return_value.with_columns(
+            pl.Series("updated_at", ["2026-09-17T08:00:00+08:00", "2026-09-18T08:00:00+08:00"])
+        )
+    )
+
+    assert service.get_snapshot(_PROD_TARGET).data_quality.overall_status == "partial"
 
 
 def test_historical_target_without_point_in_time_universe_is_partial():
