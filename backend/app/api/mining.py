@@ -541,6 +541,9 @@ def _project_result(
     return {
         "run_id": manifest["run_id"],
         "methodology_version": summary.get("methodology_version") or "factor_v2",
+        # Null for runs saved before mining recorded its Sharpe methodology and risk-free rate.
+        "stats_methodology_version": summary.get("stats_methodology_version"),
+        "stats_risk_free_rate": summary.get("stats_risk_free_rate"),
         "algorithm_version": summary.get("algorithm_version") or MINING_ALGORITHM_VERSION,
         "data_as_of": summary.get("data_as_of"),
         "request_summary": _request_summary(manifest),

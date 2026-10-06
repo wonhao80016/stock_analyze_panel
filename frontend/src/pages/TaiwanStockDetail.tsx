@@ -443,7 +443,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                   <span className="text-xs font-bold text-foreground mt-0.5">
                     {data.price_limit.rule_type}
                   </span>
-                  {!data.price_limit.is_no_limit && (
+                  {!data.price_limit.is_no_limit && data.identity.instrument_type !== 'index' && (
                     <div className="mt-1 flex items-center justify-between text-[11px] font-mono">
                       <span className="text-rose-500">漲停 {data.price_limit.limit_up?.toFixed(2) || '--'}</span>
                       <span className="text-emerald-500">跌停 {data.price_limit.limit_down?.toFixed(2) || '--'}</span>

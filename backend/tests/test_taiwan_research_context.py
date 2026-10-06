@@ -414,3 +414,28 @@ def test_provisional_market_is_provisional_and_excluded_from_ai_evidence(tmp_pat
     assert context.data_quality.overall_status == "provisional"
     assert "market_context" not in payload
     assert "market_context" in missing
+
+
+@pytest.mark.parametrize(
+    ("symbol", "previous_close", "tick"),
+    [("0050.TWSE", 190.0, 0.05), ("00878.TWSE", 35.0, 0.01)],
+)
+def test_an_etf_tick_size_comes_from_the_etf_ladder(symbol, previous_close, tick):
+    """The ordinary-stock ladder would give 0.5 at 190 and 0.05 at 35."""
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    mock_daily = MagicMock()
+    mock_daily.available_dates.return_value = [d_prev, d_curr]
+    mock_daily.read_range.return_value = pl.DataFrame({
+        "symbol": [symbol, symbol],
+        "date": [d_prev, d_curr],
+        "open": [previous_close, previous_close],
+        "high": [previous_close, previous_close],
+        "low": [previous_close, previous_close],
+        "close": [previous_close, previous_close],
+        "volume": [10000.0, 10000.0],
+        "amount": [previous_close * 10000.0] * 2,
+    })
+
+    ctx = TaiwanStockResearchContextService(daily_store=mock_daily).get_research_context(symbol, d_curr)
+
+    assert ctx.market_rules_context.tick_size == tick

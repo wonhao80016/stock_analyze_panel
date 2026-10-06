@@ -157,6 +157,28 @@ def test_minute_price_limit_prefers_authoritative_prices_only_today(monkeypatch)
     }
 
 
+class _HighPriceInstrumentRepo:
+    def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
+        return pl.DataFrame({"symbol": ["688001.SH"], "limit_up": [12_000.0], "limit_down": [8_000.0]})
+
+
+def test_minute_price_limit_keeps_authoritative_prices_above_ten_thousand(monkeypatch):
+    today = date(2026, 7, 18)
+    monkeypatch.setattr(kline, "cn_today", lambda: today)
+
+    got = kline._get_price_limit_info(_HighPriceInstrumentRepo(), "688001.SH", today, "stock", "科創板")
+
+    assert got == {"rate": 0.20, "limit_up": 12_000.0, "limit_down": 8_000.0, "source": "instrument"}
+
+
+def test_minute_price_limit_of_a_past_session_comes_from_its_previous_close():
+    got = kline._get_price_limit_info(
+        _InstrumentRepo(), "600001.SH", date(2026, 7, 3), "stock", "*ST主板", prev_close=9.87,
+    )
+
+    assert got == {"rate": 0.05, "limit_up": 10.36, "limit_down": 9.38, "source": "model"}
+
+
 def _daily_limit_rows(current_close: float) -> pl.DataFrame:
     return pl.DataFrame({
         "symbol": ["600001.SH", "600001.SH"],
@@ -653,24 +675,38 @@ def test_market_matrix_never_marks_a_no_limit_taiwan_etf_as_limit_locked(tmp_pat
         ordinary: _taiwan_instrument(ordinary),
         foreign: _no_limit_etf(foreign),
     })
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+
     root = tmp_path / "market"
     rows = [
-        (date(2026, 9, 16), 100.0, 100.0),
-        (date(2026, 9, 17), 110.0, 200.0),
+        (date(2026, 9, 16), 100.0, 100.0, None, None),
+        (date(2026, 9, 17), 110.0, 200.0, 100.0, 100.0),
     ]
-    for trade_date, stock_close, etf_close in rows:
+    bars = pl.DataFrame([
+        {
+            "symbol": symbol,
+            "date": trade_date,
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "raw_close": close,
+            "raw_high": close,
+            "raw_low": close,
+            "prev_close": prev_close,
+            "volume": 1000.0,
+        }
+        for trade_date, stock_close, etf_close, stock_prev, etf_prev in rows
+        for symbol, close, prev_close in (
+            (ordinary, stock_close, stock_prev),
+            (foreign, etf_close, etf_prev),
+        )
+    ], schema_overrides={"prev_close": pl.Float64})
+    published = object.__new__(TaiwanEnrichedRefreshService)._add_limit_signals(bars)
+    for (trade_date,), part in published.partition_by("date", as_dict=True).items():
         partition = root / f"date={trade_date.isoformat()}"
         partition.mkdir(parents=True)
-        pl.DataFrame({
-            "symbol": [ordinary, foreign],
-            "date": [trade_date, trade_date],
-            "open": [stock_close, etf_close],
-            "high": [stock_close, etf_close],
-            "low": [stock_close, etf_close],
-            "close": [stock_close, etf_close],
-            "raw_close": [stock_close, etf_close],
-            "volume": [1000.0, 1000.0],
-        }).write_parquet(partition / "part.parquet")
+        part.write_parquet(partition / "part.parquet")
 
     market = load_market_data_matrix_from_parquet(
         root,
@@ -688,6 +724,10 @@ def test_market_matrix_never_marks_a_no_limit_taiwan_etf_as_limit_locked(tmp_pat
     limits = market.field("price_limit_pct")
     assert limits[-1, column[ordinary]] == pytest.approx(0.10)
     assert np.isnan(limits[-1, column[foreign]])
+    for symbol in (ordinary, foreign):
+        sessions = published.filter(pl.col("symbol") == symbol).sort("date")
+        assert market.limit_up_locked[:, column[symbol]].tolist() == sessions["signal_limit_up"].cast(pl.UInt8).to_list()
+        assert market.limit_down_locked[:, column[symbol]].tolist() == sessions["signal_limit_down"].cast(pl.UInt8).to_list()
     assert market.limit_up_locked[-1, column[ordinary]] == 1
     assert market.limit_up_locked[-1, column[foreign]] == 0
     assert market.limit_down_locked[-1, column[foreign]] == 0

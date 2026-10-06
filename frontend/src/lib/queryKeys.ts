@@ -54,7 +54,6 @@ export const QK = {
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
-  factorColumns:        ['backtest-factor-columns'] as const,
   miningRuns:           ['backtest-mining-runs'] as const,
   miningAvailability:   (assetType: string, profile: string, start: string, end: string) =>
                           ['backtest-mining-availability', assetType, profile, start, end] as const,

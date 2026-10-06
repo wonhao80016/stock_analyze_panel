@@ -1,4 +1,5 @@
-"""回测模块 — 因子回测 + 策略回测 + 信号回测。
+"""Backtest package: strategy backtests, optimization, walk-forward and strategy mining.
 
-架构: BacktestEngine (共享) → FactorBacktestService / StrategyBacktestService
+Architecture: shared BacktestEngine -> StrategyBacktestService; mining reuses the factor
+catalog and factor computation in factor.py.
 """

@@ -34,7 +34,7 @@ from app.price_limits import (
     polars_price_limit_pct,
 )
 from app.share_capital import apply_historical_float_shares, load_share_history
-from app.volume_units import turnover_rate_pct_expr
+from app.volume_units import TAIWAN_SUFFIXES, turnover_rate_pct_expr
 
 logger = logging.getLogger(__name__)
 
@@ -715,6 +715,57 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
     return df
 
 
+def with_limit_streak(df: pl.DataFrame, signal: str, streak: str) -> pl.DataFrame:
+    """Set *streak* to the number of consecutive sessions, per symbol by date, ending at a true *signal*; 0 elsewhere."""
+    hit = pl.col(signal).fill_null(False)
+    run = f"_{streak}_run"
+    return (
+        df.with_columns((~hit).cast(pl.UInt32).cum_sum().over("symbol", order_by="date").alias(run))
+        .with_columns(
+            pl.when(hit)
+            .then(hit.cast(pl.UInt32).cum_sum().over(["symbol", run], order_by="date"))
+            .otherwise(0)
+            .cast(pl.UInt32)
+            .alias(streak)
+        )
+        .drop(run)
+    )
+
+
+def _is_taiwan_symbol() -> pl.Expr:
+    return pl.col("symbol").str.ends_with(TAIWAN_SUFFIXES[0]) | pl.col("symbol").str.ends_with(TAIWAN_SUFFIXES[1])
+
+
+def _join_taiwan_limit_profile(df: pl.DataFrame) -> pl.DataFrame:
+    profile = taiwan_limit_profile(df["symbol"].unique().to_list())
+    return df.join(
+        profile.select(
+            "symbol",
+            pl.col("limit_pct").alias("_tw_limit_pct"),
+            pl.col("is_etf_tick").alias("_tw_is_etf"),
+        ),
+        on="symbol",
+        how="left",
+    )
+
+
+def _statutory_limit_prices(previous: pl.Expr, limit_pct: pl.Expr) -> tuple[pl.Expr, pl.Expr]:
+    """Limit up / down from a raw-scale previous close; needs the _tw_is_etf column for Taiwan rows.
+
+    Taiwan limits round to the exchange tick ladder, A-share limits half-up to the cent.
+    """
+    from app.taiwan.market_rules import PriceLimitModel
+
+    taiwan_up, taiwan_down = PriceLimitModel.polars_limit_prices(
+        previous, limit_pct, pl.col("_tw_is_etf").fill_null(False)
+    )
+    is_taiwan = _is_taiwan_symbol()
+    return (
+        pl.when(is_taiwan).then(taiwan_up).otherwise(polars_limit_price(previous, limit_pct, up=True)),
+        pl.when(is_taiwan).then(taiwan_down).otherwise(polars_limit_price(previous, limit_pct, up=False)),
+    )
+
+
 def compute_limit_signals(
     df: pl.DataFrame,
     instruments: pl.DataFrame,
@@ -812,12 +863,7 @@ def compute_limit_signals(
         prev_raw_close = pl.coalesce(pl.col("ref_prev_close"), prev_raw_close)
     df = df.with_columns(prev_raw_close.alias("_prev_raw_close"))
 
-    tw_profile = taiwan_limit_profile(df["symbol"].unique().to_list())
-    df = df.join(
-        tw_profile.select("symbol", pl.col("limit_pct").alias("_tw_limit_pct")),
-        on="symbol",
-        how="left",
-    )
+    df = _join_taiwan_limit_profile(df)
 
     is_risk_warning = pl.col("_is_st") if "_is_st" in df.columns else pl.lit(False)
     df = df.with_columns(
@@ -828,40 +874,31 @@ def compute_limit_signals(
         .alias("_limit_pct")
     )
 
-    # 理论涨停价 = prev_close × (1 + limit_pct)  整数算术，避免浮点误差
+    theoretical_up, theoretical_down = _statutory_limit_prices(pl.col("_prev_raw_close"), pl.col("_limit_pct"))
     df = df.with_columns(
-        polars_limit_price(pl.col("_prev_raw_close"), pl.col("_limit_pct"), up=True)
-        .alias("_theoretical_limit_up")
-    )
-
-    # 理论跌停价 = prev_close × (1 - limit_pct)
-    df = df.with_columns(
-        polars_limit_price(pl.col("_prev_raw_close"), pl.col("_limit_pct"), up=False)
-        .alias("_theoretical_limit_down")
+        theoretical_up.alias("_theoretical_limit_up"),
+        theoretical_down.alias("_theoretical_limit_down"),
     )
 
     # 生效涨跌停价: 维表日期与行情日期一致时使用权威值, 否则使用理论价。
     # 旧版维表没有 as_of, 保持仅在最新行情日使用权威值的兼容行为。
-    _SENTINEL = 10000.0
     if "_instrument_as_of" in df.columns:
         authoritative_date = (
             pl.col("_instrument_as_of") == pl.col("date").cast(pl.Date, strict=False)
         )
     else:
         authoritative_date = pl.col("date") == pl.col("date").max()
+    # Taiwan limits come from Security Master rules and official ref_limit_*, never the instrument table.
+    authoritative_date = authoritative_date & ~_is_taiwan_symbol()
     if "limit_up" in df.columns:
         effective_limit_up = pl.when(
-            authoritative_date
-            & pl.col("limit_up").is_not_null()
-            & (pl.col("limit_up") < _SENTINEL)
+            authoritative_date & pl.col("limit_up").is_not_null()
         ).then(pl.col("limit_up")).otherwise(pl.col("_theoretical_limit_up"))
     else:
         effective_limit_up = pl.col("_theoretical_limit_up")
     if "limit_down" in df.columns:
         effective_limit_down = pl.when(
-            authoritative_date
-            & pl.col("limit_down").is_not_null()
-            & (pl.col("limit_down") < _SENTINEL)
+            authoritative_date & pl.col("limit_down").is_not_null()
         ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
     else:
         effective_limit_down = pl.col("_theoretical_limit_down")
@@ -890,28 +927,8 @@ def compute_limit_signals(
         .alias("signal_limit_up")
         )
 
-    # ── consecutive_limit_ups ──
     if "consecutive_limit_ups" in want:
-        df = df.with_columns(
-        (~pl.col("signal_limit_up").fill_null(False))
-        .cast(pl.UInt32)
-        .cum_sum()
-        .over("symbol")
-        .alias("_grp_up")
-        ).with_columns(
-        pl.col("signal_limit_up")
-        .cast(pl.UInt32)
-        .cum_sum()
-        .over("symbol", "_grp_up")
-        .cast(pl.UInt32)
-        .alias("consecutive_limit_ups")
-        ).with_columns(
-        pl.when(pl.col("signal_limit_up").fill_null(False))
-        .then(pl.col("consecutive_limit_ups"))
-        .otherwise(0)
-        .cast(pl.UInt32)
-        .alias("consecutive_limit_ups")
-        )
+        df = with_limit_streak(df, "signal_limit_up", "consecutive_limit_ups")
 
     # ── signal_limit_down ──
     if need_down:
@@ -926,28 +943,8 @@ def compute_limit_signals(
         .alias("signal_limit_down")
         )
 
-    # ── consecutive_limit_downs ──
     if "consecutive_limit_downs" in want:
-        df = df.with_columns(
-        (~pl.col("signal_limit_down").fill_null(False))
-        .cast(pl.UInt32)
-        .cum_sum()
-        .over("symbol")
-        .alias("_grp_down")
-        ).with_columns(
-        pl.col("signal_limit_down")
-        .cast(pl.UInt32)
-        .cum_sum()
-        .over("symbol", "_grp_down")
-        .cast(pl.UInt32)
-        .alias("consecutive_limit_downs")
-        ).with_columns(
-        pl.when(pl.col("signal_limit_down").fill_null(False))
-        .then(pl.col("consecutive_limit_downs"))
-        .otherwise(0)
-        .cast(pl.UInt32)
-        .alias("consecutive_limit_downs")
-        )
+        df = with_limit_streak(df, "signal_limit_down", "consecutive_limit_downs")
 
     # ── signal_limit_down_recovery (跌停翘板) ──
     # 条件: 当日最低价曾触及跌停价 + 最终没有跌停 + 收阳
@@ -981,10 +978,10 @@ def compute_limit_signals(
         )
 
     # 清理临时列 + JOIN 引入的 instruments 列 (不存入 enriched)
-    cleanup = ["_prev_raw_close", "_limit_pct", "_tw_limit_pct",
+    cleanup = ["_prev_raw_close", "_limit_pct", "_tw_limit_pct", "_tw_is_etf",
                "_theoretical_limit_up", "_theoretical_limit_down",
                "_effective_limit_up", "_effective_limit_down",
-               "_grp_up", "_grp_down", "_instrument_as_of"]
+               "_instrument_as_of"]
     if "_is_st" in df.columns:
         cleanup.append("_is_st")
     # 清理 join 产生的重复列
@@ -1867,12 +1864,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         prev_raw = pl.col("close_right")
     else:
         prev_raw = pl.col("raw_close")
-    tw_profile = taiwan_limit_profile(df["symbol"].unique().to_list())
-    df = df.join(
-        tw_profile.select("symbol", pl.col("limit_pct").alias("_tw_limit_pct")),
-        on="symbol",
-        how="left",
-    )
+    df = _join_taiwan_limit_profile(df)
 
     is_risk_warning = pl.col("_is_st") if "_is_st" in df.columns else pl.lit(False)
     trade_date = pl.col("date") if "date" in df.columns else pl.lit(cn_today())
@@ -1881,32 +1873,23 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         polars_price_limit_pct(pl.col("symbol"), trade_date, is_risk_warning),
     ).alias("_limit_pct")
 
-    limit_up_price = polars_limit_price(prev_raw, limit_pct, up=True)
-    limit_down_price = polars_limit_price(prev_raw, limit_pct, up=False)
+    limit_up_price, limit_down_price = _statutory_limit_prices(prev_raw, limit_pct)
 
     # 生效涨跌停价: 维表日期与行情日期一致时优先使用交易所权威值;
     # 维表过期或价格缺失时回退自算理论价。旧版无 as_of 维表保持兼容。
-    # 哨兵阈值 10000 用于识别 "新股无涨跌停限制" 的占位值 (实际涨停价不可能上万)。
-    _SENTINEL = 10000.0
+    # Taiwan limits come from Security Master rules and the quoted reference price, never the instrument table.
     authoritative_date = (
         pl.col("_instrument_as_of") == trade_date.cast(pl.Date, strict=False)
         if "_instrument_as_of" in df.columns
         else pl.lit(True)
-    )
+    ) & ~_is_taiwan_symbol()
     has_authoritative_up = pl.lit(False)
     has_authoritative_down = pl.lit(False)
-    no_price_limit = pl.lit(False)
     if "limit_up" in df.columns:
         has_authoritative_up = (
             authoritative_date
             & pl.col("limit_up").is_not_null()
             & (pl.col("limit_up") > 0)
-            & (pl.col("limit_up") < _SENTINEL)
-        )
-        no_price_limit = (
-            authoritative_date
-            & pl.col("limit_up").is_not_null()
-            & (pl.col("limit_up") >= _SENTINEL)
         )
         effective_limit_up = pl.when(
             has_authoritative_up
@@ -1918,7 +1901,6 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
             authoritative_date
             & pl.col("limit_down").is_not_null()
             & (pl.col("limit_down") > 0)
-            & (pl.col("limit_down") < _SENTINEL)
         )
         effective_limit_down = pl.when(
             has_authoritative_down
@@ -1928,16 +1910,12 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
 
     valid_prev_raw = prev_raw.is_not_null() & (prev_raw > 0)
     is_limit_up = (
-        pl.when(no_price_limit)
-          .then(False)
-          .when((valid_prev_raw | has_authoritative_up) & (pl.col("raw_close") > 0))
+        pl.when((valid_prev_raw | has_authoritative_up) & (pl.col("raw_close") > 0))
           .then(pl.col("raw_close") >= (effective_limit_up - 0.005))
           .otherwise(None).cast(pl.Boolean)
     )
     is_limit_down = (
-        pl.when(no_price_limit)
-          .then(False)
-          .when((valid_prev_raw | has_authoritative_down) & (pl.col("raw_close") > 0))
+        pl.when((valid_prev_raw | has_authoritative_down) & (pl.col("raw_close") > 0))
           .then(pl.col("raw_close") <= (effective_limit_down + 0.005))
           .otherwise(None).cast(pl.Boolean)
     )
@@ -1946,9 +1924,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         is_limit_up.alias("signal_limit_up"),
         is_limit_down.alias("signal_limit_down"),
         # 跌停翘板
-        pl.when(no_price_limit)
-          .then(False)
-          .when((valid_prev_raw | has_authoritative_down) & (pl.col("raw_low") > 0))
+        pl.when((valid_prev_raw | has_authoritative_down) & (pl.col("raw_low") > 0))
           .then(
               (~is_limit_down.fill_null(True))
               & (pl.col("raw_low") <= effective_limit_down + 0.005)
@@ -1956,9 +1932,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
           ).otherwise(None).cast(pl.Boolean)
           .alias("signal_limit_down_recovery"),
         # 炸板: 最高价曾触及涨停价 + 最终未封住
-        pl.when(no_price_limit)
-          .then(False)
-          .when((valid_prev_raw | has_authoritative_up) & (pl.col("raw_high") > 0))
+        pl.when((valid_prev_raw | has_authoritative_up) & (pl.col("raw_high") > 0))
           .then(
               (~is_limit_up.fill_null(True))
               & (pl.col("raw_high") >= effective_limit_up - 0.005)
@@ -1986,7 +1960,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     ])
 
     # 清理
-    cleanup = ["_limit_pct", "_tw_limit_pct", "_is_st", "limit_up", "limit_down", "_instrument_as_of"]
+    cleanup = ["_limit_pct", "_tw_limit_pct", "_tw_is_etf", "_is_st", "limit_up", "limit_down", "_instrument_as_of"]
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
@@ -2018,40 +1992,29 @@ def taiwan_limit_profile(symbols: list[str]) -> pl.DataFrame:
     from app.taiwan.universe import get_security_master
     from app.taiwan.universe.models import MarketProfileBridge
 
-    missing = [s for s in symbols if s not in _taiwan_limit_profile_cache]
+    # A lookup may load the master, which clears the shared cache, so results are read from this local copy.
+    profiles = {s: _taiwan_limit_profile_cache.get(s) for s in symbols}
+    missing = [s for s, profile in profiles.items() if profile is None]
     if missing:
         master = get_security_master()
         for sym in missing:
             inst = master.get_instrument(sym)
             if inst is None:
-                _taiwan_limit_profile_cache[sym] = (None, False)
-                continue
-            try:
-                pct = MarketProfileBridge.get_price_limit_pct(inst)
-            except ValueError:
-                pct = None
-            _taiwan_limit_profile_cache[sym] = (pct, inst.instrument_type == "etf")
+                profiles[sym] = (None, False)
+            else:
+                try:
+                    pct = MarketProfileBridge.get_price_limit_pct(inst)
+                except ValueError:
+                    pct = None
+                profiles[sym] = (pct, inst.instrument_type == "etf")
+            _taiwan_limit_profile_cache[sym] = profiles[sym]
 
     if not symbols:
         return pl.DataFrame(schema={"symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean})
     return pl.DataFrame([
-        {"symbol": s, "limit_pct": _taiwan_limit_profile_cache[s][0], "is_etf_tick": _taiwan_limit_profile_cache[s][1]}
+        {"symbol": s, "limit_pct": profiles[s][0], "is_etf_tick": profiles[s][1]}
         for s in symbols
     ])
-
-
-def _taiwan_tick_size_expr(price: pl.Expr, is_etf: pl.Expr) -> pl.Expr:
-    """台股跳动单位阶梯, 镜像 TickSizeModel.get_tick_size。"""
-    etf_tick = pl.when(price < 50.0).then(0.01).otherwise(0.05)
-    stock_tick = (
-        pl.when(price < 10.0).then(0.01)
-        .when(price < 50.0).then(0.05)
-        .when(price < 100.0).then(0.10)
-        .when(price < 500.0).then(0.50)
-        .when(price < 1000.0).then(1.00)
-        .otherwise(5.00)
-    )
-    return pl.when(is_etf).then(etf_tick).otherwise(stock_tick)
 
 
 def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -2061,6 +2024,8 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
     NO_LIMIT 标的 (外资成分/债券 ETF、underlying_scope 未确认) 两列皆为 null;
     Polars 对 null 的比较结果为 null, df.filter() 会自然剔除, 天然 fail-closed。
     """
+    from app.taiwan.market_rules import PriceLimitModel
+
     out_cols = ("distance_to_upper_limit", "distance_to_lower_limit")
     if df.is_empty() or "symbol" not in df.columns or "close" not in df.columns or "prev_close" not in df.columns:
         return df.with_columns([pl.lit(None).cast(pl.Float64).alias(c) for c in out_cols])
@@ -2076,13 +2041,9 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
     else:
         ref = pl.col("prev_close")
         close = pl.col("close")
-    up_raw = ref * (1.0 + pl.col("limit_pct"))
-    down_raw = pl.max_horizontal(pl.lit(0.01), ref * (1.0 - pl.col("limit_pct")))
-    is_etf = pl.col("is_etf_tick").fill_null(False)
-    up_tick = _taiwan_tick_size_expr(up_raw, is_etf)
-    down_tick = _taiwan_tick_size_expr(down_raw, is_etf)
-    limit_up = ((up_raw / up_tick + 1e-9).floor() * up_tick).round(4)
-    limit_down = ((down_raw / down_tick - 1e-9).ceil() * down_tick).round(4)
+    limit_up, limit_down = PriceLimitModel.polars_limit_prices(
+        ref, pl.col("limit_pct"), pl.col("is_etf_tick").fill_null(False)
+    )
 
     usable = (
         pl.col("limit_pct").is_not_null()

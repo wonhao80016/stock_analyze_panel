@@ -11,11 +11,18 @@ Covers:
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
+import numpy as np
+import polars as pl
 import pytest
 
-from app.price_limits import board_limit_pct, price_limit_pct, taiwan_price_limit_pct
+from app.price_limits import (
+    board_limit_pct,
+    numpy_limit_price,
+    price_limit_pct,
+    taiwan_price_limit_pct,
+)
 from app.taiwan.market_rules import (
     EXAMPLE_BROKER_MIN_COMMISSION,
     BacktestMode,
@@ -237,3 +244,233 @@ def test_audited_leveraged_etf_rule_profiles_are_explicit_official_evidence():
     assert (leveraged.category, leveraged.underlying_scope, leveraged.price_limit_multiplier) == ("leveraged", "domestic", 2.0)
     assert (inverse.category, inverse.underlying_scope, inverse.price_limit_multiplier) == ("inverse", "domestic", -1.0)
     assert leveraged.evidence_url.startswith("https://www.twse.com.tw/")
+
+
+# ── 7. One Tick Ladder Behind Scalar, Polars and NumPy ─────────
+
+_POLARS_FLOAT = {np.float32: pl.Float32, np.float64: pl.Float64}
+
+
+def _tick_class(is_etf: bool) -> TickSizeClass:
+    return TickSizeClass.ETF if is_etf else TickSizeClass.ORDINARY_STOCK
+
+
+def _scalar_limits(refs, pct, is_etf, trade_date=None):
+    return [
+        PriceLimitModel.calc_limits_for_pct(float(r), pct, _tick_class(is_etf), trade_date=trade_date)
+        for r in refs
+    ]
+
+
+def _polars_limits(refs, pct, is_etf, trade_date=None):
+    frame = pl.DataFrame({
+        "ref": pl.Series(refs),
+        "pct": pl.Series([pct] * len(refs), dtype=pl.Float64),
+        "etf": pl.Series([is_etf] * len(refs), dtype=pl.Boolean),
+    })
+    up, down = PriceLimitModel.polars_limit_prices(
+        pl.col("ref"), pl.col("pct"), pl.col("etf"), trade_date=trade_date
+    )
+    out = frame.select(up.alias("up"), down.alias("down"))
+    return list(zip(out["up"].to_list(), out["down"].to_list(), strict=True))
+
+
+def _numpy_limits(refs, pct, is_etf, trade_date=None):
+    pcts = np.full(len(refs), np.nan if pct is None else pct)
+    up, down = PriceLimitModel.numpy_limit_prices(
+        refs, pcts, np.full(len(refs), is_etf), trade_date=trade_date
+    )
+    return [
+        (None if np.isnan(u) else float(u), None if np.isnan(d) else float(d))
+        for u, d in zip(up, down, strict=True)
+    ]
+
+
+_LIMIT_CASES = [
+    pytest.param(5180.0, False, 5695.0, 4665.0, id="2454-5180"),
+    pytest.param(971.0, False, 1065.0, 874.0, id="6488-971"),
+    pytest.param(535.0, False, 588.0, 481.5, id="6196-535"),
+    pytest.param(111.85, True, 123.0, 100.7, id="0050-etf-111.85"),
+    pytest.param(2248.99, False, 2470.0, 2025.0, id="2330-2248.99"),
+    pytest.param(519.0, False, 570.0, 467.5, id="3034-519"),
+    pytest.param(704.0, False, 774.0, 634.0, id="2379-704"),
+    pytest.param(51.3, False, 56.4, 46.2, id="6225-51.3"),
+    pytest.param(3925.0, False, 4315.0, 3535.0, id="2454-3925"),
+    pytest.param(9.1, False, 10.0, 8.19, id="stock-across-10"),
+    pytest.param(9.1, True, 10.01, 8.19, id="etf-across-10"),
+    pytest.param(11.1, False, 12.2, 9.99, id="stock-down-below-10"),
+    pytest.param(11.1, True, 12.21, 9.99, id="etf-down-below-10"),
+    pytest.param(45.5, False, 50.0, 40.95, id="stock-across-50"),
+    pytest.param(45.5, True, 50.05, 40.95, id="etf-across-50"),
+    pytest.param(91.0, False, 100.0, 81.9, id="stock-across-100"),
+    pytest.param(91.0, True, 100.1, 81.9, id="etf-across-100"),
+    pytest.param(455.0, False, 500.0, 409.5, id="stock-across-500"),
+    pytest.param(455.0, True, 500.5, 409.5, id="etf-across-500"),
+    pytest.param(910.0, False, 1000.0, 819.0, id="stock-across-1000"),
+    pytest.param(910.0, True, 1001.0, 819.0, id="etf-across-1000"),
+    pytest.param(1111.0, False, 1220.0, 1000.0, id="stock-down-below-1000"),
+    pytest.param(1111.0, True, 1222.1, 999.9, id="etf-down-below-1000"),
+]
+
+_TICK_BOUNDARIES = [
+    (9.99, 0.01, 0.01),
+    (10.0, 0.05, 0.01),
+    (49.99, 0.05, 0.01),
+    (50.0, 0.10, 0.05),
+    (99.99, 0.10, 0.05),
+    (100.0, 0.50, 0.05),
+    (499.5, 0.50, 0.05),
+    (500.0, 1.00, 0.05),
+    (999.0, 1.00, 0.05),
+    (1000.0, 5.00, 0.05),
+]
+
+
+class TestSharedTickLadder:
+    """Scalar, Polars and NumPy entry points share one ladder and one rounding rule."""
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("ref,is_etf,expected_up,expected_down", _LIMIT_CASES)
+    def test_limit_prices_agree_across_interfaces(self, dtype, ref, is_etf, expected_up, expected_down):
+        refs = np.array([ref], dtype=dtype)
+        expected = [(expected_up, expected_down)]
+        assert _scalar_limits(refs, 0.10, is_etf) == expected
+        assert _polars_limits(refs, 0.10, is_etf) == expected
+        assert _numpy_limits(refs, 0.10, is_etf) == expected
+
+    def test_2454_differs_from_a_share_cent_rounding(self):
+        refs = np.array([5180.0])
+        pcts = np.array([0.10])
+        assert numpy_limit_price(refs, pcts, up=True).tolist() == [5698.0]
+        assert numpy_limit_price(refs, pcts, up=False).tolist() == [4662.0]
+        assert _numpy_limits(refs, 0.10, False) == [(5695.0, 4665.0)]
+
+    @pytest.mark.parametrize("dtype", [np.float32, np.float64])
+    @pytest.mark.parametrize("price,stock_tick,etf_tick", _TICK_BOUNDARIES)
+    def test_tick_size_boundaries_agree_across_interfaces(self, dtype, price, stock_tick, etf_tick):
+        prices = np.array([price, price], dtype=dtype)
+        is_etf = np.array([False, True])
+        expected = [stock_tick, etf_tick]
+        scalar = [
+            TickSizeModel.get_tick_size(float(p), _tick_class(bool(e)))
+            for p, e in zip(prices, is_etf, strict=True)
+        ]
+        frame = pl.DataFrame({"price": pl.Series(prices), "etf": pl.Series(is_etf)})
+        polars = frame.select(TickSizeModel.polars_tick_size(pl.col("price"), pl.col("etf")))
+        assert frame["price"].dtype == _POLARS_FLOAT[dtype]
+        assert scalar == expected
+        assert polars.to_series().to_list() == expected
+        assert TickSizeModel.numpy_tick_size(prices, is_etf).tolist() == expected
+
+    def test_trade_date_none_matches_current_session(self):
+        refs = np.array([5180.0, 111.85, 9.1, 45.5, 910.0, 1111.0])
+        today = date(2026, 10, 6)
+        for is_etf in (False, True):
+            assert _scalar_limits(refs, 0.10, is_etf) == _scalar_limits(refs, 0.10, is_etf, today)
+            assert _polars_limits(refs, 0.10, is_etf) == _polars_limits(refs, 0.10, is_etf, today)
+            assert _numpy_limits(refs, 0.10, is_etf) == _numpy_limits(refs, 0.10, is_etf, today)
+            flags = np.full(refs.size, is_etf)
+            assert (
+                TickSizeModel.numpy_tick_size(refs, flags).tolist()
+                == TickSizeModel.numpy_tick_size(refs, flags, trade_date=today).tolist()
+            )
+            assert [TickSizeModel.get_tick_size(float(p), _tick_class(is_etf)) for p in refs] == [
+                TickSizeModel.get_tick_size(float(p), _tick_class(is_etf), trade_date=today) for p in refs
+            ]
+
+    def test_missing_percentage_yields_missing_limits(self):
+        refs = np.array([100.0, 5180.0])
+        assert _scalar_limits(refs, None, False) == [(None, None), (None, None)]
+        assert _polars_limits(refs, None, False) == [(None, None), (None, None)]
+        assert _numpy_limits(refs, None, False) == [(None, None), (None, None)]
+
+    @pytest.mark.parametrize("pct,is_etf", [(0.10, False), (0.10, True), (0.20, True)])
+    def test_vector_interfaces_match_scalar_on_dense_price_grid(self, pct, is_etf):
+        refs = np.concatenate([np.arange(1, 120_001) * 0.01, 1200.0 + np.arange(0, 96_001) * 0.05])
+        scalar = _scalar_limits(refs, pct, is_etf)
+        assert _numpy_limits(refs, pct, is_etf) == scalar
+        assert _polars_limits(refs, pct, is_etf) == scalar
+
+
+def test_enriched_limit_signals_use_the_shared_ladder():
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+
+    service = TaiwanEnrichedRefreshService.__new__(TaiwanEnrichedRefreshService)
+    service._limit_profile = lambda symbols: pl.DataFrame(
+        {"symbol": symbols, "limit_pct": [0.10] * len(symbols), "is_etf_tick": [False] * len(symbols)}
+    )
+    closes = [5695.0, 5690.0, 4665.0, 4670.0]
+    frame = pl.DataFrame({
+        "symbol": [f"S{i}" for i in range(len(closes))],
+        "date": [date(2026, 10, 6)] * len(closes),
+        "prev_close": [5180.0] * len(closes),
+        "close": closes,
+        "raw_close": closes,
+        "raw_high": [5695.0, 5695.0, 4670.0, 4700.0],
+        "raw_low": [5600.0, 5600.0, 4665.0, 4665.0],
+    })
+
+    out = service._add_limit_signals(frame)
+
+    assert out["signal_limit_up"].to_list() == [True, False, False, False]
+    assert out["signal_broken_limit_up"].to_list() == [False, True, False, False]
+    assert out["signal_limit_down"].to_list() == [False, False, True, False]
+    assert out["signal_limit_down_recovery"].to_list() == [False, False, False, True]
+
+
+def test_pick_performance_limit_up_uses_the_shared_ladder():
+    from app.services.strategy_pick_performance import _limit_up_expr
+
+    frame = pl.DataFrame({
+        "_signal_close": [5180.0, 111.85, 5180.0],
+        "_limit_pct": [0.10, 0.10, 0.10],
+        "_is_etf_tick": [False, True, False],
+        "_entry_ref_prev_close": [None, None, 5000.0],
+        "_entry_ref_limit_up": [None, None, 5500.0],
+    })
+
+    assert frame.select(_limit_up_expr()).to_series().to_list() == [5695.0, 123.0, 5500.0]
+
+
+@pytest.mark.parametrize("refs,is_etf,expected", [
+    pytest.param(np.array([0.7], dtype=np.float32), False, [(0.77, 0.63)], id="float32-0.7"),
+    pytest.param(np.array([9.1 * (1 - 1e-12)]), True, [(10.01, 8.19)], id="etf-9.1-noise-below"),
+    pytest.param(np.array([9.1 * (1 + 1e-12)]), True, [(10.01, 8.19)], id="etf-9.1-noise-above"),
+])
+def test_reference_noise_does_not_move_the_limit_a_tick(refs, is_etf, expected):
+    assert _scalar_limits(refs, 0.10, is_etf) == expected
+    assert _polars_limits(refs, 0.10, is_etf) == expected
+    assert _numpy_limits(refs, 0.10, is_etf) == expected
+
+
+def test_vector_limits_of_degenerate_references():
+    frame = pl.DataFrame({"ref": [0.0, -1.0, float("nan"), None]}, schema={"ref": pl.Float64})
+    up, down = PriceLimitModel.polars_limit_prices(pl.col("ref"), pl.lit(0.10), pl.lit(False))
+    rows = frame.select(up.alias("up"), down.alias("down")).rows()
+    assert rows[:2] == [(0.0, 0.01), (-1.1, 0.01)]
+    assert all(np.isnan(v) for v in rows[2])
+    assert rows[3] == (None, None)
+
+    np_up, np_down = PriceLimitModel.numpy_limit_prices(np.array([0.0, -1.0, np.nan]), 0.10, False)
+    assert np_up[:2].tolist() == [0.0, -1.1]
+    assert np_down[:2].tolist() == [0.01, 0.01]
+    assert np.isnan(np_up[2]) and np.isnan(np_down[2])
+
+
+def test_trade_date_accepts_a_datetime_and_rejects_other_types():
+    moment = datetime(2026, 10, 6, 13, 30)
+    assert TickSizeModel.get_tick_size(1000.0, trade_date=moment) == 5.0
+    assert PriceLimitModel.calc_limits_for_pct(5180.0, 0.10, trade_date=moment) == (5695.0, 4665.0)
+    assert _polars_limits(np.array([5180.0]), 0.10, False, moment) == [(5695.0, 4665.0)]
+    assert _numpy_limits(np.array([5180.0]), 0.10, False, moment) == [(5695.0, 4665.0)]
+    assert TickSizeModel.numpy_tick_size(np.array([1000.0]), False, trade_date=moment).tolist() == [5.0]
+
+    for bad in ("2026-10-06", np.datetime64("2026-10-06"), 20261006):
+        with pytest.raises(TypeError, match="trade_date"):
+            TickSizeModel.get_tick_size(1000.0, trade_date=bad)
+        with pytest.raises(TypeError, match="trade_date"):
+            TickSizeModel.get_tick_size(-1.0, trade_date=bad)
+        with pytest.raises(TypeError, match="trade_date"):
+            TickSizeModel.polars_tick_size(pl.col("p"), pl.lit(False), trade_date=bad)
+        with pytest.raises(TypeError, match="trade_date"):
+            PriceLimitModel.numpy_limit_prices(np.array([5180.0]), 0.10, False, trade_date=bad)

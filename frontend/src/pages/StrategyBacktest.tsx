@@ -3,7 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Activity, AlertCircle, Loader2, Play, TrendingUp } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { BacktestEquityChart } from '@/components/backtest/BacktestEquityChart'
-import { api, type StrategyBacktestResult, type StrategyBacktestRunPayload } from '@/lib/api'
+import { api, type StrategyBacktestBenchmark, type StrategyBacktestResult, type StrategyBacktestRunPayload } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 
@@ -12,6 +12,10 @@ type Matching = 'close_t' | 'open_t+1'
 type LotMode = 'board_lot' | 'odd_lot'
 type InstrumentSearchResult = Awaited<ReturnType<typeof api.instrumentSearch>>['results'][number]
 
+const SLIPPAGE_BPS = 5
+// Mirrors the backend bounds; the API rejects values outside them with 400.
+const RISK_FREE_RATE_MIN = -0.05
+const RISK_FREE_RATE_MAX = 0.2
 const inputClass = 'h-9 w-full rounded-md border border-border bg-base px-3 text-xs text-foreground outline-none transition-colors focus:border-accent/60 disabled:cursor-not-allowed disabled:opacity-60'
 
 function parseAssetType(value: string | null): AssetType {
@@ -78,6 +82,38 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '回測執行失敗，請稍後再試。'
 }
 
+function returnTone(value: number | null): 'positive' | 'negative' | undefined {
+  if (value == null) return undefined
+  return value >= 0 ? 'positive' : 'negative'
+}
+
+function benchmarkName(benchmark: StrategyBacktestBenchmark): string {
+  return benchmark.name?.trim() || '加權指數'
+}
+
+function benchmarkNote(benchmark: StrategyBacktestBenchmark, benchmarkReturn: number | null): string {
+  const name = benchmarkName(benchmark)
+  const basis = `${name}為價格指數，不含息`
+  if (benchmarkReturn != null) {
+    const base = benchmark.base_date ? `，以 ${benchmark.base_date} 收盤為起點` : ''
+    return `${basis}${base}；超額報酬＝總報酬－${name}報酬。策略報酬含股利而基準不含，相較含息基準，超額報酬每年約高估大盤的股利殖利率。`
+  }
+  if (benchmark.coverage_start && benchmark.coverage_end) {
+    return `${basis}。${name}缺少回測首日或末日的收盤（期間內找到的資料為 ${benchmark.coverage_start} 至 ${benchmark.coverage_end}），無法計算${name}報酬與超額報酬。`
+  }
+  return `${basis}。回測期間內沒有${name}資料，無法計算${name}報酬與超額報酬。`
+}
+
+const EXCLUSION_REASON_LABELS: Record<string, string> = {
+  security_master_missing: '證券主檔查無',
+  price_limit_unknown: '漲跌幅規則未確認',
+}
+
+function exclusionNote(excluded: { symbol: string; reason: string }[]): string {
+  const items = excluded.map(item => `${item.symbol}（${EXCLUSION_REASON_LABELS[item.reason] ?? '原因不明'}）`)
+  return `以下標的未納入回測：${items.join('、')}`
+}
+
 function MetricCard({ label, value, tone }: { label: string; value: string; tone?: 'positive' | 'negative' }) {
   return (
     <div className="rounded-md border border-border/70 bg-base/50 px-3 py-2">
@@ -93,7 +129,7 @@ function MetricCard({ label, value, tone }: { label: string; value: string; tone
   )
 }
 
-function Results({ result }: { result: StrategyBacktestResult }) {
+function Results({ result, lotMode }: { result: StrategyBacktestResult; lotMode: LotMode }) {
   if (result.error) {
     return <ErrorPanel message={result.error} />
   }
@@ -103,8 +139,13 @@ function Results({ result }: { result: StrategyBacktestResult }) {
   const annualReturn = finiteNumber(result.stats.annual_return)
   const maxDrawdown = finiteNumber(result.stats.max_drawdown)
   const winRate = finiteNumber(result.stats.win_rate)
+  const riskFreeRate = finiteNumber(result.stats.risk_free_rate)
   const entryCandidates = finiteNumber(result.stats.selection?.entry_candidates)
   const lotSizeRejections = finiteNumber(result.stats.execution?.buy_lot_size)
+  const benchmark = result.stats.benchmark
+  const benchmarkReturn = finiteNumber(result.stats.benchmark_return)
+  const excessReturn = finiteNumber(result.stats.excess)
+  const excludedSymbols = result.stats.excluded_symbols ?? []
 
   return (
     <div className="space-y-3">
@@ -116,14 +157,31 @@ function Results({ result }: { result: StrategyBacktestResult }) {
           </div>
           <span className="font-mono text-[11px] text-muted">耗時 {formatNumber(result.elapsed_ms, 1)} ms</span>
         </div>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+        {excludedSymbols.length > 0 && (
+          <div role="status" className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-warning">
+            {exclusionNote(excludedSymbols)}
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
           <MetricCard label="總報酬" value={formatPercent(totalReturn)} tone={totalReturn == null ? undefined : totalReturn >= 0 ? 'positive' : 'negative'} />
           <MetricCard label="年化報酬" value={formatPercent(annualReturn)} tone={annualReturn == null ? undefined : annualReturn >= 0 ? 'positive' : 'negative'} />
           <MetricCard label="最大回撤" value={formatPercent(maxDrawdown)} tone="negative" />
           <MetricCard label="Sharpe" value={formatNumber(result.stats.sharpe)} />
           <MetricCard label="勝率" value={formatPercent(winRate, false)} />
           <MetricCard label="交易數" value={`${formatNumber(tradeCount, 0)} 筆`} />
+          {benchmark && (
+            <>
+              <MetricCard label="基準指數報酬" value={formatPercent(benchmarkReturn)} tone={returnTone(benchmarkReturn)} />
+              <MetricCard label="超額報酬" value={formatPercent(excessReturn)} tone={returnTone(excessReturn)} />
+            </>
+          )}
         </div>
+        {benchmark && (
+          <p className="mt-2 text-[10px] leading-relaxed text-muted">{benchmarkNote(benchmark, benchmarkReturn)}</p>
+        )}
+        <p className="mt-2 text-[10px] leading-relaxed text-muted">
+          年化報酬依回測期間的實際日曆天數以複利換算；Sharpe 先從每期報酬扣除無風險利率，再乘以每年報酬期數的平方根。每年報酬期數＝報酬期數 ÷（日曆天數 ÷ 365.25），無風險年利率依 (1＋年利率)^(1÷每年報酬期數)－1 換算為每期利率{riskFreeRate != null && `，本次使用 ${formatPercent(riskFreeRate, false)}`}。回測少於 60 個交易日時不計算年化報酬與 Sharpe。交易紀錄的價格與股數為當時實際成交價與股數，持有期間遇分割或減資時，以「→」列出出場股數；損益與報酬率以前復權價計算，含持有期間的股利，因此可能與（出場價－進場價）×股數不同。配股增加的股數不在交易紀錄中追蹤；減資退還股款時，出場股數為近似值。
+        </p>
       </section>
 
       {result.equity_curve.length > 0 && (
@@ -160,7 +218,7 @@ function Results({ result }: { result: StrategyBacktestResult }) {
                   <th className="px-2 py-2 font-medium">進場</th>
                   <th className="px-2 py-2 font-medium">出場</th>
                   <th className="px-2 py-2 text-right font-medium">股數</th>
-                  <th className="px-2 py-2 text-right font-medium">張數</th>
+                  {lotMode === 'board_lot' && <th className="px-2 py-2 text-right font-medium">張數</th>}
                   <th className="px-2 py-2 text-right font-medium">損益</th>
                   <th className="px-2 py-2 text-right font-medium">報酬率</th>
                   <th className="px-2 py-2 font-medium">出場原因</th>
@@ -170,13 +228,26 @@ function Results({ result }: { result: StrategyBacktestResult }) {
                 {result.trades.map((trade, index) => {
                   const pnl = finiteNumber(trade.pnl_amount)
                   const returnValue = finiteNumber(trade.pnl_pct)
+                  const exitShares = finiteNumber(trade.exit_shares)
+                  const lots = finiteNumber(trade.lots)
+                  const sharesChanged = exitShares != null && exitShares !== trade.shares
+                  const entryShares = finiteNumber(trade.shares)
+                  const exitLots = sharesChanged && lots != null && entryShares ? exitShares * lots / entryShares : null
                   return (
                     <tr key={`${trade.symbol}-${trade.entry_date}-${trade.exit_date}-${index}`} className="text-secondary">
                       <td className="whitespace-nowrap px-2 py-2 font-mono text-foreground">{trade.symbol}</td>
                       <td className="whitespace-nowrap px-2 py-2 font-mono">{trade.entry_date}<span className="ml-1 text-muted">@ {formatNumber(trade.entry_price)}</span></td>
                       <td className="whitespace-nowrap px-2 py-2 font-mono">{trade.exit_date}<span className="ml-1 text-muted">@ {formatNumber(trade.exit_price)}</span></td>
-                      <td className="px-2 py-2 text-right font-mono">{formatNumber(trade.shares, 0)}</td>
-                      <td className="px-2 py-2 text-right font-mono">{formatNumber(trade.lots)}</td>
+                      <td className="whitespace-nowrap px-2 py-2 text-right font-mono">
+                        {formatNumber(trade.shares, 0)}
+                        {sharesChanged && <span className="ml-1 text-muted">→ {formatNumber(exitShares, 0)}</span>}
+                      </td>
+                      {lotMode === 'board_lot' && (
+                        <td className="whitespace-nowrap px-2 py-2 text-right font-mono">
+                          {formatNumber(lots)}
+                          {exitLots != null && <span className="ml-1 text-muted">→ {formatNumber(exitLots)}</span>}
+                        </td>
+                      )}
                       <td className={cn('px-2 py-2 text-right font-mono', pnl != null && (pnl >= 0 ? 'text-danger' : 'text-bear'))}>{formatNumber(pnl)}</td>
                       <td className={cn('px-2 py-2 text-right font-mono', returnValue != null && (returnValue >= 0 ? 'text-danger' : 'text-bear'))}>{formatPercent(returnValue)}</td>
                       <td className="whitespace-nowrap px-2 py-2">{trade.exit_reason || '—'}</td>
@@ -215,6 +286,7 @@ export function StrategyBacktest() {
   const [commissionDiscount, setCommissionDiscount] = useState(1)
   const [minimumCommission, setMinimumCommission] = useState(0)
   const [minimumHoldingSessions, setMinimumHoldingSessions] = useState(1)
+  const [riskFreeRate, setRiskFreeRate] = useState(0)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [symbolError, setSymbolError] = useState<string | null>(null)
   const [resolvedSymbols, setResolvedSymbols] = useState<string[]>([])
@@ -240,6 +312,7 @@ export function StrategyBacktest() {
     commissionDiscount,
     minimumCommission,
     minimumHoldingSessions,
+    riskFreeRate,
   }), [
     assetType,
     commissionDiscount,
@@ -250,6 +323,7 @@ export function StrategyBacktest() {
     maxPositions,
     minimumCommission,
     minimumHoldingSessions,
+    riskFreeRate,
     start,
     strategyId,
     symbolsText,
@@ -307,6 +381,10 @@ export function StrategyBacktest() {
       setValidationError('最少持有交易日必須是至少 1 的整數。')
       return
     }
+    if (!Number.isFinite(riskFreeRate) || riskFreeRate < RISK_FREE_RATE_MIN || riskFreeRate > RISK_FREE_RATE_MAX) {
+      setValidationError('無風險利率必須介於 -0.05 到 0.2（-5% 到 20%）。')
+      return
+    }
 
     run.reset()
     setValidationError(null)
@@ -337,6 +415,8 @@ export function StrategyBacktest() {
       commission_discount: commissionDiscount,
       minimum_commission: minimumCommission,
       minimum_holding_sessions: minimumHoldingSessions,
+      risk_free_rate: riskFreeRate,
+      slippage_bps: SLIPPAGE_BPS,
     })
   }
 
@@ -430,8 +510,14 @@ export function StrategyBacktest() {
 
             <label className="block text-[11px] text-secondary">最少持有交易日<input aria-label="最少持有交易日" type="number" min="1" step="1" value={minimumHoldingSessions} onChange={event => setMinimumHoldingSessions(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} /></label>
 
+            <label className="block text-[11px] text-secondary">
+              無風險利率（年）
+              <input aria-label="無風險利率（年）" type="number" min={RISK_FREE_RATE_MIN} max={RISK_FREE_RATE_MAX} step="0.005" value={riskFreeRate} onChange={event => setRiskFreeRate(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} />
+              <span className="mt-1 block text-[10px] text-muted">以小數輸入，例如 0.015 代表 1.5%；用於 Sharpe 與 Sortino。</span>
+            </label>
+
             <div className="rounded-md border border-border/70 bg-base/40 px-3 py-2 text-[10px] leading-relaxed text-muted">
-              佣金基準、交易稅與每檔交易單位由台股市場規則接管；此處只設定券商折扣與最低手續費。
+              佣金基準、交易稅與每檔交易單位由台股市場規則接管；此處只設定券商折扣與最低手續費。買進與賣出各另計 {SLIPPAGE_BPS / 100}% 滑價。
             </div>
 
             {validationError && <ErrorPanel message={validationError} />}
@@ -450,7 +536,7 @@ export function StrategyBacktest() {
             </div>
           )}
           {run.isError && <ErrorPanel message={errorMessage(run.error)} />}
-          {run.isSuccess && run.data && submittedFingerprint === currentFingerprint && <Results result={run.data} />}
+          {run.isSuccess && run.data && submittedFingerprint === currentFingerprint && <Results result={run.data} lotMode={lotMode} />}
           {run.isSuccess && run.data && submittedFingerprint !== currentFingerprint && (
             <div role="status" className="flex min-h-56 items-center justify-center rounded-card border border-warning/30 bg-warning/10 px-4 text-center text-xs text-warning">
               設定已變更，請重新執行回測。

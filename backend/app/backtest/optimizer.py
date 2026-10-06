@@ -155,6 +155,18 @@ def objective_value(stats: dict, objective: str, direction: str) -> float:
     return -v if direction == "min" else v
 
 
+def _no_best_reason(ranked: list[dict], objective: str) -> str:
+    """Explain why no combination produced a usable objective value."""
+    from app.backtest.engine import ANNUALIZED_STATS, MIN_ANNUALIZED_SESSIONS
+
+    if all(row.get("error") for row in ranked):
+        return "every parameter combination failed"
+    reason = f"objective '{objective}' is null for every parameter combination"
+    if objective in ANNUALIZED_STATS:
+        reason += f"; annualized metrics need at least {MIN_ANNUALIZED_SESSIONS} trading sessions"
+    return reason
+
+
 def default_direction(objective: str) -> str:
     return "min" if objective in _MINIMIZE_OBJECTIVES else "max"
 
@@ -362,6 +374,9 @@ class StrategyOptimizer:
 
             best = ranked[0] if ranked and ranked[0].get("objective_raw") is not None else None
             best_raw = best["objective_raw"] if best else None
+            no_best_reason = None
+            if best is None and ranked and not (cancel_event is not None and cancel_event.is_set()):
+                no_best_reason = _no_best_reason(ranked, cfg.objective)
             best_backtest = None
             if best is not None and not (cancel_event is not None and cancel_event.is_set()):
                 if progress_cb is not None:
@@ -404,6 +419,7 @@ class StrategyOptimizer:
                 "n_combinations": n_total,
                 "n_completed": len(results),
                 "best_params": best["params"] if best else None,
+                "error": no_best_reason,
                 "best_score": round(best_raw, 4) if best_raw is not None else None,
                 "best_backtest": best_backtest,
                 "results": ranked,

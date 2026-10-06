@@ -16,6 +16,7 @@ from typing import Any, Literal
 import numpy as np
 import polars as pl
 
+from app.backtest.engine import STATS_METHODOLOGY_VERSION
 from app.backtest.factor import (
     FACTOR_COLUMNS,
     FACTOR_METHODOLOGY_VERSION,
@@ -45,6 +46,7 @@ from app.backtest.mining import (
     validation_config_for_profile,
 )
 from app.backtest.strategy import (
+    TAIWAN_STAMP_TAX_OVERRIDE_ERROR,
     BacktestResultPolicy,
     ResolvedFeaturePlan,
     StrategyBacktestConfig,
@@ -68,6 +70,7 @@ CancelCheck = Callable[[], bool] | Any
 _PROFILE_NAMES = frozenset({"exploratory", "balanced", "strict"})
 _FACTOR_IDS = frozenset(str(item["id"]) for item in FACTOR_COLUMNS)
 _MINING_MATRIX_CACHE_BYTES = 32 * 1024 * 1024
+MINING_RISK_FREE_RATE = 0.0
 _RESULT_POLICY = BacktestResultPolicy(
     required_stats=frozenset({"total_return", "sharpe", "max_drawdown", "n_trades"}),
     include_monte_carlo=False,
@@ -77,6 +80,8 @@ _RESULT_POLICY = BacktestResultPolicy(
     include_return_distribution=False,
     include_benchmark=False,
     include_strategy_info=False,
+    # Exploratory inner test folds span 21 sessions; ranking needs a finite Sharpe there.
+    min_annualized_sessions=0,
 )
 _REGIME_FILTERS: dict[str, dict[str, list[str]]] = {
     "strong": {"states": ["strong", "lean_strong"]},
@@ -305,6 +310,7 @@ class MatcherCandidateEvaluator:
             holding_days=self.request.forward_horizon,
             minute_fill=False,
             regime_filter=regime_filter,
+            risk_free_rate=MINING_RISK_FREE_RATE,
         )
 
 
@@ -473,15 +479,10 @@ def run_mining_runtime(
     _raise_if_cancelled(cancel_check)
     factor_service = FactorBacktestService(service.engine)
     factor_config = FactorBatchConfig(
-        factor_names=list(request.factor_names),
         symbols=request.symbols,
         start=request.start,
         end=request.end,
         asset_type=request.asset_type,
-        fees_pct=0.0002,
-        commission_pct=request.commission_pct,
-        stamp_tax_pct=None,
-        slippage_bps=request.slippage_bps,
     )
     phase_ms: dict[str, float] = {}
     panel: pl.DataFrame | None = None
@@ -673,6 +674,8 @@ def run_mining_runtime(
         "data_as_of": request.end.isoformat(),
         "algorithm_version": MINING_ALGORITHM_VERSION,
         "methodology_version": FACTOR_METHODOLOGY_VERSION,
+        "stats_methodology_version": STATS_METHODOLOGY_VERSION,
+        "stats_risk_free_rate": MINING_RISK_FREE_RATE,
         "proxy_trials_used": result.proxy_trials_used,
         "trials_used": result.trials_used + max(0, evaluator.backtest_count - result.trials_used),
         "panel_rows": panel.height,
@@ -900,7 +903,7 @@ def _decode_runtime_request(
         else _bounded_float(commission_value, "commission_pct", 0.0, 0.05)
     )
     if request.get("stamp_tax_pct") is not None:
-        raise ValueError("stamp_tax_pct cannot override per-instrument Taiwan tax rules")
+        raise ValueError(TAIWAN_STAMP_TAX_OVERRIDE_ERROR)
     slippage_bps = _bounded_float(
         request.get("slippage_bps", 5.0), "slippage_bps", 0.0, 1000.0
     )

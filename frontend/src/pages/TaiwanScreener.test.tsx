@@ -225,6 +225,19 @@ describe('Indicator publication notice', () => {
     await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
     expect(screen.queryByText('技術指標更新中，暫以空值顯示')).toBeNull()
   })
+
+  it('shows the price-limit notice when the limit references are missing', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue({ ...buildScreenerResponse(), degraded_sections: ['price_limits'] } as any)
+    renderScreener()
+    expect(await screen.findByText('當日缺少漲跌停參考價，「逼近漲停／跌停」暫無法判斷')).toBeTruthy()
+  })
+
+  it('shows no price-limit notice when the limit references are published', async () => {
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue({ ...buildScreenerResponse(), degraded_sections: ['volume_patterns'] } as any)
+    renderScreener()
+    expect(await screen.findByText('量價型態尚未發佈')).toBeTruthy()
+    expect(screen.queryByText(/漲跌停參考價/)).toBeNull()
+  })
 })
 
 describe('Main results row direct actions (Phase 8C-A)', () => {
@@ -526,6 +539,18 @@ describe('Results table density (Phase 8C-C)', () => {
     fireEvent.click(toggle)
     expect(await screen.findByText('投信買賣超')).toBeInTheDocument()
     expect(screen.getByText('RSI (14)')).toBeInTheDocument()
+  })
+
+  it('renders an RSI of exactly 0 as a value, not as missing', async () => {
+    const response = buildScreenerResponse()
+    response.items[0].rsi_14 = 0
+    vi.mocked(api.taiwanScreenerRun).mockResolvedValue(response as any)
+    renderScreener()
+    await waitFor(() => expect(screen.getAllByText('2330.TWSE').length).toBeGreaterThan(0))
+    fireEvent.click(screen.getByRole('button', { name: /更多欄位/ }))
+
+    const rsi = await screen.findByText('0.0')
+    expect(rsi).toHaveClass('text-emerald-400')
   })
 })
 

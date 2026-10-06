@@ -133,8 +133,13 @@ def get_quotes(
         limit_up, limit_down = (None, None)
         limit_pct = None
         is_no_limit = False
-        if inst:
-            limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+        rule_known = inst is not None
+        if rule_known:
+            try:
+                limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+            except ValueError:
+                rule_known = False
+        if rule_known:
             if limit_pct is None:
                 is_no_limit = True
             elif q.prev_close is not None:
@@ -176,8 +181,11 @@ def search_taiwan_instruments(
         limit_pct = None
         is_no_limit = False
         if inst and inst.is_supported:
-            limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
-            is_no_limit = (limit_pct is None)
+            try:
+                limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+                is_no_limit = (limit_pct is None)
+            except ValueError:
+                limit_pct = None
         item["price_limit_pct"] = limit_pct
         item["is_no_limit"] = is_no_limit
         enriched.append(item)

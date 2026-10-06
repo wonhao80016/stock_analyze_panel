@@ -3,8 +3,6 @@
 1. 2026-07-06 前 ST 5% 涨跌停限幅仅适用于主板风险警示股;
    新规生效后主板 ST 为 10%, 创业板/科创板 ST 始终执行 20%。
    (修正前 _is_st 无条件套 5%, 会误报/漏报这批股的涨停。)
-2. 因子回测 Sharpe 的年化系数须匹配调仓频率 (月频 √12 / 周频 √52 / 日频 √252);
-   (修正前一律 √252, 月频 Sharpe 被高估 √21 ≈ 4.6 倍。)
 """
 from __future__ import annotations
 
@@ -13,7 +11,6 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 
-from app.backtest.factor import FactorBacktestService
 from app.backtest.matrix import build_market_data_matrix
 from app.indicators.pipeline import compute_limit_signals
 
@@ -105,20 +102,3 @@ def test_st_main_board_limit_changes_to_10pct_on_2026_07_06():
     )
     assert plus_five is False
     assert plus_ten is True
-
-
-def test_sharpe_annualization_matches_rebalance_frequency():
-    nav = [
-        {"date": "2024-01-31", "Q1": 1.00},
-        {"date": "2024-02-29", "Q1": 1.02},
-        {"date": "2024-03-29", "Q1": 1.01},
-        {"date": "2024-04-30", "Q1": 1.05},
-        {"date": "2024-05-31", "Q1": 1.04},
-        {"date": "2024-06-28", "Q1": 1.08},
-    ]
-    start, end = date(2024, 1, 1), date(2024, 6, 30)
-    m = FactorBacktestService._calc_group_stats(nav, start, end, "monthly")[0]["sharpe"]
-    d = FactorBacktestService._calc_group_stats(nav, start, end, "daily")[0]["sharpe"]
-    assert m != 0.0 and d != 0.0
-    # 同一净值曲线, daily(√252) / monthly(√12) 的比值应为 √21 ≈ 4.58
-    assert abs((d / m) - (252 / 12) ** 0.5) < 0.05

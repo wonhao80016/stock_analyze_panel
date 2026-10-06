@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Literal
 
 import numpy as np
+import polars as pl
 
 
 # ── Enums ──────────────────────────────────────────────────────
@@ -184,6 +185,47 @@ class LotModel:
 
 # ── 4. Price Tick Size Model ───────────────────────────────────
 
+# (exclusive upper price bound, tick); the last bound is infinite.
+TickLadder = tuple[tuple[float, float], ...]
+
+_STOCK_TICK_LADDER: TickLadder = (
+    (10.0, 0.01), (50.0, 0.05), (100.0, 0.10), (500.0, 0.50), (1000.0, 1.00), (math.inf, 5.00),
+)
+_ETF_TICK_LADDER: TickLadder = ((50.0, 0.01), (math.inf, 0.05))
+
+# (effective date, stock ladder, ETF ladder), ascending; trade_date=None resolves to the newest row.
+# Add a row only for a rule change that has been officially promulgated.
+_TICK_LADDERS: tuple[tuple[date, TickLadder, TickLadder], ...] = (
+    (date.min, _STOCK_TICK_LADDER, _ETF_TICK_LADDER),
+)
+
+_LIMIT_ROUNDING_TOLERANCE = 1e-9
+_MIN_LIMIT_DOWN_PRICE = 0.01
+
+
+def _tick_ladders(trade_date: date | datetime | None) -> tuple[TickLadder, TickLadder]:
+    if isinstance(trade_date, datetime):
+        trade_date = trade_date.date()
+    elif trade_date is not None and not isinstance(trade_date, date):
+        raise TypeError(f"trade_date must be a date, datetime or None, not {type(trade_date).__name__}")
+    for effective, stock, etf in reversed(_TICK_LADDERS):
+        if trade_date is None or effective <= trade_date:
+            return stock, etf
+    raise RegulatoryRuleUnavailableError(f"No tick ladder is effective on {trade_date}.")
+
+
+def _polars_ladder(price: pl.Expr, ladder: TickLadder) -> pl.Expr:
+    (first_bound, first_tick), *middle, (_, last_tick) = ladder
+    expr = pl.when(price < first_bound).then(first_tick)
+    for bound, tick in middle:
+        expr = expr.when(price < bound).then(tick)
+    return expr.otherwise(last_tick)
+
+
+def _numpy_ladder(price: np.ndarray, ladder: TickLadder) -> np.ndarray:
+    *bounded, (_, last_tick) = ladder
+    return np.select([price < bound for bound, _ in bounded], [tick for _, tick in bounded], default=last_tick)
+
 
 class TickSizeModel:
     """Price tick size model adhering to TWSE Rule 62 & ETF regulations."""
@@ -192,30 +234,30 @@ class TickSizeModel:
     def get_tick_size(
         price: float,
         tick_class: TickSizeClass = TickSizeClass.ORDINARY_STOCK,
-        trade_date: date | None = None,  # noqa: ARG004
+        trade_date: date | None = None,
     ) -> float:
         """Get minimum price movement for a given price and asset category."""
+        stock, etf = _tick_ladders(trade_date)
         if price <= 0:
             return 0.01
+        ladder = etf if tick_class == TickSizeClass.ETF else stock
+        for bound, tick in ladder:
+            if price < bound:
+                return tick
+        return ladder[-1][1]
 
-        if tick_class == TickSizeClass.ETF:
-            # ETF: 2 tiers (<50: 0.01, >=50: 0.05)
-            if price < 50.0:
-                return 0.01
-            return 0.05
+    @staticmethod
+    def polars_tick_size(price: pl.Expr, is_etf: pl.Expr, trade_date: date | None = None) -> pl.Expr:
+        """Vectorised get_tick_size over a price expression and a boolean ETF-ladder flag."""
+        stock, etf = _tick_ladders(trade_date)
+        return pl.when(is_etf).then(_polars_ladder(price, etf)).otherwise(_polars_ladder(price, stock))
 
-        # Ordinary Stock: 6 tiers
-        if price < 10.0:
-            return 0.01
-        if price < 50.0:
-            return 0.05
-        if price < 100.0:
-            return 0.10
-        if price < 500.0:
-            return 0.50
-        if price < 1000.0:
-            return 1.00
-        return 5.00
+    @staticmethod
+    def numpy_tick_size(price: np.ndarray, is_etf: np.ndarray | bool, trade_date: date | None = None) -> np.ndarray:
+        """Vectorised get_tick_size over a price array and a boolean ETF-ladder flag."""
+        stock, etf = _tick_ladders(trade_date)
+        price = np.asarray(price, dtype=np.float64)
+        return np.where(np.asarray(is_etf, dtype=bool), _numpy_ladder(price, etf), _numpy_ladder(price, stock))
 
     @classmethod
     def round_price_limit_boundary(
@@ -234,9 +276,9 @@ class TickSizeModel:
             return 0.0
         tick = cls.get_tick_size(raw_price, tick_class=tick_class, trade_date=trade_date)
         if direction == "up":
-            steps = math.floor(raw_price / tick + 1e-9)
+            steps = math.floor(raw_price / tick + _LIMIT_ROUNDING_TOLERANCE)
         else:
-            steps = math.ceil(raw_price / tick - 1e-9)
+            steps = math.ceil(raw_price / tick - _LIMIT_ROUNDING_TOLERANCE)
         return round(steps * tick, 4)
 
     @classmethod
@@ -315,14 +357,60 @@ class PriceLimitModel:
         ref_price: float,
         limit_pct: float | None,
         tick_class: TickSizeClass = TickSizeClass.ORDINARY_STOCK,
+        trade_date: date | None = None,
     ) -> tuple[float | None, float | None]:
         """Calculate (limit_up, limit_down) for an explicit percentage, aligned to valid ticks."""
         if ref_price <= 0 or limit_pct is None:
             return None, None
-        up_raw = ref_price * (1.0 + limit_pct)
-        down_raw = max(0.01, ref_price * (1.0 - limit_pct))
-        limit_up = TickSizeModel.round_price_limit_boundary(up_raw, direction="up", tick_class=tick_class)
-        limit_down = TickSizeModel.round_price_limit_boundary(down_raw, direction="down", tick_class=tick_class)
+        ref = round(float(ref_price), 4)
+        up_raw = ref * (1.0 + limit_pct)
+        down_raw = max(_MIN_LIMIT_DOWN_PRICE, ref * (1.0 - limit_pct))
+        limit_up = TickSizeModel.round_price_limit_boundary(
+            up_raw, direction="up", tick_class=tick_class, trade_date=trade_date
+        )
+        limit_down = TickSizeModel.round_price_limit_boundary(
+            down_raw, direction="down", tick_class=tick_class, trade_date=trade_date
+        )
+        return limit_up, limit_down
+
+    @staticmethod
+    def polars_limit_prices(
+        ref_price: pl.Expr,
+        limit_pct: pl.Expr,
+        is_etf: pl.Expr,
+        trade_date: date | None = None,
+    ) -> tuple[pl.Expr, pl.Expr]:
+        """Vectorised calc_limits_for_pct; a null or NaN reference or percentage yields null or NaN limits.
+
+        Unlike the scalar form, a non-positive reference is not masked to null.
+        """
+        ref = ref_price.cast(pl.Float64).round(4)
+        up_raw = ref * (1.0 + limit_pct)
+        down_floor = ref * (1.0 - limit_pct)
+        down_raw = pl.when(down_floor < _MIN_LIMIT_DOWN_PRICE).then(_MIN_LIMIT_DOWN_PRICE).otherwise(down_floor)
+        up_tick = TickSizeModel.polars_tick_size(up_raw, is_etf, trade_date)
+        down_tick = TickSizeModel.polars_tick_size(down_raw, is_etf, trade_date)
+        limit_up = ((up_raw / up_tick + _LIMIT_ROUNDING_TOLERANCE).floor() * up_tick).round(4)
+        limit_down = ((down_raw / down_tick - _LIMIT_ROUNDING_TOLERANCE).ceil() * down_tick).round(4)
+        return limit_up, limit_down
+
+    @staticmethod
+    def numpy_limit_prices(
+        ref_price: np.ndarray,
+        limit_pct: np.ndarray | float,
+        is_etf: np.ndarray | bool,
+        trade_date: date | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """NumPy counterpart of polars_limit_prices; a NaN percentage yields NaN limits."""
+        ref = np.round(np.asarray(ref_price, dtype=np.float64), 4)
+        pct = np.asarray(limit_pct, dtype=np.float64)
+        up_raw = ref * (1.0 + pct)
+        down_floor = ref * (1.0 - pct)
+        down_raw = np.where(down_floor < _MIN_LIMIT_DOWN_PRICE, _MIN_LIMIT_DOWN_PRICE, down_floor)
+        up_tick = TickSizeModel.numpy_tick_size(up_raw, is_etf, trade_date)
+        down_tick = TickSizeModel.numpy_tick_size(down_raw, is_etf, trade_date)
+        limit_up = np.round(np.floor(up_raw / up_tick + _LIMIT_ROUNDING_TOLERANCE) * up_tick, 4)
+        limit_down = np.round(np.ceil(down_raw / down_tick - _LIMIT_ROUNDING_TOLERANCE) * down_tick, 4)
         return limit_up, limit_down
 
     @classmethod

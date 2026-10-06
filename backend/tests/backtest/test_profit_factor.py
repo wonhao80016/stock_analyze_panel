@@ -89,8 +89,10 @@ def test_stats_reports_gross_profit_factor_and_payoff_ratio_separately():
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
     assert wins and losses, "fixture must produce both winners and losers"
+    amounts = [float(t.pnl_amount) for t in result.trades]
 
-    expected_gross = sum(wins) / abs(sum(losses))
+    # Portfolio profit factor is on currency amounts; payoff ratio stays on percentages.
+    expected_gross = sum(a for a in amounts if a > 0) / abs(sum(a for a in amounts if a <= 0))
     expected_payoff = (sum(wins) / len(wins)) / abs(sum(losses) / len(losses))
 
     assert result.stats["profit_factor"] == round(expected_gross, 2)

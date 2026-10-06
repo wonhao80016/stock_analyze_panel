@@ -125,6 +125,27 @@ def test_taiwan_profile_isolated_from_non_taiwan_universes() -> None:
     assert mixed.market_profile is None
 
 
+@pytest.mark.parametrize("stamp_tax_pct", [0.0, 0.003])
+def test_taiwan_matcher_rejects_single_stamp_tax_override(stamp_tax_pct: float) -> None:
+    instrument = _instrument("2330.TWSE", "stock", lot_size=1000)
+    config = MatcherConfig(stamp_tax_pct=stamp_tax_pct, slippage_bps=0)
+
+    with pytest.raises(ValueError, match="stamp_tax_pct cannot override"):
+        _configure_taiwan_matcher(
+            config,
+            ["2330.TWSE"],
+            security_master=_SecurityMaster({"2330.TWSE": instrument}),
+        )
+    assert config.market_profile is None
+    assert config.tax_class_by_symbol is None
+
+    non_taiwan = MatcherConfig(stamp_tax_pct=stamp_tax_pct, fees_pct=0, slippage_bps=0)
+    _configure_taiwan_matcher(non_taiwan, ["600519.SH"])
+    assert non_taiwan.sell_transaction_cost(100_000, "600519.SH", date(2026, 10, 3)) == pytest.approx(
+        100_000 * stamp_tax_pct
+    )
+
+
 @pytest.mark.parametrize("management_style", ["active", None])
 def test_bond_etf_requires_explicit_passive_management_style(
     management_style: str | None,
@@ -364,6 +385,7 @@ def test_board_lot_portfolio_holds_until_the_next_session() -> None:
         "high": [100.0, 100.0, 101.0, 102.0],
         "low": [100.0, 100.0, 101.0, 102.0],
         "close": [100.0, 100.0, 101.0, 102.0],
+        "raw_close": [100.0, 100.0, 101.0, 102.0],
         "volume": [100_000.0] * 4,
         "score": [1.0] * 4,
         "signal_limit_up": [False] * 4,
@@ -400,6 +422,7 @@ def test_locked_limit_up_session_cannot_fill_a_board_lot() -> None:
         "high": [100.0, 110.0, 109.0],
         "low": [100.0, 110.0, 109.0],
         "close": [100.0, 110.0, 109.0],
+        "raw_close": [100.0, 110.0, 109.0],
         "volume": [100_000.0] * 3,
         "score": [1.0] * 3,
         "signal_limit_up": [False, True, False],
@@ -512,6 +535,7 @@ def test_full_mode_same_session_exit_still_requires_taiwan_eligibility() -> None
         "high": [100.0, 101.0],
         "low": [100.0, 101.0],
         "close": [100.0, 101.0],
+        "raw_close": [100.0, 101.0],
         "volume": [100.0, 100.0],
         "score": [1.0, 1.0],
         "signal_limit_up": [False, False],
@@ -708,9 +732,7 @@ def test_close_fill_does_not_replay_minutes_before_the_daily_signal() -> None:
     "method_name",
     [
         "simulate_independent_candidates",
-        "simulate_independent_candidates_legacy",
         "simulate_portfolio",
-        "simulate_portfolio_legacy",
     ],
 )
 @pytest.mark.parametrize(

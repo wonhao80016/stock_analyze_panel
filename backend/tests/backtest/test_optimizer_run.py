@@ -359,3 +359,31 @@ def test_invalid_objective_rejected():
         return _FakeResult(stats={"sortino": 1.0})
     with pytest.raises(ValueError, match="不支持的优化目标"):
         _optimizer(score).optimize(_cfg(objective="not_a_metric"))
+
+
+def test_all_null_objectives_report_an_explicit_reason():
+    def score(p):
+        return _FakeResult(stats={"sharpe": None})
+
+    out = _optimizer(score).optimize(_cfg(objective="sharpe"))
+
+    assert out["best_params"] is None
+    assert "sharpe" in out["error"]
+    assert "60 trading sessions" in out["error"]
+
+
+def test_all_failed_trials_report_an_explicit_reason():
+    def score(p):
+        return _FakeResult(stats={}, error="no data")
+
+    out = _optimizer(score).optimize(_cfg())
+
+    assert out["best_params"] is None
+    assert out["error"] == "every parameter combination failed"
+
+
+def test_successful_optimization_has_no_error():
+    def score(p):
+        return _FakeResult(stats={"sortino": p["ma_proximity"]})
+
+    assert _optimizer(score).optimize(_cfg())["error"] is None

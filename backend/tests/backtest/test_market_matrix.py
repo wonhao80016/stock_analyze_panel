@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import date, timedelta
 
 import numpy as np
@@ -108,7 +107,24 @@ def test_open_t_plus_one_keeps_legacy_next_asset_bar_semantics():
     assert matrix.entry_signal_time[2, 0] == 0
 
 
-def test_matrix_matcher_matches_legacy_trade_records_and_equity():
+def _trade_summary(trades) -> list[tuple]:
+    return [
+        (
+            trade.symbol,
+            trade.entry_date,
+            trade.exit_date,
+            trade.entry_price,
+            trade.exit_price,
+            trade.shares,
+            trade.exit_reason,
+            trade.blocked_exit_days,
+            trade.pnl_amount,
+        )
+        for trade in trades
+    ]
+
+
+def test_matrix_matcher_portfolio_golden_trades_and_equity():
     rows = []
     for symbol, score in (("A", 90), ("B", 80), ("C", 70)):
         for day in range(5):
@@ -138,19 +154,31 @@ def test_matrix_matcher_matches_legacy_trade_records_and_equity():
     )
     engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
 
-    matrix_result = engine.simulate_portfolio(panel, entries, exits, config)
-    legacy_result = engine.simulate_portfolio_legacy(panel, entries, exits, config)
+    result = engine.simulate_portfolio(panel, entries, exits, config)
 
-    assert [asdict(trade) for trade in matrix_result.trades] == [
-        asdict(trade) for trade in legacy_result.trades
+    assert _trade_summary(result.trades) == [
+        ("B", "2024-01-02", "2024-01-04", 10.1, 8.5, 3900.0, "stop_loss", 0, -6240.0),
+        ("A", "2024-01-02", "2024-01-04", 10.1, 10.3, 3900.0, "stop_loss", 2, 780.0),
     ]
-    assert matrix_result.equity_curve == legacy_result.equity_curve
-    assert matrix_result.drawdown_curve == legacy_result.drawdown_curve
-    assert matrix_result.stats["execution"] == legacy_result.stats["execution"]
-    assert matrix_result.stats["pending_exit_positions"] == legacy_result.stats["pending_exit_positions"]
+    assert [
+        (point["date"], point["value"], point["cash"], point["positions"])
+        for point in result.equity_curve
+    ] == [
+        ("2024-01-01", 100000.0, 100000.0, 0),
+        ("2024-01-02", 100000.0, 21220.0, 2),
+        ("2024-01-03", 96100.0, 21220.0, 2),
+        ("2024-01-04", 94540.0, 94540.0, 0),
+        ("2024-01-05", 94540.0, 94540.0, 0),
+    ]
+    assert [point["value"] for point in result.drawdown_curve] == [
+        0.0, 0.0, -0.039, -0.0546, -0.0546,
+    ]
+    assert result.stats["execution"]["sell_limit_down"] == 2
+    assert result.stats["execution"]["pending_exit"] == 1
+    assert result.stats["pending_exit_positions"] == 0
 
 
-def test_independent_matrix_matches_legacy_candidates():
+def test_independent_matrix_golden_candidates():
     panel = pl.DataFrame([
         _row("A", 0, 10, signal_entry=True),
         _row("A", 1, 11, signal_entry=True),
@@ -169,13 +197,13 @@ def test_independent_matrix_matches_legacy_candidates():
     )
     engine = BacktestEngine(repo=None)  # type: ignore[arg-type]
 
-    matrix_result = engine.simulate_independent_candidates(panel, entries, exits, config)
-    legacy_result = engine.simulate_independent_candidates_legacy(panel, entries, exits, config)
+    result = engine.simulate_independent_candidates(panel, entries, exits, config)
 
-    assert [asdict(trade) for trade in matrix_result.trades] == [
-        asdict(trade) for trade in legacy_result.trades
+    assert _trade_summary(result.trades) == [
+        ("A", "2024-01-01", "2024-01-03", 10.0, 12.0, 100.0, "max_hold", 0, 200.0),
+        ("A", "2024-01-02", "2024-01-04", 11.0, 9.0, 100.0, "stop_loss", 0, -200.0),
     ]
-    assert matrix_result.stats["execution"] == legacy_result.stats["execution"]
+    assert all(value == 0 for value in result.stats["execution"].values())
 
 
 def test_lightweight_portfolio_keeps_stats_without_curves_or_monte_carlo(monkeypatch):

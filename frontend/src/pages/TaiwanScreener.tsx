@@ -1562,6 +1562,11 @@ export function TaiwanScreener() {
             量價型態尚未發佈
           </div>
         )}
+        {data?.degraded_sections?.includes('price_limits') && (
+          <div role="status" className="px-4 py-2 text-[11px] text-amber-400 bg-amber-500/10 border-b border-zinc-800">
+            當日缺少漲跌停參考價，「逼近漲停／跌停」暫無法判斷
+          </div>
+        )}
         {/* Table View */}
         <div id="screener-results-table" className="overflow-x-auto">
           <table className="w-full text-left text-xs text-zinc-300">
@@ -1784,7 +1789,7 @@ export function TaiwanScreener() {
 
                     {/* RSI 14 */}
                     <td className="py-3 px-3 text-right font-mono text-zinc-300 whitespace-nowrap">
-                      {item.rsi_14 ? (
+                      {item.rsi_14 != null ? (
                         <span className={item.rsi_14 >= 70 ? 'text-red-400' : item.rsi_14 <= 30 ? 'text-emerald-400' : ''}>
                           {item.rsi_14.toFixed(1)}
                         </span>

@@ -88,6 +88,7 @@ class TestGolden2330Backtest:
         start_time = end_time - timedelta(days=90)
         df = provider.get_daily(["2330.TWSE"], start_time=start_time, end_time=end_time)
         return df.with_columns([
+            pl.col("close").alias("raw_close"),
             pl.lit(True).alias("tradable"),
             pl.lit(False).alias("limit_up_locked"),
             pl.lit(False).alias("limit_down_locked"),
@@ -150,11 +151,10 @@ class TestGolden2330Backtest:
 
         config = MatcherConfig(
             matching="close_t",
-            fees_pct=profile.cost.commission_rate * profile.cost.discount,
-            commission_pct=profile.cost.commission_rate * profile.cost.discount,
-            stamp_tax_pct=profile.tax.ordinary_stock_rate,
             initial_capital=5_000_000.0,
+            max_positions=1,
             market_profile=profile,
+            tax_class_by_symbol={"2330.TWSE": TaxClass.ORDINARY_STOCK},
         )
 
         # Generate simple synthetic entry/exit signals for testing
@@ -168,17 +168,27 @@ class TestGolden2330Backtest:
             exits[20] = True
 
         engine = BacktestEngine(repo=None)
-        result = engine.simulate(
+        result = engine.simulate_portfolio(
             panel=df,
             entries=pl.Series(entries),
             exits=pl.Series(exits),
             config=config,
         )
 
-        assert result is not None
-        assert result.equity_curve is not None
         assert len(result.equity_curve) == n
         assert result.equity_curve[-1]["value"] > 0
+        assert len(result.trades) == 1
+        trade = result.trades[0]
+        assert trade.shares > 0
+        assert trade.shares % 1000 == 0
+        assert trade.lots == trade.shares / 1000
+        gross_exit = trade.shares * trade.exit_price
+        expected_sell_cost = (
+            profile.cost.calc_commission(gross_exit)
+            + gross_exit * 0.003
+            + gross_exit * config.slippage_bps / 10000.0
+        )
+        assert trade.exit_value == pytest.approx(gross_exit - expected_sell_cost, abs=0.01)
 
 
 

@@ -10,112 +10,7 @@ from app.backtest.factor import (
     DERIVED_FACTOR_DEPENDENCIES,
     FACTOR_COLUMNS,
     FactorBacktestService,
-    FactorBatchConfig,
-    FactorConfig,
 )
-
-
-def _panel() -> pl.DataFrame:
-    rows = []
-    start = date(2026, 1, 1)
-    for day in range(8):
-        for index, symbol in enumerate(("000001.SZ", "000002.SZ", "600000.SH")):
-            rows.append({
-                "symbol": symbol,
-                "date": start + timedelta(days=day),
-                "open": 10.0 + index + day * 0.1,
-                "high": 10.5 + index + day * 0.1,
-                "low": 9.5 + index + day * 0.1,
-                "close": 10.0 + index + day * (index + 1) * 0.1,
-                "volume": 1000.0 + index * 100 + day,
-                "change_pct": 0.01 * (index + 1) + day * 0.001,
-                "turnover_rate": 0.02 * (3 - index) + day * 0.001,
-            })
-    return pl.DataFrame(rows)
-
-
-class _Engine:
-    def __init__(self, panel: pl.DataFrame) -> None:
-        self.panel = panel
-        self.calls: list[dict] = []
-
-    def load_panel(self, symbols, start, end, columns, asset_type):
-        self.calls.append({
-            "symbols": symbols,
-            "start": start,
-            "end": end,
-            "columns": columns,
-            "asset_type": asset_type,
-        })
-        selected = [column for column in columns if column in self.panel.columns]
-        return self.panel.select(selected)
-
-
-def _batch_config(factor_names: list[str]) -> FactorBatchConfig:
-    return FactorBatchConfig(
-        factor_names=factor_names,
-        symbols=None,
-        start=date(2026, 1, 1),
-        end=date(2026, 1, 8),
-        n_groups=3,
-        rebalance="daily",
-    )
-
-
-def test_batch_loads_panel_once_and_deduplicates_factors():
-    engine = _Engine(_panel())
-    result = FactorBacktestService(engine).run_batch(
-        _batch_config(["change_pct", "turnover_rate", "change_pct"]),
-    )
-
-    assert len(engine.calls) == 1
-    assert result.config["factor_names"] == ["change_pct", "turnover_rate"]
-    assert [item.factor_name for item in result.results] == ["change_pct", "turnover_rate"]
-    assert all(item.error is None for item in result.results)
-
-
-def test_batch_isolates_a_single_factor_failure(monkeypatch):
-    engine = _Engine(_panel())
-    service = FactorBacktestService(engine)
-    original = service._evaluate_panel
-
-    def evaluate(panel, config, run_id, started_at, **kwargs):
-        if config.factor_name == "turnover_rate":
-            raise ValueError("broken factor")
-        return original(panel, config, run_id, started_at, **kwargs)
-
-    monkeypatch.setattr(service, "_evaluate_panel", evaluate)
-    result = service.run_batch(_batch_config(["change_pct", "turnover_rate"]))
-
-    assert result.results[0].error is None
-    assert result.results[1].error == "broken factor"
-
-
-def test_batch_empty_panel_returns_batch_error():
-    engine = _Engine(pl.DataFrame())
-    result = FactorBacktestService(engine).run_batch(_batch_config(["change_pct"]))
-
-    assert len(engine.calls) == 1
-    assert result.results == []
-    assert result.error
-
-
-def test_single_factor_contract_remains_compatible():
-    engine = _Engine(_panel())
-    result = FactorBacktestService(engine).run(FactorConfig(
-        factor_name="change_pct",
-        symbols=None,
-        start=date(2026, 1, 1),
-        end=date(2026, 1, 8),
-        n_groups=3,
-        rebalance="daily",
-    ))
-
-    assert result.error is None
-    assert result.config["factor_name"] == "change_pct"
-    assert result.config["asset_type"] == "stock"
-    assert result.n_symbols == 3
-    assert result.ic_series
 
 
 def test_factor_catalog_covers_normalized_indicator_families():
@@ -169,8 +64,6 @@ def test_derived_factors_are_computed_from_shared_base_panel():
             "amount": (1000.0 + day) * close,
             "turnover_rate": 2.0 + day * 0.01,
         })
-    engine = _Engine(pl.DataFrame(rows))
-    service = FactorBacktestService(engine)
     factor_names = [
         "ma20_bias",
         "atr_pct",
@@ -184,7 +77,10 @@ def test_derived_factors_are_computed_from_shared_base_panel():
         "distance_to_high_60d",
     ]
 
-    panel = service._load_factor_panel(_batch_config(factor_names), factor_names)
+    panel = FactorBacktestService._compute_missing_factors(
+        pl.DataFrame(rows),
+        set(factor_names),
+    )
     last = panel.tail(1).to_dicts()[0]
 
     assert set(factor_names) <= set(panel.columns)

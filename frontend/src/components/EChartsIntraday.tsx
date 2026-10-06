@@ -40,26 +40,18 @@ function isValidPrice(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v) && v > 0
 }
 
-/** 計算實際漲跌停價 (四捨五入到2位小數) 和實際漲跌停幅度 */
-function getLimitPrices(prevClose: number, priceLimit?: PriceLimitInfo): {
-  limitUp: number      // 漲停價 (四捨五入)
-  limitDown: number    // 跌停價 (四捨五入)
-  upPct: number        // 實際漲停幅度 (如 9.97)
-  downPct: number      // 實際跌停幅度 (如 -9.97)
-} {
-  const pct = priceLimit && Number.isFinite(priceLimit.rate) ? priceLimit.rate : 0.10
-  const rawUp = prevClose * (1 + pct)
-  const rawDown = prevClose * (1 - pct)
-  // A股漲跌停價四捨五入到分 (2位小數)
-  const limitUp = isValidPrice(priceLimit?.limit_up)
-    ? priceLimit.limit_up
-    : Math.round(rawUp * 100) / 100
-  const limitDown = isValidPrice(priceLimit?.limit_down)
-    ? priceLimit.limit_down
-    : Math.round(rawDown * 100) / 100
-  const upPct = (limitUp - prevClose) / prevClose * 100
-  const downPct = (limitDown - prevClose) / prevClose * 100
-  return { limitUp, limitDown, upPct, downPct }
+/** Limit prices exactly as the backend computed them; the chart never derives its own. */
+function getLimitPrices(priceLimit?: PriceLimitInfo): { limitUp: number; limitDown: number } | null {
+  if (!isValidPrice(priceLimit?.limit_up) || !isValidPrice(priceLimit?.limit_down)) return null
+  return { limitUp: priceLimit.limit_up, limitDown: priceLimit.limit_down }
+}
+
+function limitStatusLabel(priceLimit?: PriceLimitInfo): string | null {
+  if (!priceLimit || getLimitPrices(priceLimit)) return null
+  const source: string = priceLimit.source
+  if (source === 'no_limit') return '無漲跌幅限制'
+  if (source === 'unknown') return '漲跌幅規則未知'
+  return '漲跌停價未知'
 }
 
 function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
@@ -148,8 +140,9 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         : largest
     ), 0) * 1.05
 
-    if (showLimitLines && yMode === 'limit') {
-      const { limitUp, limitDown } = getLimitPrices(prevClose, priceLimit)
+    const limits = showLimitLines ? getLimitPrices(priceLimit) : null
+    if (limits && yMode === 'limit') {
+      const { limitUp, limitDown } = limits
       const limitDiffUp = limitUp - prevClose
       const limitDiffDown = prevClose - limitDown
       const limitDiff = Math.max(limitDiffUp, limitDiffDown)
@@ -174,9 +167,8 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       )
     } else {
       // 自適應模式: Y 軸按實際漲跌幅對稱, 但不超出實際漲跌停範圍
-      if (showLimitLines) {
-        const { limitUp, limitDown } = getLimitPrices(prevClose, priceLimit)
-        const limitDiff = Math.max(limitUp - prevClose, prevClose - limitDown)
+      if (limits) {
+        const limitDiff = Math.max(limits.limitUp - prevClose, prevClose - limits.limitDown)
         maxDiff = Math.min(maxDiff, limitDiff)
       }
       if (!showLimitLines && maxDiff > 0) {
@@ -418,6 +410,9 @@ export function EChartsIntraday({
   const [infoIdx, setInfoIdx] = useState(data.length - 1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
   const ct = useChartTheme()
+  const hasLimitPrices = getLimitPrices(priceLimit) != null
+  const limitMode = yMode === 'limit' && hasLimitPrices
+  const limitLabel = limitStatusLabel(priceLimit)
   const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
 
   // 分時線顏色：基於最新價 vs 昨收
@@ -537,12 +532,13 @@ export function EChartsIntraday({
   return (
     <div className="w-full">
       {/* 按鈕行: 切換式按鈕組, 居右 */}
-      {showLimitLines && <div className="flex items-center justify-end px-1 pb-0.5">
+      {showLimitLines && <div className="flex items-center justify-end gap-2 px-1 pb-0.5">
+        {limitLabel && <span className="text-[10px] text-muted">{limitLabel}</span>}
         <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
           <button
             onClick={() => setYMode('adaptive')}
             className={`px-2.5 py-0.5 text-[10px] font-mono cursor-pointer transition-colors ${
-              yMode === 'adaptive'
+              !limitMode
                 ? 'bg-accent/20 text-accent'
                 : 'text-muted hover:text-secondary'
             }`}
@@ -552,10 +548,13 @@ export function EChartsIntraday({
           <div className="w-px h-3 bg-border/40" />
           <button
             onClick={() => setYMode('limit')}
-            className={`px-2.5 py-0.5 text-[10px] font-mono cursor-pointer transition-colors ${
-              yMode === 'limit'
-                ? 'bg-accent/20 text-accent'
-                : 'text-muted hover:text-secondary'
+            disabled={!hasLimitPrices}
+            className={`px-2.5 py-0.5 text-[10px] font-mono transition-colors ${
+              limitMode
+                ? 'bg-accent/20 text-accent cursor-pointer'
+                : hasLimitPrices
+                  ? 'text-muted hover:text-secondary cursor-pointer'
+                  : 'text-muted opacity-40 cursor-not-allowed'
             }`}
           >
             漲跌停

@@ -126,9 +126,22 @@ class TaiwanStockDetailService:
             )
 
         # 2. Canonical Price Limits via MarketProfileBridge
-        limit_pct = MarketProfileBridge.get_price_limit_pct(master_item) if master_item else 0.1
-        is_no_limit = limit_pct is None
-        rule_type = "無漲跌幅限制" if is_no_limit else f"±{int(limit_pct * 100)}%" if limit_pct else "普通股±10%"
+        rule_known = master_item is not None
+        limit_pct = None
+        if rule_known:
+            try:
+                limit_pct = MarketProfileBridge.get_price_limit_pct(master_item)
+            except ValueError:
+                rule_known = False
+        is_no_limit = rule_known and limit_pct is None
+        if identity.instrument_type == "index":
+            rule_type = "不適用（指數）"  # noqa: RUF001
+        elif not rule_known:
+            rule_type = "漲跌幅規則未知"
+        elif is_no_limit:
+            rule_type = "無漲跌幅限制"
+        else:
+            rule_type = f"±{int(limit_pct * 100)}%"
         price_limit = TaiwanStockPriceLimit(
             limit_up=None,
             limit_down=None,
@@ -212,14 +225,10 @@ class TaiwanStockDetailService:
             if q is not None:
                 # Calculate limit up/down via authoritative MarketProfileBridge.calc_limits
                 inst = self.security_master.get_instrument(symbol_str)
-                if q.prev_close and not price_limit.is_no_limit and inst:
+                if q.prev_close and price_limit.price_limit_pct is not None and inst:
                     lim_up, lim_dn = MarketProfileBridge.calc_limits(q.prev_close, inst)
                     price_limit.limit_up = lim_up
                     price_limit.limit_down = lim_dn
-                elif q.prev_close and not price_limit.is_no_limit and price_limit.price_limit_pct:
-                    mult = price_limit.price_limit_pct
-                    price_limit.limit_up = round(q.prev_close * (1.0 + mult), 2)
-                    price_limit.limit_down = round(q.prev_close * (1.0 - mult), 2)
 
                 meta = None
                 if q.source_meta:

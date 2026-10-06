@@ -4,15 +4,11 @@ from datetime import date
 
 import polars as pl
 
-from app.services.backtest import BacktestConfig
 from app.backtest.engine import BacktestEngine, PanelCache
-from app.backtest.factor import FactorConfig
 from app.backtest.strategy import StrategyBacktestConfig
 
 
 def test_configs_default_to_stock():
-    assert BacktestConfig(symbols=[], start=date(2026, 1, 1), end=date(2026, 1, 2)).asset_type == "stock"
-    assert FactorConfig(factor_name="x", symbols=None, start=date(2026, 1, 1), end=date(2026, 1, 2)).asset_type == "stock"
     assert StrategyBacktestConfig(strategy_id="x", symbols=None, start=date(2026, 1, 1), end=date(2026, 1, 2)).asset_type == "stock"
 
 

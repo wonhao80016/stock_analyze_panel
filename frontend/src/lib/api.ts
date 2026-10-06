@@ -129,10 +129,11 @@ export interface MinuteKlineSession {
 }
 
 export interface PriceLimitInfo {
-  rate: number
+  /** Decimal (0.1 = 10%); null when the instrument has no limit or its rule is unknown. */
+  rate: number | null
   limit_up: number | null
   limit_down: number | null
-  source: 'rule' | 'instrument'
+  source: 'rule' | 'model' | 'official' | 'instrument' | 'no_limit' | 'unknown'
 }
 
 export interface KlineRow {
@@ -1709,77 +1710,6 @@ export function genRuleId(): string {
 // (連板梯隊頁)一併移除 —— 連板/打板/炸板/封板率為中國 A 股漲跌停制度
 // 衍生術語, 對台股產品無意義。depth_service 其後已一併移除。
 
-// ===== Backtest =====
-export interface BacktestResult {
-  run_id: string
-  config: any
-  stats: Record<string, any>
-  equity_curve: { date: string; value: number }[]
-  trades: any[]
-  per_symbol_stats: { symbol: string; total_return: number }[]
-}
-
-// ===== Factor Backtest =====
-export interface FactorColumn {
-  id: string
-  label: string
-  group: string
-  desc: string
-}
-
-export interface GroupStat {
-  group: number
-  label: string
-  total_return: number
-  annual_return: number
-  max_drawdown: number
-  sharpe: number
-  win_rate: number
-}
-
-export interface FactorBacktestResult {
-  run_id: string
-  config: Record<string, any>
-  ic_mean: number | null
-  ic_std: number | null
-  ir: number | null
-  ic_win_rate: number | null
-  ic_series: { date: string; ic: number }[]
-  group_stats: GroupStat[]
-  group_nav: Record<string, any>[]
-  long_short_stats: Record<string, any>
-  long_short_nav: { date: string; value: number }[]
-  elapsed_ms: number
-  n_symbols: number
-  n_dates: number
-  error: string | null
-}
-
-export interface FactorBatchItem {
-  factor_name: string
-  label: string
-  group: string
-  ic_mean: number | null
-  ir: number | null
-  ic_win_rate: number | null
-  long_short_return: number | null
-  long_short_max_drawdown: number | null
-  n_symbols: number
-  n_dates: number
-  elapsed_ms: number
-  error: string | null
-}
-
-export interface FactorBatchResult {
-  run_id: string
-  config: Record<string, any>
-  results: FactorBatchItem[]
-  elapsed_ms: number
-  n_symbols: number
-  n_dates: number
-  error: string | null
-}
-
 // ===== Factor / strategy mining =====
 export type MiningBudgetProfile = 'exploratory' | 'balanced' | 'strict'
 export type MiningRunStatus =
@@ -2040,6 +1970,10 @@ export interface StrategyBacktestTrade {
   blocked_exit_days?: number
   entry_signal_id?: string | null
   exit_signal_id?: string | null
+  // entry_price / exit_price / shares are as traded; *_adj are forward-adjusted.
+  entry_price_adj?: number | null
+  exit_price_adj?: number | null
+  exit_shares?: number | null
 }
 
 export interface StrategyBacktestRunPayload {
@@ -2066,12 +2000,51 @@ export interface StrategyBacktestRunPayload {
   asset_type?: 'stock' | 'etf' | 'index'
   lot_mode?: 'board_lot' | 'odd_lot'
   minute_fill?: boolean
+  // Annual decimal rate, -0.05 to 0.2; the API answers 400 outside that range.
+  risk_free_rate?: number
+}
+
+export interface StrategyBacktestStatsMethodology {
+  version: string
+  annualization: 'calendar_cagr'
+  sessions: number
+  return_periods: number
+  calendar_days: number
+  periods_per_year: number | null
+  min_annualized_sessions: number
+  annualization_unavailable_reason: string | null
+  risk_free_rate: number
+  risk_free_rate_per_period: number | null
+  profit_factor_basis: 'pnl_amount' | 'pnl_pct'
+  monte_carlo_basis: 'pnl_pct_x_position_pct' | 'pnl_pct'
+}
+
+export interface StrategyBacktestBenchmark {
+  symbol: string
+  name: string
+  price_basis: 'price_index'
+  includes_dividends: boolean
+  base_date: string | null
+  // Bounds of the index rows found inside the queried period.
+  coverage_start: string | null
+  coverage_end: string | null
+  missing_sessions: number
 }
 
 export interface StrategyBacktestResult {
   run_id: string
   config: Record<string, any>
-  stats: Record<string, any>
+  // annual_return, sharpe, sortino and calmar are null below methodology.min_annualized_sessions.
+  stats: Record<string, any> & {
+    risk_free_rate?: number
+    methodology?: StrategyBacktestStatsMethodology
+    benchmark?: StrategyBacktestBenchmark
+    // Null unless the index has a close on the first and the last session.
+    benchmark_return?: number | null
+    // Null when benchmark_return is null or in full mode, where total_return is not an account return.
+    excess?: number | null
+    excluded_symbols?: { symbol: string; reason: string }[]
+  }
   equity_curve: { date: string; value: number; cash?: number; positions?: number; exposure?: number }[]
   drawdown_curve: { date: string; value: number }[]
   benchmark_curve?: { date: string; value: number; close?: number; name?: string; symbol?: string }[]
@@ -2791,59 +2764,6 @@ export const api = {
 
 
   backtestStatus: () => request<{ available: boolean }>('/api/backtest/status'),
-
-  backtestRun: (payload: {
-    symbols: string[]
-    entries: string[]
-    exits: string[]
-    start?: string
-    end?: string
-    stop_loss_pct?: number
-    max_hold_days?: number
-    matching?: 'close_t' | 'open_t+1'
-    asset_type?: 'stock' | 'etf' | 'index'
-  }) =>
-    request<BacktestResult>('/api/backtest/run', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
-  factorColumns: () =>
-    request<{ columns: FactorColumn[] }>('/api/backtest/factor/columns'),
-
-  factorRun: (payload: {
-    factor_name: string
-    symbols?: string[] | null
-    start?: string | null
-    end?: string | null
-    n_groups?: number
-    rebalance?: 'daily' | 'weekly' | 'monthly'
-    weight?: 'equal' | 'factor_weight'
-    fees_pct?: number
-    slippage_bps?: number
-    asset_type?: 'stock' | 'etf' | 'index'
-  }) =>
-    request<FactorBacktestResult>('/api/backtest/factor/run', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
-  factorBatch: (payload: {
-    factor_names: string[]
-    symbols?: string[] | null
-    start?: string | null
-    end?: string | null
-    n_groups?: number
-    rebalance?: 'daily' | 'weekly' | 'monthly'
-    weight?: 'equal' | 'factor_weight'
-    fees_pct?: number
-    slippage_bps?: number
-    asset_type?: 'stock' | 'etf' | 'index'
-  }) =>
-    request<FactorBatchResult>('/api/backtest/factor/batch', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
 
   miningRuns: () =>
     request<{ items: MiningRun[] }>('/api/backtest/mining/runs'),

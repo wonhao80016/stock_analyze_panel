@@ -45,6 +45,13 @@ function formatAmount(amt: number | null | undefined): string {
   return amt.toLocaleString()
 }
 
+/** price_limit_pct is a decimal (0.1 = 10%); null without is_no_limit means the rule is unknown. */
+function limitRuleLabel(quote: TaiwanRealtimeQuote, sign: '+' | '-'): string {
+  if (quote.is_no_limit) return '無限制'
+  if (quote.price_limit_pct == null) return '未知'
+  return `${sign}${Number((quote.price_limit_pct * 100).toFixed(2))}%`
+}
+
 /** 格式化股數 (可選擇切換顯示 張數 = 股數 / 1000) */
 function formatVolume(shares: number | null | undefined, unit: 'shares' | 'lots'): string {
   if (shares == null) return '--'
@@ -316,6 +323,11 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
                     無漲跌幅限制 (NO LIMIT)
                   </span>
                 )}
+                {!currentQuote.is_no_limit && currentQuote.price_limit_pct == null && (
+                  <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                    漲跌幅規則未知
+                  </span>
+                )}
               </div>
 
               {/* 報價詳細四格表 */}
@@ -347,13 +359,13 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
                   </div>
                 </div>
                 <div className="rounded-lg bg-elevated/40 p-2 border border-border/30">
-                  <div className="text-muted text-[11px]">漲停價 ({currentQuote.price_limit_pct != null ? `+${currentQuote.price_limit_pct}%` : '無限制'})</div>
+                  <div className="text-muted text-[11px]">漲停價 ({limitRuleLabel(currentQuote, '+')})</div>
                   <div className="font-mono font-medium text-sm text-rose-600 dark:text-rose-400 mt-0.5">
                     {currentQuote.limit_up != null ? currentQuote.limit_up.toFixed(2) : '--'}
                   </div>
                 </div>
                 <div className="rounded-lg bg-elevated/40 p-2 border border-border/30">
-                  <div className="text-muted text-[11px]">跌停價 ({currentQuote.price_limit_pct != null ? `-${currentQuote.price_limit_pct}%` : '無限制'})</div>
+                  <div className="text-muted text-[11px]">跌停價 ({limitRuleLabel(currentQuote, '-')})</div>
                   <div className="font-mono font-medium text-sm text-emerald-600 dark:text-emerald-400 mt-0.5">
                     {currentQuote.limit_down != null ? currentQuote.limit_down.toFixed(2) : '--'}
                   </div>

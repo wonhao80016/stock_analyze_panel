@@ -361,6 +361,132 @@ class TestTaiwanScreenerCore:
         assert len(data["items"]) >= 5
 
 
+_PREV_SESSION = date(2026, 10, 5)
+_QUOTE_SESSION = date(2026, 10, 6)
+
+
+def _bar(symbol: str, day: date, close: float) -> dict:
+    return {
+        "symbol": symbol, "date": day.isoformat(), "open": close, "high": close, "low": close,
+        "close": close, "volume": 1000.0, "amount": close * 1000.0, "quote_ts": None,
+    }
+
+
+@pytest.fixture
+def limit_store(tmp_path, monkeypatch):
+    """Two sessions closing at 100 then 108.5 / 91.5 / 102; 00646 has no limit; 0050 has one bar."""
+    from app.config import settings
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+
+    get_security_master()
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    store = TaiwanDailyStore(data_dir=tmp_path / "daily")
+    store.write_batch(pl.DataFrame([
+        _bar("2330.TWSE", _PREV_SESSION, 100.0), _bar("2330.TWSE", _QUOTE_SESSION, 108.5),
+        _bar("8069.TPEX", _PREV_SESSION, 100.0), _bar("8069.TPEX", _QUOTE_SESSION, 91.5),
+        _bar("2317.TWSE", _PREV_SESSION, 100.0), _bar("2317.TWSE", _QUOTE_SESSION, 102.0),
+        _bar("00646.TWSE", _PREV_SESSION, 100.0), _bar("00646.TWSE", _QUOTE_SESSION, 103.0),
+        _bar("0050.TWSE", _QUOTE_SESSION, 108.5),
+    ]))
+    TaiwanEnrichedRefreshService(
+        daily_store=store,
+        enriched_root=tmp_path / "kline_daily_enriched",
+        share_capital=TaiwanShareCapitalStore(data_dir=tmp_path),
+    ).refresh()
+    yield store
+
+
+def _patch_partition(store: TaiwanDailyStore, symbol: str, **values: float | None) -> None:
+    path = _partition_path(store)
+    frame = pl.read_parquet(path)
+    frame.with_columns([
+        pl.when(pl.col("symbol") == symbol).then(pl.lit(v, dtype=pl.Float64)).otherwise(pl.col(c)).alias(c)
+        for c, v in values.items()
+    ]).write_parquet(path)
+
+
+def _limit_item(store: TaiwanDailyStore, symbol: str, **req):
+    res = TaiwanScreenerService(daily_store=store).run(TaiwanScreenerRequest(**req))
+    return next((item for item in res.items if item.symbol == symbol), None)
+
+
+class TestTaiwanScreenerLimitReference:
+    def test_limit_up_comes_from_the_previous_close(self, limit_store):
+        item = _limit_item(limit_store, "2330.TWSE")
+        assert item.close == 108.5
+        assert item.limit_up == 110.0
+        assert item.limit_down == 90.0
+        assert item.distance_to_upper_limit == pytest.approx((110.0 - 108.5) / 108.5)
+        assert item.distance_to_lower_limit == pytest.approx((108.5 - 90.0) / 108.5)
+        assert _limit_item(limit_store, "2330.TWSE", near_upper_limit=True) is not None
+        assert _limit_item(limit_store, "2330.TWSE", near_lower_limit=True) is None
+
+    def test_limit_down_comes_from_the_previous_close(self, limit_store):
+        item = _limit_item(limit_store, "8069.TPEX")
+        assert item.limit_up == 110.0
+        assert item.limit_down == 90.0
+        assert item.distance_to_lower_limit == pytest.approx((91.5 - 90.0) / 91.5)
+        assert _limit_item(limit_store, "8069.TPEX", near_lower_limit=True) is not None
+        assert _limit_item(limit_store, "8069.TPEX", near_upper_limit=True) is None
+
+    def test_reference_is_moved_onto_the_raw_scale(self, limit_store):
+        _patch_partition(limit_store, "2330.TWSE", prev_close=50.0, close=54.25, raw_close=108.5)
+        item = _limit_item(limit_store, "2330.TWSE")
+        assert (item.limit_up, item.limit_down) == (110.0, 90.0)
+
+    @pytest.mark.parametrize("official_limits", [True, False])
+    def test_corporate_action_session_uses_the_official_reference(self, limit_store, official_limits):
+        limits = {"ref_limit_up": 105.0, "ref_limit_down": 86.0} if official_limits else {}
+        expected = (105.0, 86.0) if official_limits else (104.5, 85.5)
+        assert _limit_item(limit_store, "2317.TWSE", near_upper_limit=True) is None
+        _patch_partition(limit_store, "2317.TWSE", ref_prev_close=95.0, **limits)
+        item = _limit_item(limit_store, "2317.TWSE")
+        assert (item.limit_up, item.limit_down) == expected
+        assert item.distance_to_upper_limit == pytest.approx((expected[0] - 102.0) / 102.0)
+        assert _limit_item(limit_store, "2317.TWSE", near_upper_limit=True) is not None
+
+    def test_etf_limits_use_the_etf_tick_ladder(self, limit_store):
+        _patch_partition(limit_store, "0050.TWSE", prev_close=115.95)
+        item = _limit_item(limit_store, "0050.TWSE")
+        assert (item.limit_up, item.limit_down) == (127.5, 104.4)
+
+    def test_no_limit_product_never_counts_as_near_a_limit(self, limit_store):
+        item = _limit_item(limit_store, "00646.TWSE")
+        assert item.is_no_limit is True
+        assert (item.price_limit_pct, item.limit_up, item.limit_down) == (None, None, None)
+        assert (item.distance_to_upper_limit, item.distance_to_lower_limit) == (None, None)
+        for req in ({"near_upper_limit": True}, {"near_lower_limit": True},
+                    {"distance_to_upper_limit_max": 1.0}, {"distance_to_lower_limit_max": 1.0}):
+            assert _limit_item(limit_store, "00646.TWSE", **req) is None
+
+    def test_missing_previous_session_leaves_limits_null(self, limit_store):
+        item = _limit_item(limit_store, "0050.TWSE")
+        assert item.close == 108.5
+        assert item.price_limit_pct == 0.10
+        assert (item.limit_up, item.limit_down) == (None, None)
+        assert (item.distance_to_upper_limit, item.distance_to_lower_limit) == (None, None)
+        assert _limit_item(limit_store, "0050.TWSE", distance_to_upper_limit_max=1.0) is None
+
+    def test_missing_partition_never_falls_back_to_the_quote_close(self, limit_store):
+        _partition_path(limit_store).unlink()
+        res = TaiwanScreenerService(daily_store=limit_store).run(TaiwanScreenerRequest())
+        item = next(i for i in res.items if i.symbol == "2330.TWSE")
+        assert (item.limit_up, item.limit_down) == (None, None)
+        assert (item.distance_to_upper_limit, item.distance_to_lower_limit) == (None, None)
+        assert "price_limits" not in res.degraded_sections
+
+    def test_partition_without_reference_columns_flags_price_limits(self, limit_store):
+        path = _partition_path(limit_store)
+        pl.read_parquet(path).drop(["ref_prev_close", "ref_limit_up", "ref_limit_down"]).write_parquet(path)
+        res = TaiwanScreenerService(daily_store=limit_store).run(TaiwanScreenerRequest())
+        assert "price_limits" in res.degraded_sections
+        assert "indicators" not in res.degraded_sections
+        item = next(i for i in res.items if i.symbol == "2330.TWSE")
+        assert item.price_limit_pct == 0.10
+        assert (item.limit_up, item.limit_down) == (None, None)
+
+
 def _set_patterns(store: TaiwanDailyStore, values: dict[str, dict[str, bool | None]]) -> None:
     """Overwrite the published pattern columns: every pattern False except the given values."""
     path = _partition_path(store)

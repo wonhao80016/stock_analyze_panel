@@ -741,7 +741,7 @@ class TaiwanStockResearchContextService:
                 upper_l, lower_l = MarketProfileBridge.calc_limits(p_close, inst)
                 if ref_row is not None and ref_row["limit_up"] is not None and ref_row["limit_down"] is not None:
                     upper_l, lower_l = ref_row["limit_up"], ref_row["limit_down"]
-            tick_sz = TickSizeModel.get_tick_size(p_close)
+            tick_sz = TickSizeModel.get_tick_size(p_close, MarketProfileBridge.get_tick_size_class(inst))
 
         market_rules_evidence = MarketRulesContextEvidence(
             price_limit_pct=limit_pct,

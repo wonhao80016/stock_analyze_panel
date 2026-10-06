@@ -641,3 +641,29 @@ def test_start_returns_400_with_guidance_while_enriched_publication_active(
 
     assert response.status_code == 400
     assert "数据更新" in response.json()["detail"]
+
+
+def test_result_labels_backtest_statistics_methodology(tmp_path):
+    client, store = _client(tmp_path)
+    _successful_run(store)
+    summary = store.read_summary("result-run")
+    store.write_summary("result-run", {
+        **summary,
+        "stats_methodology_version": "stats_v3",
+        "stats_risk_free_rate": 0.0,
+    })
+
+    body = client.get("/api/backtest/mining/runs/result-run/result").json()
+
+    assert body["stats_methodology_version"] == "stats_v3"
+    assert body["stats_risk_free_rate"] == 0.0
+
+
+def test_legacy_result_has_unknown_backtest_statistics_methodology(tmp_path):
+    client, store = _client(tmp_path)
+    _successful_run(store)
+
+    body = client.get("/api/backtest/mining/runs/result-run/result").json()
+
+    assert body["stats_methodology_version"] is None
+    assert body["stats_risk_free_rate"] is None

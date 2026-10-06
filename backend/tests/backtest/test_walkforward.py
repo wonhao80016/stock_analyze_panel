@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -19,45 +19,111 @@ from app.backtest.walkforward import (
     generate_folds,
 )
 
+# TWSE weekday closures for 2024-2025 (holidays and typhoon days).
+_TW_CLOSED_WEEKDAYS = frozenset(date.fromisoformat(d) for d in (
+    "2024-01-01", "2024-02-06", "2024-02-07", "2024-02-08", "2024-02-09", "2024-02-12",
+    "2024-02-13", "2024-02-14", "2024-02-28", "2024-04-04", "2024-04-05", "2024-05-01",
+    "2024-06-10", "2024-07-24", "2024-07-25", "2024-09-17", "2024-10-02", "2024-10-03",
+    "2024-10-10", "2024-10-31",
+    "2025-01-01", "2025-01-23", "2025-01-24", "2025-01-27", "2025-01-28", "2025-01-29",
+    "2025-01-30", "2025-01-31", "2025-02-28", "2025-04-03", "2025-04-04", "2025-05-01",
+    "2025-05-30", "2025-09-29", "2025-10-06", "2025-10-10", "2025-10-24", "2025-12-25",
+))
+
+
+def _tw_sessions(start: date, end: date) -> list[date]:
+    out = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5 and current not in _TW_CLOSED_WEEKDAYS:
+            out.append(current)
+        current += timedelta(days=1)
+    return out
+
+
+_TW_2024 = _tw_sessions(date(2024, 1, 1), date(2024, 12, 31))
+_TW_2024_2025 = _tw_sessions(date(2024, 1, 1), date(2025, 12, 31))
+
+
+def test_tw_session_fixture_matches_exchange_counts():
+    assert len(_TW_2024) == 242
+    assert len(_TW_2024_2025) == 485
+
+
 # ---------------------------------------------------------------
 # fold 生成
 # ---------------------------------------------------------------
 
-def test_folds_rolling_windows():
-    # 1 年数据, 训练 90d / 测试 30d / 步进 30d
-    folds = generate_folds(date(2024, 1, 1), date(2024, 12, 31), train_days=90, test_days=30, step_days=30)
-    assert len(folds) > 0
+def test_folds_default_windows_count_trading_sessions():
+    """252/63/63 must mean trading sessions, not calendar days."""
+    folds = generate_folds(_TW_2024_2025, train_days=252, test_days=63, step_days=63)
+
+    assert len(folds) == 3
+    assert [(f.train_start, f.train_end, f.test_start, f.test_end) for f in folds] == [
+        (date(2024, 1, 2), date(2025, 1, 15), date(2025, 1, 16), date(2025, 4, 28)),
+        (date(2024, 4, 12), date(2025, 4, 28), date(2025, 4, 29), date(2025, 7, 28)),
+        (date(2024, 7, 12), date(2025, 7, 28), date(2025, 7, 29), date(2025, 10, 29)),
+    ]
+    for f in folds:
+        assert f.train_trading_days == 252
+        assert f.test_trading_days == 63
+        assert len([d for d in _TW_2024_2025 if f.train_start <= d <= f.train_end]) == 252
+        assert len([d for d in _TW_2024_2025 if f.test_start <= d <= f.test_end]) == 63
+
+
+def test_folds_test_starts_at_session_after_train_end():
+    folds = generate_folds(_TW_2024, train_days=120, test_days=40, step_days=40)
+
+    assert len(folds) == 3
     f0 = folds[0]
-    assert f0.train_start == date(2024, 1, 1)
-    assert f0.train_end == date(2024, 3, 31)     # +90d (2024 闰年)
-    assert f0.test_start == date(2024, 4, 1)     # train_end + 1天 (隔断前视泄漏)
-    assert f0.test_end == date(2024, 5, 1)       # +30d
-    # 滚动: 下一折训练起点 +step
-    assert folds[1].train_start == date(2024, 1, 31)  # +30d
-
-
-def test_folds_test_starts_day_after_train_end():
-    """无前视泄漏: 每折 test_start 严格晚于 train_end (不共享同一天)。"""
-    folds = generate_folds(date(2024, 1, 1), date(2024, 12, 31), train_days=90, test_days=30, step_days=30)
+    assert f0.train_start == _TW_2024[0] == date(2024, 1, 2)
+    assert f0.train_end == _TW_2024[119] == date(2024, 7, 3)
+    assert f0.test_start == _TW_2024[120] == date(2024, 7, 4)
+    assert f0.test_end == _TW_2024[159] == date(2024, 8, 30)
+    assert folds[1].train_start == _TW_2024[40]
     for f in folds:
-        assert f.test_start > f.train_end
+        assert f.train_end < f.test_start
+        assert _TW_2024.index(f.test_start) == _TW_2024.index(f.train_end) + 1
+        assert f.test_end <= _TW_2024[-1]
 
 
-def test_folds_no_test_beyond_end():
-    folds = generate_folds(date(2024, 1, 1), date(2024, 12, 31), train_days=90, test_days=30, step_days=30)
-    for f in folds:
-        assert f.test_end <= date(2024, 12, 31)
+def test_folds_skip_missing_sessions_instead_of_counting_them():
+    """A date absent from the series is not a session; the window extends to the next one."""
+    with_gap = [d for d in _TW_2024 if d != date(2024, 3, 15)]
+
+    f0 = generate_folds(with_gap, train_days=120, test_days=40, step_days=40)[0]
+
+    assert f0.train_end == date(2024, 7, 4)
+    assert f0.test_start == date(2024, 7, 5)
+    assert f0.train_trading_days == 120
 
 
-def test_folds_insufficient_span_raises():
-    # 训练90+测试30=120d, 但只有 100d 数据 -> 0 折
-    with pytest.raises(ValueError, match=r"数据区间不足|至少"):
-        generate_folds(date(2024, 1, 1), date(2024, 4, 10), train_days=90, test_days=30, step_days=30)
+def test_folds_accept_unsorted_duplicate_dates():
+    shuffled = list(reversed(_TW_2024)) + _TW_2024[:10]
+
+    assert generate_folds(shuffled, 120, 40, 40) == generate_folds(_TW_2024, 120, 40, 40)
+
+
+def test_folds_insufficient_sessions_raises():
+    with pytest.raises(ValueError, match=r"需 train\+test=315 个交易日, 实有 314 个"):
+        generate_folds(_TW_2024_2025[:314], train_days=252, test_days=63, step_days=63)
+
+
+def test_folds_exact_fit_yields_one_fold():
+    folds = generate_folds(_TW_2024_2025[:315], train_days=252, test_days=63, step_days=63)
+
+    assert len(folds) == 1
+    assert folds[0].test_end == _TW_2024_2025[314]
+
+
+def test_folds_no_sessions_raises():
+    with pytest.raises(ValueError, match=r"实有 0 个"):
+        generate_folds([], train_days=252, test_days=63, step_days=63)
 
 
 def test_folds_reject_nonpositive_windows():
     with pytest.raises(ValueError, match=r"必须为正"):
-        generate_folds(date(2024, 1, 1), date(2024, 12, 31), train_days=0, test_days=30, step_days=30)
+        generate_folds(_TW_2024, train_days=0, test_days=30, step_days=30)
 
 
 # ---------------------------------------------------------------
@@ -172,9 +238,23 @@ def _wf_cfg(**kw):
     return WalkForwardConfig(**base)
 
 
+class _SessionLoader:
+    def __init__(self, sessions):
+        self.sessions = sessions
+        self.calls = []
+
+    def __call__(self, asset_type, start, end):
+        self.calls.append((asset_type, start, end))
+        return [d for d in self.sessions if start <= d <= end]
+
+
+def _wf_service(opt, svc, sessions=_TW_2024):
+    return WalkForwardService(opt, svc, strategy_engine=None, trading_dates_loader=_SessionLoader(sessions))
+
+
 def test_walkforward_optimizes_train_applies_oos():
     opt, svc = _FakeOptimizer(), _FakeService()
-    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf = _wf_service(opt, svc)
     out = wf.run(_wf_cfg())
 
     assert out["n_folds"] > 0
@@ -185,7 +265,54 @@ def test_walkforward_optimizes_train_applies_oos():
     first_fold = out["folds"][0]
     assert svc.calls[0]["params"] == first_fold["best_params"]
     # 训练区间与测试区间不重叠 (测试在训练之后)
-    assert svc.calls[0]["start"] >= opt.train_ranges[0][1]
+    assert svc.calls[0]["start"] > opt.train_ranges[0][1]
+
+
+def test_walkforward_windows_follow_loaded_sessions_and_report_counts():
+    opt, svc = _FakeOptimizer(), _FakeService()
+    loader = _SessionLoader(_TW_2024)
+    wf = WalkForwardService(opt, svc, strategy_engine=None, trading_dates_loader=loader)
+
+    out = wf.run(_wf_cfg(train_days=120, test_days=40, step_days=40,
+                         backtest_kwargs={"asset_type": "etf"}))
+
+    assert loader.calls == [("etf", date(2024, 1, 1), date(2024, 12, 31))]
+    assert out["window_unit"] == "trading_days"
+    assert out["n_planned_folds"] == 3
+    assert opt.train_ranges[0] == (date(2024, 1, 2), date(2024, 7, 3))
+    assert (svc.calls[0]["start"], svc.calls[0]["end"]) == (date(2024, 7, 4), date(2024, 8, 30))
+    first = out["folds"][0]
+    assert (first["train_start"], first["train_end"]) == ("2024-01-02", "2024-07-03")
+    assert (first["test_start"], first["test_end"]) == ("2024-07-04", "2024-08-30")
+    assert all(f["train_trading_days"] == 120 and f["test_trading_days"] == 40 for f in out["folds"])
+
+
+def test_walkforward_defaults_to_stock_sessions():
+    loader = _SessionLoader(_TW_2024)
+    wf = WalkForwardService(_FakeOptimizer(), _FakeService(), strategy_engine=None,
+                            trading_dates_loader=loader)
+
+    wf.run(_wf_cfg())
+
+    assert loader.calls[0][0] == "stock"
+
+
+def test_walkforward_skipped_folds_report_session_counts():
+    out = _wf_service(_NoParamsOptimizer(), _FakeService()).run(_wf_cfg())
+
+    assert out["n_skipped"] > 0
+    assert all(s["train_trading_days"] == 90 and s["test_trading_days"] == 30 for s in out["skipped"])
+
+
+def test_walkforward_without_enough_sessions_fails_before_running():
+    opt, svc = _FakeOptimizer(), _FakeService()
+    wf = _wf_service(opt, svc, sessions=_TW_2024[:119])
+
+    with pytest.raises(ValueError, match=r"需 train\+test=120 个交易日, 实有 119 个"):
+        wf.run(_wf_cfg())
+
+    assert opt.train_ranges == []
+    assert svc.calls == []
 
 
 class _CountingEngine:
@@ -204,7 +331,7 @@ def test_walkforward_cache_telemetry_computes_deltas():
     """cache_telemetry 用首尾快照差值: scans/hits/reuses/秒数 = after - before, 且方向正确。"""
     opt, svc = _FakeOptimizer(), _FakeService()
     svc.engine = _CountingEngine()
-    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf = _wf_service(opt, svc)
     out = wf.run(_wf_cfg())
 
     tel = out["cache_telemetry"]
@@ -219,7 +346,7 @@ def test_walkforward_forces_position_mode_for_is_optimization():
     """训练折(IS)强制 position 防前视泄漏(full 会用 OOS 区间 K 线平仓污染 IS);
     OOS 回测保留用户所选 mode。"""
     opt, svc = _FakeOptimizer(), _FakeService()
-    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf = _wf_service(opt, svc)
     wf.run(_wf_cfg(backtest_kwargs={"mode": "full"}))
 
     assert len(opt.opt_kwargs) > 0 and len(svc.calls) > 0
@@ -231,7 +358,7 @@ def test_walkforward_forces_position_mode_for_is_optimization():
 
 def test_walkforward_reports_degradation():
     opt, svc = _FakeOptimizer(), _FakeService()
-    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf = _wf_service(opt, svc)
     out = wf.run(_wf_cfg())
     # IS best_score=2.0, OOS sortino=1.0 -> 退化 1.0
     assert out["summary"]["avg_is_objective"] == 2.0
@@ -256,7 +383,7 @@ class _ErrorService(_FakeService):
 def test_walkforward_skips_folds_without_optimized_params():
     """训练区间没优化出参数 (best_params=None) -> 跳过, 不用默认参数硬跑 OOS 伪装成有效折。"""
     opt, svc = _NoParamsOptimizer(), _FakeService()
-    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf = _wf_service(opt, svc)
     out = wf.run(_wf_cfg())
     assert out["n_folds"] == 0           # 无有效折
     assert out["n_skipped"] > 0          # 全部跳过
@@ -267,7 +394,7 @@ def test_walkforward_skips_folds_without_optimized_params():
 def test_walkforward_skips_oos_error_folds():
     """OOS 回测失败的折 -> 跳过, 不把空/0 收益混入复利曲线。"""
     opt, svc = _FakeOptimizer(), _ErrorService()
-    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf = _wf_service(opt, svc)
     out = wf.run(_wf_cfg())
     assert out["n_folds"] == 0
     assert out["n_skipped"] > 0
@@ -280,7 +407,7 @@ def test_walkforward_cancel_stops():
     ev = threading.Event()
     ev.set()
     opt, svc = _FakeOptimizer(), _FakeService()
-    wf = WalkForwardService(opt, svc, strategy_engine=None)
+    wf = _wf_service(opt, svc)
     out = wf.run(_wf_cfg(), cancel_event=ev)
     # 取消 -> 不跑任何折
     assert svc.calls == []
@@ -334,3 +461,35 @@ def test_wf_cancel_by_echoed_key():
         assert res2["ok"] is False
     finally:
         _running_jobs.pop(key, None)
+
+
+def test_annualized_objective_needs_sixty_training_sessions():
+    opt, svc = _FakeOptimizer(), _FakeService()
+    wf = WalkForwardService(opt, svc, strategy_engine=None, trading_dates_loader=_SessionLoader(_TW_2024))
+
+    with pytest.raises(ValueError, match="at least 60 trading sessions"):
+        wf.run(_wf_cfg(objective="sharpe", train_days=59, test_days=40, step_days=40))
+    assert opt.train_ranges == []
+
+
+def test_non_annualized_objective_allows_short_training_windows():
+    opt, svc = _FakeOptimizer(), _FakeService()
+    wf = WalkForwardService(opt, svc, strategy_engine=None, trading_dates_loader=_SessionLoader(_TW_2024))
+
+    out = wf.run(_wf_cfg(objective="total_return", train_days=59, test_days=40, step_days=40))
+
+    assert out["n_planned_folds"] > 0
+
+
+def test_skipped_fold_carries_the_optimizer_reason():
+    class _NoBestOptimizer(_FakeOptimizer):
+        def optimize(self, cfg, progress_cb=None, cancel_event=None):
+            return {"best_params": None, "best_score": None, "results": [], "error": "objective is null"}
+
+    svc = _FakeService()
+    wf = WalkForwardService(_NoBestOptimizer(), svc, strategy_engine=None, trading_dates_loader=_SessionLoader(_TW_2024))
+
+    out = wf.run(_wf_cfg(train_days=120, test_days=40, step_days=40))
+
+    assert out["skipped"]
+    assert all("objective is null" in fold["reason"] for fold in out["skipped"])

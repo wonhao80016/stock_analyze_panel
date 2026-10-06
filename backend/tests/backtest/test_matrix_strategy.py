@@ -378,6 +378,8 @@ def test_direct_parquet_matrix_uses_taiwan_share_volume_for_turnover(tmp_path):
         "close": [100.0],
         "volume": [1_000_000.0],
         "amount": [100_000_000.0],
+        "signal_limit_up": [False],
+        "signal_limit_down": [False],
     }).write_parquet(partition / "part.parquet")
     instruments = pl.DataFrame({
         "symbol": ["2330.TWSE"],
@@ -756,7 +758,7 @@ def test_matrix_cache_prunes_by_bytes_and_leaves_no_staging_directory(tmp_path):
     del first
     gc.collect()
     assert second.close[0, 0] == pytest.approx(11.0)
-    assert len(list(cache_root.glob("v5-*"))) == 1
+    assert len(list(cache_root.glob("v7-*"))) == 1
     assert list(cache_root.glob(".*.tmp")) == []
     assert len(list(cache_root.glob(".axes-v1-*.json"))) == 1
 
@@ -809,7 +811,7 @@ def test_managed_source_generation_skips_file_walk_and_invalidates_explicitly(tm
     assert changed.cache_path != first.cache_path
     del first, repeated
     gc.collect()
-    assert len(list(cache_root.glob("v5-*"))) == 1
+    assert len(list(cache_root.glob("v7-*"))) == 1
 
 
 def test_registered_builtin_matrix_strategies_share_one_cache_profile():

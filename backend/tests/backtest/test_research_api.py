@@ -1,32 +1,29 @@
 from __future__ import annotations
 
 from datetime import date
-from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from app.api import backtest as api
-from app.backtest.factor import FACTOR_COLUMNS
 
 
-def test_factor_batch_api_rejects_unknown_factor():
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-    req = api.FactorBatchRequest(factor_names=["unknown"])
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/backtest/run"),
+        ("POST", "/api/backtest/factor/run"),
+        ("POST", "/api/backtest/factor/batch"),
+        ("GET", "/api/backtest/factor/columns"),
+    ],
+)
+def test_removed_legacy_backtest_routes_are_not_registered(method, path):
+    app = FastAPI()
+    app.include_router(api.router)
 
-    with pytest.raises(HTTPException) as exc_info:
-        api.factor_batch(req, request)
-    assert exc_info.value.status_code == 400
-    assert "unknown" in str(exc_info.value.detail)
-
-
-def test_factor_batch_request_accepts_full_research_catalog():
-    factor_names = [item["id"] for item in FACTOR_COLUMNS]
-
-    request = api.FactorBatchRequest(factor_names=factor_names)
-
-    assert len(request.factor_names) > 16
-    assert request.factor_names == factor_names
+    assert path not in {route.path for route in api.router.routes}
+    assert TestClient(app).request(method, path).status_code == 404
 
 
 def test_candidate_api_create_list_and_update(monkeypatch, tmp_path):

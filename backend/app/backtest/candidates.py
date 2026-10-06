@@ -72,6 +72,7 @@ _CONFIG_FIELDS: dict[str, frozenset[str]] = {
             "lot_mode",
             "minute_fill",
             "regime_filter",
+            "risk_free_rate",
             "factor_names",
             "directions",
             "weights",
@@ -122,6 +123,7 @@ _METRIC_FIELDS: dict[str, frozenset[str]] = {
             "avg_return",
             "median_return",
             "elapsed_ms",
+            "methodology_version",
         }
     )
     | _MINING_METRIC_FIELDS,

@@ -26,7 +26,7 @@ from pathlib import Path
 import polars as pl
 
 from app.enriched_generation import EnrichedPublication, enriched_publication_incomplete
-from app.indicators.pipeline import compute_enriched, filter_halt_days
+from app.indicators.pipeline import compute_enriched, filter_halt_days, with_limit_streak
 from app.taiwan.corporate_actions import (
     REF_LIMIT_DOWN,
     REF_LIMIT_UP,
@@ -36,6 +36,7 @@ from app.taiwan.corporate_actions import (
     today_factors,
 )
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
+from app.taiwan.market_rules import PriceLimitModel
 from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.volume_patterns import add_volume_patterns
@@ -230,20 +231,6 @@ class TaiwanEnrichedRefreshService:
             Path(tmp_path).unlink(missing_ok=True)
             raise
 
-    @staticmethod
-    def _tick_size_expr(price: pl.Expr, is_etf: pl.Expr) -> pl.Expr:
-        """Taiwan tick ladders, mirroring TickSizeModel.get_tick_size."""
-        etf_tick = pl.when(price < 50.0).then(0.01).otherwise(0.05)
-        stock_tick = (
-            pl.when(price < 10.0).then(0.01)
-            .when(price < 50.0).then(0.05)
-            .when(price < 100.0).then(0.10)
-            .when(price < 500.0).then(0.50)
-            .when(price < 1000.0).then(1.00)
-            .otherwise(5.00)
-        )
-        return pl.when(is_etf).then(etf_tick).otherwise(stock_tick)
-
     def _limit_profile(self, symbols: list[str]) -> pl.DataFrame:
         """Per-symbol statutory limit percentage and tick ladder."""
         from app.taiwan.universe import get_security_master
@@ -278,7 +265,7 @@ class TaiwanEnrichedRefreshService:
         table for the limit prices; Taiwan carries its own rules instead. Limits and
         ticks are raw-scale prices, so the comparison uses raw_close / raw_high / raw_low
         and the previous close moved onto the raw scale; a corporate-action session
-        uses the limits the exchange published.
+        uses the limits the exchange published. The limit streaks are counted from these signals.
         """
         cols = ["signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"]
         enriched = enriched.with_columns([
@@ -287,16 +274,18 @@ class TaiwanEnrichedRefreshService:
         ])
         profile = self._limit_profile(enriched["symbol"].unique().to_list())
         if profile.is_empty():
-            return enriched.with_columns([pl.lit(False).alias(c) for c in cols])
+            out = enriched.with_columns([pl.lit(False).alias(c) for c in cols])
+        else:
+            out = self._limit_signals(enriched.join(profile, on="symbol", how="left"))
+        out = with_limit_streak(out, "signal_limit_up", "consecutive_limit_ups")
+        return with_limit_streak(out, "signal_limit_down", "consecutive_limit_downs")
 
-        out = enriched.join(profile, on="symbol", how="left")
+    @staticmethod
+    def _limit_signals(out: pl.DataFrame) -> pl.DataFrame:
         ref = pl.col("prev_close") * pl.when(pl.col("close") > 0).then(pl.col("raw_close") / pl.col("close"))
-        up_raw = ref * (1.0 + pl.col("limit_pct"))
-        down_raw = pl.max_horizontal(pl.lit(0.01), ref * (1.0 - pl.col("limit_pct")))
-        up_tick = self._tick_size_expr(up_raw, pl.col("is_etf_tick").fill_null(False))
-        down_tick = self._tick_size_expr(down_raw, pl.col("is_etf_tick").fill_null(False))
-        limit_up = ((up_raw / up_tick + 1e-9).floor() * up_tick).round(4)
-        limit_down = ((down_raw / down_tick - 1e-9).ceil() * down_tick).round(4)
+        limit_up, limit_down = PriceLimitModel.polars_limit_prices(
+            ref, pl.col("limit_pct"), pl.col("is_etf_tick").fill_null(False)
+        )
 
         official = pl.col(REF_LIMIT_UP).is_not_null() & pl.col(REF_LIMIT_DOWN).is_not_null()
         close, high, low = pl.col("raw_close"), pl.col("raw_high"), pl.col("raw_low")
@@ -304,7 +293,7 @@ class TaiwanEnrichedRefreshService:
             pl.when(official).then(pl.col(REF_LIMIT_UP)).otherwise(limit_up).alias("_limit_up"),
             pl.when(official).then(pl.col(REF_LIMIT_DOWN)).otherwise(limit_down).alias("_limit_down"),
         ])
-        usable = official | (pl.col("limit_pct").is_not_null() & ref.is_not_null())
+        usable = official | (pl.col("limit_pct").is_not_null() & (ref > 0))
         return out.with_columns([
             (usable & (close >= pl.col("_limit_up"))).fill_null(False).alias("signal_limit_up"),
             (usable & (close <= pl.col("_limit_down"))).fill_null(False).alias("signal_limit_down"),

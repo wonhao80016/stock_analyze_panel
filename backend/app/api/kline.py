@@ -35,6 +35,7 @@ import math
 from datetime import date, datetime, timedelta
 from typing import Optional
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import (
@@ -45,7 +46,7 @@ from app.indicators.pipeline import (
     compute_indicators,
 )
 from app.market_time import cn_now, cn_today
-from app.price_limits import is_risk_warning_name, price_limit_pct
+from app.price_limits import is_risk_warning_name, numpy_limit_price, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
 from app.volume_units import TAIWAN_SUFFIXES
@@ -222,10 +223,18 @@ def _get_price_limit_info(
     trade_date: date,
     asset_type: str,
     instrument_name: str | None,
+    prev_close: float | None = None,
+    official_limits: tuple[float, float] | None = None,
 ) -> dict | None:
-    """Return the date-aware limit rule and today's authoritative prices."""
+    """Return the session's limit rule and limit prices on the scale of its minute bars.
+
+    rate is None when the instrument has no limit (source "no_limit") or its rule is
+    unconfirmed (source "unknown"); consumers must then draw no limit at all.
+    """
     if asset_type == "index":
         return None
+    if symbol.endswith(TAIWAN_SUFFIXES):
+        return _taiwan_price_limit_info(symbol, prev_close, official_limits)
 
     info = {
         "rate": price_limit_pct(
@@ -239,9 +248,18 @@ def _get_price_limit_info(
         "limit_down": None,
         "source": "rule",
     }
-    if trade_date != cn_today():
+    if trade_date == cn_today() and _apply_instrument_limit_prices(info, repo, symbol, asset_type):
         return info
+    if prev_close is not None and info["rate"] is not None:
+        previous = np.array([prev_close], dtype=np.float64)
+        rate = np.array([info["rate"]], dtype=np.float64)
+        info["limit_up"] = float(numpy_limit_price(previous, rate, up=True)[0])
+        info["limit_down"] = float(numpy_limit_price(previous, rate, up=False)[0])
+        info["source"] = "model"
+    return info
 
+
+def _apply_instrument_limit_prices(info: dict, repo, symbol: str, asset_type: str) -> bool:
     try:
         import polars as pl
 
@@ -252,13 +270,13 @@ def _get_price_limit_info(
             if column in instruments.columns
         ]
         if "symbol" not in available or len(available) == 1:
-            return info
+            return False
         hit = instruments.filter(pl.col("symbol") == symbol).select(available).head(1)
         row = hit.to_dicts()[0] if not hit.is_empty() else None
     except Exception:
-        return info
+        return False
     if row is None:
-        return info
+        return False
 
     has_authoritative_price = False
     for field in ("limit_up", "limit_down"):
@@ -269,12 +287,55 @@ def _get_price_limit_info(
             numeric = float(value)
         except (TypeError, ValueError):
             continue
-        if math.isfinite(numeric) and 0 < numeric < 10_000:
+        if math.isfinite(numeric) and numeric > 0:
             info[field] = numeric
             has_authoritative_price = True
     if has_authoritative_price:
         info["source"] = "instrument"
-    return info
+    return has_authoritative_price
+
+
+def _taiwan_price_limit_info(
+    symbol: str,
+    prev_close: float | None,
+    official_limits: tuple[float, float] | None,
+) -> dict:
+    from app.taiwan.universe import get_security_master
+    from app.taiwan.universe.models import MarketProfileBridge
+
+    info = {"rate": None, "limit_up": None, "limit_down": None, "source": "unknown"}
+    try:
+        instrument = get_security_master().get_instrument(symbol)
+    except Exception as exc:
+        logger.warning("Security master unavailable, price limit of %s unknown: %s", symbol, exc)
+        return info
+    if instrument is None:
+        return info
+    try:
+        rate = MarketProfileBridge.get_price_limit_pct(instrument)
+    except ValueError:
+        return info
+    if rate is None:
+        return {**info, "source": "no_limit"}
+    if official_limits is not None:
+        limit_up, limit_down = official_limits
+        return {"rate": rate, "limit_up": limit_up, "limit_down": limit_down, "source": "official"}
+    if prev_close is None:
+        return {**info, "rate": rate, "source": "rule"}
+    limit_up, limit_down = MarketProfileBridge.calc_limits(prev_close, instrument)
+    return {"rate": rate, "limit_up": limit_up, "limit_down": limit_down, "source": "model"}
+
+
+def _session_price_limit(
+    repo, symbol: str, trade_date: date, asset_type: str, instrument_name: str | None
+) -> tuple[float | None, dict | None]:
+    closes, official_limits = _get_session_bases(repo, symbol, [trade_date], asset_type)
+    prev_close = closes.get(trade_date)
+    price_limit = _get_price_limit_info(
+        repo, symbol, trade_date, asset_type, instrument_name,
+        prev_close=prev_close, official_limits=official_limits.get(trade_date),
+    )
+    return prev_close, price_limit
 
 
 def _get_previous_closes(
@@ -289,8 +350,19 @@ def _get_previous_closes(
     corporate-action session uses the exchange reference price instead. Other
     markets keep the adjusted close.
     """
+    return _get_session_bases(repo, symbol, trade_dates, asset_type)[0]
+
+
+def _get_session_bases(
+    repo,
+    symbol: str,
+    trade_dates: list[date],
+    asset_type: str,
+) -> tuple[dict[date, float | None], dict[date, tuple[float, float]]]:
+    """Each session's previous close (see _get_previous_closes) and the exchange's published
+    (limit_up, limit_down) of the Taiwan sessions a corporate action opens."""
     if not trade_dates:
-        return {}
+        return {}, {}
     taiwan = symbol.endswith(TAIWAN_SUFFIXES) and asset_type != "index"
     start = min(trade_dates) - timedelta(days=45)
     end = max(trade_dates)
@@ -305,7 +377,7 @@ def _get_previous_closes(
     except Exception:
         daily = None
     if daily is None or daily.is_empty():
-        return {trade_date: None for trade_date in trade_dates}
+        return {trade_date: None for trade_date in trade_dates}, {}
 
     import polars as pl
 
@@ -329,15 +401,21 @@ def _get_previous_closes(
         )
         previous_dates[trade_date] = previous[0] if previous else None
         result[trade_date] = previous[1] if previous else None
+    official_limits: dict[date, tuple[float, float]] = {}
     if taiwan:
-        result.update(_taiwan_reference_closes(symbol, previous_dates, start, end))
-    return result
+        for trade_date, (ref_price, limits) in _taiwan_reference_prices(
+            symbol, previous_dates, start, end
+        ).items():
+            result[trade_date] = ref_price
+            if limits is not None:
+                official_limits[trade_date] = limits
+    return result, official_limits
 
 
-def _taiwan_reference_closes(
+def _taiwan_reference_prices(
     symbol: str, previous_dates: dict[date, date | None], start: date, end: date
-) -> dict[date, float]:
-    """Exchange reference prices of the sessions that open after a corporate action."""
+) -> dict[date, tuple[float, tuple[float, float] | None]]:
+    """Exchange reference price and published limits of the sessions that open after a corporate action."""
     from app.taiwan.corporate_actions import (
         TaiwanCorporateActionStore,
         read_events_or_empty,
@@ -345,13 +423,20 @@ def _taiwan_reference_closes(
     )
 
     events = read_events_or_empty(TaiwanCorporateActionStore(), start=start, end=end, symbols=[symbol])
-    found: dict[date, float] = {}
+    found: dict[date, tuple[float, tuple[float, float] | None]] = {}
     if events.is_empty():
         return found
     for trade_date, previous in previous_dates.items():
         ref = reference_prices(events, previous, trade_date)
-        if not ref.is_empty():
-            found[trade_date] = float(ref["ref_price"][0])
+        if ref.is_empty():
+            continue
+        row = ref.row(0, named=True)
+        limits = (
+            (float(row["limit_up"]), float(row["limit_down"]))
+            if row["limit_up"] is not None and row["limit_down"] is not None
+            else None
+        )
+        found[trade_date] = (float(row["ref_price"]), limits)
     return found
 
 
@@ -1081,12 +1166,7 @@ def get_minute(
         # 本地无任何分钟K，尝试从 TickFlow 拉取当天
         trade_date = cn_today()
         df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
-        price_limit = _get_price_limit_info(
-            repo, symbol, trade_date, asset_type, stock_name,
-        )
-        prev_close = _get_previous_closes(
-            repo, symbol, [trade_date], asset_type,
-        ).get(trade_date)
+        prev_close, price_limit = _session_price_limit(repo, symbol, trade_date, asset_type, stock_name)
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
@@ -1095,12 +1175,7 @@ def get_minute(
             "prev_close": prev_close,
         }
 
-    prev_close = _get_previous_closes(
-        repo, symbol, [trade_date], asset_type,
-    ).get(trade_date)
-    price_limit = _get_price_limit_info(
-        repo, symbol, trade_date, asset_type, stock_name,
-    )
+    prev_close, price_limit = _session_price_limit(repo, symbol, trade_date, asset_type, stock_name)
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
 
     expected = _expected_minute_rows(trade_date)

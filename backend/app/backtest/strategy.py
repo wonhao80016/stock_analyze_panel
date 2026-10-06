@@ -19,7 +19,13 @@ from typing import Literal
 import numpy as np
 import polars as pl
 
-from app.backtest.engine import BacktestEngine, MatcherConfig, SimResult, SimulationOptions
+from app.backtest.engine import (
+    MIN_ANNUALIZED_SESSIONS,
+    BacktestEngine,
+    MatcherConfig,
+    SimulationOptions,
+    validate_risk_free_rate,
+)
 from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES
 from app.backtest.matrix import (
     MarketDataMatrix,
@@ -29,11 +35,13 @@ from app.backtest.matrix import (
     MatrixPrewarmCancelledError,
     MatrixStrategyPipeline,
     apply_time_masks,
+    asset_mask_without,
     build_market_matrix,
     build_market_matrix_from_signals,
     rolling_mean,
     slice_market_data_matrix,
     slice_signal_matrix,
+    taiwan_limit_rule_exclusions,
 )
 from app.backtest.minute_trigger import unsupported_minute_exit_signals
 from app.config import settings
@@ -43,6 +51,7 @@ from app.indicators.pipeline import (
     LIMIT_SIGNAL_OUTPUTS,
     get_signal_dependencies,
 )
+from app.price_limits import TAIWAN_SYMBOL_SUFFIXES
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
 from app.strategy.scoring import (
     SCORING_DIRECTION_LOW,
@@ -53,16 +62,31 @@ from app.strategy.scoring import (
     scoring_value_expr,
     scoring_warmup_bars,
 )
+from app.taiwan.benchmarks import TAIEX
 
 logger = logging.getLogger(__name__)
 
 BENCHMARK_SYMBOL = "000001.SH"
+BENCHMARK_NAME = "上证指数"
+TAIWAN_STAMP_TAX_OVERRIDE_ERROR = "stamp_tax_pct cannot override per-instrument Taiwan tax rules"
 _EXECUTION_COLUMNS = frozenset({
-    "symbol", "date", "open", "high", "low", "close", "volume",
+    "symbol", "date", "open", "high", "low", "close", "volume", "raw_close",
     "name", "score", "signal_limit_up", "signal_limit_down",
 })
 _LIMIT_BASE_COLUMNS = frozenset({"raw_close", "raw_high", "raw_low"})
 _INSTRUMENT_COLUMNS = frozenset({"name", "total_shares", "float_shares"})
+
+
+def _read_local_taiex(start: date, end: date) -> pl.DataFrame:
+    """TAIEX closes from the local index store only; a backtest never backfills them online."""
+    from app.taiwan.daily_store import TaiwanDailyStore
+    from app.taiwan.data_root import taiwan_data_root
+
+    index_dir = taiwan_data_root() / "index_daily"
+    # TaiwanDailyStore creates its directory on construction; a read must not.
+    if not index_dir.is_dir():
+        return pl.DataFrame(schema={"date": pl.Date, "close": pl.Float64})
+    return TaiwanDailyStore(index_dir).scan_range([TAIEX.symbol], start, end).select("date", "close")
 
 
 @dataclass(frozen=True)
@@ -522,10 +546,31 @@ def _minute_fill_reference(close: np.ndarray, entry_fill: str) -> np.ndarray:
     return result
 
 
+def _taiwan_share_events(
+    symbols: list[str],
+    corporate_actions=None,
+) -> dict[str, tuple[tuple[str, float], ...]]:
+    from app.taiwan.corporate_actions import TaiwanCorporateActionStore, adjustment_factors
+
+    store = corporate_actions or TaiwanCorporateActionStore()
+    try:
+        events = store.read(symbols=symbols)
+    except Exception as exc:
+        raise ValueError(f"Taiwan corporate actions unavailable: {exc}") from exc
+    share_events: dict[str, list[tuple[str, float]]] = {}
+    factors = adjustment_factors(events, date.max).filter(pl.col("volume_factor") != 1.0)
+    for row in factors.iter_rows(named=True):
+        share_events.setdefault(row["symbol"], []).append(
+            (row["trade_date"].isoformat(), float(row["volume_factor"]))
+        )
+    return {symbol: tuple(items) for symbol, items in share_events.items()}
+
+
 def _configure_taiwan_matcher(
     matcher_config: MatcherConfig,
     symbols: list[str] | tuple[str, ...],
     security_master=None,
+    corporate_actions=None,
 ) -> None:
     all_symbols = sorted({str(symbol) for symbol in symbols})
     taiwan_symbols = sorted({
@@ -537,6 +582,8 @@ def _configure_taiwan_matcher(
         return
     if len(taiwan_symbols) != len(all_symbols):
         raise ValueError("mixed Taiwan and non-Taiwan backtest universes are unsupported")
+    if matcher_config.stamp_tax_pct is not None:
+        raise ValueError(TAIWAN_STAMP_TAX_OVERRIDE_ERROR)
 
     from app.taiwan.market_rules import (
         TAIWAN_SIMULATION_COMMISSION_RATE,
@@ -550,6 +597,7 @@ def _configure_taiwan_matcher(
 
     master = security_master or get_security_master()
     tax_classes = {}
+    tick_classes = {}
     lot_sizes = {}
     for symbol in taiwan_symbols:
         try:
@@ -562,7 +610,9 @@ def _configure_taiwan_matcher(
         if lot_size <= 0:
             raise ValueError(f"Taiwan Security Master has invalid trading unit for {symbol}")
         tax_classes[symbol] = MarketProfileBridge.get_tax_class(instrument)
+        tick_classes[symbol] = MarketProfileBridge.get_tick_size_class(instrument)
         lot_sizes[symbol] = lot_size
+    share_events = _taiwan_share_events(taiwan_symbols, corporate_actions)
 
     matcher_config.market_profile = TaiwanMarketProfile(
         mode=(
@@ -582,7 +632,9 @@ def _configure_taiwan_matcher(
         lot=LotModel(mode=matcher_config.lot_mode),
     )
     matcher_config.tax_class_by_symbol = tax_classes
+    matcher_config.tick_class_by_symbol = tick_classes
     matcher_config.lot_size_by_symbol = lot_sizes
+    matcher_config.share_events_by_symbol = share_events
     eligible_symbols = set(matcher_config.day_trade_eligible_symbols)
     matcher_config.day_trade_eligible_by_symbol = {
         symbol: symbol in eligible_symbols
@@ -623,12 +675,15 @@ class StrategyBacktestConfig:
     # 市场环境过滤: {"states": ["strong",...], "min_score": 60}。
     # 强制 T-1: regime[T-1] 决定 entry[T](防未来函数)。None=不过滤。
     regime_filter: dict | None = None
+    # Annual decimal rate for Sharpe/Sortino; does not change the market matrix.
+    risk_free_rate: float = 0.0
 
     def __post_init__(self) -> None:
         if self.entry_fill is None:
             self.entry_fill = self.matching
         if self.exit_fill is None:
             self.exit_fill = self.matching
+        self.risk_free_rate = validate_risk_free_rate(self.risk_free_rate)
         if self.minimum_holding_sessions < 0:
             raise ValueError("minimum_holding_sessions must be non-negative")
         if not 0 <= self.commission_discount <= 1:
@@ -662,6 +717,7 @@ class BacktestResultPolicy:
     include_return_distribution: bool = True
     include_benchmark: bool = True
     include_strategy_info: bool = True
+    min_annualized_sessions: int = MIN_ANNUALIZED_SESSIONS
 
     @classmethod
     def optimizer_trial(cls, objective: str) -> BacktestResultPolicy:
@@ -683,6 +739,7 @@ class BacktestResultPolicy:
             include_trades=self.include_trades,
             include_per_symbol_stats=self.include_per_symbol_stats,
             include_return_distribution=self.include_return_distribution,
+            min_annualized_sessions=self.min_annualized_sessions,
         )
 
     def select_stats(self, stats: dict) -> dict:
@@ -840,6 +897,7 @@ class StrategyBacktestService:
         min_confirm: int,
         max_hold: int,
         timing_ms: dict[str, float],
+        asset_mask: np.ndarray | None = None,
     ):
         """逐子策略计算 SignalMatrix, 再合并为单个 SignalMatrix(回测合并)。
 
@@ -853,6 +911,8 @@ class StrategyBacktestService:
         t_signals = time.perf_counter()
         sigs = []
         for child_def, child_params, child_pipeline_cfg in resolved_children:
+            if asset_mask is not None:
+                child_pipeline_cfg = replace(child_pipeline_cfg, asset_mask=asset_mask)
             try:
                 child_sig = MatrixStrategyPipeline().run(
                     child_def.matrix_strategy,
@@ -1314,6 +1374,7 @@ class StrategyBacktestService:
             minute_fill=config.minute_fill,
             asset_type=config.asset_type,
             lot_mode=config.lot_mode,
+            risk_free_rate=config.risk_free_rate,
         )
         if market_data is not None:
             execution_symbols = list(market_data.symbols)
@@ -1327,7 +1388,11 @@ class StrategyBacktestService:
         else:
             return _err("回测缺少可执行标的")
         try:
-            _configure_taiwan_matcher(matcher_config, execution_symbols)
+            excluded_symbols = taiwan_limit_rule_exclusions(execution_symbols)
+            excluded = {item["symbol"] for item in excluded_symbols}
+            if excluded and excluded >= set(execution_symbols):
+                return _err(f"回测标的均缺少已确认的涨跌幅规则: {', '.join(sorted(excluded))}")
+            _configure_taiwan_matcher(matcher_config, [s for s in execution_symbols if s not in excluded])
         except ValueError as e:
             return _err(str(e))
         t_signal = time.perf_counter()
@@ -1403,6 +1468,7 @@ class StrategyBacktestService:
                     min_confirm,
                     composite_max_hold,
                     timing_ms,
+                    asset_mask=asset_mask_without(market_data.symbols, excluded),
                 )
             except ValueError as e:
                 return _err(str(e))
@@ -1516,6 +1582,7 @@ class StrategyBacktestService:
                     scoring_directions=effective_scoring_directions(overrides),
                     order_by=s.meta.get("order_by"),
                     descending=bool(s.meta.get("descending", True)),
+                    asset_mask=asset_mask_without(market_data.symbols, excluded),
                     protect_strategy_cache=prepared is not None,
                 )
                 if prepared is None:
@@ -1585,7 +1652,7 @@ class StrategyBacktestService:
                         return _err(f"基础过滤计算失败: {e}")
 
             candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
-            candidate_mask = basic_mask & candidate_filter_mask
+            candidate_mask = basic_mask & candidate_filter_mask & ~panel.get_column("symbol").is_in(sorted(excluded))
             panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
             formal_candidate_mask = candidate_mask & formal_range
             entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
@@ -1661,6 +1728,7 @@ class StrategyBacktestService:
                 progress_cb,
                 cancel_event,
                 result_policy.simulation_options(),
+                formal_end=config.end,
             )
         else:
             result = self.engine.simulate_market_matrix(
@@ -1693,6 +1761,7 @@ class StrategyBacktestService:
         result.stats["full_feature_fallback"] = feature_plan.full_feature_fallback
         result.stats["execution_backend"] = s.execution_backend
         result.stats["selection"] = selection_stats
+        result.stats["excluded_symbols"] = excluded_symbols
         result.stats["shared_market_data"] = prepared is not None
         result.stats["matrix_data_cache_hit"] = matrix_data_cache_hit
         result.stats["matrix_data_cache_status"] = matrix_data_cache_status
@@ -1702,11 +1771,27 @@ class StrategyBacktestService:
             result.stats["shared_prepare_timing_ms"] = prepared.prepare_timing_ms
             result.stats["matrix_compute_cache"] = prepared.compute_cache.snapshot()
 
-        benchmark_curve = (
-            self._build_benchmark_curve(config.start, config.end)
-            if result_policy.include_benchmark
-            else []
-        )
+        benchmark_curve: list[dict] = []
+        if result_policy.include_benchmark:
+            start_text, end_text = str(config.start), str(config.end)
+            sessions = [
+                label[:10]
+                for label in market_matrix.timestamp_labels
+                if start_text <= label[:10] <= end_text
+            ]
+            benchmark_curve, benchmark_info, benchmark_return = self._build_benchmark(
+                market_matrix.symbols, config.start, config.end, sessions,
+            )
+            total_return = result.stats.get("total_return")
+            # Full-mode total_return compounds candidate samples, not an account, so it has no excess.
+            excess = (
+                round(float(total_return) - benchmark_return, 4)
+                if config.mode != "full" and benchmark_return is not None and total_return is not None
+                else None
+            )
+            result.stats["benchmark"] = benchmark_info
+            result.stats["benchmark_return"] = benchmark_return
+            result.stats["excess"] = excess
 
         # 构建策略信息
         strategy_info = {
@@ -1764,129 +1849,6 @@ class StrategyBacktestService:
             ),
             strategy_info=strategy_info,
             elapsed_ms=round(elapsed, 1),
-        )
-
-    # ── 全量模拟 (选股能力统计, 不建组合不算净值) ──
-
-    def _run_full_simulation(
-        self,
-        panel: pl.DataFrame,
-        entry_mask: pl.Series,
-        holding_days: int,
-    ) -> SimResult:
-        """对 entry_mask 命中的全部候选, 算持有 N 天后的前瞻收益统计。
-
-        不受 max_positions/资金约束, 反映策略选股能力本身。
-        equity_curve 复用为"累计日均超额收益曲线"(基准归零)。
-        """
-        n = holding_days if holding_days and holding_days > 0 else 5
-
-        df = panel.with_columns([
-            entry_mask.cast(pl.Boolean).alias("_is_candidate"),
-            (pl.col("close").shift(-n).over("symbol") / pl.col("close") - 1).alias("_fwd_return"),
-        ]).filter(
-            pl.col("_is_candidate")
-            & pl.col("_fwd_return").is_not_null()
-            & pl.col("_fwd_return").is_not_nan()
-        )
-
-        if df.is_empty():
-            return self.engine._empty_result()
-
-        fwd = df["_fwd_return"].to_numpy()
-        wins = fwd[fwd > 0]
-        losses = fwd[fwd <= 0]
-        avg_win = float(wins.mean()) if wins.size else 0.0
-        avg_loss = abs(float(losses.mean())) if losses.size else 0.0
-
-        # 按日聚合: 当日候选的平均前瞻收益
-        daily = (
-            df.group_by("date").agg(
-                pl.col("_fwd_return").mean().alias("avg_ret"),
-                pl.col("_fwd_return").count().alias("n_cand"),
-            ).sort("date")
-        )
-
-        # 累计超额曲线: 每日复利平均收益 (基准归零, 故 equity 即累计策略收益)
-        equity_curve: list[dict] = []
-        equity = 1.0
-        peak = 1.0
-        drawdown_curve: list[dict] = []
-        for row in daily.iter_rows(named=True):
-            ret = float(row["avg_ret"] or 0.0)
-            equity *= (1 + ret)
-            peak = max(peak, equity)
-            dd = (equity - peak) / peak if peak > 0 else 0.0
-            d_str = str(row["date"])[:10]
-            equity_curve.append({
-                "date": d_str,
-                "value": round(equity, 4),
-                "positions": int(row["n_cand"]),
-            })
-            drawdown_curve.append({"date": d_str, "value": round(dd, 4)})
-
-        # 同期上证收益 (用 benchmark close 算)
-        benchmark_curve = self._build_benchmark_curve(
-            daily["date"].min(), daily["date"].max()
-        )
-        benchmark_return = 0.0
-        if benchmark_curve:
-            closes = [b["close"] for b in benchmark_curve if b.get("close")]
-            if len(closes) >= 2 and closes[0] > 0:
-                benchmark_return = closes[-1] / closes[0] - 1
-
-        total_return = equity - 1.0
-        max_dd = min((d["value"] for d in drawdown_curve), default=0.0)
-
-        # 日收益序列算 Sharpe (年化)
-        daily_rets = daily["avg_ret"].to_numpy()
-        sharpe = (
-            float(daily_rets.mean() / daily_rets.std() * np.sqrt(252))
-            if daily_rets.size > 1 and daily_rets.std() > 0 else 0.0
-        )
-
-        # 收益分布直方图: 按 [-20%, +20%] 分 21 档 (每档 2%), 超出归入首尾档
-        lo, hi, nbins = -0.20, 0.20, 20
-        clipped = np.clip(fwd, lo, hi)
-        counts, edges = np.histogram(clipped, bins=nbins, range=(lo, hi))
-        dist = [
-            {
-                "range": f"{(edges[i]*100):+.0f}~{(edges[i+1]*100):+.0f}%",
-                "count": int(counts[i]),
-                "ratio": round(float(counts[i] / fwd.size), 4) if fwd.size else 0.0,
-            }
-            for i in range(nbins)
-        ]
-
-        stats = {
-            "mode": "full",
-            "n_candidates": int(fwd.size),
-            "n_days": int(daily.height),
-            "avg_daily_candidates": round(float(daily["n_cand"].mean()), 1),
-            "avg_return": round(float(fwd.mean()), 4),
-            "median_return": round(float(np.median(fwd)), 4),
-            "win_rate": round(float(wins.size / fwd.size), 4) if fwd.size else 0.0,
-            "profit_factor": (
-                round(float(wins.sum()) / abs(float(losses.sum())), 2)
-                if abs(float(losses.sum())) > 0 else None
-            ),
-            "payoff_ratio": round(avg_win / avg_loss, 2) if avg_loss > 0 else None,
-            "best": round(float(fwd.max()), 4),
-            "worst": round(float(fwd.min()), 4),
-            "total_return": round(float(total_return), 4),
-            "max_drawdown": round(float(max_dd), 4),
-            "sharpe": round(sharpe, 2),
-            "benchmark_return": round(float(benchmark_return), 4),
-            "excess": round(float(total_return - benchmark_return), 4),
-            "return_distribution": dist,
-        }
-
-        return SimResult(
-            equity_curve=equity_curve,
-            drawdown_curve=drawdown_curve,
-            trades=[],
-            per_symbol_stats=[],
-            stats=stats,
         )
 
     # ── 向量化信号生成 ──
@@ -2061,31 +2023,64 @@ class StrategyBacktestService:
             combined = combined | m
         return combined
 
-    def _build_benchmark_curve(self, start: date, end: date) -> list[dict]:
+    def _load_benchmark_closes(self, symbol: str, start: date, end: date) -> dict[str, float]:
         try:
-            df = self.engine.repo.get_index_daily(BENCHMARK_SYMBOL, start, end, columns=["date", "close"])
+            if symbol == TAIEX.symbol:
+                df = _read_local_taiex(start, end)
+            else:
+                df = self.engine.repo.get_index_daily(symbol, start, end, columns=["date", "close"])
         except Exception as e:
-            logger.warning("load benchmark %s failed: %s", BENCHMARK_SYMBOL, e)
-            return []
+            logger.warning("load benchmark %s failed: %s", symbol, e)
+            return {}
 
         if df.is_empty() or "close" not in df.columns:
-            return []
+            return {}
 
         df = df.filter(pl.col("close").is_not_null() & (pl.col("close") > 0)).sort("date")
-        if df.is_empty():
-            return []
+        return {
+            str(day)[:10]: round(float(close), 4)
+            for day, close in zip(df["date"].to_list(), df["close"].to_list(), strict=True)
+        }
 
-        return [
-            {
-                "date": str(row["date"])[:10],
-                "value": round(float(row["close"]), 4),
-                "close": round(float(row["close"]), 4),
-                "name": "上证指数",
-                "symbol": BENCHMARK_SYMBOL,
-            }
-            for row in df.iter_rows(named=True)
-            if row["close"] is not None
+    def _build_benchmark(
+        self,
+        symbols: list[str] | tuple[str, ...],
+        start: date,
+        end: date,
+        sessions: list[str],
+    ) -> tuple[list[dict], dict, float | None]:
+        """Benchmark curve on the given sessions, its metadata, and its period return.
+
+        The return runs from the close of base_date, the first session, because a
+        strategy holds nothing before that close. It is None unless the index has a
+        close on the first and the last session; a session missing in between is left
+        out of the curve. coverage_start and coverage_end bound the index rows found
+        inside the queried period, not the whole local store.
+        """
+        if any(str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES) for symbol in symbols):
+            symbol, name = TAIEX.symbol, TAIEX.name
+        else:
+            symbol, name = BENCHMARK_SYMBOL, BENCHMARK_NAME
+        closes = self._load_benchmark_closes(symbol, start, end)
+        curve = [
+            {"date": day, "value": closes[day], "close": closes[day], "name": name, "symbol": symbol}
+            for day in sessions
+            if day in closes
         ]
+        info = {
+            "symbol": symbol,
+            "name": name,
+            "price_basis": "price_index",
+            "includes_dividends": False,
+            "base_date": sessions[0] if sessions else None,
+            "coverage_start": min(closes) if closes else None,
+            "coverage_end": max(closes) if closes else None,
+            "missing_sessions": len(sessions) - len(curve),
+        }
+        benchmark_return = None
+        if sessions and sessions[0] in closes and sessions[-1] in closes:
+            benchmark_return = round(closes[sessions[-1]] / closes[sessions[0]] - 1, 4)
+        return curve, info, benchmark_return
 
     # ── 工具 ──
 
@@ -2211,6 +2206,9 @@ class StrategyBacktestService:
             "blocked_exit_days": getattr(t, "blocked_exit_days", 0),
             "entry_signal_id": getattr(t, "entry_signal_id", None),
             "exit_signal_id": getattr(t, "exit_signal_id", None),
+            "entry_price_adj": getattr(t, "entry_price_adj", None),
+            "exit_price_adj": getattr(t, "exit_price_adj", None),
+            "exit_shares": getattr(t, "exit_shares", None),
         }
 
     @staticmethod
@@ -2254,6 +2252,7 @@ class StrategyBacktestService:
             "lot_mode": c.lot_mode,
             "minute_fill": c.minute_fill,
             "regime_filter": c.regime_filter,
+            "risk_free_rate": c.risk_free_rate,
         }
 
     @staticmethod

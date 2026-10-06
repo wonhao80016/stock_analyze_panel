@@ -1,4 +1,4 @@
-"""回测 API — 信号回测 + 因子回测 + 策略回测。"""
+"""Backtest API: strategy backtests, optimization, walk-forward and research candidates."""
 from __future__ import annotations
 
 import asyncio
@@ -14,11 +14,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.services.backtest import (
-    BacktestConfig,
-    BacktestService,
-    VectorbtUnavailable,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -27,21 +22,12 @@ router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 FACTOR_DEFAULT_DAYS = 180
 STRATEGY_DEFAULT_DAYS = 365 * 3
 BACKTEST_MAX_SERVER_DAYS = 186
-FACTOR_MAX_SYMBOLS = 1000
+# Half of the 252-session year, the session-count counterpart of the 186-day guard.
+WALKFORWARD_MAX_SERVER_SESSIONS = 126
 BACKTEST_SERVER_GUARD_MESSAGE = (
     "当前服务器内存约 1.8GB，回测区间最多支持 6 个月；"
     "更长周期容易触发 OOM，建议在 8GB 以上内存环境或本机运行。"
 )
-
-
-def _get_engine(request: Request):
-    """获取或创建 BacktestEngine (单例，PanelCache 跨请求生效)。"""
-    from app.backtest.engine import BacktestEngine
-    engine = getattr(request.app.state, "backtest_engine", None)
-    if engine is None:
-        engine = BacktestEngine(request.app.state.repo)
-        request.app.state.backtest_engine = engine
-    return engine
 
 
 def _resolve_start(req: BaseModel, end: date, default_days: int) -> date:
@@ -62,6 +48,33 @@ def _guard_server_backtest_range(start: date, end: date):
         raise HTTPException(status_code=400, detail=BACKTEST_SERVER_GUARD_MESSAGE)
 
 
+def _split_symbols(symbols: str | None) -> list[str]:
+    return [s.strip() for s in symbols.split(",") if s.strip()] if symbols else []
+
+
+def _reject_taiwan_stamp_tax_override(
+    symbols: list[str] | None,
+    stamp_tax_pct: float | None,
+) -> None:
+    """Reject explicit Taiwan universes early; implicit universes fail in the matcher."""
+    if stamp_tax_pct is None:
+        return
+    from app.backtest.strategy import TAIWAN_STAMP_TAX_OVERRIDE_ERROR
+    from app.taiwan.symbol import is_taiwan_symbol
+
+    if any(is_taiwan_symbol(symbol) for symbol in symbols or ()):
+        raise HTTPException(status_code=400, detail=TAIWAN_STAMP_TAX_OVERRIDE_ERROR)
+
+
+def _reject_unreasonable_risk_free_rate(risk_free_rate: float) -> None:
+    from app.backtest.engine import validate_risk_free_rate
+
+    try:
+        validate_risk_free_rate(risk_free_rate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 # ================================================================
 # 状态
 # ================================================================
@@ -70,171 +83,6 @@ def _guard_server_backtest_range(start: date, end: date):
 def status():
     """前端可用此接口判断回测页是否要灰显。"""
     return {"available": True}
-
-
-# ================================================================
-# 信号回测 (现有接口，保持不变)
-# ================================================================
-
-class BacktestRequest(BaseModel):
-    symbols: list[str] = Field(..., min_length=1)
-    start: date | None = None
-    end: date | None = None
-    entries: list[str] = []
-    exits: list[str] = []
-    stop_loss_pct: float | None = None
-    max_hold_days: int | None = None
-    fees_pct: float = 0.0002
-    slippage_bps: float = 5
-    matching: Literal["close_t", "open_t+1"] = "close_t"
-    asset_type: str = "stock"
-
-
-@router.post("/run")
-def run(req: BacktestRequest, request: Request):
-    """信号回测 — 现有接口，向后兼容。"""
-    repo = request.app.state.repo
-    svc = BacktestService(repo)
-    end = req.end or date.today()
-    start = req.start or (end - timedelta(days=365 * 3))
-
-    cfg = BacktestConfig(
-        symbols=req.symbols,
-        start=start,
-        end=end,
-        entries=req.entries,
-        exits=req.exits,
-        stop_loss_pct=req.stop_loss_pct,
-        max_hold_days=req.max_hold_days,
-        fees_pct=req.fees_pct,
-        slippage_bps=req.slippage_bps,
-        matching=req.matching,
-        asset_type=req.asset_type,
-    )
-    try:
-        result = svc.run(cfg)
-    except VectorbtUnavailable as e:
-        raise HTTPException(status_code=503, detail=str(e)) from e
-    return asdict(result)
-
-
-# ================================================================
-# 因子回测
-# ================================================================
-
-class FactorColumnsResponse(BaseModel):
-    columns: list[dict]
-
-
-@router.get("/factor/columns")
-def factor_columns():
-    """返回可用的因子列列表。"""
-    from app.backtest.factor import FACTOR_COLUMNS
-    return {"columns": FACTOR_COLUMNS}
-
-
-class FactorBacktestRequest(BaseModel):
-    factor_name: str = Field(..., min_length=1, max_length=64)
-    symbols: list[str] | None = None
-    start: date | None = None
-    end: date | None = None
-    n_groups: int = Field(5, ge=2, le=10)
-    rebalance: Literal["daily", "weekly", "monthly"] = "monthly"
-    weight: Literal["equal", "factor_weight"] = "equal"
-    fees_pct: float = 0.0002
-    slippage_bps: float = 5.0
-    asset_type: str = "stock"
-
-
-@router.post("/factor/run")
-def factor_run(req: FactorBacktestRequest, request: Request):
-    """因子回测 — IC/IR 分析 + 分层回测。"""
-    from app.backtest.factor import FACTOR_COLUMNS, FactorBacktestService, FactorConfig
-
-    if req.factor_name not in {item["id"] for item in FACTOR_COLUMNS}:
-        raise HTTPException(status_code=400, detail=f"不支持的因子: {req.factor_name}")
-
-    engine = _get_engine(request)
-    svc = FactorBacktestService(engine)
-
-    end = req.end or date.today()
-    start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
-    _guard_server_backtest_range(start, end)
-    symbols = req.symbols if req.symbols else None
-    if symbols is not None and len(symbols) > FACTOR_MAX_SYMBOLS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"指定标的最多支持 {FACTOR_MAX_SYMBOLS} 只，请缩小标的范围。",
-        )
-
-    cfg = FactorConfig(
-        factor_name=req.factor_name,
-        symbols=symbols,
-        start=start,
-        end=end,
-        n_groups=req.n_groups,
-        rebalance=req.rebalance,
-        weight=req.weight,
-        fees_pct=req.fees_pct,
-        slippage_bps=req.slippage_bps,
-        asset_type=req.asset_type,
-    )
-    result = svc.run(cfg)
-    return asdict(result)
-
-
-class FactorBatchRequest(BaseModel):
-    factor_names: list[str] = Field(..., min_length=1, max_length=64)
-    symbols: list[str] | None = None
-    start: date | None = None
-    end: date | None = None
-    n_groups: int = Field(5, ge=2, le=10)
-    rebalance: Literal["daily", "weekly", "monthly"] = "monthly"
-    weight: Literal["equal", "factor_weight"] = "equal"
-    fees_pct: float = 0.0002
-    slippage_bps: float = 5.0
-    asset_type: str = "stock"
-
-
-@router.post("/factor/batch")
-def factor_batch(req: FactorBatchRequest, request: Request):
-    """批量筛选因子, 同一批次只加载并计算一次数据面板。"""
-    from app.backtest.factor import (
-        FACTOR_COLUMNS,
-        FactorBacktestService,
-        FactorBatchConfig,
-    )
-
-    factor_names = list(dict.fromkeys(req.factor_names))
-    allowed = {item["id"] for item in FACTOR_COLUMNS}
-    invalid = [name for name in factor_names if name not in allowed]
-    if invalid:
-        raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")
-
-    end = req.end or date.today()
-    start = _resolve_start(req, end, STRATEGY_DEFAULT_DAYS)
-    _guard_server_backtest_range(start, end)
-    symbols = req.symbols if req.symbols else None
-    if symbols is not None and len(symbols) > FACTOR_MAX_SYMBOLS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"指定标的最多支持 {FACTOR_MAX_SYMBOLS} 只, 请缩小标的范围。",
-        )
-
-    svc = FactorBacktestService(_get_engine(request))
-    result = svc.run_batch(FactorBatchConfig(
-        factor_names=factor_names,
-        symbols=symbols,
-        start=start,
-        end=end,
-        n_groups=req.n_groups,
-        rebalance=req.rebalance,
-        weight=req.weight,
-        fees_pct=req.fees_pct,
-        slippage_bps=req.slippage_bps,
-        asset_type=req.asset_type,
-    ))
-    return asdict(result)
 
 
 # ================================================================
@@ -349,6 +197,8 @@ class StrategyBacktestRequest(BaseModel):
     lot_mode: Literal["board_lot", "odd_lot"] = "board_lot"
     minute_fill: bool = False
     regime_filter: dict | None = None
+    # Annual decimal rate; range is checked in the route so violations return 400.
+    risk_free_rate: float = 0.0
 
 
 @router.post("/strategy/run")
@@ -357,6 +207,8 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
+    _reject_taiwan_stamp_tax_override(req.symbols, req.stamp_tax_pct)
+    _reject_unreasonable_risk_free_rate(req.risk_free_rate)
     end = req.end or date.today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
@@ -389,6 +241,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
         lot_mode=req.lot_mode,
         minute_fill=req.minute_fill,
         regime_filter=req.regime_filter,
+        risk_free_rate=req.risk_free_rate,
     )
     task = make_worker_task("backtest", settings.data_dir, cfg)
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
@@ -468,8 +321,9 @@ def _make_job_key(
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,
     day_trade_eligible_symbols: str | tuple[str, ...] = "",
+    risk_free_rate: float = 0.0,
 ) -> str:
-    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{minimum_holding_sessions}|{minimum_commission}|{lot_mode}|{commission_discount}|{day_trade_eligible_symbols}"
+    raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}|{minimum_holding_sessions}|{minimum_commission}|{lot_mode}|{commission_discount}|{day_trade_eligible_symbols}|{risk_free_rate}"
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
@@ -503,6 +357,7 @@ async def strategy_stream(
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,
     day_trade_eligible_symbols: str = "",
+    risk_free_rate: float = 0.0,
 ):
     """SSE 流式策略回测: 实时推送进度, 完成后推送结果, 支持重连 (刷新/切页后恢复)。
 
@@ -518,6 +373,8 @@ async def strategy_stream(
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
+    _reject_taiwan_stamp_tax_override(_split_symbols(symbols), stamp_tax_pct)
+    _reject_unreasonable_risk_free_rate(risk_free_rate)
     end_date = date.fromisoformat(end) if end else date.today()
     if start:
         start_date = date.fromisoformat(start)
@@ -548,6 +405,7 @@ async def strategy_stream(
         lot_mode=lot_mode,
         commission_discount=commission_discount,
         day_trade_eligible_symbols=day_trade_eligible_symbols,
+        risk_free_rate=risk_free_rate,
     )
 
     _cleanup_stale_jobs()
@@ -618,6 +476,7 @@ async def strategy_stream(
                 lot_mode=lot_mode,
                 minute_fill=minute_fill,
                 regime_filter=json.loads(regime_filter) if regime_filter else None,
+                risk_free_rate=float(risk_free_rate),
             )
 
             def _run_backtest():
@@ -728,6 +587,7 @@ async def strategy_cancel(request: Request):
         lot_mode=_get("lot_mode", "board_lot"),
         commission_discount=float(_get("commission_discount", "1")),
         day_trade_eligible_symbols=_get("day_trade_eligible_symbols", ""),
+        risk_free_rate=float(_get("risk_free_rate", "0")),
     )
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
@@ -762,7 +622,7 @@ _OPT_BT_FIELDS = [
     "stamp_tax_pct", "slippage_bps",
     "max_positions", "max_exposure_pct", "initial_capital", "position_sizing",
     "mode", "holding_days", "minimum_holding_sessions", "lot_mode",
-    "day_trade_eligible_symbols",
+    "day_trade_eligible_symbols", "risk_free_rate",
 ]
 
 
@@ -792,6 +652,7 @@ def _opt_backtest_kwargs(
     minimum_commission=0.0, minimum_holding_sessions=1, lot_mode="board_lot",
     commission_discount=1.0,
     day_trade_eligible_symbols="",
+    risk_free_rate=0.0,
 ) -> dict:
     return {
         "matching": matching,
@@ -814,6 +675,7 @@ def _opt_backtest_kwargs(
             for symbol in day_trade_eligible_symbols.split(",")
             if symbol.strip()
         ),
+        "risk_free_rate": float(risk_free_rate),
     }
 
 
@@ -847,6 +709,7 @@ async def optimize_stream(
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,
     day_trade_eligible_symbols: str = "",
+    risk_free_rate: float = 0.0,
 ):
     """SSE 流式参数优化: 并行跑各参数组回测, 按 objective 排序。
 
@@ -858,6 +721,8 @@ async def optimize_stream(
     from app.backtest.optimizer import OptimizeConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
+    _reject_taiwan_stamp_tax_override(_split_symbols(symbols), stamp_tax_pct)
+    _reject_unreasonable_risk_free_rate(risk_free_rate)
     end_date = date.fromisoformat(end) if end else date.today()
     if start:
         start_date = date.fromisoformat(start)
@@ -875,7 +740,7 @@ async def optimize_stream(
         matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
         max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
         minimum_commission, minimum_holding_sessions, lot_mode, commission_discount,
-        day_trade_eligible_symbols,
+        day_trade_eligible_symbols, risk_free_rate,
     )
     bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
     job_key = _make_opt_job_key(
@@ -1077,14 +942,25 @@ async def walkforward_stream(
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,
     day_trade_eligible_symbols: str = "",
+    risk_free_rate: float = 0.0,
 ):
     """SSE 流式 walk-forward: 每折训练区间网格优化 -> 测试区间 OOS 回测。
 
+    train_days / test_days / step_days count trading sessions (dates with enriched
+    partitions for the asset type inside [start, end]), not calendar days.
+    The done result carries window_unit="trading_days", and every fold in folds/skipped
+    reports train_start/train_end/test_start/test_end with train_trading_days/test_trading_days.
     事件: job {key} / progress {type:walkforward_progress,done,total,fold} / done {result} / error {message}
     """
-    from app.backtest.walkforward import WalkForwardConfig
+    from app.backtest.walkforward import WalkForwardConfig, validate_walkforward_objective
     from app.backtest.worker import make_worker_task, run_worker_task
 
+    _reject_taiwan_stamp_tax_override(_split_symbols(symbols), stamp_tax_pct)
+    _reject_unreasonable_risk_free_rate(risk_free_rate)
+    try:
+        validate_walkforward_objective(objective, train_days)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     direction = direction or None
 
     end_date = date.fromisoformat(end) if end else date.today()
@@ -1098,7 +974,7 @@ async def walkforward_stream(
         matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
         max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
         minimum_commission, minimum_holding_sessions, lot_mode, commission_discount,
-        day_trade_eligible_symbols,
+        day_trade_eligible_symbols, risk_free_rate,
     )
     bt_sig = "|".join(f"{k}={bt_kwargs[k]}" for k in _OPT_BT_FIELDS)
     windows = f"{train_days}/{test_days}/{step_days}"
@@ -1121,7 +997,7 @@ async def walkforward_stream(
     # 按总区间拦会误杀; 真正的 OOM 风险在单折窗口过大。
     wf_guard_violated = (
         settings.backtest_range_guard
-        and max(int(train_days), int(test_days)) > BACKTEST_MAX_SERVER_DAYS
+        and max(int(train_days), int(test_days)) > WALKFORWARD_MAX_SERVER_SESSIONS
     )
 
     _cleanup_stale_jobs()
@@ -1138,7 +1014,10 @@ async def walkforward_stream(
         yield f"event: job\ndata: {json.dumps({'key': job_key}, ensure_ascii=False)}\n\n"
 
         if wf_guard_violated:
-            msg = f"单折窗口最多 {BACKTEST_MAX_SERVER_DAYS} 天 (当前 train/test 更大), 请减小训练/测试窗口或在更大内存环境运行。"
+            msg = (
+                f"单折窗口最多 {WALKFORWARD_MAX_SERVER_SESSIONS} 个交易日 (当前 train/test 更大), "
+                "请减小训练/测试窗口或在更大内存环境运行。"
+            )
             yield f"event: error\ndata: {json.dumps({'message': msg}, ensure_ascii=False)}\n\n"
             return
 

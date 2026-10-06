@@ -165,6 +165,41 @@ def test_basic_filter_only_limits_entries_not_panel_rows():
     }
 
 
+def test_implicit_taiwan_universe_rejects_single_stamp_tax_override():
+    start = date(2024, 1, 1)
+    panel = pl.DataFrame([
+        {
+            "symbol": "2330.TWSE",
+            "name": "2330",
+            "date": start + timedelta(days=i),
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 100_000,
+            "amount": 1000.0,
+            "signal_limit_up": False,
+            "signal_limit_down": False,
+        }
+        for i in range(3)
+    ])
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(_strategy()))
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test",
+        symbols=None,
+        start=start,
+        end=start + timedelta(days=2),
+        matching="close_t",
+        stamp_tax_pct=0.0,
+    ))
+
+    assert result.error == "stamp_tax_pct cannot override per-instrument Taiwan tax rules"
+    assert engine.sim_matrix is None
+    assert engine.sim_panel is None
+
+
 def test_non_matrix_strategy_applies_regime_filter_and_reports_config(tmp_path):
     start = date(2024, 1, 1)
     panel = pl.DataFrame([

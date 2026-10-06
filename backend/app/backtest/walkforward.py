@@ -11,10 +11,14 @@ from __future__ import annotations
 import logging
 import time
 from bisect import bisect_left
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+TradingDatesLoader = Callable[[str, date, date], list[date]]
 
 
 @dataclass
@@ -24,43 +28,68 @@ class Fold:
     train_end: date
     test_start: date
     test_end: date
+    train_trading_days: int
+    test_trading_days: int
 
 
 def generate_folds(
-    start: date,
-    end: date,
+    trading_dates: Iterable[date],
     train_days: int,
     test_days: int,
     step_days: int,
 ) -> list[Fold]:
-    """滚动窗口 fold 切分: 训练窗口固定长度, 测试窗口紧接其后, 按 step 前移。
+    """Split rolling folds by position in the trading-date series.
 
-    测试区间超出 end 即停止。数据区间放不下一折则抛错。
+    All three window sizes count sessions, not calendar days. A date missing from
+    the series is not a session, so windows stretch over it. Raises when no fold fits.
     """
     if train_days <= 0 or test_days <= 0 or step_days <= 0:
         raise ValueError("train_days / test_days / step_days 必须为正")
 
+    dates = sorted(set(trading_dates))
     folds: list[Fold] = []
     i = 0
-    train_start = start
-    while True:
-        train_end = train_start + timedelta(days=train_days)
-        # 测试区间从训练末日的次日开始: 回测区间是闭区间, 若 test_start==train_end 则
-        # 该日 K 线同时进训练优化与 OOS 首日, 构成前视泄漏。后移一天隔断。
-        test_start = train_end + timedelta(days=1)
-        test_end = test_start + timedelta(days=test_days)
-        if test_end > end:
-            break
-        folds.append(Fold(i, train_start, train_end, test_start, test_end))
-        i += 1
-        train_start = train_start + timedelta(days=step_days)
+    while i + train_days + test_days <= len(dates):
+        # Closed backtest ranges: the test window must begin on the session after
+        # train_end, or that bar feeds both IS optimisation and OOS.
+        test_start_idx = i + train_days
+        folds.append(Fold(
+            index=len(folds),
+            train_start=dates[i],
+            train_end=dates[test_start_idx - 1],
+            test_start=dates[test_start_idx],
+            test_end=dates[test_start_idx + test_days - 1],
+            train_trading_days=train_days,
+            test_trading_days=test_days,
+        ))
+        i += step_days
 
     if not folds:
         raise ValueError(
-            f"数据区间不足以切出至少一折 (需 train+test={train_days + test_days}天, "
-            f"实有 {(end - start).days}天)"
+            f"交易日不足以切出至少一折 (需 train+test={train_days + test_days} 个交易日, "
+            f"实有 {len(dates)} 个)"
         )
     return folds
+
+
+def _enriched_trading_dates(data_dir: Path) -> TradingDatesLoader:
+    from app.services.mining_preflight import enriched_partition_dates
+
+    def load(asset_type: str, start: date, end: date) -> list[date]:
+        return enriched_partition_dates(data_dir, asset_type, start, end)
+
+    return load
+
+
+def validate_walkforward_objective(objective: str, train_days: int) -> None:
+    """Reject annualized objectives whose training folds are too short to be annualized."""
+    from app.backtest.engine import ANNUALIZED_STATS, MIN_ANNUALIZED_SESSIONS
+
+    if objective in ANNUALIZED_STATS and int(train_days) < MIN_ANNUALIZED_SESSIONS:
+        raise ValueError(
+            f"objective '{objective}' is annualized and needs at least {MIN_ANNUALIZED_SESSIONS} "
+            f"trading sessions per training window; train_days={int(train_days)}"
+        )
 
 
 def _norm(v: float, direction: str) -> float:
@@ -143,10 +172,20 @@ class WalkForwardConfig:
 class WalkForwardService:
     """滚动窗口 walk-forward: 每折训练区间优化 -> 测试区间 OOS 验证 -> 聚合。"""
 
-    def __init__(self, optimizer, service, strategy_engine) -> None:
+    def __init__(
+        self,
+        optimizer,
+        service,
+        strategy_engine,
+        trading_dates_loader: TradingDatesLoader | None = None,
+    ) -> None:
         self.optimizer = optimizer
         self.service = service
         self.strategy_engine = strategy_engine
+        # Same enriched partitions the backtest matrix reads, so fold sessions match its axis.
+        self.trading_dates_loader = trading_dates_loader or _enriched_trading_dates(
+            service.engine.repo.store.data_dir
+        )
 
     def _prepare_shared_matrix(self, cfg: WalkForwardConfig, folds: list[Fold]):
         """Build one immutable superset matrix for every matrix-native fold."""
@@ -191,9 +230,12 @@ class WalkForwardService:
         from app.backtest.optimizer import OptimizeConfig, default_direction
         from app.backtest.strategy import StrategyBacktestConfig
 
+        validate_walkforward_objective(cfg.objective, cfg.train_days)
         t0 = time.perf_counter()
         direction = cfg.direction or default_direction(cfg.objective)
-        folds = generate_folds(cfg.start, cfg.end, cfg.train_days, cfg.test_days, cfg.step_days)
+        asset_type = cfg.backtest_kwargs.get("asset_type", "stock")
+        trading_dates = self.trading_dates_loader(asset_type, cfg.start, cfg.end)
+        folds = generate_folds(trading_dates, cfg.train_days, cfg.test_days, cfg.step_days)
         n_total = len(folds)
 
         shared_prepared = self._prepare_shared_matrix(cfg, folds)
@@ -232,6 +274,8 @@ class WalkForwardService:
                 "train_end": str(f.train_end),
                 "test_start": str(f.test_start),
                 "test_end": str(f.test_end),
+                "train_trading_days": f.train_trading_days,
+                "test_trading_days": f.test_trading_days,
             }
             missing_window = None
             if shared_market_data is not None:
@@ -274,7 +318,11 @@ class WalkForwardService:
 
             # 训练区间没优化出参数 (全组失败/取消) -> 跳过, 不用默认参数硬跑 OOS 伪装成有效折
             if best_params is None:
-                skipped.append({**base, "reason": "训练区间未优化出参数"})
+                reason = opt_res.get("error")
+                skipped.append({
+                    **base,
+                    "reason": f"训练区间未优化出参数: {reason}" if reason else "训练区间未优化出参数",
+                })
                 if progress_cb is not None:
                     progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
                 continue
@@ -370,6 +418,7 @@ class WalkForwardService:
         return {
             "objective": cfg.objective,
             "direction": direction,
+            "window_unit": "trading_days",
             "n_folds": len(valid_records),
             "n_skipped": len(skipped),
             "n_planned_folds": n_total,

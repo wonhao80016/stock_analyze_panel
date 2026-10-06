@@ -152,6 +152,36 @@ describe('TaiwanStockDetail — back navigation (DAILY_USE_CORE_UX_FIXES P1-2)',
   })
 })
 
+describe('TaiwanStockDetail — price-limit card', () => {
+  it('shows an index rule as not applicable without limit prices', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...buildDetailResponse('index'),
+      price_limit: {
+        is_no_limit: false, rule_type: '不適用（指數）', price_limit_pct: null, limit_up: null, limit_down: null,
+      },
+    } as any)
+    renderAt(['/stocks/t00.TWSE'], 0)
+
+    expect(await screen.findByText('不適用（指數）')).toBeInTheDocument()
+    expect(screen.queryByText(/^漲停 /)).not.toBeInTheDocument()
+    expect(screen.queryByText(/^跌停 /)).not.toBeInTheDocument()
+  })
+
+  it('keeps the limit prices of an ordinary stock', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...buildDetailResponse('stock'),
+      symbol: '2454.TWSE',
+      price_limit: {
+        is_no_limit: false, rule_type: '±10%', price_limit_pct: 0.1, limit_up: 5695, limit_down: 4665,
+      },
+    } as any)
+    renderAt(['/stocks/2454.TWSE'], 0)
+
+    expect(await screen.findByText('漲停 5695.00')).toBeInTheDocument()
+    expect(screen.getByText('跌停 4665.00')).toBeInTheDocument()
+  })
+})
+
 describe('TaiwanStockDetail — sign helpers', () => {
   it('treats missing values as neutral, not as a zero net buy', () => {
     expect(signColorClass(null)).toBe('text-muted')

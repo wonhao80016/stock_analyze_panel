@@ -67,10 +67,17 @@ class TaiwanSecurityMaster:
                 continue
             merged[item.symbol] = item
 
-        self._instruments = merged
-        self._loaded = True
+        self._replace_instruments(merged)
         logger.info("Loaded %d Taiwan instruments from official adapters.", len(merged))
         return len(merged)
+
+    def _replace_instruments(self, instruments: dict[str, TaiwanInstrument]) -> None:
+        """Install a new instrument set and drop the limit profiles cached from the previous one."""
+        from app.indicators.pipeline import invalidate_taiwan_limit_profile_cache
+
+        self._instruments = instruments
+        self._loaded = True
+        invalidate_taiwan_limit_profile_cache()
 
     def save_cache(self, path: Path | None = None) -> Path:
         """Persist current instruments to Parquet."""
@@ -125,8 +132,7 @@ class TaiwanSecurityMaster:
                 loaded[inst.symbol] = inst
 
 
-            self._instruments = loaded
-            self._loaded = True
+            self._replace_instruments(loaded)
             logger.info("Loaded %d instruments from cache %s", len(loaded), target)
             return True
         except Exception as e:

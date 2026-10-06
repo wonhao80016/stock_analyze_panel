@@ -255,6 +255,7 @@ describe('策略回測工作區', () => {
     fireEvent.change(screen.getByLabelText('佣金折扣'), { target: { value: '0.6' } })
     fireEvent.change(screen.getByLabelText('最低手續費'), { target: { value: '20' } })
     fireEvent.change(screen.getByLabelText('最少持有交易日'), { target: { value: '2' } })
+    fireEvent.change(screen.getByLabelText('無風險利率（年）'), { target: { value: '0.015' } })
     submit()
 
     await waitFor(() => expect(api.strategyBacktestRun).toHaveBeenCalledOnce())
@@ -272,6 +273,8 @@ describe('策略回測工作區', () => {
       commission_discount: 0.6,
       minimum_commission: 20,
       minimum_holding_sessions: 2,
+      risk_free_rate: 0.015,
+      slippage_bps: 5,
     })
     expect(payload).not.toHaveProperty('commission_pct')
     expect(payload).not.toHaveProperty('stamp_tax_pct')
@@ -302,6 +305,8 @@ describe('策略回測工作區', () => {
       ['佣金折扣', '1.1', '佣金折扣必須介於 0 到 1。', '1'],
       ['最低手續費', '-1', '最低手續費不可小於 0。', '0'],
       ['最少持有交易日', '0', '最少持有交易日必須是至少 1 的整數。', '1'],
+      ['無風險利率（年）', '0.25', '無風險利率必須介於 -0.05 到 0.2（-5% 到 20%）。', '0'],
+      ['無風險利率（年）', '-0.06', '無風險利率必須介於 -0.05 到 0.2（-5% 到 20%）。', '0'],
     ] as const
 
     for (const [label, invalid, message, valid] of cases) {
@@ -375,6 +380,7 @@ describe('策略回測工作區', () => {
         sharpe: 1.42,
         win_rate: 0.6,
         n_trades: 1,
+        risk_free_rate: 0.015,
       },
       trades: [{
         symbol: '2330.TWSE',
@@ -406,6 +412,380 @@ describe('策略回測工作區', () => {
     expect(screen.getByTestId('equity-chart')).toBeInTheDocument()
     expect(screen.getByRole('cell', { name: '2330.TWSE' })).toBeInTheDocument()
     expect(screen.getByText('signal')).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: '張數' })).toBeInTheDocument()
+    expect(screen.getByText(/年化報酬依回測期間的實際日曆天數以複利換算/)).toBeInTheDocument()
+    expect(screen.getByText(/Sharpe 先從每期報酬扣除無風險利率/)).toBeInTheDocument()
+    expect(screen.getByText(/每年報酬期數＝報酬期數 ÷（日曆天數 ÷ 365.25）/)).toBeInTheDocument()
+    expect(screen.getByText(/本次使用 1.50%/)).toBeInTheDocument()
+    expect(screen.getByText(/回測少於 60 個交易日時不計算年化報酬與 Sharpe/)).toBeInTheDocument()
+    expect(screen.queryByText(/252 個交易日/)).not.toBeInTheDocument()
+    expect(screen.getByText(/交易紀錄的價格與股數為當時實際成交價與股數/)).toBeInTheDocument()
+    expect(screen.getByText(/損益與報酬率以前復權價計算，含持有期間的股利/)).toBeInTheDocument()
+    expect(screen.queryByText(/交易紀錄的價格為前復權價/)).not.toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: '1,000' })).toBeInTheDocument()
+  })
+
+  it('持有期間分割時列出出場股數', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: { total_return: 0.01, n_trades: 1 },
+      trades: [{
+        symbol: '0050.TWSE',
+        entry_date: '2025-06-10',
+        exit_date: '2025-06-19',
+        entry_price: 188.65,
+        exit_price: 47.1,
+        entry_price_adj: 47.1625,
+        exit_price_adj: 47.1,
+        shares: 5000,
+        exit_shares: 20000,
+        lots: 5,
+        pnl_amount: -4878.48,
+        pnl_pct: -0.005165,
+        duration: 2,
+        exit_reason: 'signal',
+      }],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByRole('cell', { name: '0050.TWSE' })).toBeInTheDocument()
+    expect(screen.getByText(/@ 188\.65/)).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: /^5,000\s*→\s*20,000$/ })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: /^5\s*→\s*20$/ })).toBeInTheDocument()
+  })
+
+  it('出場股數未變時股數與張數欄不顯示箭頭', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: { total_return: 0.01, n_trades: 1 },
+      trades: [{
+        symbol: '2330.TWSE',
+        entry_date: '2025-01-02',
+        exit_date: '2025-01-10',
+        entry_price: 1000,
+        exit_price: 1010,
+        shares: 3000,
+        exit_shares: 3000,
+        lots: 3,
+        pnl_amount: 21000,
+        pnl_pct: 0.007,
+        duration: 6,
+        exit_reason: 'signal',
+      }],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByRole('cell', { name: '2330.TWSE' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: '3,000' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: '3' })).toBeInTheDocument()
+    expect(screen.getAllByRole('cell').filter((cell) => cell.textContent?.includes('→'))).toHaveLength(0)
+  })
+
+  it('零股模式的交易紀錄不顯示張數欄', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: { total_return: 0.01, n_trades: 1 },
+      trades: [{
+        symbol: '2330.TWSE',
+        entry_date: '2025-01-02',
+        exit_date: '2025-01-10',
+        entry_price: 1000,
+        exit_price: 1010,
+        shares: 98,
+        lots: 98,
+        pnl_amount: 980,
+        pnl_pct: 0.01,
+        duration: 6,
+        exit_reason: 'signal',
+      }],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    fireEvent.change(screen.getByLabelText('交易單位'), { target: { value: 'odd_lot' } })
+    submit()
+
+    expect(await screen.findByRole('cell', { name: '2330.TWSE' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: '股數' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: '張數' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('cell', { name: '98' })).toHaveLength(1)
+  })
+
+  it('表單說明揭露固定滑價', async () => {
+    mockStrategies()
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+
+    expect(screen.getByText(/買進與賣出各另計 0\.05% 滑價/)).toBeInTheDocument()
+  })
+
+  it('期間不足時年化報酬與 Sharpe 顯示為不可計算', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.03,
+        annual_return: null,
+        max_drawdown: -0.01,
+        sharpe: null,
+        win_rate: 1,
+        n_trades: 1,
+        risk_free_rate: 0,
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('+3.00%')).toBeInTheDocument()
+    expect(screen.getByText('年化報酬').nextElementSibling).toHaveTextContent('—')
+    expect(screen.getByText('Sharpe').nextElementSibling).toHaveTextContent('—')
+    expect(screen.getByText(/本次使用 0.00%/)).toBeInTheDocument()
+  })
+
+  it('顯示加權指數報酬與超額報酬並標示不含息', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        benchmark_return: 0.05,
+        excess: 0.075,
+        benchmark: {
+          symbol: 't00.TWSE',
+          name: '發行量加權股價指數',
+          price_basis: 'price_index',
+          includes_dividends: false,
+          base_date: '2025-01-02',
+          coverage_start: '2025-01-02',
+          coverage_end: '2025-06-30',
+          missing_sessions: 0,
+        },
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('基準指數報酬')).toBeInTheDocument()
+    expect(screen.getByText('基準指數報酬').nextElementSibling).toHaveTextContent('+5.00%')
+    expect(screen.getByText('基準指數報酬').nextElementSibling).toHaveClass('text-danger')
+    expect(screen.getByText('超額報酬').nextElementSibling).toHaveTextContent('+7.50%')
+    expect(screen.getByText(/發行量加權股價指數為價格指數，不含息，以 2025-01-02 收盤為起點；超額報酬＝總報酬－發行量加權股價指數報酬。/)).toBeInTheDocument()
+    expect(screen.getByText(/策略報酬含股利而基準不含，相較含息基準，超額報酬每年約高估大盤的股利殖利率/)).toBeInTheDocument()
+    expect(screen.queryByText(/無法計算/)).not.toBeInTheDocument()
+  })
+
+  it('基準與超額報酬為負時以下跌色顯示', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: -0.07,
+        n_trades: 0,
+        benchmark_return: -0.05,
+        excess: -0.02,
+        benchmark: {
+          symbol: 't00.TWSE',
+          name: '發行量加權股價指數',
+          price_basis: 'price_index',
+          includes_dividends: false,
+          base_date: '2025-01-02',
+          coverage_start: '2025-01-02',
+          coverage_end: '2025-06-30',
+          missing_sessions: 0,
+        },
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    const benchmarkValue = (await screen.findByText('基準指數報酬')).nextElementSibling
+    expect(benchmarkValue).toHaveTextContent('-5.00%')
+    expect(benchmarkValue).toHaveClass('text-bear')
+    const excessValue = screen.getByText('超額報酬').nextElementSibling
+    expect(excessValue).toHaveTextContent('-2.00%')
+    expect(excessValue).toHaveClass('text-bear')
+  })
+
+  it('沒有基期日與指數名稱時省略起點並退回加權指數', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        benchmark_return: 0.05,
+        excess: 0.075,
+        benchmark: {
+          symbol: 't00.TWSE',
+          price_basis: 'price_index',
+          includes_dividends: false,
+          base_date: null,
+          coverage_start: '2025-01-02',
+          coverage_end: '2025-06-30',
+          missing_sessions: 0,
+        },
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect((await screen.findByText('基準指數報酬')).nextElementSibling).toHaveTextContent('+5.00%')
+    expect(screen.getByText(/加權指數為價格指數，不含息；超額報酬＝總報酬－加權指數報酬。/)).toBeInTheDocument()
+    expect(screen.queryByText(/收盤為起點/)).not.toBeInTheDocument()
+  })
+
+  it('指數資料覆蓋不足時基準與超額報酬顯示為不可計算並列出實際涵蓋期間', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        benchmark_return: null,
+        excess: null,
+        benchmark: {
+          symbol: 't00.TWSE',
+          name: '發行量加權股價指數',
+          price_basis: 'price_index',
+          includes_dividends: false,
+          base_date: '2025-01-02',
+          coverage_start: '2025-03-03',
+          coverage_end: '2025-06-30',
+          missing_sessions: 40,
+        },
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('基準指數報酬')).toBeInTheDocument()
+    expect(screen.getByText('基準指數報酬').nextElementSibling).toHaveTextContent('—')
+    expect(screen.getByText('超額報酬').nextElementSibling).toHaveTextContent('—')
+    expect(screen.getByText(/價格指數，不含息/)).toBeInTheDocument()
+    expect(screen.getByText(/發行量加權股價指數缺少回測首日或末日的收盤（期間內找到的資料為 2025-03-03 至 2025-06-30），無法計算發行量加權股價指數報酬與超額報酬/)).toBeInTheDocument()
+    expect(screen.queryByText(/未涵蓋整段/)).not.toBeInTheDocument()
+  })
+
+  it('回測期間沒有指數資料時說明無法計算', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        benchmark_return: null,
+        excess: null,
+        benchmark: {
+          symbol: 't00.TWSE',
+          name: '發行量加權股價指數',
+          price_basis: 'price_index',
+          includes_dividends: false,
+          base_date: '2025-01-02',
+          coverage_start: null,
+          coverage_end: null,
+          missing_sessions: 120,
+        },
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText(/回測期間內沒有發行量加權股價指數資料，無法計算發行量加權股價指數報酬與超額報酬/)).toBeInTheDocument()
+  })
+
+  it('說明配股與減資退還股款對交易紀錄股數的影響', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: { total_return: 0.125, n_trades: 0 },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText(/配股增加的股數不在交易紀錄中追蹤；減資退還股款時，出場股數為近似值/)).toBeInTheDocument()
+    expect(screen.queryByText(/指數報酬/)).not.toBeInTheDocument()
+  })
+
+  it('列出未納入回測的標的與中文原因', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        excluded_symbols: [
+          { symbol: '0000.TWSE', reason: 'security_master_missing' },
+          { symbol: '00998A.TWSE', reason: 'price_limit_unknown' },
+        ],
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('以下標的未納入回測：0000.TWSE（證券主檔查無）、00998A.TWSE（漲跌幅規則未確認）')).toBeInTheDocument()
+    expect(screen.queryByText(/security_master_missing|price_limit_unknown/)).not.toBeInTheDocument()
+  })
+
+  it('沒有排除標的時不顯示排除提示', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: { total_return: 0.125, n_trades: 0, excluded_symbols: [] },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('+12.50%')).toBeInTheDocument()
+    expect(screen.queryByText(/未納入回測/)).not.toBeInTheDocument()
   })
 
   it('表單變更後隱藏舊結果並要求重新執行', async () => {
@@ -427,6 +807,7 @@ describe('策略回測工作區', () => {
       ['標的', '2317.TWSE', '2330.TWSE'],
       ['開始日期', '2025-01-02', ''],
       ['成交時點', 'close_t', 'open_t+1'],
+      ['無風險利率（年）', '0.015', '0'],
     ] as const
 
     for (const [label, changed, original] of cases) {

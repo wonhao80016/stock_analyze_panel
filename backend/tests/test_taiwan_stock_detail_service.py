@@ -308,3 +308,37 @@ def test_detail_daily_bars_are_forward_adjusted_across_a_dividend(tmp_path):
     for symbol in ("9927.TWSE", "2330.TWSE"):
         untouched = svc._aggregate_daily(symbol, 1000).rows
         assert [r.close for r in untouched] == [r.raw_close for r in untouched]
+
+
+def _offline_service(symbol: str, price: float, prev_close: float) -> TaiwanStockDetailService:
+    svc = TaiwanStockDetailService()
+    mock_rt = MagicMock()
+    mock_rt.get_quotes.return_value = {symbol: _make_sample_quote(symbol, price, prev_close)}
+    svc.realtime_service = mock_rt
+    svc.hybrid_provider = MagicMock(**{"get_daily.return_value": pl.DataFrame()})
+    svc.daily_store = MagicMock(**{"scan_range.return_value": pl.DataFrame()})
+    svc.institutional_provider = MagicMock(**{"fetch_live_day.side_effect": RuntimeError("offline")})
+    svc.margin_provider = MagicMock(**{"fetch_live_day.side_effect": RuntimeError("offline")})
+    return svc
+
+
+@pytest.mark.parametrize("symbol", ["9999.TWSE", "00998A.TPEX"])
+def test_service_unknown_limit_rule_has_no_rate_or_prices(symbol):
+    """9999 is not in the security master; 00998A has no confirmed underlying scope."""
+    res = _offline_service(symbol, 101.0, 100.0).get_stock_detail(symbol)
+
+    assert res.price_limit.price_limit_pct is None
+    assert res.price_limit.is_no_limit is False
+    assert res.price_limit.limit_up is None
+    assert res.price_limit.limit_down is None
+    assert res.price_limit.rule_type == "漲跌幅規則未知"
+
+
+def test_service_index_limit_rule_is_not_applicable():
+    res = _offline_service("t00.TWSE", 23000.0, 22900.0).get_stock_detail("t00.TWSE")
+
+    assert res.identity.instrument_type == "index"
+    assert res.price_limit.rule_type == "不適用（指數）"  # noqa: RUF001
+    assert res.price_limit.price_limit_pct is None
+    assert res.price_limit.is_no_limit is False
+    assert (res.price_limit.limit_up, res.price_limit.limit_down) == (None, None)

@@ -6,7 +6,7 @@ Architecture:
   TaiwanSecurityMaster (Universe)
   -> TaiwanDailyStore.read_latest_per_symbol() (Batch daily snapshot)
   -> Published enriched partition for indicators (MA5/10/20, RSI14, Momentum5d, VolRatio5d, change_pct)
-  -> Batch MarketProfile price limits (calc_limits_for_pct with tick size)
+  -> Batch MarketProfile price limits off the session's raw-scale reference price
   -> Batch Institutional & Margin joins
   -> Strongly typed Pydantic filters (whitelist)
   -> Deterministic Sort with symbol ASC tie-breaker
@@ -26,6 +26,7 @@ from typing import Any, Literal
 import polars as pl
 from pydantic import BaseModel, Field
 
+from app.taiwan.corporate_actions import REF_LIMIT_DOWN, REF_LIMIT_UP, REF_PREV_CLOSE
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.enriched_reader import read_enriched_partition
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
@@ -50,6 +51,14 @@ SortField = Literal[
 SortDir = Literal["asc", "desc"]
 
 _INDICATOR_COLUMNS = ["change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"]
+_LIMIT_REFERENCE_SOURCE_COLUMNS = ["prev_close", "close", "raw_close", REF_PREV_CLOSE, REF_LIMIT_UP, REF_LIMIT_DOWN]
+_LIMIT_REFERENCE_COLUMNS = ["_limit_ref_price", "_official_limit_up", "_official_limit_down"]
+
+
+def _enriched_part(as_of: str | None) -> Path:
+    from app.config import settings
+
+    return Path(settings.data_dir) / "kline_daily_enriched" / f"date={as_of}" / "part.parquet"
 
 
 class TaiwanScreenerRequest(BaseModel):
@@ -236,6 +245,8 @@ class TaiwanScreenerService:
         else:
             combined = self._add_null_cols(combined, _INDICATOR_COLUMNS)
 
+        combined, limit_refs_published = self._join_limit_reference(combined, daily_as_of, valid_symbols)
+
         # Built-in signals, as published by TaiwanEnrichedRefreshService.
         combined = self._join_signals(combined, daily_as_of)
         patterns_published = all(c in combined.columns for c in VOLUME_PATTERN_COLUMNS)
@@ -249,6 +260,8 @@ class TaiwanScreenerService:
             degraded = ["indicators", *degraded]
         if not patterns_published:
             degraded.append("volume_patterns")
+        if not limit_refs_published and _enriched_part(daily_as_of).exists():
+            degraded.append("price_limits")
 
         # Step 7: Apply Strongly Typed Filters
         filtered = self._apply_filters(combined, req)
@@ -303,6 +316,29 @@ class TaiwanScreenerService:
 
         return df.select(["symbol", "name", "exchange", "instrument_type", "industry"]).unique(subset=["symbol"])
 
+    @staticmethod
+    def _join_limit_reference(
+        df: pl.DataFrame, as_of: str | None, symbols: list[str]
+    ) -> tuple[pl.DataFrame, bool]:
+        """Attach the raw-scale limit reference of the quote session; False with null columns when unpublished.
+
+        The official reference wins; otherwise the previous close is moved onto the raw scale,
+        matching TaiwanEnrichedRefreshService._limit_signals. The quote close is never a fallback.
+        """
+        refs = read_enriched_partition(as_of, _LIMIT_REFERENCE_SOURCE_COLUMNS, symbols)
+        if refs is None:
+            nulls = [pl.lit(None, dtype=pl.Float64).alias(c) for c in _LIMIT_REFERENCE_COLUMNS]
+            return df.with_columns(nulls), False
+        adj_close = pl.col("close").cast(pl.Float64)
+        previous_raw_close = pl.col("prev_close") * pl.when(adj_close > 0).then(pl.col("raw_close") / adj_close)
+        refs = refs.select(
+            "symbol",
+            pl.coalesce(pl.col(REF_PREV_CLOSE), previous_raw_close).cast(pl.Float64).alias("_limit_ref_price"),
+            pl.col(REF_LIMIT_UP).cast(pl.Float64).alias("_official_limit_up"),
+            pl.col(REF_LIMIT_DOWN).cast(pl.Float64).alias("_official_limit_down"),
+        )
+        return df.join(refs, on="symbol", how="left"), True
+
     def _enrich_price_limits(self, df: pl.DataFrame) -> pl.DataFrame:
         """Enrich with tick-size aware price limits and distance metrics."""
         rows = []
@@ -354,7 +390,19 @@ class TaiwanScreenerService:
                 })
                 continue
 
-            upper, lower = MarketProfileBridge.calc_limits(close, inst)
+            official_up, official_down = r.get("_official_limit_up"), r.get("_official_limit_down")
+            ref_price = r.get("_limit_ref_price")
+            if official_up is not None and official_down is not None:
+                upper, lower = official_up, official_down
+            elif ref_price is not None and ref_price > 0:
+                upper, lower = PriceLimitModel.calc_limits_for_pct(
+                    ref_price,
+                    limit_pct,
+                    MarketProfileBridge.get_tick_size_class(inst),
+                    trade_date=r.get("date"),
+                )
+            else:
+                upper, lower = None, None
             dist_up = (upper - close) / close if (upper and close > 0) else None
             dist_dn = (close - lower) / close if (lower and close > 0) else None
 
@@ -369,7 +417,7 @@ class TaiwanScreenerService:
             })
 
         # Nullable boolean columns can be all-null in the first rows; infer from every row.
-        return pl.DataFrame(rows, infer_schema_length=None)
+        return pl.DataFrame(rows, infer_schema_length=None).drop(_LIMIT_REFERENCE_COLUMNS, strict=False)
 
     def _join_institutional_margin(
         self, df: pl.DataFrame, symbols: list[str]
@@ -569,9 +617,7 @@ class TaiwanScreenerService:
         """Attach the published signal columns for the quote date, if they exist."""
         if not as_of:
             return combined
-        from app.config import settings
-
-        part = Path(settings.data_dir) / "kline_daily_enriched" / f"date={as_of}" / "part.parquet"
+        part = _enriched_part(as_of)
         if not part.exists():
             logger.debug("no published signals for %s", as_of)
             return combined

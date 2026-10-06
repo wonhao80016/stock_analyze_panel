@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 
 from app.backtest.engine import BacktestEngine, MatcherConfig
 
@@ -51,35 +52,39 @@ def _mask(panel: pl.DataFrame, marks: set[tuple[str, int]]) -> pl.Series:
 
 
 # ---------------------------------------------------------------
-# 1. 单元测试: buy_cost_pct / sell_cost_pct
+# 1. 单元测试: buy_cost_pct / sell_transaction_cost
 # ---------------------------------------------------------------
+
+def _sell_cost_rate(cfg: MatcherConfig) -> float:
+    return cfg.sell_transaction_cost(10_000.0, "A", None) / 10_000.0
+
 
 def test_legacy_fees_pct_keeps_symmetric_cost_without_stamp():
     """仅传 fees_pct: 买卖成本相等, 均为 fees + slippage, 不含印花税 (旧行为)。"""
     cfg = MatcherConfig(fees_pct=0.0002, slippage_bps=5.0)
     assert cfg.buy_cost_pct() == 0.0002 + 0.0005
-    assert cfg.sell_cost_pct() == 0.0002 + 0.0005  # 无印花税, 与买入对称
+    assert _sell_cost_rate(cfg) == pytest.approx(0.0002 + 0.0005)  # 无印花税, 与买入对称
 
 
 def test_decomposed_cost_applies_stamp_only_on_sell():
     """拆分模型: 佣金双边, 印花税仅卖出, 滑点双边。"""
     cfg = MatcherConfig(commission_pct=0.0003, stamp_tax_pct=0.001, slippage_bps=5.0)
     assert cfg.buy_cost_pct() == 0.0003 + 0.0005
-    assert cfg.sell_cost_pct() == 0.0003 + 0.001 + 0.0005
+    assert _sell_cost_rate(cfg) == pytest.approx(0.0003 + 0.001 + 0.0005)
 
 
 def test_commission_pct_overrides_fees_pct():
     """同时给 fees_pct 与 commission_pct 时, 以 commission_pct 为准。"""
     cfg = MatcherConfig(fees_pct=0.0002, commission_pct=0.0009, slippage_bps=0)
     assert cfg.buy_cost_pct() == 0.0009
-    assert cfg.sell_cost_pct() == 0.0009  # stamp 未设 → 0
+    assert _sell_cost_rate(cfg) == pytest.approx(0.0009)  # stamp 未设 → 0
 
 
 def test_commission_pct_zero_is_not_treated_as_unset():
     """commission_pct=0.0 是有效值, 不应因 falsy 而回退到 fees_pct。"""
     cfg = MatcherConfig(fees_pct=0.0002, commission_pct=0.0, slippage_bps=0)
     assert cfg.buy_cost_pct() == 0.0
-    assert cfg.sell_cost_pct() == 0.0
+    assert _sell_cost_rate(cfg) == 0.0
 
 
 # ---------------------------------------------------------------

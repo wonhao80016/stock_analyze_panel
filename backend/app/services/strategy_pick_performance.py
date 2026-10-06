@@ -15,7 +15,6 @@ from typing import Any
 
 import polars as pl
 
-from app.indicators.pipeline import _taiwan_tick_size_expr
 from app.taiwan.corporate_actions import (
     REF_LIMIT_UP,
     REF_PREV_CLOSE,
@@ -27,6 +26,7 @@ from app.taiwan.corporate_actions import (
 )
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.enrichment.corporate_actions import default_adapters
+from app.taiwan.market_rules import PriceLimitModel
 
 logger = logging.getLogger(__name__)
 
@@ -285,9 +285,9 @@ def _by_exchange(prefix: str) -> pl.Expr:
 
 def _limit_up_expr() -> pl.Expr:
     """The T+1 limit-up price on the raw scale: official on an event session, else T close rounded down to a tick."""
-    up_raw = pl.col("_signal_close") * (1.0 + pl.col("_limit_pct"))
-    tick = _taiwan_tick_size_expr(up_raw, pl.col("_is_etf_tick").fill_null(False))
-    computed = ((up_raw / tick + 1e-9).floor() * tick).round(4)
+    computed, _ = PriceLimitModel.polars_limit_prices(
+        pl.col("_signal_close"), pl.col("_limit_pct"), pl.col("_is_etf_tick").fill_null(False)
+    )
     return pl.when(pl.col("_entry_ref_prev_close").is_not_null()).then(pl.col("_entry_ref_limit_up")).otherwise(computed)
 
 
