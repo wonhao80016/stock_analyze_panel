@@ -105,14 +105,13 @@ jobs:
       - name: 設置 Python
         run: uv python install 3.12
 
-      - name: 安裝後端依賴 (含 desktop + legacy-cpu, 不含 backtest)
+      - name: 安裝後端依賴 (含 desktop + legacy-cpu)
         working-directory: backend
         # --no-dev 排除 pytest/ruff/mypy; --extra desktop 裝 pywebview
         # --extra legacy-cpu 裝 polars[rtcompat] 運行時兼容內核:
         #   讓安裝包同時兼容 AVX2 新 CPU 和無 AVX2 的老 CPU (NAS/老服務器/國產 CPU)。
         #   rtcompat 會在運行時自動探測 CPU 能力 —— 有 AVX2 用 AVX2, 沒有則回退,
         #   對新 CPU 性能幾乎無損 (Polars 1.x 官方推薦方案)。
-        # 不加 --extra backtest, 主包不含 vectorbt/numba/llvmlite
         run: uv sync --no-dev --extra desktop --extra legacy-cpu
 
       - name: 安裝 PyInstaller
@@ -240,6 +239,6 @@ jobs:
             - **Linux**: 解壓縮後執行可執行檔
             - 資料存放在安裝目錄下的 `data/` 子資料夾, 解除安裝後重新安裝不會遺失
             - 內建 Polars 相容核心, 新舊 CPU (無 AVX2) 都可執行
-            - 內含純 Polars 回測引擎; 不含 vectorbt 回測(為控制體積)
+            - 內含純 Polars 回測引擎
             - 系統通知: 設定 → 即時監控 → 系統通知
             - 檢查更新: 設定 → 系統設定 → 關於

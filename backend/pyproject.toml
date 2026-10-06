@@ -45,12 +45,8 @@ legacy-cpu = [
     "polars[rtcompat]>=1.0",
 ]
 
-# vectorbt 还会引入绘图、交互组件等完整分析栈，仍保持为可选 extras。
-# Matrix 引擎只直接依赖上面的 numba/llvmlite 编译内核。
-# 启用:`uv sync --extra backtest`
-backtest = [
-    "vectorbt>=0.26",
-]
+# Empty extra kept so existing `--extra backtest` installs and BACKEND_EXTRAS still resolve.
+backtest = []
 
 # 桌面客户端依赖: pywebview 桌面窗口。打包用 (PyInstaller), 生产/Docker 不需要。
 # 启用:`uv sync --extra desktop`

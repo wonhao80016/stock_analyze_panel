@@ -116,9 +116,8 @@ datas += [(VERSION_FILE, ".")]
 # 內置策略 → app/strategy/builtin/ (importlib 動態加載, 不能進 PYZ)
 datas += [(BUILTIN_STRATEGIES, "app/strategy/builtin")]
 
-# ── 排除不需要的重型依賴 (主包不含 vectorbt 回測鏈) ──────────────────
+# ── 排除不需要的重型依賴 ──────────────────────────────────────────────
 excludes = [
-    "vectorbt",
     "numba",
     "llvmlite",
     "matplotlib",

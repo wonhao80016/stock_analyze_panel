@@ -41,7 +41,7 @@
 ### 2.1 技術棧
 
 - 後端：Python 3.11+、FastAPI、Pydantic v2、Polars、DuckDB、PyArrow。
-- 回測邊界允許使用 pandas；業務數據計算優先使用 Polars。`vectorbt` 是可選依賴，不得讓未安裝它的主流程失效。
+- 回測邊界允許使用 pandas；業務數據計算優先使用 Polars。回測引擎以 Polars/NumPy 實現，Matrix 以 numba 加速（無 numba 時退回純 Python），不需要額外的可選依賴。
 - 前端：React 18、TypeScript、Vite、TanStack Query、Tailwind CSS、ECharts、lightweight-charts。
 - 包管理和驗證命令：後端使用 `uv`，前端使用 `pnpm`。
 

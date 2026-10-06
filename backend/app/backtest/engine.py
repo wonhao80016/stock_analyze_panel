@@ -1,6 +1,6 @@
 """回测引擎 — 共享数据加载 + 撮合 + 统计计算。
 
-纯 Polars/NumPy 实现，不依赖 pandas/vectorbt。
+纯 Polars/NumPy 实现，不依赖 pandas。
 """
 from __future__ import annotations
 

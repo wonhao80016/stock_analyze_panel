@@ -26,9 +26,8 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 
 ```bash
 # 後端
-cd backend && uv sync --extra backtest   # 含回測依賴
+cd backend && uv sync
 # 老 CPU: uv sync --extra legacy-cpu
-# 老 CPU + 回測: uv sync --extra legacy-cpu --extra backtest
 uv run uvicorn app.main:app --reload --port 3018
 
 # 前端
@@ -78,14 +77,13 @@ docker compose up --build -d
 
 ```ini
 BACKEND_EXTRAS=legacy-cpu          # 兼容老 CPU
-BACKEND_EXTRAS=legacy-cpu backtest # 兼容老 CPU + 回測依賴
 ```
 
 手動啟動源碼時，也可以在 `backend/` 目錄直接執行 `uv sync --extra legacy-cpu`。不要設置 `POLARS_SKIP_CPU_CHECK`，它只會隱藏警告，實際執行不支持的指令時仍可能崩潰。
 
 ### 回測依賴說明
 
-vectorbt → numba 體積較大,作為可選 extras(`uv sync --extra backtest`)。macOS / Intel 無預構建 wheel 時需 `brew install cmake` 現場編譯。
+回測引擎以 Polars / NumPy 實現,Matrix 以 numba 加速(無 numba 時退回純 Python),不需要額外 extras。`backtest` extra 保留為空以兼容舊配置,`uv sync --extra backtest` 與 `BACKEND_EXTRAS=legacy-cpu backtest` 仍可正常執行。
 
 ---
 
