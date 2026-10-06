@@ -643,13 +643,16 @@ def test_the_backfill_cli_defaults_to_today(monkeypatch):
 SESSIONS = [date(2026, 9, d) for d in (21, 22, 23, 24, 25, 28, 29)]
 
 
-def _daily_store(root: Path, sessions: list[date] = SESSIONS) -> TaiwanDailyStore:
+def _daily_store(
+    root: Path, sessions: list[date] = SESSIONS, symbols: tuple[str, ...] = ("2330.TWSE",)
+) -> TaiwanDailyStore:
     store = TaiwanDailyStore(data_dir=root)
+    n = len(sessions) * len(symbols)
     store.write_batch(pl.DataFrame({
-        "symbol": ["2330.TWSE"] * len(sessions), "date": sessions,
-        "open": [1.0] * len(sessions), "high": [1.0] * len(sessions), "low": [1.0] * len(sessions),
-        "close": [1.0] * len(sessions), "volume": [1.0] * len(sessions), "amount": [1.0] * len(sessions),
-        "quote_ts": pl.Series([None] * len(sessions), dtype=pl.Int64),
+        "symbol": [s for s in symbols for _ in sessions], "date": [d for _ in symbols for d in sessions],
+        "open": [1.0] * n, "high": [1.0] * n, "low": [1.0] * n,
+        "close": [1.0] * n, "volume": [1.0] * n, "amount": [1.0] * n,
+        "quote_ts": pl.Series([None] * n, dtype=pl.Int64),
     }))
     return store
 
@@ -817,6 +820,7 @@ def _dated_store(latest: date) -> MagicMock:
     store.available_dates.return_value = [latest]
     store.provisional_dates.return_value = []
     store.incomplete_dates.return_value = []
+    store.repair_dates.return_value = []
     return store
 
 
@@ -873,7 +877,7 @@ def test_the_scheduled_update_survives_a_reference_fetch_that_raises(quiet_publi
 
 
 def test_the_update_button_fetches_reference_prices_through_the_shared_publish(tmp_path, quiet_publish, monkeypatch, caplog):
-    _daily_store(tmp_path / "taiwan" / "daily")
+    _daily_store(tmp_path / "taiwan" / "daily", symbols=("2330.TWSE", "6488.TPEX"))
     monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: SESSIONS[-1])
     calls: list[tuple[date, date]] = []
 

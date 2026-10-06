@@ -93,6 +93,7 @@ def test_orchestrator_all_success_mocked():
     """All 3 datasets succeed -> overall_status == 'success'."""
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_daily_store.repair_dates.return_value = []
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
     mock_margin_store = MagicMock()
@@ -131,6 +132,7 @@ def test_orchestrator_partial_failure_mocked():
     """Institutional succeeds, Margin fails -> overall_status == 'partial'."""
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_daily_store.repair_dates.return_value = []
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
     mock_margin_store = MagicMock()
@@ -163,6 +165,7 @@ def test_orchestrator_all_failed_mocked():
     """All executed services fail -> overall_status == 'failed'."""
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_daily_store.repair_dates.return_value = []
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
     mock_margin_store = MagicMock()
@@ -197,6 +200,7 @@ def test_orchestrator_idempotency_already_current():
     """If all stores are already at target date, no provider refresh calls are dispatched."""
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = [date(2026, 8, 28)]
+    mock_daily_store.repair_dates.return_value = []
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
     mock_margin_store = MagicMock()
@@ -235,7 +239,7 @@ def test_run_update_reaches_back_to_a_recent_partition_missing_an_exchange(monke
     stored = [date(2026, 8, 26), date(2026, 8, 27), date(2026, 8, 28)]
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = stored
-    mock_daily_store.incomplete_dates.return_value = [date(2026, 8, 27)]
+    mock_daily_store.repair_dates.return_value = [date(2026, 8, 27)]
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
     mock_margin_store = MagicMock()
@@ -255,7 +259,7 @@ def test_run_update_reaches_back_to_a_recent_partition_missing_an_exchange(monke
     )
     result = svc.run_update(target_date=date(2026, 8, 28))
 
-    mock_daily_store.incomplete_dates.assert_called_once_with(stored)
+    mock_daily_store.repair_dates.assert_called_once_with(date(2026, 8, 28))
     mock_daily_svc.refresh_dates.assert_called_once_with(
         start_date=date(2026, 8, 27), end_date=date(2026, 8, 28), force=False
     )
@@ -271,7 +275,7 @@ def test_a_failed_repair_is_reported_without_failing_the_daily_run(monkeypatch):
 
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = [date(2026, 8, 27)]
-    mock_daily_store.incomplete_dates.return_value = [date(2026, 8, 27)]
+    mock_daily_store.repair_dates.return_value = [date(2026, 8, 27)]
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
     mock_margin_store = MagicMock()
@@ -309,7 +313,7 @@ def test_a_partial_daily_run_still_publishes_what_it_stored(monkeypatch):
 
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = [date(2026, 8, 27)]
-    mock_daily_store.incomplete_dates.return_value = []
+    mock_daily_store.repair_dates.return_value = []
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 28)]
     mock_margin_store = MagicMock()

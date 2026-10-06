@@ -443,8 +443,9 @@ class TaiwanBootstrapService:
 
         latest = dates[-1]
         target = resolve_target_latest_trading_date()
+        repairs = st.repair_dates(target)
 
-        if latest >= target:
+        if latest >= target and not repairs:
             published = self._publish(True)
             return {
                 "ok": True,
@@ -454,17 +455,21 @@ class TaiwanBootstrapService:
                 "enriched_published": published,
             }
 
-        start = latest + timedelta(days=1)
+        start = min([latest + timedelta(days=1), *repairs])
         res = self.refresh_service.refresh_dates(start_date=start, end_date=target)
         fetched = res.get("dates_fetched", 0)
-        failed = res.get("failed_dates") or []
-        if failed and not fetched:
-            raise RuntimeError(f"{failed[0]['date']} 行情抓取失敗: {failed[0]['error']}")
+        failures = [
+            (f"{f['date']} 行情抓取失敗", f["error"]) for f in res.get("failed_dates") or []
+        ] + [
+            (f"{f['date']} 重抓失敗, 保留原有資料", f["error"]) for f in res.get("repair_failed_dates") or []
+        ]
+        if failures and not fetched:
+            raise RuntimeError(f"{failures[0][0]}: {failures[0][1]}")
         # Screening takes its basis day from these bars, so their indicators must be published too.
         published = self._publish(not fetched)
         message = f"成功更新 {fetched} 個交易日 (最新至 {target})"
-        if failed:
-            message = f"已更新 {fetched} 個交易日, {failed[0]['date']} 行情抓取失敗, 請稍後再試"
+        if failures:
+            message = f"已更新 {fetched} 個交易日, {failures[0][0]}, 請稍後再試"
         return {
             "ok": True,
             "already_current": False,

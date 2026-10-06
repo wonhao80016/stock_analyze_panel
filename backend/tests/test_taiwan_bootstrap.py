@@ -7,9 +7,10 @@ import os
 import shutil
 import tempfile
 import zipfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import httpx
 import polars as pl
@@ -359,9 +360,98 @@ def test_update_to_latest_publishes_the_days_it_fetched(tmp_path: Path):
     assert res["enriched_published"] is True
 
 
+def _write_both_exchanges(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["2330.TWSE", "6488.TPEX"],
+        "date": [date(2024, 1, 2)] * 2,
+        "close": [593.0, 420.0],
+    }).write_parquet(str(path))
+
+
+def _refresh_service_for(tmp_path: Path, *, written_on: datetime | None, both_exchanges: bool = True):
+    daily_dir = tmp_path / "taiwan" / "daily"
+    part = daily_dir / "date=2024-01-02" / "part.parquet"
+    if both_exchanges:
+        _write_both_exchanges(part)
+    else:
+        _create_dummy_parquet(part)
+    if written_on is not None:
+        stamp = written_on.timestamp()
+        os.utime(part, (stamp, stamp))
+    mock_refresh = MagicMock()
+    mock_refresh.refresh_dates.return_value = {"dates_fetched": 1}
+    svc = TaiwanBootstrapService(
+        store=TaiwanDailyStore(data_dir=daily_dir), refresh_service=mock_refresh, publish=lambda _: True
+    )
+    return svc, mock_refresh
+
+
+def test_update_to_latest_refetches_a_latest_day_written_on_the_day_itself(tmp_path: Path, monkeypatch):
+    """The settings button must finalize a provisional day, as the scheduled run does."""
+    monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
+    evening = datetime(2024, 1, 2, 21, 40, tzinfo=ZoneInfo("Asia/Taipei"))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=evening)
+
+    res = svc.update_to_latest()
+
+    mock_refresh.refresh_dates.assert_called_once_with(start_date=date(2024, 1, 2), end_date=date(2024, 1, 2))
+    assert res["already_current"] is False
+    assert res["dates_fetched"] == 1
+
+
+def test_update_to_latest_refetches_a_latest_day_holding_one_exchange(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=None, both_exchanges=False)
+
+    res = svc.update_to_latest()
+
+    mock_refresh.refresh_dates.assert_called_once_with(start_date=date(2024, 1, 2), end_date=date(2024, 1, 2))
+    assert res["already_current"] is False
+
+
+def test_update_to_latest_reports_a_refetch_that_failed(tmp_path: Path, monkeypatch):
+    """A provisional day that could not be refetched must not read as a successful update."""
+    monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
+    evening = datetime(2024, 1, 2, 21, 40, tzinfo=ZoneInfo("Asia/Taipei"))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=evening)
+    mock_refresh.refresh_dates.return_value = {
+        "dates_fetched": 0, "failed_dates": [], "repair_failed_dates": [{"date": "2024-01-02", "error": "no rows"}],
+    }
+
+    with pytest.raises(RuntimeError, match="2024-01-02 重抓失敗, 保留原有資料"):
+        svc.update_to_latest()
+
+
+def test_update_to_latest_names_a_failed_refetch_next_to_new_days(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 3))
+    evening = datetime(2024, 1, 2, 21, 40, tzinfo=ZoneInfo("Asia/Taipei"))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=evening)
+    mock_refresh.refresh_dates.return_value = {
+        "dates_fetched": 1, "failed_dates": [], "repair_failed_dates": [{"date": "2024-01-02", "error": "no rows"}],
+    }
+
+    res = svc.update_to_latest()
+
+    assert res["dates_fetched"] == 1
+    assert "2024-01-02" in res["message"]
+
+
+def test_update_to_latest_leaves_a_finalized_latest_day_alone(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
+    next_day = datetime(2024, 1, 3, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=next_day)
+
+    res = svc.update_to_latest()
+
+    mock_refresh.refresh_dates.assert_not_called()
+    assert res["already_current"] is True
+
+
 def test_update_to_latest_catches_up_a_lagging_enriched_table_when_current(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
     svc, calls = _service_with_publish(tmp_path, {"dates_fetched": 0})
+    _write_both_exchanges(tmp_path / "taiwan" / "daily" / "date=2024-01-02" / "part.parquet")
 
     res = svc.update_to_latest()
 

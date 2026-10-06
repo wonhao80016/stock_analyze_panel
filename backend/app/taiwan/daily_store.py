@@ -332,6 +332,11 @@ class TaiwanDailyStore:
                 provisional.append(d)
         return sorted(provisional)
 
+    def repair_dates(self, target: date) -> list[date]:
+        """Return the recent stored dates up to *target* that hold one exchange only or are provisional."""
+        recent = [d for d in self.available_dates()[-REPAIR_WINDOW_PARTITIONS:] if d <= target]
+        return sorted(set(self.incomplete_dates(recent)) | set(self.provisional_dates(recent)))
+
     def latest_date(self) -> date | None:
         """Return the most recent partition date, or *None* if empty."""
         return self.available_dates()[-1] if self.available_dates() else None

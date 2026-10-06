@@ -375,13 +375,9 @@ class TaiwanDailyUpdateService:
                     # The missing range starts after the latest stored day, so a recent day
                     # holding one exchange only, or written before the exchanges finalized it,
                     # would otherwise never be fetched again.
-                    recent = d_dates[-REPAIR_WINDOW_PARTITIONS:]
-                    provisional = [d for d in self.daily_store.provisional_dates(recent) if d <= target]
-                    incomplete = [d for d in self.daily_store.incomplete_dates(recent) if d <= target]
-                    if provisional:
-                        logger.info("Refetching provisional daily partitions: %s", ", ".join(map(str, provisional)))
-                    repair_dates = sorted(set(incomplete) | set(provisional))
+                    repair_dates = self.daily_store.repair_dates(target)
                     if repair_dates:
+                        logger.info("Refetching daily partitions: %s", ", ".join(map(str, repair_dates)))
                         d_range = (repair_dates[0], target)
                 if not d_range and not force:
                     daily_stats.status = "success"

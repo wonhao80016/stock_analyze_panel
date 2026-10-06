@@ -110,6 +110,33 @@ def test_provisional_dates_ignore_missing_partitions_and_return_sorted(tmp_path,
     assert store.provisional_dates([NEXT, date(2026, 9, 22), D]) == [D, NEXT]
 
 
+def test_repair_dates_combine_half_snapshots_and_provisional_days_up_to_the_target(tmp_path):
+    store = TaiwanDailyStore(data_dir=tmp_path / "daily")
+    root = tmp_path / "daily"
+    half, final, provisional, after = date(2026, 9, 21), date(2026, 9, 22), D, NEXT
+    store.write_batch(_daily_rows(["2330.TWSE"], half))
+    for d in (final, provisional, after):
+        store.write_batch(_daily_rows(["2330.TWSE", "6488.TPEX"], d))
+    _set_mtime(root, half, _taipei(NEXT, 9))
+    _set_mtime(root, final, _taipei(NEXT, 9))
+    _set_mtime(root, provisional, _taipei(provisional, 21, 40))
+    _set_mtime(root, after, _taipei(after, 21, 40))
+
+    assert store.repair_dates(D) == [half, provisional]
+
+
+def test_repair_dates_only_look_at_the_recent_window(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.taiwan.daily_store.REPAIR_WINDOW_PARTITIONS", 2)
+    store = TaiwanDailyStore(data_dir=tmp_path / "daily")
+    old, recent, latest = date(2026, 9, 18), date(2026, 9, 22), D
+    store.write_batch(_daily_rows(["2330.TWSE"], old))
+    for d in (recent, latest):
+        store.write_batch(_daily_rows(["2330.TWSE", "6488.TPEX"], d))
+        _set_mtime(tmp_path / "daily", d, _taipei(NEXT, 9))
+
+    assert store.repair_dates(latest) == []
+
+
 # run_update, daily ----------------------------------------------------------------------------
 
 

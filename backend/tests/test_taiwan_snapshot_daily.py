@@ -624,6 +624,7 @@ def test_daily_update_orchestration_with_snapshot():
     """TaiwanDailyUpdateService seamlessly updates Daily, Inst, and Margin."""
     mock_daily_store = MagicMock()
     mock_daily_store.available_dates.return_value = [date(2026, 8, 27)]
+    mock_daily_store.repair_dates.return_value = []
 
     mock_inst_store = MagicMock()
     mock_inst_store.available_dates.return_value = [date(2026, 8, 27)]

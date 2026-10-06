@@ -679,6 +679,7 @@ def test_run_update_uses_the_daily_bars_it_just_stored_to_fail_an_empty_answer(t
     daily_store.available_dates.return_value = [SEP29]
     daily_store.provisional_dates.return_value = []
     daily_store.incomplete_dates.return_value = []
+    daily_store.repair_dates.return_value = []
     daily_svc = MagicMock()
 
     def store_the_target_day(**_kwargs):

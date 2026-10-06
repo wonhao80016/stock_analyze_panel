@@ -145,7 +145,7 @@ def update_taiwan_history_to_latest():
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Update to latest failed: %s", exc)
-        raise HTTPException(status_code=500, detail=f"更新至最新交易日失敗: {exc}") from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # New bars or indicators on disk are invisible to a running process: the repo caches and the
     # strategy picks file are both built once and never reread. The post-close job
