@@ -726,19 +726,21 @@ class TaiwanStockResearchContextService:
             )
 
         # 8. Market Rules Context (Phase 3 MarketProfileBridge)
+        rule_known = True
         try:
-            limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+            limit_pct = MarketProfileBridge.get_price_limit_pct(inst, target)
         except ValueError:
             limit_pct = None
+            rule_known = False
 
-        is_no_lim = (limit_pct is None)
+        is_no_lim = rule_known and limit_pct is None
         upper_l = None
         lower_l = None
         tick_sz = None
 
         if p_close is not None and p_close > 0:
             if not is_no_lim and limit_pct is not None:
-                upper_l, lower_l = MarketProfileBridge.calc_limits(p_close, inst)
+                upper_l, lower_l = MarketProfileBridge.calc_limits(p_close, inst, target)
                 if ref_row is not None and ref_row["limit_up"] is not None and ref_row["limit_down"] is not None:
                     upper_l, lower_l = ref_row["limit_up"], ref_row["limit_down"]
             tick_sz = TickSizeModel.get_tick_size(p_close, MarketProfileBridge.get_tick_size_class(inst))

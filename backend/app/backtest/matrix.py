@@ -53,7 +53,7 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 2
-_DIRECT_MATRIX_LOADER_VERSION = 7
+_DIRECT_MATRIX_LOADER_VERSION = 8
 _MATRIX_AXIS_INDEX_VERSION = 1
 _PUBLISHED_LIMIT_SIGNALS = (
     ("signal_limit_up", "limit_up_locked"),
@@ -61,6 +61,7 @@ _PUBLISHED_LIMIT_SIGNALS = (
 )
 LIMIT_RULE_NOT_IN_SECURITY_MASTER = "security_master_missing"
 LIMIT_RULE_UNCONFIRMED = "price_limit_unknown"
+LIMIT_RULE_LISTING_DATE_UNKNOWN = "listing_date_unknown"
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
 _ROLLING_MATERIALIZED_WINDOW_BUDGET_BYTES = 32 * 1024 * 1024
@@ -4270,7 +4271,7 @@ def taiwan_limit_rule_exclusions(symbols: Sequence[str]) -> list[dict[str, str]]
         return []
 
     from app.taiwan.universe import get_security_master
-    from app.taiwan.universe.models import MarketProfileBridge
+    from app.taiwan.universe.models import ListingDateUnknownError, MarketProfileBridge
 
     excluded: list[dict[str, str]] = []
     try:
@@ -4284,6 +4285,8 @@ def taiwan_limit_rule_exclusions(symbols: Sequence[str]) -> list[dict[str, str]]
             continue
         try:
             MarketProfileBridge.get_price_limit_pct(instrument)
+        except ListingDateUnknownError:
+            excluded.append({"symbol": symbol, "reason": LIMIT_RULE_LISTING_DATE_UNKNOWN})
         except ValueError:
             excluded.append({"symbol": symbol, "reason": LIMIT_RULE_UNCONFIRMED})
     return excluded

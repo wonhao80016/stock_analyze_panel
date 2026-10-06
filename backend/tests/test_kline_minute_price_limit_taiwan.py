@@ -7,6 +7,7 @@ instrument without a limit or with an unconfirmed rule gets no prices and no rat
 from __future__ import annotations
 
 from datetime import date
+from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -158,3 +159,47 @@ def test_a_session_without_a_previous_close_keeps_only_the_rate(isolated_data):
 
     assert got["prev_close"] is None
     assert got["price_limit"] == {"rate": 0.1, "limit_up": None, "limit_down": None, "source": "rule"}
+
+
+IPO_SESSIONS = (date(2026, 9, 9), date(2026, 9, 10), date(2026, 9, 11), date(2026, 9, 14), date(2026, 9, 15),
+                date(2026, 9, 16), date(2026, 9, 17))
+
+
+@pytest.fixture
+def new_listing(isolated_data, monkeypatch):
+    """7799.TWSE lists on 2026-09-10; its sessions 1-5 run through 09-16 on the stored calendar."""
+    from dataclasses import replace
+
+    from app.taiwan import universe
+    from app.taiwan.daily_store import TaiwanDailyStore
+
+    master = universe.get_security_master()
+    template = master.get_instrument("2454.TWSE")
+    listing = replace(template, symbol="7799.TWSE", code="7799", listing_date="20260910")
+    monkeypatch.setitem(master._instruments, listing.symbol, listing)
+    TaiwanDailyStore(isolated_data / "taiwan" / "daily").write_batch(pl.DataFrame([
+        {"symbol": "2330.TWSE", "date": d.isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+         "volume": 1.0, "amount": 1.0, "quote_ts": None}
+        for d in IPO_SESSIONS
+    ]))
+    return lambda **changes: monkeypatch.setitem(master._instruments, listing.symbol, replace(listing, **changes))
+
+
+def test_a_new_listing_has_no_limit_through_its_fifth_session(new_listing):
+    for prev, session in pairwise(IPO_SESSIONS[1:6]):
+        got = _minute("7799.TWSE", "stock", {prev: 100.0}, session)
+        assert got["price_limit"] == {"rate": None, "limit_up": None, "limit_down": None, "source": "no_limit"}
+
+
+def test_a_new_listing_takes_the_ordinary_limit_on_its_sixth_session(new_listing):
+    got = _minute("7799.TWSE", "stock", {IPO_SESSIONS[5]: 220.0}, IPO_SESSIONS[6])
+
+    assert got["price_limit"] == {"rate": 0.1, "limit_up": 242.0, "limit_down": 198.0, "source": "model"}
+
+
+def test_a_stock_without_a_listing_date_has_an_unknown_rule(new_listing):
+    new_listing(listing_date=None)
+
+    got = _minute("7799.TWSE", "stock", {IPO_SESSIONS[5]: 220.0}, IPO_SESSIONS[6])
+
+    assert got["price_limit"] == {"rate": None, "limit_up": None, "limit_down": None, "source": "unknown"}

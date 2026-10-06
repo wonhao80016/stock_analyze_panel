@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
 
@@ -35,6 +37,10 @@ from app.price_limits import (
 )
 from app.share_capital import apply_historical_float_shares, load_share_history
 from app.volume_units import TAIWAN_SUFFIXES, turnover_rate_pct_expr
+
+if TYPE_CHECKING:
+    from app.taiwan.market_rules import ListingSessions
+    from app.taiwan.universe.models import TaiwanInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -736,17 +742,29 @@ def _is_taiwan_symbol() -> pl.Expr:
     return pl.col("symbol").str.ends_with(TAIWAN_SUFFIXES[0]) | pl.col("symbol").str.ends_with(TAIWAN_SUFFIXES[1])
 
 
-def _join_taiwan_limit_profile(df: pl.DataFrame) -> pl.DataFrame:
+def _join_taiwan_limit_profile(df: pl.DataFrame, trade_date: pl.Expr) -> pl.DataFrame:
+    """Join _tw_limit_pct, the statutory limit on each row's *trade_date*, _tw_is_etf and _tw_ipo_session."""
+    from app.taiwan.market_rules import PriceLimitModel
+
     profile = taiwan_limit_profile(df["symbol"].unique().to_list())
     return df.join(
         profile.select(
             "symbol",
             pl.col("limit_pct").alias("_tw_limit_pct"),
             pl.col("is_etf_tick").alias("_tw_is_etf"),
+            pl.col("ipo_start").alias("_tw_ipo_start"),
+            pl.col("ipo_end").alias("_tw_ipo_end"),
         ),
         on="symbol",
         how="left",
-    )
+    ).with_columns(
+        PriceLimitModel.polars_session_limit_pct(
+            pl.col("_tw_limit_pct"), trade_date, pl.col("_tw_ipo_start"), pl.col("_tw_ipo_end")
+        ).alias("_tw_limit_pct"),
+        PriceLimitModel.polars_in_ipo_window(
+            trade_date, pl.col("_tw_ipo_start"), pl.col("_tw_ipo_end")
+        ).alias("_tw_ipo_session"),
+    ).drop("_tw_ipo_start", "_tw_ipo_end")
 
 
 def _statutory_limit_prices(previous: pl.Expr, limit_pct: pl.Expr) -> tuple[pl.Expr, pl.Expr]:
@@ -863,7 +881,7 @@ def compute_limit_signals(
         prev_raw_close = pl.coalesce(pl.col("ref_prev_close"), prev_raw_close)
     df = df.with_columns(prev_raw_close.alias("_prev_raw_close"))
 
-    df = _join_taiwan_limit_profile(df)
+    df = _join_taiwan_limit_profile(df, pl.col("date"))
 
     is_risk_warning = pl.col("_is_st") if "_is_st" in df.columns else pl.lit(False)
     df = df.with_columns(
@@ -902,11 +920,16 @@ def compute_limit_signals(
         ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
     else:
         effective_limit_down = pl.col("_theoretical_limit_down")
-    # Taiwan corporate-action bars carry the exchange's own limits (raw scale).
+    # Taiwan corporate-action bars carry the exchange's own limits (raw scale), except inside an
+    # initial listing's no-limit window.
     if "ref_limit_up" in df.columns:
-        effective_limit_up = pl.coalesce(pl.col("ref_limit_up"), effective_limit_up)
+        effective_limit_up = pl.coalesce(
+            pl.when(~pl.col("_tw_ipo_session")).then(pl.col("ref_limit_up")), effective_limit_up
+        )
     if "ref_limit_down" in df.columns:
-        effective_limit_down = pl.coalesce(pl.col("ref_limit_down"), effective_limit_down)
+        effective_limit_down = pl.coalesce(
+            pl.when(~pl.col("_tw_ipo_session")).then(pl.col("ref_limit_down")), effective_limit_down
+        )
     effective_exprs: list[pl.Expr] = []
     if need_up:
         effective_exprs.append(effective_limit_up.alias("_effective_limit_up"))
@@ -978,7 +1001,7 @@ def compute_limit_signals(
         )
 
     # 清理临时列 + JOIN 引入的 instruments 列 (不存入 enriched)
-    cleanup = ["_prev_raw_close", "_limit_pct", "_tw_limit_pct", "_tw_is_etf",
+    cleanup = ["_prev_raw_close", "_limit_pct", "_tw_limit_pct", "_tw_is_etf", "_tw_ipo_session",
                "_theoretical_limit_up", "_theoretical_limit_down",
                "_effective_limit_up", "_effective_limit_down",
                "_instrument_as_of"]
@@ -1864,10 +1887,10 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         prev_raw = pl.col("close_right")
     else:
         prev_raw = pl.col("raw_close")
-    df = _join_taiwan_limit_profile(df)
+    trade_date = pl.col("date") if "date" in df.columns else pl.lit(cn_today())
+    df = _join_taiwan_limit_profile(df, trade_date)
 
     is_risk_warning = pl.col("_is_st") if "_is_st" in df.columns else pl.lit(False)
-    trade_date = pl.col("date") if "date" in df.columns else pl.lit(cn_today())
     limit_pct = pl.coalesce(
         pl.col("_tw_limit_pct"),
         polars_price_limit_pct(pl.col("symbol"), trade_date, is_risk_warning),
@@ -1960,7 +1983,10 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     ])
 
     # 清理
-    cleanup = ["_limit_pct", "_tw_limit_pct", "_tw_is_etf", "_is_st", "limit_up", "limit_down", "_instrument_as_of"]
+    cleanup = [
+        "_limit_pct", "_tw_limit_pct", "_tw_is_etf", "_tw_ipo_session", "_is_st", "limit_up", "limit_down",
+        "_instrument_as_of",
+    ]
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
@@ -1974,7 +2000,8 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
 
 # 台股法定涨跌幅逐 symbol 缓存: Security Master 不随盘中轮询变动,
 # 避免每轮都重新查 get_instrument + get_price_limit_pct。
-_taiwan_limit_profile_cache: dict[str, tuple[float | None, bool]] = {}
+# Holds no initial-listing window: the window depends on the session calendar, which grows daily.
+_taiwan_limit_profile_cache: dict[str, tuple[float | None, bool, TaiwanInstrument | None]] = {}
 
 
 def invalidate_taiwan_limit_profile_cache() -> None:
@@ -1982,12 +2009,15 @@ def invalidate_taiwan_limit_profile_cache() -> None:
     _taiwan_limit_profile_cache.clear()
 
 
-def taiwan_limit_profile(symbols: list[str]) -> pl.DataFrame:
+def taiwan_limit_profile(symbols: list[str], sessions: ListingSessions | None = None) -> pl.DataFrame:
     """按 symbol 查询台股法定涨跌幅比例与跳动单位分类 (逐 symbol 缓存)。
 
     非台股 symbol (Security Master 查无) 或 ETF underlying_scope 未确认
     (MarketProfileBridge.get_price_limit_pct 抛 ValueError) 一律记为
     limit_pct=None, 由调用方按 NO_LIMIT 处理 (对应列置 null)。
+
+    ipo_start / ipo_end bound an ordinary stock's initial-listing window on *sessions* (default: the
+    stored calendar), null without one; apply them with PriceLimitModel.polars_session_limit_pct.
     """
     from app.taiwan.universe import get_security_master
     from app.taiwan.universe.models import MarketProfileBridge
@@ -2000,21 +2030,39 @@ def taiwan_limit_profile(symbols: list[str]) -> pl.DataFrame:
         for sym in missing:
             inst = master.get_instrument(sym)
             if inst is None:
-                profiles[sym] = (None, False)
+                profiles[sym] = (None, False, None)
             else:
                 try:
                     pct = MarketProfileBridge.get_price_limit_pct(inst)
                 except ValueError:
                     pct = None
-                profiles[sym] = (pct, inst.instrument_type == "etf")
+                profiles[sym] = (pct, inst.instrument_type == "etf", inst if pct is not None else None)
             _taiwan_limit_profile_cache[sym] = profiles[sym]
 
-    if not symbols:
-        return pl.DataFrame(schema={"symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean})
-    return pl.DataFrame([
-        {"symbol": s, "limit_pct": profiles[s][0], "is_etf_tick": profiles[s][1]}
-        for s in symbols
-    ])
+    windows: dict[str, tuple[date, date] | None] = {}
+    limited = {s: profile[2] for s, profile in profiles.items() if profile[2] is not None}
+    if limited:
+        if sessions is None:
+            from app.taiwan.daily_store import listing_sessions
+
+            sessions = listing_sessions()
+        windows = {s: MarketProfileBridge.ipo_no_limit_window(inst, sessions) for s, inst in limited.items()}
+
+    schema = {
+        "symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean,
+        "ipo_start": pl.Date, "ipo_end": pl.Date,
+    }
+    rows = []
+    for s in symbols:
+        window = windows.get(s)
+        rows.append({
+            "symbol": s,
+            "limit_pct": profiles[s][0],
+            "is_etf_tick": profiles[s][1],
+            "ipo_start": window[0] if window else None,
+            "ipo_end": window[1] if window else None,
+        })
+    return pl.DataFrame(rows, schema=schema)
 
 
 def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -2031,7 +2079,12 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
         return df.with_columns([pl.lit(None).cast(pl.Float64).alias(c) for c in out_cols])
 
     profile = taiwan_limit_profile(df["symbol"].unique().to_list())
-    df = df.join(profile, on="symbol", how="left")
+    trade_date = pl.col("date") if "date" in df.columns else pl.lit(cn_today())
+    df = df.join(profile, on="symbol", how="left").with_columns(
+        PriceLimitModel.polars_session_limit_pct(
+            pl.col("limit_pct"), trade_date, pl.col("ipo_start"), pl.col("ipo_end")
+        ).alias("limit_pct")
+    )
 
     # Limits and ticks live on the raw price scale; prev_close and close may be forward-adjusted.
     if "raw_close" in df.columns:
@@ -2062,4 +2115,4 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
           .otherwise(None)
           .alias("distance_to_lower_limit"),
     ])
-    return df.drop(["limit_pct", "is_etf_tick"])
+    return df.drop(["limit_pct", "is_etf_tick", "ipo_start", "ipo_end"])

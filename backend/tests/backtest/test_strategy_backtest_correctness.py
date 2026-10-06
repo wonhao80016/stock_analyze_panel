@@ -671,3 +671,42 @@ def test_matrix_cache_preserves_trades_daily_equity_and_core_stats():
         assert cached.stats[name] == uncached.stats[name]
         assert cached_again.stats[name] == uncached.stats[name]
     assert cached_again.stats["matrix_compute_cache"]["hits"] > 0
+
+
+def test_result_reports_the_resolved_minimum_commission():
+    start = date(2024, 1, 1)
+    panel = pl.DataFrame([
+        {
+            "symbol": "A",
+            "name": "A",
+            "date": start + timedelta(days=i),
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 100_000,
+            "amount": 1000.0,
+            "signal_limit_up": False,
+            "signal_limit_down": False,
+        }
+        for i in range(2)
+    ])
+    cases = [("board_lot", None, 20.0), ("odd_lot", None, 1.0), ("odd_lot", 7.0, 7.0)]
+    for lot_mode, requested, expected in cases:
+        service = StrategyBacktestService(
+            engine=_EngineStub(panel),
+            strategy_engine=_StrategyEngineStub(_strategy()),
+        )
+
+        result = service.run(StrategyBacktestConfig(
+            strategy_id="test",
+            symbols=None,
+            start=start,
+            end=start + timedelta(days=1),
+            lot_mode=lot_mode,
+            minimum_commission=requested,
+        ))
+
+        assert result.error is None
+        assert result.stats["minimum_commission"] == expected
+        assert result.config["minimum_commission"] == expected

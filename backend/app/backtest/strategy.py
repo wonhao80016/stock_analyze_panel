@@ -642,6 +642,17 @@ def _configure_taiwan_matcher(
     }
 
 
+BOARD_LOT_MINIMUM_COMMISSION = 20.0
+ODD_LOT_MINIMUM_COMMISSION = 1.0
+
+
+def default_minimum_commission(lot_mode: str) -> float:
+    """Common Taiwan broker floor per order: 20 TWD board lot, 1 TWD odd lot."""
+    if lot_mode == "odd_lot":
+        return ODD_LOT_MINIMUM_COMMISSION
+    return BOARD_LOT_MINIMUM_COMMISSION
+
+
 @dataclass
 class StrategyBacktestConfig:
     strategy_id: str
@@ -657,7 +668,8 @@ class StrategyBacktestConfig:
     fees_pct: float = 0.0002
     commission_pct: float | None = None
     commission_discount: float = 1.0
-    minimum_commission: float = 0.0
+    # None resolves to the broker floor for lot_mode; callers that omit it keep no floor.
+    minimum_commission: float | None = 0.0
     stamp_tax_pct: float | None = None
     slippage_bps: float = 5.0
     max_positions: int = 10
@@ -684,6 +696,8 @@ class StrategyBacktestConfig:
         if self.exit_fill is None:
             self.exit_fill = self.matching
         self.risk_free_rate = validate_risk_free_rate(self.risk_free_rate)
+        if self.minimum_commission is None:
+            self.minimum_commission = default_minimum_commission(self.lot_mode)
         if self.minimum_holding_sessions < 0:
             raise ValueError("minimum_holding_sessions must be non-negative")
         if not 0 <= self.commission_discount <= 1:
@@ -1762,6 +1776,7 @@ class StrategyBacktestService:
         result.stats["execution_backend"] = s.execution_backend
         result.stats["selection"] = selection_stats
         result.stats["excluded_symbols"] = excluded_symbols
+        result.stats["minimum_commission"] = config.minimum_commission
         result.stats["shared_market_data"] = prepared is not None
         result.stats["matrix_data_cache_hit"] = matrix_data_cache_hit
         result.stats["matrix_data_cache_status"] = matrix_data_cache_status

@@ -182,7 +182,8 @@ class StrategyBacktestRequest(BaseModel):
     fees_pct: float = 0.0002
     commission_pct: float | None = None
     commission_discount: float = Field(1.0, ge=0.0, le=1.0)
-    minimum_commission: float = Field(0.0, ge=0.0)
+    # None selects the broker floor for lot_mode (see StrategyBacktestConfig).
+    minimum_commission: float | None = Field(None, ge=0.0)
     stamp_tax_pct: float | None = None
     slippage_bps: float = 5.0
     max_positions: int = 10
@@ -317,7 +318,7 @@ def _make_job_key(
     minute_fill: bool = False,
     regime_filter: str | None = None,
     minimum_holding_sessions: int = 1,
-    minimum_commission: float = 0.0,
+    minimum_commission: float | None = None,
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,
     day_trade_eligible_symbols: str | tuple[str, ...] = "",
@@ -353,7 +354,7 @@ async def strategy_stream(
     minute_fill: bool = False,
     regime_filter: str | None = None,
     minimum_holding_sessions: int = 1,
-    minimum_commission: float = 0.0,
+    minimum_commission: float | None = None,
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,
     day_trade_eligible_symbols: str = "",
@@ -399,7 +400,7 @@ async def strategy_stream(
         commission_pct, stamp_tax_pct,
         asset_type=asset_type,
         minute_fill=minute_fill,
-        regime_filter=regime_filter,
+        regime_filter=regime_filter or None,
         minimum_holding_sessions=minimum_holding_sessions,
         minimum_commission=minimum_commission,
         lot_mode=lot_mode,
@@ -457,7 +458,7 @@ async def strategy_stream(
                 fees_pct=fees_pct,
                 commission_pct=commission_pct,
                 commission_discount=float(commission_discount),
-                minimum_commission=float(minimum_commission),
+                minimum_commission=minimum_commission,
                 stamp_tax_pct=stamp_tax_pct,
                 slippage_bps=slippage_bps,
                 max_positions=int(max_positions),
@@ -547,6 +548,10 @@ async def strategy_stream(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+# Query strings FastAPI parses as a true bool; cancel must decode minute_fill the same way.
+_TRUE_QUERY_VALUES = frozenset({"1", "on", "t", "true", "y", "yes"})
+
+
 @router.post("/strategy/cancel")
 async def strategy_cancel(request: Request):
     """取消正在运行的回测任务 (前端传 query string, 后端算 job_key)。"""
@@ -582,8 +587,10 @@ async def strategy_cancel(request: Request):
         commission_pct=_get_opt_float("commission_pct"),
         stamp_tax_pct=_get_opt_float("stamp_tax_pct"),
         asset_type=_get("asset_type", "stock"),
+        minute_fill=_get("minute_fill", "false").strip().lower() in _TRUE_QUERY_VALUES,
+        regime_filter=_get("regime_filter") or None,
         minimum_holding_sessions=int(_get("minimum_holding_sessions", "1")),
-        minimum_commission=float(_get("minimum_commission", "0")),
+        minimum_commission=_get_opt_float("minimum_commission"),
         lot_mode=_get("lot_mode", "board_lot"),
         commission_discount=float(_get("commission_discount", "1")),
         day_trade_eligible_symbols=_get("day_trade_eligible_symbols", ""),
@@ -649,7 +656,7 @@ def _make_opt_job_key(
 def _opt_backtest_kwargs(
     matching, fees_pct, commission_pct, stamp_tax_pct, slippage_bps,
     max_positions, max_exposure_pct, initial_capital, position_sizing, mode, holding_days,
-    minimum_commission=0.0, minimum_holding_sessions=1, lot_mode="board_lot",
+    minimum_commission=None, minimum_holding_sessions=1, lot_mode="board_lot",
     commission_discount=1.0,
     day_trade_eligible_symbols="",
     risk_free_rate=0.0,
@@ -659,7 +666,7 @@ def _opt_backtest_kwargs(
         "fees_pct": fees_pct,
         "commission_pct": commission_pct,
         "commission_discount": float(commission_discount),
-        "minimum_commission": float(minimum_commission),
+        "minimum_commission": None if minimum_commission is None else float(minimum_commission),
         "stamp_tax_pct": stamp_tax_pct,
         "slippage_bps": slippage_bps,
         "max_positions": int(max_positions),
@@ -704,7 +711,7 @@ async def optimize_stream(
     position_sizing: str = "equal",
     mode: str = "position",
     holding_days: int = 5,
-    minimum_commission: float = 0.0,
+    minimum_commission: float | None = None,
     minimum_holding_sessions: int = 1,
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,
@@ -937,7 +944,7 @@ async def walkforward_stream(
     position_sizing: str = "equal",
     mode: str = "position",
     holding_days: int = 5,
-    minimum_commission: float = 0.0,
+    minimum_commission: float | None = None,
     minimum_holding_sessions: int = 1,
     lot_mode: str = "board_lot",
     commission_discount: float = 1.0,

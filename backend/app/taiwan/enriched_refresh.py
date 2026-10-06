@@ -35,8 +35,8 @@ from app.taiwan.corporate_actions import (
     attach_reference_prices,
     today_factors,
 )
-from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
-from app.taiwan.market_rules import PriceLimitModel
+from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore, listing_sessions
+from app.taiwan.market_rules import ListingSessions, PriceLimitModel
 from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.volume_patterns import add_volume_patterns
@@ -136,7 +136,7 @@ class TaiwanEnrichedRefreshService:
         enriched = compute_enriched(raw, factors=factors, instruments=instruments)
         if enriched.is_empty():
             return 0
-        enriched = self._add_limit_signals(enriched)
+        enriched = self._add_limit_signals(enriched, listing_sessions(self.daily_store))
         enriched = add_volume_patterns(enriched, available)
         enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if enriched.is_empty():
@@ -231,8 +231,8 @@ class TaiwanEnrichedRefreshService:
             Path(tmp_path).unlink(missing_ok=True)
             raise
 
-    def _limit_profile(self, symbols: list[str]) -> pl.DataFrame:
-        """Per-symbol statutory limit percentage and tick ladder."""
+    def _limit_profile(self, symbols: list[str], sessions: ListingSessions) -> pl.DataFrame:
+        """Per-symbol statutory limit percentage, tick ladder and initial-listing no-limit window."""
         from app.taiwan.universe import get_security_master
         from app.taiwan.universe.models import MarketProfileBridge
 
@@ -249,16 +249,20 @@ class TaiwanEnrichedRefreshService:
                 continue
             if pct is None:
                 continue
+            window = MarketProfileBridge.ipo_no_limit_window(inst, sessions)
             rows.append({
                 "symbol": sym,
                 "limit_pct": float(pct),
                 "is_etf_tick": inst.instrument_type == "etf",
+                "ipo_start": window[0] if window else None,
+                "ipo_end": window[1] if window else None,
             })
-        if not rows:
-            return pl.DataFrame(schema={"symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean})
-        return pl.DataFrame(rows)
+        return pl.DataFrame(rows, schema={
+            "symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean,
+            "ipo_start": pl.Date, "ipo_end": pl.Date,
+        })
 
-    def _add_limit_signals(self, enriched: pl.DataFrame) -> pl.DataFrame:
+    def _add_limit_signals(self, enriched: pl.DataFrame, sessions: ListingSessions | None = None) -> pl.DataFrame:
         """Derive the Taiwan limit-board signals from the statutory daily limits.
 
         The shared pipeline skips these because it wants an A-share instrument
@@ -266,13 +270,17 @@ class TaiwanEnrichedRefreshService:
         ticks are raw-scale prices, so the comparison uses raw_close / raw_high / raw_low
         and the previous close moved onto the raw scale; a corporate-action session
         uses the limits the exchange published. The limit streaks are counted from these signals.
+        A session inside an initial listing's no-limit window, placed on *sessions* (default: the
+        stored calendar), has no limit board.
         """
         cols = ["signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"]
         enriched = enriched.with_columns([
             pl.lit(None, dtype=pl.Float64).alias(c)
             for c in (REF_LIMIT_UP, REF_LIMIT_DOWN) if c not in enriched.columns
         ])
-        profile = self._limit_profile(enriched["symbol"].unique().to_list())
+        profile = self._limit_profile(
+            enriched["symbol"].unique().to_list(), sessions if sessions is not None else listing_sessions()
+        )
         if profile.is_empty():
             out = enriched.with_columns([pl.lit(False).alias(c) for c in cols])
         else:
@@ -283,17 +291,21 @@ class TaiwanEnrichedRefreshService:
     @staticmethod
     def _limit_signals(out: pl.DataFrame) -> pl.DataFrame:
         ref = pl.col("prev_close") * pl.when(pl.col("close") > 0).then(pl.col("raw_close") / pl.col("close"))
+        limit_pct = PriceLimitModel.polars_session_limit_pct(
+            pl.col("limit_pct"), pl.col("date"), pl.col("ipo_start"), pl.col("ipo_end")
+        )
         limit_up, limit_down = PriceLimitModel.polars_limit_prices(
-            ref, pl.col("limit_pct"), pl.col("is_etf_tick").fill_null(False)
+            ref, limit_pct, pl.col("is_etf_tick").fill_null(False)
         )
 
-        official = pl.col(REF_LIMIT_UP).is_not_null() & pl.col(REF_LIMIT_DOWN).is_not_null()
+        in_ipo_window = PriceLimitModel.polars_in_ipo_window(pl.col("date"), pl.col("ipo_start"), pl.col("ipo_end"))
+        official = pl.col(REF_LIMIT_UP).is_not_null() & pl.col(REF_LIMIT_DOWN).is_not_null() & ~in_ipo_window
         close, high, low = pl.col("raw_close"), pl.col("raw_high"), pl.col("raw_low")
         out = out.with_columns([
             pl.when(official).then(pl.col(REF_LIMIT_UP)).otherwise(limit_up).alias("_limit_up"),
             pl.when(official).then(pl.col(REF_LIMIT_DOWN)).otherwise(limit_down).alias("_limit_down"),
         ])
-        usable = official | (pl.col("limit_pct").is_not_null() & (ref > 0))
+        usable = official | (limit_pct.is_not_null() & (ref > 0))
         return out.with_columns([
             (usable & (close >= pl.col("_limit_up"))).fill_null(False).alias("signal_limit_up"),
             (usable & (close <= pl.col("_limit_down"))).fill_null(False).alias("signal_limit_down"),
@@ -301,7 +313,7 @@ class TaiwanEnrichedRefreshService:
             .fill_null(False).alias("signal_broken_limit_up"),
             (usable & (low <= pl.col("_limit_down")) & (close > pl.col("_limit_down")))
             .fill_null(False).alias("signal_limit_down_recovery"),
-        ]).drop(["limit_pct", "is_etf_tick", "_limit_up", "_limit_down"])
+        ]).drop(["limit_pct", "is_etf_tick", "ipo_start", "ipo_end", "_limit_up", "_limit_down"])
 
     def refresh_recent(self, days: int = 5) -> int:
         """Republish the newest partitions, for the daily update job.

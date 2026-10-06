@@ -31,7 +31,7 @@ from app.taiwan.corporate_actions import (
     read_events_or_empty,
     reference_prices,
 )
-from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.daily_store import TaiwanDailyStore, listing_sessions
 from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
     resolve_target_latest_trading_date,
@@ -550,6 +550,7 @@ class TaiwanMarketIntelligenceService:
             # Determine limit-up / limit-down per row
             limit_up_flags = []
             limit_down_flags = []
+            sessions = listing_sessions()
             for r in joined.iter_rows(named=True):
                 sym = r["symbol"]
                 close = r.get("close")
@@ -561,14 +562,18 @@ class TaiwanMarketIntelligenceService:
                     limit_down_flags.append(False)
                     continue
 
+                try:
+                    ipo_session = MarketProfileBridge.in_ipo_no_limit_window(inst, target, sessions)
+                except ValueError:
+                    ipo_session = False
                 official_up, official_down = r.get("_ref_limit_up"), r.get("_ref_limit_down")
-                if official_up is not None and official_down is not None:
+                if official_up is not None and official_down is not None and not ipo_session:
                     limit_up_flags.append(bool(close >= official_up))
                     limit_down_flags.append(bool(close <= official_down))
                     continue
 
                 try:
-                    limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+                    limit_pct = MarketProfileBridge.get_price_limit_pct(inst, target, sessions)
                 except ValueError:
                     limit_up_flags.append(False)
                     limit_down_flags.append(False)
@@ -579,7 +584,7 @@ class TaiwanMarketIntelligenceService:
                     limit_down_flags.append(False)
                     continue
 
-                upper, lower = MarketProfileBridge.calc_limits(prev_close, inst)
+                upper, lower = MarketProfileBridge.calc_limits(prev_close, inst, target, sessions)
                 is_up = bool(upper is not None and close >= upper)
                 is_dn = bool(lower is not None and close <= lower)
                 limit_up_flags.append(is_up)

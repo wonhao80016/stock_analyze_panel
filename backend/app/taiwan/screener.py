@@ -27,7 +27,7 @@ import polars as pl
 from pydantic import BaseModel, Field
 
 from app.taiwan.corporate_actions import REF_LIMIT_DOWN, REF_LIMIT_UP, REF_PREV_CLOSE
-from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.daily_store import TaiwanDailyStore, listing_sessions
 from app.taiwan.enriched_reader import read_enriched_partition
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
@@ -341,6 +341,7 @@ class TaiwanScreenerService:
 
     def _enrich_price_limits(self, df: pl.DataFrame) -> pl.DataFrame:
         """Enrich with tick-size aware price limits and distance metrics."""
+        sessions = listing_sessions(self.daily_store)
         rows = []
         for r in df.iter_rows(named=True):
             sym = r["symbol"]
@@ -360,7 +361,7 @@ class TaiwanScreenerService:
                 continue
 
             try:
-                limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+                limit_pct = MarketProfileBridge.get_price_limit_pct(inst, r.get("date"), sessions)
             except ValueError as e:
                 logger.debug("Unconfirmed regulatory profile for %s: %s", inst.symbol, e)
                 # Unconfirmed profile: cannot verify regulatory limit safely.

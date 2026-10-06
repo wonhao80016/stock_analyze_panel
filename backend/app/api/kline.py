@@ -234,7 +234,7 @@ def _get_price_limit_info(
     if asset_type == "index":
         return None
     if symbol.endswith(TAIWAN_SUFFIXES):
-        return _taiwan_price_limit_info(symbol, prev_close, official_limits)
+        return _taiwan_price_limit_info(symbol, trade_date, prev_close, official_limits)
 
     info = {
         "rate": price_limit_pct(
@@ -297,6 +297,7 @@ def _apply_instrument_limit_prices(info: dict, repo, symbol: str, asset_type: st
 
 def _taiwan_price_limit_info(
     symbol: str,
+    trade_date: date,
     prev_close: float | None,
     official_limits: tuple[float, float] | None,
 ) -> dict:
@@ -312,7 +313,7 @@ def _taiwan_price_limit_info(
     if instrument is None:
         return info
     try:
-        rate = MarketProfileBridge.get_price_limit_pct(instrument)
+        rate = MarketProfileBridge.get_price_limit_pct(instrument, trade_date)
     except ValueError:
         return info
     if rate is None:
@@ -322,7 +323,7 @@ def _taiwan_price_limit_info(
         return {"rate": rate, "limit_up": limit_up, "limit_down": limit_down, "source": "official"}
     if prev_close is None:
         return {**info, "rate": rate, "source": "rule"}
-    limit_up, limit_down = MarketProfileBridge.calc_limits(prev_close, instrument)
+    limit_up, limit_down = MarketProfileBridge.calc_limits(prev_close, instrument, trade_date)
     return {"rate": rate, "limit_up": limit_up, "limit_down": limit_down, "source": "model"}
 
 

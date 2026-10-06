@@ -13,6 +13,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 
 import polars as pl
 
+from app.taiwan.market_rules import ListingSessions
 from app.taiwan.providers.base import (
     AmountUnit,
     PriceSemantics,
@@ -159,6 +161,7 @@ class TaiwanDailyStore:
                 os.close(tmp_fd)
                 df.write_parquet(tmp_path)
                 Path(tmp_path).replace(target)
+                invalidate_listing_sessions(self._data_dir)
                 logger.debug("Wrote %d rows to %s", df.height, target)
             except BaseException:
                 try:
@@ -333,6 +336,20 @@ class TaiwanDailyStore:
         """Return the most recent partition date, or *None* if empty."""
         return self.available_dates()[-1] if self.available_dates() else None
 
+    def first_sessions(self) -> dict[str, date]:
+        """Return each stored symbol's earliest stored date."""
+        pattern = str(self._data_dir / "date=*" / "part.parquet")
+        if not any(self._data_dir.glob("date=*/part.parquet")):
+            return {}
+        frame = (
+            pl.scan_parquet(pattern, missing_columns="insert", extra_columns="ignore")
+            .select("symbol", "date")
+            .group_by("symbol")
+            .agg(pl.col("date").min())
+            .collect()
+        )
+        return dict(zip(frame["symbol"].to_list(), frame["date"].to_list(), strict=True))
+
     # ── Symbol / date helpers ──────────────────────────────────────
 
     def has_symbol_date(self, symbol: str, d: date) -> bool:
@@ -361,6 +378,46 @@ class TaiwanDailyStore:
         if not frames:
             return []
         return sorted(pl.concat(frames, how="diagonal_relaxed")["symbol"].unique().to_list())
+
+
+# A write through TaiwanDailyStore drops its directory's entry at once; a write from another
+# process is picked up when the entry expires.
+_LISTING_SESSIONS_TTL_SECONDS = 60.0
+_listing_sessions_cache: dict[str, tuple[float, ListingSessions]] = {}
+
+
+def _listing_sessions_key(data_dir: Path) -> str:
+    return os.path.normcase(os.path.abspath(data_dir))
+
+
+def invalidate_listing_sessions(data_dir: Path) -> None:
+    """Drop the cached sessions of *data_dir*, so the next lookup sees its current partitions."""
+    _listing_sessions_cache.pop(_listing_sessions_key(data_dir), None)
+
+
+def listing_sessions(store: TaiwanDailyStore | None = None) -> ListingSessions:
+    """The stored trading sessions and first session per symbol, for placing initial-listing windows.
+
+    Without *store* the default daily directory is read, and never created when absent.
+    """
+    if store is None:
+        from app.taiwan.data_root import taiwan_data_root
+
+        data_dir = taiwan_data_root() / "daily"
+    else:
+        data_dir = store._data_dir
+    key = _listing_sessions_key(data_dir)
+    now = time.monotonic()
+    cached = _listing_sessions_cache.get(key)
+    if cached is not None and now - cached[0] < _LISTING_SESSIONS_TTL_SECONDS:
+        return cached[1]
+    if store is None:
+        if not data_dir.is_dir():
+            return ListingSessions(())
+        store = TaiwanDailyStore(data_dir)
+    sessions = ListingSessions(tuple(store.available_dates()), store.first_sessions())
+    _listing_sessions_cache[key] = (now, sessions)
+    return sessions
 
 
 # ── Internal helpers ──────────────────────────────────────────────

@@ -84,3 +84,37 @@ def test_search_marks_an_unconfirmed_etf_as_unknown():
     assert res.status_code == 200
     hit = next(item for item in res.json()["results"] if item["symbol"] == "00998A.TPEX")
     assert (hit["price_limit_pct"], hit["is_no_limit"]) == (None, False)
+
+
+def test_a_new_listing_quoted_against_its_offer_price_has_no_limit(tmp_path, monkeypatch):
+    """On its listing session 7799.TWSE quotes the offer price as the previous close; no limit applies."""
+    from dataclasses import replace
+    from datetime import date
+
+    import polars as pl
+
+    from app.config import settings
+    from app.taiwan import universe
+    from app.taiwan.daily_store import TaiwanDailyStore
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    TaiwanDailyStore(tmp_path / "taiwan" / "daily").write_batch(pl.DataFrame([
+        {"symbol": "2330.TWSE", "date": "2026-09-09", "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+         "volume": 1.0, "amount": 1.0, "quote_ts": None}
+    ]))
+    master = universe.get_security_master()
+    listing = replace(master.get_instrument("2454.TWSE"), symbol="7799.TWSE", code="7799", listing_date="20260910")
+    monkeypatch.setitem(master._instruments, listing.symbol, listing)
+
+    quote = MagicMock()
+    quote.symbol = listing.symbol
+    quote.prev_close = 100.0
+    quote.trade_date = date(2026, 9, 10)
+    quote.to_dict.return_value = {"symbol": listing.symbol, "name": listing.symbol, "prev_close": 100.0}
+    service = MagicMock()
+    service.get_quotes.return_value = {listing.symbol: quote}
+    with patch("app.api.intraday.get_realtime_service", return_value=service):
+        res = client.get("/api/intraday/quotes", params={"symbols": listing.symbol})
+
+    assert res.status_code == 200
+    assert _limit_fields(res.json()["quotes"][0]) == (None, True, None, None)

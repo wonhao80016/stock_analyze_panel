@@ -280,6 +280,62 @@ describe('策略回測工作區', () => {
     expect(payload).not.toHaveProperty('stamp_tax_pct')
   })
 
+  it('未調整最低手續費時預設以 20 元送出', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      trades: [],
+      stats: {},
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+
+    expect(screen.getByLabelText('最低手續費')).toHaveValue(20)
+    submit()
+
+    await waitFor(() => expect(api.strategyBacktestRun).toHaveBeenCalledOnce())
+    expect(vi.mocked(api.strategyBacktestRun).mock.calls[0][0].minimum_commission).toBe(20)
+  })
+
+  it('切換交易單位時未自訂的最低手續費改用該模式預設', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      trades: [],
+      stats: {},
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+
+    fireEvent.change(screen.getByLabelText('交易單位'), { target: { value: 'odd_lot' } })
+    expect(screen.getByLabelText('最低手續費')).toHaveValue(1)
+    fireEvent.change(screen.getByLabelText('交易單位'), { target: { value: 'board_lot' } })
+    expect(screen.getByLabelText('最低手續費')).toHaveValue(20)
+    fireEvent.change(screen.getByLabelText('交易單位'), { target: { value: 'odd_lot' } })
+    submit()
+
+    await waitFor(() => expect(api.strategyBacktestRun).toHaveBeenCalledOnce())
+    const payload = vi.mocked(api.strategyBacktestRun).mock.calls[0][0]
+    expect(payload.lot_mode).toBe('odd_lot')
+    expect(payload.minimum_commission).toBe(1)
+  })
+
+  it('切換交易單位時保留使用者自訂的最低手續費', async () => {
+    mockStrategies()
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+
+    fireEvent.change(screen.getByLabelText('最低手續費'), { target: { value: '15' } })
+    fireEvent.change(screen.getByLabelText('交易單位'), { target: { value: 'odd_lot' } })
+    expect(screen.getByLabelText('最低手續費')).toHaveValue(15)
+    fireEvent.change(screen.getByLabelText('交易單位'), { target: { value: 'board_lot' } })
+    expect(screen.getByLabelText('最低手續費')).toHaveValue(15)
+  })
+
   it('執行中停用送出並顯示進度', async () => {
     mockStrategies()
     const pending = deferred<any>()
@@ -769,6 +825,27 @@ describe('策略回測工作區', () => {
 
     expect(await screen.findByText('以下標的未納入回測：0000.TWSE（證券主檔查無）、00998A.TWSE（漲跌幅規則未確認）')).toBeInTheDocument()
     expect(screen.queryByText(/security_master_missing|price_limit_unknown/)).not.toBeInTheDocument()
+  })
+
+  it('上市日不明的排除標的顯示中文原因', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        excluded_symbols: [{ symbol: '7799.TWSE', reason: 'listing_date_unknown' }],
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('以下標的未納入回測：7799.TWSE（上市日不明）')).toBeInTheDocument()
+    expect(screen.queryByText(/listing_date_unknown|原因不明/)).not.toBeInTheDocument()
   })
 
   it('沒有排除標的時不顯示排除提示', async () => {

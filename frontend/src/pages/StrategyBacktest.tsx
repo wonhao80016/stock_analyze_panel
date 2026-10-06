@@ -13,6 +13,8 @@ type LotMode = 'board_lot' | 'odd_lot'
 type InstrumentSearchResult = Awaited<ReturnType<typeof api.instrumentSearch>>['results'][number]
 
 const SLIPPAGE_BPS = 5
+// Mirrors the backend default_minimum_commission broker floors.
+const DEFAULT_MINIMUM_COMMISSION: Record<LotMode, number> = { board_lot: 20, odd_lot: 1 }
 // Mirrors the backend bounds; the API rejects values outside them with 400.
 const RISK_FREE_RATE_MIN = -0.05
 const RISK_FREE_RATE_MAX = 0.2
@@ -107,6 +109,7 @@ function benchmarkNote(benchmark: StrategyBacktestBenchmark, benchmarkReturn: nu
 const EXCLUSION_REASON_LABELS: Record<string, string> = {
   security_master_missing: '證券主檔查無',
   price_limit_unknown: '漲跌幅規則未確認',
+  listing_date_unknown: '上市日不明',
 }
 
 function exclusionNote(excluded: { symbol: string; reason: string }[]): string {
@@ -284,7 +287,7 @@ export function StrategyBacktest() {
   const [initialCapital, setInitialCapital] = useState(1_000_000)
   const [maxPositions, setMaxPositions] = useState(10)
   const [commissionDiscount, setCommissionDiscount] = useState(1)
-  const [minimumCommission, setMinimumCommission] = useState(0)
+  const [minimumCommission, setMinimumCommission] = useState(DEFAULT_MINIMUM_COMMISSION.board_lot)
   const [minimumHoldingSessions, setMinimumHoldingSessions] = useState(1)
   const [riskFreeRate, setRiskFreeRate] = useState(0)
   const [validationError, setValidationError] = useState<string | null>(null)
@@ -338,6 +341,13 @@ export function StrategyBacktest() {
   const positionBudget = Number.isFinite(initialCapital) && Number.isInteger(maxPositions) && maxPositions > 0
     ? initialCapital / maxPositions
     : null
+
+  function handleLotMode(next: LotMode) {
+    if (minimumCommission === DEFAULT_MINIMUM_COMMISSION[lotMode]) {
+      setMinimumCommission(DEFAULT_MINIMUM_COMMISSION[next])
+    }
+    setLotMode(next)
+  }
 
   function handleAssetType(next: AssetType) {
     setAssetType(next)
@@ -489,7 +499,7 @@ export function StrategyBacktest() {
               </label>
               <label className="block text-[11px] text-secondary">
                 交易單位
-                <select aria-label="交易單位" value={lotMode} onChange={event => setLotMode(event.target.value as LotMode)} disabled={isBusy} className={`${inputClass} mt-1`}>
+                <select aria-label="交易單位" value={lotMode} onChange={event => handleLotMode(event.target.value as LotMode)} disabled={isBusy} className={`${inputClass} mt-1`}>
                   <option value="board_lot">整股</option>
                   <option value="odd_lot">零股</option>
                 </select>
@@ -517,7 +527,7 @@ export function StrategyBacktest() {
             </label>
 
             <div className="rounded-md border border-border/70 bg-base/40 px-3 py-2 text-[10px] leading-relaxed text-muted">
-              佣金基準、交易稅與每檔交易單位由台股市場規則接管；此處只設定券商折扣與最低手續費。買進與賣出各另計 {SLIPPAGE_BPS / 100}% 滑價。
+              佣金基準、交易稅與每檔交易單位由台股市場規則接管；此處只設定券商折扣與最低手續費；最低手續費預設整股 20 元、零股 1 元，未自訂時會隨交易單位切換。買進與賣出各另計 {SLIPPAGE_BPS / 100}% 滑價。
             </div>
 
             {validationError && <ErrorPanel message={validationError} />}

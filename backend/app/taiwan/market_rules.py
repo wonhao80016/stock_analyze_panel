@@ -12,6 +12,8 @@ Responsibilities:
 from __future__ import annotations
 
 import math
+from bisect import bisect_left
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
@@ -329,6 +331,31 @@ class TickSizeModel:
 
 # ── 5. Price Limit Model ───────────────────────────────────────
 
+IPO_NO_LIMIT_SESSIONS = 5
+
+
+@dataclass(frozen=True)
+class ListingSessions:
+    """Trading sessions, ascending, and each symbol's first session, both from the stored daily bars."""
+    trading_dates: tuple[date, ...]
+    first_sessions: Mapping[str, date] = field(default_factory=dict)
+
+
+def ipo_no_limit_until(
+    listing_date: date,
+    trading_dates: Sequence[date],
+    sessions: int = IPO_NO_LIMIT_SESSIONS,
+) -> date | None:
+    """Last session of the no-limit window an initial listing opens; the listing session is the first.
+
+    None when the calendar is empty or starts after listing_date, so the sessions cannot be counted;
+    date.max while fewer than *sessions* sessions from listing_date on are recorded.
+    """
+    if not trading_dates or listing_date < trading_dates[0]:
+        return None
+    last = bisect_left(trading_dates, listing_date) + sessions - 1
+    return trading_dates[last] if last < len(trading_dates) else date.max
+
 
 class PriceLimitModel:
     """Daily price limit model (+-10% standard, multiplier-adjusted, or no-limit). Single source of truth."""
@@ -393,6 +420,22 @@ class PriceLimitModel:
         limit_up = ((up_raw / up_tick + _LIMIT_ROUNDING_TOLERANCE).floor() * up_tick).round(4)
         limit_down = ((down_raw / down_tick - _LIMIT_ROUNDING_TOLERANCE).ceil() * down_tick).round(4)
         return limit_up, limit_down
+
+    @staticmethod
+    def polars_session_limit_pct(
+        limit_pct: pl.Expr,
+        trade_date: pl.Expr,
+        ipo_start: pl.Expr,
+        ipo_end: pl.Expr,
+    ) -> pl.Expr:
+        """*limit_pct*, or null on a session inside the [ipo_start, ipo_end] no-limit window of an initial listing."""
+        in_window = PriceLimitModel.polars_in_ipo_window(trade_date, ipo_start, ipo_end)
+        return pl.when(in_window).then(pl.lit(None, dtype=pl.Float64)).otherwise(limit_pct)
+
+    @staticmethod
+    def polars_in_ipo_window(trade_date: pl.Expr, ipo_start: pl.Expr, ipo_end: pl.Expr) -> pl.Expr:
+        """Whether *trade_date* falls inside the [ipo_start, ipo_end] window; false without a window."""
+        return trade_date.cast(pl.Date).is_between(ipo_start, ipo_end).fill_null(False)
 
     @staticmethod
     def numpy_limit_prices(

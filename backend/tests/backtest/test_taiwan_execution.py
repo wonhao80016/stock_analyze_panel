@@ -782,3 +782,44 @@ def test_close_entry_does_not_use_pre_entry_daily_high(
     assert len(result.trades) == 1
     assert result.trades[0].exit_reason == "end"
     assert result.trades[0].exit_price == pytest.approx(9.8)
+
+
+@pytest.mark.parametrize(
+    ("lot_mode", "minimum_commission", "trade_value", "expected_cost"),
+    [
+        ("board_lot", None, 1_000, 20.0),
+        ("odd_lot", None, 100, 1.0),
+        ("odd_lot", 0.0, 100, 100 * 0.001425),
+        ("board_lot", 5.0, 1_000, 5.0),
+    ],
+)
+def test_request_minimum_commission_defaults_by_lot_mode(
+    lot_mode: str,
+    minimum_commission: float | None,
+    trade_value: float,
+    expected_cost: float,
+) -> None:
+    fields = {} if minimum_commission is None else {"minimum_commission": minimum_commission}
+    request = StrategyBacktestRequest(strategy_id="test", lot_mode=lot_mode, **fields)
+    backtest = StrategyBacktestConfig(
+        strategy_id=request.strategy_id,
+        symbols=None,
+        start=date(2026, 1, 1),
+        end=date(2026, 1, 2),
+        lot_mode=request.lot_mode,
+        minimum_commission=request.minimum_commission,
+    )
+    matcher = MatcherConfig(
+        commission_pct=0.001425,
+        minimum_commission=backtest.minimum_commission,
+        lot_mode=backtest.lot_mode,
+        slippage_bps=0,
+    )
+
+    _configure_taiwan_matcher(
+        matcher,
+        ["2330.TWSE"],
+        security_master=_SecurityMaster({"2330.TWSE": _instrument("2330.TWSE", "stock", lot_size=1000)}),
+    )
+
+    assert matcher.buy_transaction_cost(trade_value) == pytest.approx(expected_cost)

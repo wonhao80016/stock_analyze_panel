@@ -10,11 +10,18 @@ Responsibilities:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, ClassVar
 
 from app.taiwan.enrichment.models import EtfCategory
-from app.taiwan.market_rules import PriceLimitClass, TaxClass, TickSizeClass
+from app.taiwan.market_rules import (
+    ListingSessions,
+    PriceLimitClass,
+    TaxClass,
+    TickSizeClass,
+    ipo_no_limit_until,
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +84,10 @@ class TaiwanInstrument:
         return asdict(self)
 
 
+class ListingDateUnknownError(ValueError):
+    """An ordinary stock's listing date is missing or unparseable, so its daily limit is unknown."""
+
+
 class MarketProfileBridge:
     """Translates TaiwanInstrument metadata into Phase 3 Market Profile rule classes.
 
@@ -125,17 +136,97 @@ class MarketProfileBridge:
             return TickSizeClass.ETF
         return TickSizeClass.ORDINARY_STOCK
 
+    @staticmethod
+    def listing_date(instrument: TaiwanInstrument) -> date:
+        """The instrument's listing date; raises ListingDateUnknownError when missing or unparseable."""
+        from app.taiwan.providers.taiwan_values import parse_taiwan_date
+
+        raw = str(instrument.listing_date or "").strip()
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            pass
+        try:
+            return parse_taiwan_date(raw)
+        except ValueError as exc:
+            raise ListingDateUnknownError(
+                f"Cannot determine the daily limit of {instrument.symbol}: listing date {instrument.listing_date!r}"
+            ) from exc
+
+    @staticmethod
+    def initial_listing_rule_applies(instrument: TaiwanInstrument) -> bool:
+        """Whether the no-limit window of an initial listing applies: ordinary stocks, not TDRs.
+
+        Taiwan depositary receipts have six-digit codes starting with 91, or names ending in -DR.
+        """
+        code = instrument.code or ""
+        is_tdr = (len(code) == 6 and code.startswith("91")) or (instrument.name or "").strip().upper().endswith("-DR")
+        return instrument.instrument_type == "stock" and not is_tdr
+
     @classmethod
-    def get_price_limit_pct(cls, instrument: TaiwanInstrument) -> float | None:
+    def ipo_no_limit_window(cls, instrument: TaiwanInstrument, sessions: ListingSessions) -> tuple[date, date] | None:
+        """First and last session an ordinary stock's initial listing trades without a daily limit.
+
+        TWSE Operating Rules art. 63 and the TPEx counterpart: five sessions from the listing session,
+        except a stock that already traded, inferred from bars of the same code under either exchange
+        stored before listing; stored bars carry the current exchange, so a transfer's history may be .TWSE.
+        """
+        if not cls.initial_listing_rule_applies(instrument):
+            return None
+        listed = cls.listing_date(instrument)
+        for exchange in ("TWSE", "TPEX"):
+            first = sessions.first_sessions.get(f"{instrument.code}.{exchange}")
+            if first is not None and first < listed:
+                return None
+        until = ipo_no_limit_until(listed, sessions.trading_dates)
+        return None if until is None else (listed, until)
+
+    @classmethod
+    def in_ipo_no_limit_window(
+        cls,
+        instrument: TaiwanInstrument,
+        trade_date: date,
+        sessions: ListingSessions | None = None,
+    ) -> bool:
+        """Whether *trade_date* falls inside the instrument's initial-listing window on *sessions*.
+
+        *sessions* defaults to the stored daily-bar calendar. Raises ListingDateUnknownError when the
+        rule applies but the listing date is unknown.
+        """
+        if not cls.initial_listing_rule_applies(instrument):
+            return False
+        if isinstance(trade_date, datetime):
+            trade_date = trade_date.date()
+        if sessions is None:
+            from app.taiwan.daily_store import listing_sessions
+
+            sessions = listing_sessions()
+        window = cls.ipo_no_limit_window(instrument, sessions)
+        return window is not None and window[0] <= trade_date <= window[1]
+
+    @classmethod
+    def get_price_limit_pct(
+        cls,
+        instrument: TaiwanInstrument,
+        trade_date: date | None = None,
+        sessions: ListingSessions | None = None,
+    ) -> float | None:
         """Get authoritative price limit percentage for an instrument.
 
-        Ordinary stocks: 0.10 (10%)
+        Ordinary stocks: 0.10 (10%); None on *trade_date* inside the initial-listing window
         Domestic plain ETF (0050, 006208): 0.10 (10%)
         Domestic leveraged ETF (00631L, 2X): 0.20 (20%)
         Domestic inverse ETF (00632R, -1X): 0.10 (10%)
         Foreign / Bond ETF (00646, 00720B, 00633L): None (NO_LIMIT)
+
+        Without *trade_date* the initial-listing window is not applied. *sessions* defaults to the
+        stored daily-bar calendar.
         """
         if instrument.instrument_type == "stock":
+            if cls.initial_listing_rule_applies(instrument):
+                cls.listing_date(instrument)
+                if trade_date is not None and cls.in_ipo_no_limit_window(instrument, trade_date, sessions):
+                    return None
             return 0.10
 
         if instrument.instrument_type == "etf":
@@ -180,9 +271,11 @@ class MarketProfileBridge:
         cls,
         ref_price: float,
         instrument: TaiwanInstrument,
+        trade_date: date | None = None,
+        sessions: ListingSessions | None = None,
     ) -> tuple[float | None, float | None]:
         """Calculate authoritative price limit boundary prices for an instrument, aligned to valid ticks."""
-        pct = cls.get_price_limit_pct(instrument)
+        pct = cls.get_price_limit_pct(instrument, trade_date, sessions)
         tick_class = cls.get_tick_size_class(instrument)
         from app.taiwan.market_rules import PriceLimitModel
         return PriceLimitModel.calc_limits_for_pct(ref_price=ref_price, limit_pct=pct, tick_class=tick_class)

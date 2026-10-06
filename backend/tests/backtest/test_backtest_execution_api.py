@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import backtest as api
-from app.backtest.strategy import TAIWAN_STAMP_TAX_OVERRIDE_ERROR
+from app.backtest.strategy import TAIWAN_STAMP_TAX_OVERRIDE_ERROR, StrategyBacktestConfig
 
 
 class _ImmediateThread:
@@ -385,3 +387,91 @@ def test_walkforward_rejects_annualized_objective_with_short_training_window(cap
     assert "at least 60 trading sessions" in response.json()["detail"]
     assert capture_worker == []
     assert api._running_jobs == {}
+
+
+def _resolved_minimum_commissions(captured) -> list[float]:
+    resolved = []
+    for kind, config in captured:
+        if kind == "backtest":
+            resolved.append(config.minimum_commission)
+        else:
+            replay = StrategyBacktestConfig(
+                strategy_id="test",
+                symbols=None,
+                start=date(2026, 1, 1),
+                end=date(2026, 1, 10),
+                **config.backtest_kwargs,
+            )
+            resolved.append(replay.minimum_commission)
+    return resolved
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ({}, 20.0),
+        ({"lot_mode": "board_lot"}, 20.0),
+        ({"lot_mode": "odd_lot"}, 1.0),
+        ({"lot_mode": "odd_lot", "minimum_commission": 0}, 0.0),
+        ({"lot_mode": "board_lot", "minimum_commission": 5}, 5.0),
+    ],
+)
+def test_backtest_routes_resolve_minimum_commission_by_lot_mode(
+    capture_worker,
+    extra: dict,
+    expected: float,
+) -> None:
+    client = _client()
+    assert client.post(
+        "/api/backtest/strategy/run",
+        json={"strategy_id": "test", "symbols": ["2330.TWSE"], **extra, **_SHORT_RANGE},
+    ).status_code == 200
+    for path, route_extra in (
+        ("/api/backtest/strategy/stream", {}),
+        ("/api/backtest/optimize/stream", _GRID),
+        (
+            "/api/backtest/walkforward/stream",
+            {"objective": "total_return", "train_days": 2, "test_days": 1, "step_days": 1, **_GRID},
+        ),
+    ):
+        with client.stream(
+            "GET",
+            path,
+            params={"strategy_id": "test", "symbols": "2330.TWSE", **extra, **route_extra, **_SHORT_RANGE},
+        ) as response:
+            assert "event: done" in response.read().decode("utf-8")
+
+    assert [kind for kind, _ in capture_worker] == ["backtest", "backtest", "optimize", "walkforward"]
+    assert _resolved_minimum_commissions(capture_worker) == [expected] * 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"lot_mode": "odd_lot", "minimum_commission": "3"},
+        {"minute_fill": "true", "regime_filter": '{"index":"TAIEX","min_state":"bull"}'},
+    ],
+)
+async def test_strategy_cancel_recomputes_stream_job_key(extra: dict) -> None:
+    params = {"strategy_id": "test", "symbols": "2330.TWSE", **_SHORT_RANGE, **extra}
+    stream_kwargs = {**params}
+    if "minimum_commission" in extra:
+        stream_kwargs["minimum_commission"] = float(extra["minimum_commission"])
+    if "minute_fill" in extra:
+        stream_kwargs["minute_fill"] = True
+    api._running_jobs.clear()
+    try:
+        await api.strategy_stream(_Request(), **stream_kwargs)
+        [job] = api._running_jobs.values()
+
+        cancelled = _client().post(
+            "/api/backtest/strategy/cancel",
+            json={"qs": urlencode(params)},
+        )
+
+        assert cancelled.json() == {"ok": True}
+        assert job.cancel_event.is_set()
+    finally:
+        api._running_jobs.clear()

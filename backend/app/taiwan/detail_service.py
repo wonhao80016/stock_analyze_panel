@@ -125,12 +125,14 @@ class TaiwanStockDetailService:
                 is_supported=True,
             )
 
-        # 2. Canonical Price Limits via MarketProfileBridge
+        # 2. Canonical Price Limits via MarketProfileBridge, for the session the quote belongs to
+        quote = self._fetch_quote(symbol_str)
+        rule_date = quote.trade_date if quote is not None and quote.trade_date else taipei_now().date()
         rule_known = master_item is not None
         limit_pct = None
         if rule_known:
             try:
-                limit_pct = MarketProfileBridge.get_price_limit_pct(master_item)
+                limit_pct = MarketProfileBridge.get_price_limit_pct(master_item, rule_date)
             except ValueError:
                 rule_known = False
         is_no_limit = rule_known and limit_pct is None
@@ -151,7 +153,7 @@ class TaiwanStockDetailService:
         )
 
         # 3. Realtime Quote & 5-Level Depth
-        realtime_data = self._aggregate_realtime(symbol_str, price_limit)
+        realtime_data = self._aggregate_realtime(symbol_str, price_limit, quote)
 
         # 4. Daily Historical K-Line
         daily_data = self._aggregate_daily(symbol_str, days)
@@ -213,20 +215,27 @@ class TaiwanStockDetailService:
             overall_data_quality=overall_quality,
         )
 
+    def _fetch_quote(self, symbol_str: str) -> Any | None:
+        """The live quote of *symbol_str*, or None when the realtime service has none or fails."""
+        try:
+            return self.realtime_service.get_quotes([symbol_str]).get(symbol_str)
+        except Exception as e:
+            logger.warning("Realtime aggregation failed for %s: %s", symbol_str, e)
+            return None
+
     def _aggregate_realtime(
         self,
         symbol_str: str,
         price_limit: TaiwanStockPriceLimit,
+        q: Any | None,
     ) -> TaiwanStockRealtime:
-        """Fetch live quote and enrich price limits."""
+        """Build the realtime section from the fetched quote and enrich price limits."""
         try:
-            quote_map = self.realtime_service.get_quotes([symbol_str])
-            q = quote_map.get(symbol_str)
             if q is not None:
                 # Calculate limit up/down via authoritative MarketProfileBridge.calc_limits
                 inst = self.security_master.get_instrument(symbol_str)
                 if q.prev_close and price_limit.price_limit_pct is not None and inst:
-                    lim_up, lim_dn = MarketProfileBridge.calc_limits(q.prev_close, inst)
+                    lim_up, lim_dn = MarketProfileBridge.calc_limits(q.prev_close, inst, q.trade_date)
                     price_limit.limit_up = lim_up
                     price_limit.limit_down = lim_dn
 

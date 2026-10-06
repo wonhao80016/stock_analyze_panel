@@ -616,3 +616,40 @@ def test_composite_children_never_rank_an_excluded_symbol(master):
     assert scores["2330.TWSE"] == alone["2330.TWSE"]
     assert scores["00888.TWSE"] == [0.0, 0.0, 0.0]
     assert stats["selection"]["entry_candidates"] == 3
+
+
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_a_new_listing_never_locks_before_its_sixth_session(tmp_path, master, use_cache):
+    """7799 lists on 2026-09-10 and closes one-price 10% or more above the day before on each session."""
+    from dataclasses import replace
+
+    from app.taiwan.market_rules import ListingSessions
+
+    symbol = "7799.TWSE"
+    master[symbol] = replace(_instrument(symbol), listing_date="20260910")
+    days = _sessions(date(2026, 9, 10), 7)
+    closes = [100.0, 125.0, 150.0, 180.0, 220.0, 242.0, 218.0]
+    service = object.__new__(TaiwanEnrichedRefreshService)
+    frame = service._add_limit_signals(
+        _bars(symbol, days, [(c, c) for c in closes]), sessions=ListingSessions(tuple(days))
+    )
+
+    market = _load(tmp_path, frame, use_cache=use_cache)
+
+    assert market.limit_up_locked[:, 0].tolist() == [0, 0, 0, 0, 0, 1, 0]
+    assert market.limit_down_locked[:, 0].tolist() == [0, 0, 0, 0, 0, 0, 1]
+
+
+def test_a_stock_without_a_listing_date_is_excluded_with_its_own_reason(master):
+    from dataclasses import replace
+
+    master["2330.TWSE"] = _instrument("2330.TWSE")
+    master["7799.TWSE"] = replace(_instrument("7799.TWSE"), listing_date=None)
+    master["7798.TPEX"] = replace(_instrument("7798.TPEX"), listing_date="not-a-date")
+
+    excluded = matrix_module.taiwan_limit_rule_exclusions(["2330.TWSE", "7799.TWSE", "7798.TPEX"])
+
+    assert excluded == [
+        {"symbol": "7798.TPEX", "reason": "listing_date_unknown"},
+        {"symbol": "7799.TWSE", "reason": "listing_date_unknown"},
+    ]

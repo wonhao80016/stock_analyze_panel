@@ -175,6 +175,41 @@ def taiwan_limit_pct_by_symbol(symbols: Sequence[str]) -> dict[str, float | None
     return resolved
 
 
+def taiwan_ipo_windows(symbols: Sequence[str]) -> dict[str, tuple[date, date]]:
+    """First and last no-limit session of each Taiwan initial listing among *symbols*, on the stored calendar.
+
+    A symbol without a window, or whose rule is unknown, is absent.
+    """
+    taiwan = sorted({
+        str(symbol)
+        for symbol in symbols
+        if str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES)
+    })
+    if not taiwan:
+        return {}
+
+    from app.taiwan.daily_store import listing_sessions
+    from app.taiwan.universe import get_security_master
+    from app.taiwan.universe.models import MarketProfileBridge
+
+    master = get_security_master()
+    sessions = None
+    windows: dict[str, tuple[date, date]] = {}
+    for symbol in taiwan:
+        instrument = master.get_instrument(symbol)
+        if instrument is None or instrument.instrument_type != "stock":
+            continue
+        if sessions is None:
+            sessions = listing_sessions()
+        try:
+            window = MarketProfileBridge.ipo_no_limit_window(instrument, sessions)
+        except ValueError:
+            continue
+        if window is not None:
+            windows[symbol] = window
+    return windows
+
+
 def _limit_pct_value(symbol: str, taiwan_pct: Mapping[str, float | None]) -> float:
     pct = taiwan_pct[symbol] if symbol in taiwan_pct else board_limit_pct(symbol)
     return np.nan if pct is None else float(pct)
@@ -234,6 +269,14 @@ def write_numpy_price_limit_matrix(
     )
     if legacy_rows.any():
         target[legacy_rows] = legacy.astype(np.float32, copy=False)
+    windows = taiwan_ipo_windows(symbols)
+    for asset_id, symbol in enumerate(symbols):
+        window = windows.get(str(symbol))
+        if window is not None:
+            rows = np.fromiter(
+                (window[0] <= value <= window[1] for value in trading_dates), dtype=bool, count=len(trading_dates)
+            )
+            target[rows, asset_id] = np.nan
     if valid is not None:
         target[~valid] = np.nan
     return target

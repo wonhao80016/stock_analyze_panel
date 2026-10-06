@@ -270,10 +270,10 @@ class TestTaiwanScreenerCore:
 
         orig_get_price_limit_pct = MarketProfileBridge.get_price_limit_pct
 
-        def _mock_get_price_limit_pct(inst):
+        def _mock_get_price_limit_pct(inst, *args):
             if inst.symbol == "2330.TWSE":
                 raise ValueError("Refusing to apply regulatory market rules to unconfirmed ETF")
-            return orig_get_price_limit_pct(inst)
+            return orig_get_price_limit_pct(inst, *args)
 
         monkeypatch.setattr(MarketProfileBridge, "get_price_limit_pct", _mock_get_price_limit_pct)
 
@@ -576,3 +576,65 @@ class TestTaiwanScreenerVolumePatterns:
         data = resp.json()
         assert [item["symbol"] for item in data["items"]] == ["8069.TPEX"]
         assert data["items"][0]["volume_patterns"] == ["vp_step_up"]
+
+
+_IPO = "7799.TWSE"
+_IPO_SESSIONS = (date(2026, 9, 10), date(2026, 9, 11), date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16),
+                 date(2026, 9, 17))
+_IPO_CLOSES = (100.0, 125.0, 150.0, 180.0, 220.0, 240.0)
+
+
+@pytest.fixture
+def ipo_store(tmp_path, monkeypatch):
+    """7799.TWSE lists on 2026-09-10 and is quoted on its *sessions*-th session."""
+    from dataclasses import replace
+
+    from app.config import settings
+    from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+
+    master = get_security_master()
+    listing = replace(master.get_instrument("2330.TWSE"), symbol=_IPO, code="7799", listing_date="20260910")
+    monkeypatch.setitem(master._instruments, _IPO, listing)
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+
+    def build(sessions: int, **changes) -> TaiwanDailyStore:
+        if changes:
+            monkeypatch.setitem(master._instruments, _IPO, replace(listing, **changes))
+        store = TaiwanDailyStore(data_dir=tmp_path / f"daily{sessions}")
+        store.write_batch(pl.DataFrame([
+            _bar(_IPO, d, c) for d, c in zip(_IPO_SESSIONS[:sessions], _IPO_CLOSES, strict=False)
+        ]))
+        TaiwanEnrichedRefreshService(
+            daily_store=store,
+            enriched_root=tmp_path / "kline_daily_enriched",
+            share_capital=TaiwanShareCapitalStore(data_dir=tmp_path),
+        ).refresh()
+        return store
+
+    return build
+
+
+class TestTaiwanScreenerNewListing:
+    def test_a_new_listing_has_no_limit_inside_its_first_five_sessions(self, ipo_store):
+        store = ipo_store(3)
+        item = _limit_item(store, _IPO)
+        assert item.close == 150.0
+        assert item.is_no_limit is True
+        assert (item.price_limit_pct, item.limit_up, item.limit_down) == (None, None, None)
+        assert (item.distance_to_upper_limit, item.distance_to_lower_limit) == (None, None)
+        assert _limit_item(store, _IPO, near_upper_limit=True) is None
+
+    def test_a_new_listing_takes_the_ordinary_limit_on_its_sixth_session(self, ipo_store):
+        store = ipo_store(6)
+        item = _limit_item(store, _IPO)
+        assert (item.price_limit_pct, item.is_no_limit) == (0.10, False)
+        assert (item.limit_up, item.limit_down) == (242.0, 198.0)
+        assert _limit_item(store, _IPO, near_upper_limit=True) is not None
+
+    def test_a_stock_without_a_listing_date_has_an_unknown_rule(self, ipo_store):
+        store = ipo_store(6, listing_date=None)
+        item = _limit_item(store, _IPO)
+        assert (item.price_limit_pct, item.is_no_limit) == (None, False)
+        assert (item.limit_up, item.limit_down) == (None, None)
+        assert (item.distance_to_upper_limit, item.distance_to_lower_limit) == (None, None)

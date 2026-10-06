@@ -164,7 +164,8 @@ def load_inputs(
 ) -> PerformanceInputs:
     """Read compute_outcomes inputs from stores under *data_dir* without creating anything on disk.
 
-    *limit_profile* maps symbols to symbol, limit_pct, is_etf_tick (taiwan_limit_profile in production).
+    *limit_profile* maps symbols to symbol, limit_pct, is_etf_tick and optionally ipo_start, ipo_end
+    (taiwan_limit_profile in production).
     """
     root = Path(data_dir)
     daily_dir = root / "taiwan" / "daily"
@@ -403,11 +404,21 @@ def compute_outcomes(
         "symbol",
         pl.col("limit_pct").cast(pl.Float64).alias("_limit_pct"),
         pl.col("is_etf_tick").cast(pl.Boolean).alias("_is_etf_tick"),
+        *(
+            (pl.col(c) if c in limit_profile.columns else pl.lit(None)).cast(pl.Date).alias(f"_{c}")
+            for c in ("ipo_start", "ipo_end")
+        ),
     ).unique(subset=["symbol"], keep="last")
     frame = (
         frame.join(entry_bars, left_on=["symbol", "entry_date"], right_on=["symbol", "_entry_bar_date"], how="left")
         .join(signal_bars, left_on=["symbol", "signal_date"], right_on=["symbol", "_signal_bar_date"], how="left")
         .join(profile, on="symbol", how="left")
+        .with_columns(
+            PriceLimitModel.polars_session_limit_pct(
+                pl.col("_limit_pct"), pl.col("entry_date"), pl.col("_ipo_start"), pl.col("_ipo_end")
+            ).alias("_limit_pct")
+        )
+        .drop("_ipo_start", "_ipo_end")
     )
 
     limit_up = _limit_up_expr()

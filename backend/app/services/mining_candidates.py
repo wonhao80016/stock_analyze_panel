@@ -419,6 +419,8 @@ class MiningCandidateService:
             "entry_fill": "open_t+1",
             "exit_fill": "open_t+1",
             "commission_pct": request.get("commission_pct", 0.0002),
+            # Mining simulates without a commission floor; replays must not pick up the API default.
+            "minimum_commission": 0.0,
             "stamp_tax_pct": request.get("stamp_tax_pct", 0.0005),
             "slippage_bps": request.get("slippage_bps", 5.0),
             "mode": "position",

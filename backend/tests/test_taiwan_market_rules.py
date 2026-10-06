@@ -396,8 +396,10 @@ def test_enriched_limit_signals_use_the_shared_ladder():
     from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
 
     service = TaiwanEnrichedRefreshService.__new__(TaiwanEnrichedRefreshService)
-    service._limit_profile = lambda symbols: pl.DataFrame(
-        {"symbol": symbols, "limit_pct": [0.10] * len(symbols), "is_etf_tick": [False] * len(symbols)}
+    service._limit_profile = lambda symbols, _sessions: pl.DataFrame(
+        {"symbol": symbols, "limit_pct": [0.10] * len(symbols), "is_etf_tick": [False] * len(symbols),
+         "ipo_start": [None] * len(symbols), "ipo_end": [None] * len(symbols)},
+        schema_overrides={"ipo_start": pl.Date, "ipo_end": pl.Date},
     )
     closes = [5695.0, 5690.0, 4665.0, 4670.0]
     frame = pl.DataFrame({

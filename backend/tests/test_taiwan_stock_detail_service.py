@@ -342,3 +342,34 @@ def test_service_index_limit_rule_is_not_applicable():
     assert res.price_limit.price_limit_pct is None
     assert res.price_limit.is_no_limit is False
     assert (res.price_limit.limit_up, res.price_limit.limit_down) == (None, None)
+
+
+def test_a_new_listing_viewed_on_the_weekend_takes_one_session_for_rule_and_prices(tmp_path, monkeypatch):
+    """7799 lists on Mon 2026-09-07, so Fri 09-11 is its fifth session. Seen on Sat 09-12, the rule and the
+    limit prices both follow the Friday quote: no limit, and no limit prices."""
+    from dataclasses import replace
+
+    from app.config import settings
+    from app.taiwan import detail_service
+    from app.taiwan.daily_store import TaiwanDailyStore
+    from app.taiwan.universe import get_security_master
+
+    master = get_security_master()
+    listing = replace(master.get_instrument("2330.TWSE"), symbol="7799.TWSE", code="7799", listing_date="20260907")
+    monkeypatch.setitem(master._instruments, listing.symbol, listing)
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    sessions = [date(2026, 9, 4), *(date(2026, 9, d) for d in (7, 8, 9, 10, 11))]
+    TaiwanDailyStore(tmp_path / "taiwan" / "daily").write_batch(pl.DataFrame([
+        {"symbol": "2330.TWSE", "date": d.isoformat(), "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+         "volume": 1.0, "amount": 1.0, "quote_ts": None}
+        for d in sessions
+    ]))
+    monkeypatch.setattr(detail_service, "taipei_now", lambda: datetime(2026, 9, 12, 10, 0))
+    svc = _offline_service(listing.symbol, 150.0, 140.0)
+    quote = replace(_make_sample_quote(listing.symbol, 150.0, 140.0), trade_date=date(2026, 9, 11))
+    svc.realtime_service.get_quotes.return_value = {listing.symbol: quote}
+
+    limits = svc.get_stock_detail(listing.symbol).price_limit
+
+    assert (limits.price_limit_pct, limits.is_no_limit, limits.rule_type) == (None, True, "無漲跌幅限制")
+    assert (limits.limit_up, limits.limit_down) == (None, None)

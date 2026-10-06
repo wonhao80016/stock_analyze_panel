@@ -598,3 +598,22 @@ def test_the_live_candle_carries_the_quote_previous_close():
 
     assert out[-1]["date"] == str(today)
     assert out[-1]["prev_close"] == 704.0
+
+
+def test_market_breadth_ignores_published_limits_inside_an_initial_listing_window(daily, monkeypatch):
+    """With 2454 newly listed on 2026-09-04, its published 1500 limit up on the event session does not apply."""
+    from dataclasses import replace
+
+    from app.taiwan import market_intelligence
+    from app.taiwan.market_rules import ListingSessions
+
+    master = get_security_master()
+    monkeypatch.setitem(
+        master._instruments, "2454.TWSE", replace(master.get_instrument("2454.TWSE"), listing_date="20260904")
+    )
+    monkeypatch.setattr(market_intelligence, "listing_sessions", lambda store=None: ListingSessions(tuple(SESSIONS)))
+    _publish_events()
+
+    totals = _market(daily).get_snapshot(EVENT).market_totals
+
+    assert totals.upper_limit_count == 0

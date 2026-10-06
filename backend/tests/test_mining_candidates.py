@@ -677,3 +677,15 @@ def test_promote_still_allowed_for_gated_candidates(tmp_path) -> None:
     result = service.promote(run_id, signature)
 
     assert result["status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [None, {"kind": "existing_strategy", "strategy_id": "existing_daily"}],
+)
+def test_promoted_config_pins_mining_minimum_commission(tmp_path, definition) -> None:
+    store, run_id, signature = _create_run(tmp_path, definition=definition)
+
+    promoted = _service(tmp_path, store).promote(run_id, signature)
+
+    assert promoted["config"]["minimum_commission"] == 0.0

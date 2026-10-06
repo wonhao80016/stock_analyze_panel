@@ -122,9 +122,11 @@ def get_quotes(
     tw_svc = get_realtime_service()
     quote_map = tw_svc.get_quotes(symbol_list, force_refresh=force)
     
+    from app.taiwan.daily_store import listing_sessions
     from app.taiwan.universe import get_security_master
     from app.taiwan.universe.models import MarketProfileBridge
     sec_master = get_security_master()
+    sessions = listing_sessions()
 
     rows = []
     for q in quote_map.values():
@@ -136,14 +138,14 @@ def get_quotes(
         rule_known = inst is not None
         if rule_known:
             try:
-                limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+                limit_pct = MarketProfileBridge.get_price_limit_pct(inst, q.trade_date, sessions)
             except ValueError:
                 rule_known = False
         if rule_known:
             if limit_pct is None:
                 is_no_limit = True
             elif q.prev_close is not None:
-                limit_up, limit_down = MarketProfileBridge.calc_limits(q.prev_close, inst)
+                limit_up, limit_down = MarketProfileBridge.calc_limits(q.prev_close, inst, q.trade_date, sessions)
         d["limit_up"] = limit_up
         d["limit_down"] = limit_down
         d["price_limit_pct"] = limit_pct
@@ -167,11 +169,14 @@ def search_taiwan_instruments(
     limit: int = Query(20, ge=1, le=100),
 ):
     """查詢台灣證券主檔 (Security Master)。支援股票、ETF、權證搜尋與支援狀態判斷。"""
+    from app.taiwan.daily_store import listing_sessions
     from app.taiwan.universe import get_security_master
     from app.taiwan.universe.models import MarketProfileBridge
 
     sec_master = get_security_master()
     results = sec_master.search(q, limit=limit)
+    today = taipei_now().date()
+    sessions = listing_sessions()
     
     # 附帶法規限制資訊 (方便前端即時判斷是否支援接近漲跌停規則)
     enriched = []
@@ -182,7 +187,7 @@ def search_taiwan_instruments(
         is_no_limit = False
         if inst and inst.is_supported:
             try:
-                limit_pct = MarketProfileBridge.get_price_limit_pct(inst)
+                limit_pct = MarketProfileBridge.get_price_limit_pct(inst, today, sessions)
                 is_no_limit = (limit_pct is None)
             except ValueError:
                 limit_pct = None

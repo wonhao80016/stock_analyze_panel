@@ -439,3 +439,38 @@ def test_an_etf_tick_size_comes_from_the_etf_ladder(symbol, previous_close, tick
     ctx = TaiwanStockResearchContextService(daily_store=mock_daily).get_research_context(symbol, d_curr)
 
     assert ctx.market_rules_context.tick_size == tick
+
+
+def test_an_unknown_listing_date_is_an_unknown_rule_not_no_limit():
+    d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
+    mock_daily = MagicMock()
+    mock_daily.available_dates.return_value = [d_prev, d_curr]
+    mock_daily.read_range.return_value = pl.DataFrame({
+        "symbol": ["TEST.TWSE", "TEST.TWSE"],
+        "date": [d_prev, d_curr],
+        "open": [100.0, 102.0],
+        "high": [101.0, 106.0],
+        "low": [99.0, 101.0],
+        "close": [100.0, 105.0],
+        "volume": [10000.0, 15000.0],
+        "amount": [1000000.0, 1575000.0],
+    })
+    mock_sm = MagicMock()
+    inst = MagicMock()
+    inst.symbol, inst.code, inst.name, inst.exchange = "TEST.TWSE", "TEST", "測試股", "TWSE"
+    inst.instrument_type, inst.industry, inst.currency = "stock", "半導體業", "TWD"
+    inst.listing_status, inst.listing_date, inst.updated_at = "active", None, "2026-08-28"
+    mock_sm.get_instrument.return_value = inst
+    mock_sm.to_dataframe.return_value = pl.DataFrame({
+        "symbol": ["TEST.TWSE"], "name": ["測試股"], "exchange": ["TWSE"], "instrument_type": ["stock"],
+        "industry": ["半導體業"], "listing_status": ["active"],
+    })
+
+    ctx = TaiwanStockResearchContextService(daily_store=mock_daily, security_master=mock_sm).get_research_context(
+        "TEST.TWSE", d_curr
+    )
+
+    rules = ctx.market_rules_context
+    assert rules.is_no_limit is False
+    assert (rules.price_limit_pct, rules.limit_up, rules.limit_down) == (None, None, None)
+    assert rules.meta.classification == "MISSING"
