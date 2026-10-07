@@ -1,22 +1,24 @@
 # 台股看板全面稽核與修正追蹤
 
-> 原始稽核日期：2026-09-24。最新重核日期：2026-10-06；第 1 階段（回測可信度）全部完成後，於 2026-10-07 再次更新。
-> 最新重核基準：`6582e9e`（重核當時的 HEAD，分支 `feat/market-filter-volume-patterns`）。第 1 階段的程式已在 `0bfa82f` 提交（目前 HEAD 為 `4897616`），其後的 S8 新上市規則、最低手續費預設與 vectorbt 移除還在工作樹、尚未提交。第 1 階段更新的 finding 與本頁標為第 1 階段的證據，行號對目前工作樹，其餘行號對 `6582e9e`。工作樹另有 `frontend/pnpm-lock.yaml`、`frontend/vite.config.d.ts` 的無關修改，不作為程式現況證據。
-> 行號偏移：`6582e9e` 之後改過的檔案，未更新列的 `6582e9e` 行號都可能已經偏移，請以函式名稱定位。第 1 階段在 `0bfa82f` 提交，改動較大的有 `backend/app/backtest/engine.py`、`factor.py`、`strategy.py`、`matrix.py`、`walkforward.py`，`backend/app/api/backtest.py`、`kline.py`、`intraday.py`，`backend/app/indicators/pipeline.py`，`backend/app/taiwan/market_rules.py`、`screener.py`、`enriched_refresh.py`、`detail_service.py`，`frontend/src/lib/api.ts`、`frontend/src/pages/StrategyBacktest.tsx`、`frontend/src/components/EChartsIntraday.tsx`，`backend/app/services/backtest.py` 已刪除。目前工作樹相對 HEAD 又改了（依 `git diff HEAD --stat`）：`backend/app/api/backtest.py`、`intraday.py`、`kline.py`，`backend/app/backtest/engine.py`、`matrix.py`、`strategy.py`，`backend/app/indicators/pipeline.py`，`backend/app/price_limits.py`，`backend/app/services/mining_candidates.py`、`strategy_pick_performance.py`，`backend/app/taiwan/daily_store.py`、`detail_service.py`、`enriched_refresh.py`、`market_intelligence.py`、`market_rules.py`、`research_context.py`、`screener.py`、`universe/models.py`，`frontend/src/pages/StrategyBacktest.tsx`，以及 `backend/pyproject.toml`、`backend/uv.lock`、部署文件與相關測試檔。
+> 原始稽核日期：2026-09-24。最新重核日期：2026-10-06；第 1 階段（回測可信度）全部完成後，於 2026-10-07 再次更新；第 2 階段（資料完整性與證券主檔）在程式上完成後，於 2026-10-07 第三次更新。
+> 最新重核基準：`6582e9e`（重核當時的 HEAD，分支 `feat/market-filter-volume-patterns`）。第 1 階段已全部提交（主要在 `0bfa82f`，S8 在 `6515eb0`），目前 HEAD 為 `c4ec192`。第 2 階段的程式還在工作樹、尚未提交，它的資料寫入（主檔刷新、enriched 全量重新發佈、策略快取重算、`kline_daily` 殘留隔離）也都還沒執行。第 2 階段更新的 finding 與本頁標為第 2 階段的證據，行號對目前工作樹；第 1 階段的證據，行號對第 1 階段完成時的工作樹；其餘行號對 `6582e9e`。工作樹另有 `frontend/pnpm-lock.yaml`、`frontend/vite.config.d.ts` 的無關修改，不作為程式現況證據。
+> 行號偏移：`6582e9e` 之後改過的檔案，未更新列的 `6582e9e` 行號都可能已經偏移，請以函式名稱定位。第 1 階段在 `0bfa82f` 提交，改動較大的有 `backend/app/backtest/engine.py`、`factor.py`、`strategy.py`、`matrix.py`、`walkforward.py`，`backend/app/api/backtest.py`、`kline.py`、`intraday.py`，`backend/app/indicators/pipeline.py`，`backend/app/taiwan/market_rules.py`、`screener.py`、`enriched_refresh.py`、`detail_service.py`，`frontend/src/lib/api.ts`、`frontend/src/pages/StrategyBacktest.tsx`、`frontend/src/components/EChartsIntraday.tsx`，`backend/app/services/backtest.py` 已刪除。第 2 階段改過的檔案見 [recheck-2026-10-06.md](recheck-2026-10-06.md) 開頭；第 1 階段證據引用到這些檔案的行號可能已經偏移。
 > 本頁前半部是進度入口，194 條 finding 的逐條判定與現行證據在 [recheck-2026-10-06.md](recheck-2026-10-06.md)；後半部保留 2026-09-24 的原始稽核基線。原章節與附錄的程式碼行號只對 `ced12a5` 有效，不能當成目前位置。
 
-## 目前結論（2026-10-07，第 1 階段完成後）
+## 目前結論（2026-10-07，第 2 階段程式完成後）
 
-原稽核的 194 條有效 finding（被推翻的 1 條不計）已全部對照程式碼逐條重核；第 1 階段（回測可信度）完成後，又依目前工作樹更新了其中 22 條。以下數字都由 [recheck-2026-10-06.md](recheck-2026-10-06.md) 的逐條表重算。
+原稽核的 194 條有效 finding（被推翻的 1 條不計）已全部對照程式碼逐條重核；第 1 階段（回測可信度）完成後更新了其中 22 條，第 2 階段（資料完整性與證券主檔）在程式上完成後，又依目前工作樹更新了 17 條。以下數字都由 [recheck-2026-10-06.md](recheck-2026-10-06.md) 的逐條表重算。
 
-- 已修正 62 條，其中 52 條有直接測試，10 條只有上游輸入的測試；部分修正 8 條；未修正 124 條。第 1 階段之前是已修正 43、部分修正 11、未修正 140。
-- 27 條 P1 中，26 條已修正（6 條缺直接測試），1 條部分修正，已沒有未修正的 P1。剩下的是 A12#0：產業情報的資料品質仍只看有沒有資料。
-- 根因層級：RC01、RC03、RC04、RC07、RC08、RC12、RC19 已關閉；RC02、RC05、RC06 主路徑已修，各剩 1～2 條殘留；RC14、RC22、RC25、RC31 與單項有部分進展；其餘 22 個根因（RC09–RC11、RC13、RC15–RC18、RC20、RC21、RC23、RC24、RC26–RC30、RC32–RC36）的 finding 全部未修正。
-- A11（回測／成本）11 條全部已修正且有直接測試，是第一個「已完成」的章節。`f404a85` 新增的回測頁（`/backtest`）讓回測 finding 從 UI 就會觸發，第 1 階段已把這一章的 P1 與統計口徑全部修好。
-- 第 1 階段已完成。S8 新上市規則已實作（A05#3 已修正）：初次上市（上櫃）一般股含創新板，自上市日起第 1–5 個交易日不設漲跌幅，依據是[證交所營業細則第 63 條第 2 項](https://twse-regulation.twse.com.tw/TW/law/DOC01_print.aspx?FLCODE=FL007304&FLNO=63)（2026-10-06 查證原文）與[證交所創新板交易制度](https://www.twse.com.tw/TIB/zh/mechanism.html)。enriched 已於 2026-10-07 全量重新發佈，已存的連板數與新上市期間的漲跌停訊號都已更正。
+- 已修正 78 條，其中 68 條有直接測試，10 條只有上游輸入的測試；部分修正 4 條；未修正 112 條。第 2 階段之前是已修正 62、部分修正 8、未修正 124；第 1 階段之前是已修正 43、部分修正 11、未修正 140。
+- 27 條 P1 全部已修正（6 條缺直接測試）。最後一條 A12#0（產業情報的資料品質只看有沒有資料）已在第 2 階段改為依交易所判定。
+- 根因層級：RC01–RC04、RC07、RC08、RC12、RC14、RC19、RC27 已關閉；RC05、RC06 主路徑已修，各剩 1 條殘留；RC09、RC22、RC25、RC31 與單項有部分進展；其餘 20 個根因（RC10、RC11、RC13、RC15–RC18、RC20、RC21、RC23、RC24、RC26、RC28–RC30、RC32–RC36）的 finding 全部未修正。
+- A11（回測／成本）與 G06（商品分類）的 finding 全部已修正且有直接測試。G06 的期貨信託分類要到主檔刷新後才寫進本機主檔。`f404a85` 新增的回測頁（`/backtest`）讓回測 finding 從 UI 就會觸發，第 1 階段已把 A11 的 P1 與統計口徑全部修好。
+- 第 2 階段的程式已完成、尚未提交：證券主檔每日刷新（驗證、保留下市、查詢 TPEx ETF 主被動型態）與新上市回補；主動式、CEOGEU、期貨信託 ETF 與 TDR 的分類；`listing_date` 改為 ISO；限股票策略不再選進 ETF；產業情報與異常診斷依交易所判定品質；`data_integrity` 改掃台股表、只回報；enriched 依 schema 與漲跌幅規則決定全量重建；`--symbols` 的上櫃日K改用 dailyQuotes；台股不再讀寫 `kline_daily`。
+- 第 2 階段的資料寫入都還沒執行，要逐項取得核准（見「修正順序規劃」的第 2 階段上線步驟）。只在這些步驟之後才生效的部分，各 finding 的備註都有寫明。之前估計 enriched 全量重新發佈要 40 分鐘是錯的：`data/backend.log*` 記錄的全量重寫，2026-10-01、10-02、10-06 是 48～57 秒，10-05 是 116 秒。
+- 第 1 階段已完成並提交。S8 新上市規則已實作（A05#3 已修正）：初次上市（上櫃）一般股含創新板，自上市日起第 1–5 個交易日不設漲跌幅，依據是[證交所營業細則第 63 條第 2 項](https://twse-regulation.twse.com.tw/TW/law/DOC01_print.aspx?FLCODE=FL007304&FLNO=63)（2026-10-06 查證原文）與[證交所創新板交易制度](https://www.twse.com.tw/TIB/zh/mechanism.html)。enriched 已於 2026-10-07 全量重新發佈，已存的連板數與新上市期間的漲跌停訊號都已更正。
 - 第 1 階段的待決事項都已決定並完成：S8 口徑、enriched 全量重新發佈、vectorbt 移除，以及回測最低手續費預設改為整股 20 元、零股 1 元。
 - 第 0 階段（止血）已在 2026-10-06 完成：`tests/backtest` 回到全綠，回測頁補上口徑說明，零股模式不再把股數顯示成張數，選股頁 RSI＝0 正確顯示（A03#1）。
-- G02、G06 仍是「未完成」。
+- 沒有「未完成」的章節了：G02 的外幣面額（G02#3）已修正，G06 的 3 條全部修正。
 
 ### 狀態定義
 
@@ -43,44 +45,48 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 
 | 章節 | 狀態 | 已修正 | 部分修正 | 未修正 | 已確認進展 | 主要缺口 |
 |---|---|---|---|---|---|---|
-| A01 股價資料 | 部分完成 | 5 | 1 | 4 | 雙市場快照失敗拒存、同日初值回補、前復權與官方參考價、快照日期比對。 | 證券主檔不刷新（7812 沒有日K）、`data_integrity` 只掃 A 股表、`kline_daily` 殘留、`--symbols` 上櫃量口徑、enriched 歷史分區欄位不一致。 |
-| A02 MA／MACD | 部分完成 | 2（2） | 0 | 7 | 前復權輸入；選股與自選頁改讀已發佈的指標。 | 盤中增量路徑（RC09）整組未動；MACD 柱 2× 與命名；EMA／MACD 無暖機門檻；浮點相等。 |
+| A01 股價資料 | 部分完成 | 9 | 1 | 0 | 雙市場快照失敗拒存、同日初值回補、前復權與官方參考價、快照日期比對。第 2 階段：證券主檔每日刷新與新上市回補、`data_integrity` 改掃台股表、台股讀取端不再讀 `kline_daily`、`--symbols` 上櫃改用 dailyQuotes、enriched 依 schema 與漲跌幅規則全量重建。 | `kline_daily` 4 個殘留分區待隔離（需核准）；主檔刷新尚未執行，7812 仍沒有日K。 |
+| A02 MA／MACD | 部分完成 | 3（2） | 0 | 6 | 前復權輸入；選股與自選頁改讀已發佈的指標；預熱期間台股不再以 `kline_daily` 全量回退（第 2 階段）。 | 盤中增量路徑（RC09）其餘 3 條未動；MACD 柱 2× 與命名；EMA／MACD 無暖機門檻；浮點相等。 |
 | A03 KD／RSI | 部分完成 | 3（1） | 1 | 3 | Cutler RSI 已移除；選股頁 RSI＝0 正確顯示；自選頁 KDJ、RSI6、RSI24 有值；上市首日 RSI＝0 已消除。 | KD 初值 50；盤中 RSI 遞推；K 線自訂起日暖機；RSV 0/0。 |
-| A04 Boll／ATR／量能 | 部分完成 | 4（2） | 0 | 8 | 前復權；選股與研究脈絡的量比改讀管線口徑；同日初值回補。 | 盤中 60 日高低、布林、遞推窗口；開盤量比放大上千倍；量能口徑混用；ATR 種子；252 日年化。 |
-| A05 漲跌停／訊號 | 部分完成 | 7 | 2 | 6 | 除權息日漲跌停基準改用參考價；回測鎖死改讀已發佈訊號；連板數依檔位重算並已全量重新發佈；新上市前 5 日不設漲跌幅；10000 哨兵移除；逼近漲跌停改以前一日收盤；分時線與報價面板的國外 ETF、檔位與百分比；ETF 分類失敗不再回 500；檔位表收斂成單一實作。 | 主動式 ETF 分類仍判不出；CEOGEU；檔位表的批次路徑沒有逐列帶交易日；跌停翻紅定義；盤中 60 日高低與布林；布林 ddof；MACD 交叉暖機；浮點相等。 |
-| A06 換手率／市值／漲跌幅 | 部分完成 | 4 | 1 | 7 | 除權息日漲跌幅、同日初值回補、上櫃缺日拒存、股本刷新不再整檔覆寫。 | 盤中換手率口徑；休市日重發佈清空換手率；ETF／TDR 分母；萬億、股／張單位；MIS 成交額恆為空。 |
+| A04 Boll／ATR／量能 | 部分完成 | 5（2） | 0 | 7 | 前復權；選股與研究脈絡的量比改讀管線口徑；同日初值回補；增量失敗時台股不再以 `kline_daily` 回退（第 2 階段）。 | 盤中 60 日高低、布林、遞推窗口；開盤量比放大上千倍；量能口徑混用；ATR 種子；252 日年化。 |
+| A05 漲跌停／訊號 | 部分完成 | 9 | 1 | 5 | 除權息日漲跌停基準改用參考價；回測鎖死改讀已發佈訊號；連板數依檔位重算並已全量重新發佈；新上市前 5 日不設漲跌幅；10000 哨兵移除；逼近漲跌停改以前一日收盤；分時線與報價面板的國外 ETF、檔位與百分比；ETF 分類失敗不再回 500；檔位表收斂成單一實作。第 2 階段：主動式 ETF 依官方旗標分類、CEOGEU 改判未知並以稽核清單確認（主動式 ETF 要等主檔刷新）。 | 檔位表的批次路徑沒有逐列帶交易日；跌停翻紅定義；盤中 60 日高低與布林；布林 ddof；MACD 交叉暖機；浮點相等。 |
+| A06 換手率／市值／漲跌幅 | 部分完成 | 5 | 1 | 6 | 除權息日漲跌幅、同日初值回補、上櫃缺日拒存、股本刷新不再整檔覆寫；TDR 不再以原股數算換手率與市值（第 2 階段）。 | 盤中換手率口徑；休市日重發佈清空換手率；ETF 分母；萬億、股／張單位；MIS 成交額恆為空。 |
 | A07 籌碼 | 部分完成 | 2 | 0 | 5 | 法人改用官方金額；法人初值回補。 | 詳細頁即時路徑券資比為空；缺列語意；選股器用舊列；未使用的因子程式；「近 5 日」卡含 1 日值。 |
 | A08 趨勢策略 | 部分完成 | 2（1） | 0 | 10 | 前復權輸入；上櫃缺日拒存。 | 缺值評分 0 分；滾動窗口遇缺列變 NaN；`exclude_new_days` 未實作；macd_golden 暖機；策略條件與命名；固定股數門檻。 |
 | A09 動能策略 | 部分完成 | 2（1） | 0 | 10 | 前復權輸入；同日初值回補。 | 滾動窗口與 KNN 佔位特徵；factor_rank 門檻；lorentzian 選股／回測不一致；composite；換手率門檻；252 日年化。 |
-| A10 反轉策略 | 部分完成 | 2（1） | 0 | 14 | 前復權輸入；同日初值回補。 | 缺值評分；bottom_reversal 進場當根即出場；評分方向；composite 合併口徑；`exclude_new_days`；限股票策略選進 ETF。 |
+| A10 反轉策略 | 部分完成 | 3（1） | 0 | 13 | 前復權輸入；同日初值回補；限股票策略不再選進 ETF（第 2 階段，已存的策略快取待重算）。 | 缺值評分；bottom_reversal 進場當根即出場；評分方向；composite 合併口徑；`exclude_new_days`。 |
 | A11 回測／成本 | 已完成 | 11 | 0 | 0 | 策略、優化、步進、mining 接上台股成本與交易單位，拒絕單一稅率覆蓋；舊回測路徑刪除；鎖死改讀已發佈訊號；股數與費用用原始價；觸價依升降單位取整；年化、Sharpe、profit factor、mc_maxdd 新口徑；walk-forward 依交易日；基準改用加權指數。 | 章內 finding 已全部修正；已知限制見「第 1 階段留下的已知缺口」。 |
-| A12 選股／統計 | 部分完成 | 5 | 1 | 4 | 上櫃缺日拒存、除權息日參考價、法人金額、選股量比與 RSI 口徑、同日初值回補、逼近漲跌停改以前一日收盤。 | 產業情報仍只看有無資料（P1 殘留）；空值排最前；首頁推薦數重複加總；regime 與指數欄位。 |
+| A12 選股／統計 | 部分完成 | 6 | 0 | 4 | 上櫃缺日拒存、除權息日參考價、法人金額、選股量比與 RSI 口徑、同日初值回補、逼近漲跌停改以前一日收盤；產業情報依交易所判定品質（第 2 階段）。 | 空值排最前；首頁推薦數重複加總；regime 與指數欄位。 |
 | A13 即時行情 | 部分完成 | 2 | 0 | 6 | 上櫃缺日拒存；同日初值回補。 | 收盤集合競價不進即時路徑；13:25–13:30 當成連續交易；STOCK_DAY_ALL 每 6 秒無快取下載；盤中量能口徑；分鐘量歸屬；Yahoo 開盤價。 |
-| G01 異常診斷 | 部分完成 | 2 | 1 | 9 | 除權息日參考價；同日初值回補。 | 資料品質仍只看有無資料；SHORT_SURGE 標籤；零中位數不評估；先捨入再比門檻；母體與基期；最低融資門檻。 |
-| G02 基本面／比較 | 未完成 | 0 | 0 | 6 | 無。 | 基本面無快取；財報任一類別失敗整卡失敗；累計值未標示；外幣面額；10 個財務欄位讀 A 股 API；比較頁 null 一律顯示「不適用」。 |
+| G01 異常診斷 | 部分完成 | 3 | 0 | 9 | 除權息日參考價；同日初值回補；資料品質依交易所判定（第 2 階段）。 | SHORT_SURGE 標籤；零中位數不評估；先捨入再比門檻；母體與基期；最低融資門檻。 |
+| G02 基本面／比較 | 部分完成 | 1 | 0 | 5 | 面額保留幣別與官方原文，TDR 股數改標原股（第 2 階段）。 | 基本面無快取；財報任一類別失敗整卡失敗；累計值未標示；10 個財務欄位讀 A 股 API；比較頁 null 一律顯示「不適用」。 |
 | G03 研究脈絡 | 部分完成 | 3 | 0 | 7 | 上櫃缺日不再標 complete；同日初值回補；研究總狀態繼承市場完整性；ETF 的 tick size 改用 ETF 檔位。 | 大盤基準卡永遠「--」；16:00 切目標日；20 日高低未標收盤；AI 證據少大盤脈絡的時段反而變長；證據計數寫死。 |
 | G04 關鍵價位 | 部分完成 | 2（2） | 0 | 9 | 前復權消除分割與除權息的機械缺口。 | 換手率缺值退化成無衰減 Volume Profile；盤中樞軸點漂移；缺口回補判定；Keltner；未依升降單位取整；聚合方式；API 舊欄位名；簡體標籤。 |
 | G05 圖表口徑 | 部分完成 | 4 | 0 | 7 | 日K與分時改用後端 `prev_close`；除權息日分時漲跌停線改用官方價；國外成分 ETF 不畫漲跌停線；漲跌停價依檔位取整；同日初值回補。 | 量比 N 未折算；十億元格式；分時均價範圍；`connectNulls`；成交量以股顯示；迷你分時均線；換手率公式多乘 100。 |
-| G06 商品分類 | 未完成 | 0 | 1 | 2 | 債券 ETF 已改判 bond。 | TDR 偽產業；8 檔期貨信託 ETF 仍標國外股票；`listing_date` 格式；舊主檔快取不會重建。 |
+| G06 商品分類 | 已完成 | 3 | 0 | 0 | 債券 ETF 已改判 bond。第 2 階段：TDR 以 `security_class` 標示、產業計入未分類；期貨信託 ETF 改判 futures／inverse；`listing_date` 一律 ISO；主檔每日刷新。 | 章內 finding 已全部修正；期貨信託分類要到主檔刷新後才寫進本機主檔。 |
 
 ## 已確認完成的主要修正
 
-標「第 1 階段」的列，證據行號對目前工作樹；其餘列對 `6582e9e`。「第 1 階段」的程式在 `0bfa82f` 提交，S8 還在工作樹。
+標「第 2 階段」的列，證據行號對目前工作樹；標「第 1 階段」的列，行號對第 1 階段完成時的工作樹；其餘列對 `6582e9e`。第 1 階段已全部提交（主要在 `0bfa82f`，S8 在 `6515eb0`）；第 2 階段還在工作樹、尚未提交。
 
 | 根因 | 狀態 | 主要證據 | 相關 commit |
 |---|---|---|---|
 | RC01 公司行動、參考價與前復權 | 已關閉；8 條只有價格層測試。第 1 階段補上 A11#2（回測以原始價計算股數與費用）與 G05#0（除權息日分時漲跌停線用官方價） | `backend/app/taiwan/enriched_refresh.py:105-135`、`backend/app/indicators/pipeline.py:387-400`；測試 `backend/tests/test_taiwan_reference_prices.py:132`、`backend/tests/test_taiwan_forward_adjustment.py:178`。第 1 階段：`backend/app/backtest/engine.py:67-72`、`backend/app/api/kline.py:357-413`；測試 `backend/tests/backtest/test_raw_price_sizing.py:143`、`backend/tests/test_kline_minute_price_limit_taiwan.py:106` | `b9a9d50`、`0bfa82f` |
-| RC02 不完整雙市場資料被當成完成 | 主路徑已修；殘留 A12#0、G01#1 | `backend/app/taiwan/providers/snapshot_provider.py:138-159`、`backend/app/taiwan/daily_store.py:294-314`；測試 `backend/tests/test_taiwan_snapshot_daily.py:242` | `180c071` |
+| RC02 不完整雙市場資料被當成完成 | 已關閉；第 2 階段補上 A12#0、G01#1（產業情報與異常診斷依交易所判定品質，新增 provisional） | `backend/app/taiwan/providers/snapshot_provider.py:138-159`、`backend/app/taiwan/daily_store.py:294-314`；測試 `backend/tests/test_taiwan_snapshot_daily.py:242`。第 2 階段：`backend/app/taiwan/market_intelligence.py:111-145`、`backend/app/taiwan/industry_intelligence.py:270-289`、`backend/app/taiwan/abnormal_diagnostics.py:716-735`；測試 `backend/tests/test_stage2_quality_gates.py:213`、`:274` | `180c071`；第 2 階段在工作樹（未提交） |
 | RC03 同交易日初值不回補 | 已關閉 | `backend/app/taiwan/daily_store.py:50-57`、`:323-330`、`backend/app/taiwan/daily_update.py:374-385`；測試 `backend/tests/test_taiwan_provisional_refresh.py:145` | `584fe89`、`612ea7a` |
 | RC04 市場法人以股數跨證券彙總 | 已關閉 | `backend/app/taiwan/market_intelligence.py:309-331`；測試 `backend/tests/test_taiwan_market_institutional.py:785` | `9330088` |
 | RC05 各頁各自重算指標 | 主路徑已修；殘留 A06#11 | `backend/app/taiwan/screener.py:230`、`backend/app/taiwan/research_context.py:454-455`、`backend/app/taiwan/watchlist_enrichment.py:153-161`；測試 `backend/tests/test_taiwan_screener.py:189`、`backend/tests/test_taiwan_watchlist_enrichment.py:358` | `9330088` |
 | RC06 漲跌停價與升降單位多份實作（第 1 階段） | 主路徑已修；殘留 A05#14（批次路徑沒有逐列帶交易日）。連板數已隨 2026-10-07 的全量重新發佈更正 | `backend/app/taiwan/market_rules.py:188-262`、`backend/app/backtest/matrix.py:1443-1472`、`backend/app/taiwan/enriched_refresh.py:265-289`、`backend/app/api/kline.py:298-327`；測試 `backend/tests/test_taiwan_market_rules.py:329`、`backend/tests/backtest/test_limit_lock_taiwan.py:175`、`backend/tests/test_taiwan_limit_streak.py:107` | `0bfa82f` |
 | RC07 回測台股費稅與交易單位 | 已關閉；第 1 階段補上拒絕單一稅率覆蓋、刪除舊回測路徑、觸價依升降單位取整 | `fea6532`（行號對 `6582e9e`）：`backend/app/backtest/strategy.py:525-590`、`backend/app/backtest/engine.py:162-181`；測試 `backend/tests/backtest/test_taiwan_execution.py:57-106`。第 1 階段（行號對工作樹）：`backend/app/backtest/strategy.py:569-642`（拒絕單一稅率覆蓋在 `:585-586`）、`backend/app/backtest/engine.py:79-111`、`:213-245`；測試 `backend/tests/backtest/test_taiwan_execution.py:128`、`backend/tests/backtest/test_trigger_tick_rounding.py:147` | `fea6532`、`0bfa82f` |
 | RC08 成交日使用不可知資訊 | 已關閉 | `backend/app/backtest/strategy.py:516-522`、`backend/app/backtest/engine.py:1253-1257`、`:2361-2366`；測試 `backend/tests/backtest/test_taiwan_execution.py:540-762` | `fea6532` |
-| RC12 漲跌幅限制不分商品別與上市狀態（第 1 階段） | 已關閉：國外成分 ETF 不畫漲跌停線（S4），新上市前 5 日不設漲跌幅（S8） | `backend/app/taiwan/universe/models.py:140-232`、`backend/app/taiwan/market_rules.py:334-357`、`backend/app/api/kline.py:298-327`；測試 `backend/tests/test_taiwan_limit_ipo.py:121`、`backend/tests/test_kline_minute_price_limit_taiwan.py:140`、`:188` | `0bfa82f`；S8 在工作樹（未提交） |
+| RC12 漲跌幅限制不分商品別與上市狀態（第 1 階段） | 已關閉：國外成分 ETF 不畫漲跌停線（S4），新上市前 5 日不設漲跌幅（S8） | `backend/app/taiwan/universe/models.py:140-232`、`backend/app/taiwan/market_rules.py:334-357`、`backend/app/api/kline.py:298-327`；測試 `backend/tests/test_taiwan_limit_ipo.py:121`、`backend/tests/test_kline_minute_price_limit_taiwan.py:140`、`:188` | `0bfa82f`、`6515eb0` |
 | RC19 逼近漲跌停以當日收盤為基準（第 1 階段） | 已關閉 | `backend/app/taiwan/screener.py:320-419`；測試 `backend/tests/test_taiwan_screener.py:415`、`:471` | `0bfa82f` |
 | 回測統計口徑與基準（第 1 階段，RC31、RC22 的回測部分） | A11#6、#7、#9 已修正；RC31 剩 `annual_vol_20d` 的 252 年化（A04#8、A09#10） | `backend/app/backtest/engine.py:488-575`、`backend/app/backtest/walkforward.py:35-72`、`backend/app/backtest/strategy.py:2060-2098`；測試 `backend/tests/backtest/test_stats_methodology.py:77`、`backend/tests/backtest/test_walkforward.py:57`、`backend/tests/backtest/test_benchmark_taiex.py:182` | `0bfa82f` |
-| 市場完整性二次閘門 | universe、上市／上櫃覆蓋、provisional 與研究狀態已納入完成判定；覆蓋率門檻在 `6582e9e` 放寬為 ≥98% | `backend/app/taiwan/market_intelligence.py:703-718`、`backend/app/taiwan/research_context.py:781-793`；測試 `backend/tests/test_taiwan_market_intelligence.py`、`backend/tests/test_taiwan_research_context.py:388-416` | `fea6532`、`6582e9e` |
+| RC14 證券主檔與商品分類（第 2 階段） | 已關閉（程式）：主檔每日刷新、驗證失敗保留舊檔、保留下市；新上市自動回補；主動式、CEOGEU、期貨信託 ETF 分類；`listing_date` ISO；限股票策略不選 ETF。本機主檔要到上線步驟刷新後才套用 | `backend/app/taiwan/universe/service.py:579-678`、`backend/app/taiwan/daily_update.py:158-294`、`backend/app/taiwan/universe/adapters.py:198-200`、`:563-605`、`backend/app/strategy/engine.py:643-674`；測試 `backend/tests/test_stage2_master_refresh.py:221`、`backend/tests/test_stage2_master_wiring.py:296`、`backend/tests/test_stage2_etf_classification.py:55`、`backend/tests/test_stage2_strategy_asset_types.py:160` | 工作樹（未提交） |
+| RC27 TDR 與外幣面額（第 2 階段） | 已關閉：TDR 以 `security_class` 標示，產業計入未分類，不算換手率與市值，證交稅 0.1%；面額保留幣別與官方原文 | `backend/app/taiwan/universe/models.py:162-180`、`backend/app/taiwan/share_capital_store.py:211-229`、`backend/app/taiwan/fundamentals.py:60-77`、`backend/app/taiwan/market_rules.py:127-129`；測試 `backend/tests/test_stage2_tdr.py:73`、`backend/tests/test_stage2_tdr_consumers.py:100`、`:515` | 工作樹（未提交） |
+| RC22 A 股遺留表（第 2 階段的部分） | A01#4 已修正（`data_integrity` 改掃台股表、只回報，不再擋即時行情）；A01#5 部分修正（台股讀取端改讀 `taiwan/daily`，殘留分區待隔離）；A12#8、G02#1 未動 | `backend/app/services/data_integrity.py:95-138`、`backend/app/repository.py:1924-1954`、`backend/app/services/quote_service.py:870-877`、`:1753-1771`；測試 `backend/tests/test_stage2_data_integrity.py:98`、`backend/tests/test_stage2_kline_daily_readers.py:62` | 工作樹（未提交） |
+| enriched 全量重建條件、`--symbols` 上櫃口徑（第 2 階段，A01#6、A01#9） | 已修正：歷史分區 schema 或窗口外標的的漲跌幅規則改變就全量重建；`--symbols` 的上櫃日K改用 dailyQuotes、不覆寫已存列，主檔中已下市的上櫃標的也可回補，寫入後 enriched 從最早寫入日起重新發佈 | `backend/app/taiwan/enriched_refresh.py:119-174`、`backend/app/taiwan/daily_refresh.py:289-315`、`:382-398`；測試 `backend/tests/test_stage2_enriched_triggers.py:148`、`:161`、`backend/tests/test_stage2_symbols_backfill.py:233`、`:255`、`:569` | 工作樹（未提交） |
+| 市場完整性二次閘門 | universe、上市／上櫃覆蓋、provisional 與研究狀態已納入完成判定；覆蓋率門檻在 `6582e9e` 放寬為 ≥98%。第 2 階段改以 `listing_date` 與 `delisted_at` 推算目標日的母體，不再要求主檔時點早於目標日（`backend/app/taiwan/market_intelligence.py:70-108`；測試 `backend/tests/test_stage2_master_refresh.py:620`、`:631`） | `backend/app/taiwan/market_intelligence.py:703-718`、`backend/app/taiwan/research_context.py:781-793`；測試 `backend/tests/test_taiwan_market_intelligence.py`、`backend/tests/test_taiwan_research_context.py:388-416` | `fea6532`、`6582e9e` |
 
 `06b173c` 的重試只涵蓋 `snapshot_provider.py`（MI_INDEX、TPEx dailyQuotes）與 `share_capital_store.py`，不算 RC20 的進展。以下是新能力，不等於關閉既有 finding：`c611a3f` 的市場濾網與量價型態、`ba2e007` 與 `e9453b5` 的推薦歷史與訊號後報酬，以及 `f404a85` 的回測頁。
 
@@ -92,7 +98,7 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 |---|---|---|---|
 | 0 | 止血（2026-10-06 已完成） | 修 `test_worker_process.py` 的 5 個失敗測試，改成不送 `stamp_tax_pct`。回測頁補上口徑說明：年化 252 日、Sharpe rf=0、每邊 5 bps 滑價、明細為前復權價；零股模式的「張數」改成「股數」。修前端 RSI＝0 顯示成「-」（A03#1）。 | 測試不全綠，後續驗收都不可信。回測頁已上線，數字修好之前至少不要誤導使用者。完成驗證：`tests/backtest` 全目錄 `308 passed`；`frontend/` 的 `StrategyBacktest.test.tsx`、`TaiwanScreener.test.tsx` 共 `67 passed`；`pnpm build` 退出碼 0。回測頁的口徑說明在第 1 階段已依新口徑改寫。 |
 | 1 | 回測可信度（2026-10-07 已完成） | 已完成：<br>1. 升降單位與漲跌停價收斂成 `market_rules.py` 的單一實作（S1）；回測鎖死改讀 enriched 已發佈的訊號，漲跌幅規則未知的標的排除（S2）；管線的漲跌停訊號與連板數改用同一模型，10000 哨兵移除（S3）；分時 API、分時線、報價面板、詳細頁與研究脈絡改由後端依檔位計算（S4）。<br>2. 選股「逼近漲跌停」改以前一日收盤或官方參考價為基準（S5）。<br>3. 策略回測拒絕單一稅率覆蓋（S6）；因子回測、舊 `/api/backtest/run` 與 legacy `simulate()` 已刪除（S7）。<br>4. 股數、手續費與交易明細改用當時的原始價（S9）；觸價依升降單位取整（S10）。<br>5. 年化改依日曆天數、Sharpe 可扣無風險利率、profit factor 與 mc_maxdd 新口徑（S11）；walk-forward 改以交易日切分（S12）；基準改用加權指數（S13）。<br>6. 新上市前 5 日不設漲跌幅（S8）：初次上市（上櫃）一般股含創新板適用；同代號在上市日前已有本機日K者視為轉上市，照 10%；TDR 照原規則；`listing_date` 未知時一律當成「未知」。<br>7. enriched 於 2026-10-07 00:28 以 `--full` 全量重新發佈，發佈前已備份；回測最低手續費預設改為整股 20 元、零股 1 元；vectorbt 已移除。 | 第 1 階段結束後，P1 只剩 A12#0（第 2 階段）。 |
-| 2 | 資料完整性與證券主檔 | 1. 證券主檔定期刷新（A01#8）。<br>2. 順著主檔修主動式 ETF 分類（A05#4 殘留）、CEOGEU（A05#5）、期貨信託 ETF 分類（G06#1）、TDR（RC27）、`listing_date`（G06#2）、限股票策略選進 ETF（A10#10）。<br>3. 產業情報與異常診斷的資料品質改依交易所判定（A12#0、G01#1 殘留）。<br>4. `data_integrity` 改成掃台股資料表（RC22）。<br>5. enriched 歷史分區依 schema 決定是否全量重建（A01#6 殘留）；`--symbols` 路徑的上櫃量口徑（A01#9）。 | `6582e9e` 的完整性閘門以主檔為分母；主檔不刷新，新上市股的缺漏就偵測不到。A12#0 是唯一的 P1 殘留，要優先處理。 |
+| 2 | 資料完整性與證券主檔（2026-10-07 程式完成，資料寫入待核准） | 已完成（程式，尚未提交）：<br>1. 證券主檔刷新（A01#8）：交易日台北時間 16:00 後、目標日是今天時，16:30／21:40 排程與設定頁「更新」按鈕刷新主檔，當天已有完整成功（TPEx ETF 型態查完）就不再刷新；驗證不過就保留舊檔；官方清單沒有的標的保留為 `delisted`；最近 20 個分區內新上市的標的，在第一筆已存日K之前缺的日子會自動回補。<br>2. 分類：主動式 ETF（A05#4）、CEOGEU 與稽核清單（A05#5）、期貨信託 ETF（G06#1）、TDR（RC27）、`listing_date` ISO（G06#2）；限股票策略不選 ETF（A10#10）。<br>3. 產業情報與異常診斷的資料品質依交易所判定，新增 provisional（A12#0、G01#1）。<br>4. `data_integrity` 改掃台股資料表、只回報，移除完整性檢查造成的 409 與修復任務（A01#4；報價服務暫停時的 409 仍保留，`backend/app/api/settings.py:831-833`）；台股讀取端不再讀 `kline_daily`（A01#5、A02#5、A04#11）。<br>5. enriched 依 schema 與漲跌幅規則決定全量重建（A01#6）；`--symbols` 的上櫃日K改用 dailyQuotes（A01#9）。<br>6. 證交稅：TDR 0.1%（依財政部函釋；當沖同率是我們對第 2 條之 2 的解讀）；被動債券 ETF 免稅到 2026-12-31，之後依現行法改課 ETF 稅率 0.1%，回測不再從 2027 年起出錯；股票當沖減半到 2027-12-31，之後回到 0.3%。 | P1 已全部修正。上線步驟與已知缺口見本節下方與「第 2 階段的已知缺口」。 |
 | 3 | 盤中一致性 | 1. 交易時段模型（RC11）：13:25–13:30 改判為集合競價，收盤集合競價的成交進入即時路徑，並加入休市日曆。<br>2. 盤中量能（RC10）：開盤量比折算加上限、統一量的口徑、前端「量比N」也要折算；MIS 為來源時成交額恆為空（A06#11 殘留）。<br>3. 盤中增量路徑（RC09）依下方待決事項第 3 項的結論修正，並補上 RSI 暖機門檻；台股部署的盤中路徑目前不計算漲跌停訊號與連板數（`backend/app/indicators/pipeline.py:1789`，工作樹行號：只在 instruments 非空時才算），一併處理。<br>4. 分鐘量歸屬（RC18）、STOCK_DAY_ALL 加快取（RC20），以及 Yahoo 備援的開盤價（A13#5）。 | 即時行情開啟時每天都在作用。第 3 階段開工前，必須先完成第 6 階段的回歸測試。 |
 | 4 | 策略與選股 | 1. 缺值 fail-closed、null 排最後（RC13），同步修改 `test_matrix_strategy.py:855-887` 與 `c611a3f` 的買進／觀察分級。<br>2. 滾動窗口遇缺列（RC24）、暖機門檻與 `exclude_new_days`（RC25）。<br>3. 逐支修正策略條件（RC23），再修 composite（RC28）、RC35、RC36。<br>4. 換手率的定義與分母（RC29），包括 high_turnover_surge 的門檻。 | 要先完成第 2 階段的商品分類。第 1 階段已完成，漲跌停與升降單位模型（含新上市規則）已可直接使用。 |
 | 5 | 顯示、標示與次要模組 | 大盤基準卡（RC15）、名稱與說明（RC17）、顯示格式（RC16）、關鍵價位（RC21）、基本面快取與容錯（G02）、詳細頁即時路徑券資比為空（A07#1，P2）、`annual_vol_20d` 的年化（A04#8、A09#10）、首頁推薦數重複加總（A12#6）、未使用的籌碼因子程式（A07#5），以及 RC26、RC30、RC32、RC33、RC34。 | 多屬 P3，或只影響單一畫面。RC15 的資料已經有了，可以提前做。 |
@@ -100,16 +106,27 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 
 需要先決定的事項：
 
-1. AI 研究遇到 `provisional` 資料時，要帶入大盤脈絡並加註提示，還是維持排除？這決定 G03#6 的修法。
+1. AI 研究遇到 `provisional` 資料時，要帶入大盤脈絡並加註提示，還是維持排除？這決定 G03#6 的修法。第 2 階段已讓產業脈絡為 provisional 時帶入 AI 並註明是初值（`backend/app/taiwan/ai_research.py:164`），大盤脈絡仍只接受 current／complete；16:30～21:40 融資未公布時，兩者都是 partial，仍被排除。
 2. RC09 是直接改成共用 pipeline（範圍大，但能根治），還是先逐項修補？
 
 第 1 階段的待決事項都已決定並完成：S8 的 3 個口徑問題、enriched 全量重新發佈、vectorbt 移除（`backend/pyproject.toml` 保留空的 backtest extra 以維持相容），以及最低手續費預設（整股 20 元、零股 1 元，有傳值時以傳值為準，mining 維持 0）。
+
+第 2 階段上線步驟（資料寫入，都還沒執行）：
+
+以新程式重新啟動後端（或讓執行中的開發伺服器自動重新載入新程式），自動路徑就已啟用：交易日的 16:30／21:40 排程與 16:00 後按下設定頁「更新」按鈕，會刷新主檔、發佈 enriched、重算策略快取，不會再詢問。所以**重新啟動就等於核准排程刷新與策略快取重算**。下面第 1、2 步必須在重新啟動當天 16:00 之前、也就是第一次自動執行之前完成，第一次刷新應以第 3 步的 CLI 手動執行。
+
+1. 主檔刷新的 dry-run：`python -m app.taiwan.daily_update --master-dry-run`，只讀官方清單、不寫檔，列出新增、下市與重新分類。S6 當時（2026-10-07 03:52，之後程式仍有修改，要重跑）的結果是新增 00992B、6604、7812、7856，下市 00793B、00847B、8183，388 檔重新分類，耗時 127 秒。
+2. 核准刷新前，先確認 00793B、00847B、8183 確實已下市或終止上櫃；目前的證據只有「不在官方清單」。
+3. 第一次主檔刷新：`python -m app.taiwan.daily_update --refresh-master`（刷新後會接著跑一次每日更新，並回補新上市標的的日K）；之後交給交易日 16:00 後的排程或按鈕自動刷新。上櫃 ETF 會逐檔查 TPEx ETF/detail 的「ETF類別」（每次間隔 1 秒），補上主動／被動型態。數量驟降或下市數超過上限時會拒絕，`--force` 才放行。
+4. enriched 全量重新發佈：`python -m app.taiwan.enriched_refresh --full`，約 1～2 分鐘（2026-10 的 log 為 48～116 秒）。本機的因子紀錄還沒有漲跌幅規則，第一次發佈只記基準、不重建，所以稽核清單（00877 等）與主檔重新分類的漲跌停訊號要靠這一步寫進歷史分區。
+5. 策略快取重算：交易日的 16:30 排程或設定頁「更新」按鈕會自動重算（已包含在重新啟動的核准內）；在此之前，已存的選股結果仍可能含有限股票策略選進的 ETF。
+6. `kline_daily` 殘留隔離：把 `data/kline_daily` 的 2026-09-16、09-17、09-18、09-22 四個分區移到 `data\_quarantine\`（A01#5）。
 
 每完成一個階段，就更新本節的表格、[recheck-2026-10-06.md](recheck-2026-10-06.md) 對應的列，以及下一節的待修正清單。
 
 ## 目前待修正項目
 
-除了最前面的「立即處理」，其餘依嚴重度分組：先 P1，再依「會不會給出錯誤的金融數字或判斷」排 P2，最後是 P3 與測試補強。執行順序以上一節「修正順序規劃」為準。未標第 1 階段的行號對 `6582e9e`；完整證據見 [recheck-2026-10-06.md](recheck-2026-10-06.md)。
+除了最前面的「立即處理」，其餘依嚴重度分組：先 P1，再依「會不會給出錯誤的金融數字或判斷」排 P2，最後是 P3 與測試補強。執行順序以上一節「修正順序規劃」為準。標第 2 階段的行號對目前工作樹，標第 1 階段的行號對第 1 階段完成時的工作樹，其餘對 `6582e9e`；完整證據見 [recheck-2026-10-06.md](recheck-2026-10-06.md)。
 
 ### 立即處理：讓既有測試回到全綠（2026-10-06 已完成）
 
@@ -117,37 +134,34 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 
 ### P1：會使金融結果或核心判定不可信
 
-第 1 階段之後，P1 只剩 1 條部分修正、沒有未修正：
-
-1. **產業情報的資料品質仍只看有無資料**（A12#0 殘留，RC02）：上游已不寫入只有上市的半分區，但遇到舊資料或重抓失敗時，產業情報仍會回報 `complete`（`backend/app/taiwan/industry_intelligence.py:257-263`）。
+第 2 階段之後，27 條 P1 全部已修正（6 條缺直接測試，見「P3 與測試補強」的補測試項）。最後一條 A12#0 在第 2 階段改為依交易所判定產業情報的品質（`backend/app/taiwan/industry_intelligence.py:270-289`）。
 
 第 1 階段已修正的 P1：回測漲跌停鎖死（A11#1、A05#0）、非策略回測路徑的 A 股成本（A11#0 殘留，舊路徑已刪除）、回測以復權價計算股數與手續費（A11#2 殘留），以及除權息日分時漲跌停線（G05#0 殘留）。
 
 ### P2：明確功能、分類或顯示錯誤
 
-1. **盤中增量路徑另有一套遞推**（RC09，P2 6 條，另 4 條 P3）：仍是 90 個日曆天窗口與各自的 EMA、RSI 狀態（`backend/app/repository.py:750`、`:803-812`、`:814-836`），60 日高低用最高／最低價、布林用母體標準差與 `>=`，交叉訊號拿上一輪快照比，預熱時回退讀 `kline_daily`。另外 RSI 暖機門檻只加在全量路徑（`backend/app/indicators/pipeline.py:587-595`），盤中路徑（`:1638-1650`）沒有，新上市標的盤中與盤後會不一致（推測）。
+1. **盤中增量路徑另有一套遞推**（RC09，P2 6 條，另 2 條 P3；A02#5、A04#11 已在第 2 階段修正）：仍是 90 個日曆天窗口與各自的 EMA、RSI 狀態（`backend/app/repository.py:750`、`:803-812`、`:814-836`），60 日高低用最高／最低價、布林用母體標準差與 `>=`，交叉訊號拿上一輪快照比。預熱時回退讀 `kline_daily` 的問題（A02#5、A04#11）已在第 2 階段改為台股不回退。另外 RSI 暖機門檻只加在全量路徑（`backend/app/indicators/pipeline.py:587-595`），盤中路徑（`:1638-1650`）沒有，新上市標的盤中與盤後會不一致（推測）。
 2. **盤中量能口徑與時間折算**（RC10，P2 3 條，另 2 條 P3）：開盤量比放大倍數沒有上限（`backend/app/taiwan/realtime/calendar.py:140`、`backend/app/indicators/pipeline.py:1662-1663`）；MIS 整股量與官方全日量混用（`backend/app/services/quote_service.py:178-215`）；前端「量比N」未折算。
 3. **交易時段與休市日曆**（RC11，P2 3 條，另 1 條 P3）：13:25–13:30 仍判為連續交易（`calendar.py:118-119`），收盤集合競價的成交進不了即時路徑（`backend/app/taiwan/realtime/mis_provider.py:209-213`）；休市日重發佈會清空換手率（`backend/app/jobs/daily_pipeline.py:250`）；研究脈絡 16:00 就切到當天（`backend/app/taiwan/research_context.py:367`）。
 4. **缺值當成 0 分或排最前**（RC13，P2 5 條，另 1 條 P3）：`backend/app/backtest/matrix.py:3754` 把任一評分欄缺值的候選給 0 分；`backend/app/strategy/engine.py:965`、`backend/app/taiwan/screener.py:562` 讓 null 排最前；`backend/app/indicators/levels.py:104-122` 把 null 換手率當 0。修正時要一併改 `backend/tests/backtest/test_matrix_strategy.py:855-887`，它把「缺值得 0 分」寫成預期值。
 5. **策略矩陣的滾動窗口與暖機**（RC24，3 條；RC25 的 P2，4 條）：rolling 函式遇缺列就變 NaN（`backend/app/backtest/matrix.py:3025-3042`、`:3449-3484`）；`exclude_new_days=30` 未實作（`backend/app/strategy/engine.py:1418-1483`）；macd_golden 單獨執行只用 61 根暖機（`backend/app/strategy/builtin/macd_golden.py:55-57`）；KD 初值 50 未做。
 6. **個別策略條件與 composite 合併**（RC23 的 P2，2 條；RC28，1 條 P2）：bottom_reversal 的出場條件在進場當根就成立（`backend/app/strategy/builtin/bottom_reversal.py:151`）；factor_rank_research 以截面 min-max 配固定 70／40 門檻（`factor_rank_research.py:117-129`）；composite 選股與回測對單一候選、同分的歸一化不同（`backend/app/strategy/composite.py:76-83`、`:222-226`）。
-7. **證券主檔與商品分類**（RC14，P2 3 條；RC27，1 條 P2）：主檔建立後不再刷新（`backend/app/taiwan/universe/service.py:136-145`）；主動式 ETF 仍判不出分類（`backend/app/taiwan/universe/adapters.py:469-473`），第 1 階段後搜尋、詳細頁、報價面板不再回 500，改顯示「漲跌幅規則未知」，回測也會排除；CEOGEU 被當成國內成分；TDR 形成「未知產業（91）」（`adapters.py:429-436`）。這條也和 `6582e9e` 的完整性閘門有關：新掛牌股不在主檔，缺漏偵測不到。
+7. **證券主檔與商品分類**（RC14、RC27）：第 2 階段已在程式上修正，等上線步驟的主檔刷新與 enriched 全量重新發佈才會套用到本機資料。
 8. **分鐘資料與分時圖**（RC18，2 條 P2；RC16，1 條 P2）：快照間的累計量整筆算給觀察到它的那一分鐘（`backend/app/taiwan/realtime/minute_recorder.py:134-157`）；分時均價只涵蓋有錄製的時段（`frontend/src/lib/intraday-chart.ts:16-26`）；1e9 被當成 1 億（`frontend/src/components/EChartsIntraday.tsx:33-34`）。
 9. **大盤指數與研究脈絡**（RC15，1 條 P2）：詳細頁的大盤基準卡仍以空陣列解析（`backend/app/taiwan/detail_service.py:626-629`），永遠顯示「--」。加權指數日線現在每天都會回補（`backend/app/jobs/daily_pipeline.py:129-211`），所以可以直接接上。
 10. **名稱與實際計算不符**（RC17 的 P2，3 條）：SHORT_SURGE 的「減少」仍標成「融券激增」（`frontend/src/pages/TaiwanScreener.tsx:971`）；「跌停翻紅」不要求收盤高於昨收（`frontend/src/lib/signals.ts:160-162`）；「價量背離」命名。
 11. **官方資料的快取與容錯**（RC20，1 條 P2）：報價過期時，每 6 秒下載一次沒有快取的 STOCK_DAY_ALL（`backend/app/services/quote_service.py:1217-1219`、`backend/app/taiwan/providers/hybrid_provider.py:236-241`）。
 12. **其他 P2**：
     - 關鍵價位的盤中樞軸點漂移與缺口回補判定（`backend/app/indicators/levels.py:172-179`、`:441-450`）。
-    - `data_integrity` 只掃 A 股表（`backend/app/services/data_integrity.py:44`、`:138`）。
     - 詳細頁即時路徑的券資比為空（`backend/app/taiwan/detail_service.py:535`）。
-    - 異常診斷在融資融券 20 日中位數為 0 時不評估（`backend/app/taiwan/abnormal_diagnostics.py:510`），資料品質也只看有無資料（G01#1 殘留）。
+    - 異常診斷在融資融券 20 日中位數為 0 時不評估（`backend/app/taiwan/abnormal_diagnostics.py:510`）。資料品質只看有無資料的問題（G01#1）已在第 2 階段修正。
 
 ### P3 與測試補強
 
-- **P3 未修正 82 條、部分修正 4 條**，集中在：
+- **P3 未修正 74 條、部分修正 3 條**，集中在：
   - RC16 顯示格式：萬億、股／張、MACD 柱、簡體標籤。
   - RC21 關鍵價位細節：Keltner、取整、聚合、舊欄位名。
-  - RC22 A 股遺留：regime、財務欄位、`kline_daily` 殘留。回測基準已在第 1 階段改用加權指數。
+  - RC22 A 股遺留：regime、財務欄位、`kline_daily` 殘留分區待隔離（第 2 階段已讓台股讀取端改讀 `taiwan/daily`）。回測基準已在第 1 階段改用加權指數。
   - RC25 暖機：EMA、ATR、MACD 交叉。
   - RC29 換手率定義。
   - RC30 布林標準差。
@@ -156,7 +170,7 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
   - RC33 缺列語意。
   - RC34 資料標示：AI 證據少大盤脈絡的時段，在 `fea6532` 後延長到隔日。
   - RC35、RC36。
-  - 以及 A05#14、G06#1、A01#6、A06#11 的殘留。
+  - 以及 A01#5、A05#14、A06#11 的殘留。
   - 逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)。
 - **補測試**：以下 6 條 P1 已因前復權而修正，但沒有斷言指標值或策略訊號的回歸測試：A02#0、A03#0、A04#0、A08#2、A09#0、A10#0。另有 4 條 P2／P3 也只有上游測試：G04#2、G04#4、A02#7、A04#9。
 - **回測頁的口徑揭露**：年化與 Sharpe 口徑、無風險利率、滑價、原始成交價與前復權損益、加權指數不含息、最低手續費預設（整股 20 元、零股 1 元），都已在第 0、1 階段寫進頁面說明。
@@ -165,11 +179,11 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 
 - 台股部署的盤中路徑不計算漲跌停訊號與連板數（`data/instruments` 為空，`backend/app/indicators/pipeline.py:1789`），盤中與盤後尚未一致，留到第 3 階段。
 - 新上市規則以「同代號在上市日前已有本機日K」判斷轉上市，代號被重新使用時會把新公司誤判為轉上市而照 10%。
-- TDR 以「91 開頭的 6 位數代號，或名稱以 -DR 結尾」判斷，名稱不帶 -DR 的 4 位數 TDR 會被當成一般股套用新上市規則。
+- （第 2 階段已處理）TDR 原本以「91 開頭的 6 位數代號，或名稱以 -DR 結尾」判斷；現在改用 `security_class`，產業代碼 91 也算，名稱不帶 -DR 的 4 位數 TDR 不會再套用新上市規則。
 - 新上市期間依本機已存的交易日計算（`listing_sessions` 有 60 秒快取），其他行程寫入新交易日後最多延遲 60 秒才生效；日K漏存時期間會往後延長，上市日早於本機第一個交易日時照 10%。
 - 檔位表的批次路徑沒有逐列帶交易日，千金股升降單位新制（預計 2027 年 7 月）加入表格前要先補上。
-- enriched 是否重新發佈只看公司行動的指紋，不看主檔的漲跌幅規則，主檔更新後已發佈的漲跌停訊號可能過時。
-- Security Master 由 bootstrap 換檔後不會重新載入，主檔與漲跌幅快取要到重啟才更新（`backend/app/taiwan/bootstrap.py:364-368`）。
+- （第 2 階段已處理）enriched 原本只看公司行動的指紋；現在窗口外標的的漲跌幅規則改變也會全量重建。本機第一次發佈只記基準，見上線步驟第 4 項。
+- （第 2 階段已處理）bootstrap 換檔改為不覆蓋較新的本機主檔，並立即重新載入；主檔檔案變動時，程式內的主檔與漲跌幅快取也會重新載入。
 - 回測的 polars 面板路徑（選股與即時監控也共用）缺漲跌停訊號欄時，會靜默當成沒有鎖死（`backend/app/backtest/matrix.py:2892-2902`）。
 - 報價面板與詳細頁在除權息日仍用 MIS 的昨收算漲跌停，沒有改用官方參考價。
 - 配股增加的股數不追蹤（公司行動表沒有配股比例），賣出費稅略為低估，淨值不受影響；減資退還股款時，出場股數是近似值。
@@ -177,12 +191,25 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 - mining 的 Sharpe 不套 60 個交易日的門檻，無風險利率固定為 0。
 - 回測基準是加權價格指數、不含息，策略淨值含息，超額報酬會高估約一年的殖利率。
 
+### 第 2 階段的已知缺口
+
+- 第一次主檔快照之前就下市的標的不在主檔裡；早於該快照的目標日，市場統計與產業情報的母體可能少算（沒有 `known_since`）。
+- 公司行動事件日的 `ref_limit_up/down` 若被官方更正，不在 enriched 的指紋內，不會自動全量重建。
+- 上櫃 ETF 的主被動型態只能靠 TPEx ETF/detail 逐檔查詢；00838B、00992B 這類查不到型態的標的，仍以一般 ETF 稅率 0.1% 計算，不推定為被動債券 ETF 的免稅。00980T 的成分範圍仍未確認，漲跌幅規則未知。
+- TDR 證交稅 0.1% 依[財政部稅務入口網問答](https://www.etax.nat.gov.tw/etwmain/tax-info/understanding/tax-q-and-a/national/securities-transaction-tax/filing/LeJ1WWV)（台財稅第811672688號函）；TDR 當沖也適用 0.1%，是我們對證券交易稅條例第 2 條之 2（只適用上市或上櫃股票）的解讀，尚未另行查證。
+- `data_integrity` 只回報、不修復：開機後 30 秒寫一次 log。每日更新的 20 個分區重抓窗口只重抓缺一個交易所（one_exchange）與 provisional 的分區；整天缺漏（missing）要手動回補，除非剛好落在該次的抓取範圍內。
+- `--symbols` 只補缺列、不覆寫已存列；要更正已存的上櫃列，仍要走全市場快照路徑。
+- 新上市回補只重抓上市日到第一筆已存日K之前的日子；之後某一天重抓失敗，和停牌分不出來，不會自動重試，要用 `--symbols` 補。
+- 預熱期間（通常啟動後 1～3 輪輪詢）台股當日沒有盤中 enriched 列，等增量狀態就緒後恢復。
+- `/code/validate` 不檢查策略的 asset_types；類別不符的標的不列在回測統計的 `excluded_symbols`。證券類別過濾只套用在 `.TWSE`／`.TPEX` 標的；主檔不可用時，策略相關端點回 503。
+- 以下既有測試在 HEAD 就會嘗試連外：`test_taiwan_stock_detail_service.py`（約 333 次）、`test_taiwan_ai_research.py`（約 62 次）、`test_taiwan_stock_detail_api.py`（約 144 次）、`test_taiwan_backtest.py`（約 11 次）；另有測試在 `DATA_DIR` 沒有主檔時會下載主檔，`test_taiwan_ai_research.py`、`test_taiwan_ai_research_validation.py` 各有 1 個案例與 `test_taiwan_backtest.py::TestGolden2330Backtest` 需要真實資料。留給第 6 階段的測試整理。
+
 ### 已知安全限制，不視為完成度漏洞
 
-- 歷史日期沒有可證明的當日 universe 或下市歷史時，資料品質不會標成 `complete`。
+- 歷史日期的母體以 `listing_date` 與 `delisted_at` 推算（第 2 階段起，不再要求主檔時點早於目標日）。第一次主檔快照之前就下市的標的不在主檔裡，這段期間的母體可能少算，見「第 2 階段的已知缺口」。
 - 當沖資格必須由呼叫端提供白名單；預設為空，不推測個股資格。回測頁目前沒有開放這個欄位。
-- 舊 Security Master cache 或 TPEx 資料沒有可證明的 ETF 主動／被動型態時，以一般 ETF 稅率處理，不猜成債券 ETF 的優惠稅率。
-- 債券 ETF 證交稅免徵只套用到可證明的 2017-01-01 至 2026-12-31；2027 年起不預測尚未生效的修法。
+- ETF 主動／被動型態：上市 ETF 取自官方基金類型，上櫃 ETF 在主檔刷新時查 TPEx ETF/detail 的「ETF類別」。查不到型態時，以一般 ETF 稅率處理，不猜成債券 ETF 的優惠稅率。本機主檔（2026-09-17）還沒有這個欄位，刷新前所有債券 ETF 都以 0.1% 計算。
+- 被動債券 ETF 免徵證交稅只套用到 2017-01-01 至 2026-12-31（證券交易稅條例第 2 條之 1）；2027 年起依現行法改課 ETF 稅率 0.1%，不預測尚未生效的延長修法。股票當沖減半到 2027-12-31（第 2 條之 2），之後依現行法回到 0.3%。
 - 同一次回測若混合台股與非台股標的，會明確拒絕。
 - mining 不接受全市場單一證交稅率覆蓋；台股稅率必須依標的類型決定。策略、優化與 walk-forward 在第 1 階段也改為拒絕。
 - 回測遇到漲跌幅規則未知的台股（主檔查無、ETF 分類未確認，或一般股缺 `listing_date`），一律排除並列出原因，不猜成 10%。
@@ -204,18 +231,22 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 | 第 1 階段前端型別檢查 | 在 `frontend/` 執行 `pnpm exec tsc -p tsconfig.json --noEmit` | 退出碼 0（S8 前後各執行一次） |
 | S8 驗收組與相關後端測試 | `.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider -q tests\test_taiwan_limit_ipo.py tests\test_taiwan_market_rules.py tests\test_taiwan_limit_streak.py tests\test_price_limits.py tests\test_taiwan_screener.py tests\test_kline_minute_price_limit_taiwan.py tests\test_intraday_quotes_price_limit.py tests\test_enriched_full_rebuild.py tests\test_taiwan_reference_prices.py tests\test_taiwan_research_context.py tests\test_taiwan_stock_detail_service.py tests\test_taiwan_market_intelligence.py tests\test_taiwan_backtest.py tests\test_mining_candidates.py` | `398 passed, 27 warnings in 205.74s` |
 | enriched 重新發佈結果（唯讀核對） | 讀 `data/kline_daily_enriched`，與發佈前的備份（`~\stock-analyze-backups\enriched-before-stage1-20261007-002813`）逐列比對 | 668 個分區、1,441,762 列；2454.TWSE 在 2026-09-01 的連板數為 1，6225.TWSE 在 2026-09-23 的連跌數為 2；訊號為真但連板或連跌數為 0 的列為 0；`signal_limit_up` 改變 43 列、`signal_limit_down` 改變 21 列；`close`、`raw_close` 沒有任何改變 |
+| 第 2 階段新測試與受影響模組（`no_network` 是本次驗證用的暫存 pytest 外掛，不在倉庫內，擋下並統計非本機連線） | `.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider -p no_network -q tests\test_stage2_*.py`（13 個檔）加上 27 個受影響模組的既有測試檔（清單見 [recheck-2026-10-06.md](recheck-2026-10-06.md) 文末） | `852 passed, 4 warnings in 91.10s`；收尾修正（低風險項）後重跑 `866 passed, 4 warnings in 124.20s`；兩次外部連線嘗試都是 0 次 |
+| 第 2 階段前端 | 在 `frontend/` 執行 `pnpm exec vitest run --no-cache src/pages/TaiwanScreener.test.tsx src/pages/Dashboard.test.tsx src/pages/TaiwanStockDetail.test.tsx`，再執行 `pnpm exec tsc -p tsconfig.json --noEmit` | `111 passed`（3 個檔案）；tsc 退出碼 0 |
+| 第 2 階段本機資料（唯讀核對） | 讀 `data/taiwan/security_master.parquet`、`data/.taiwan_enriched_factors.json`、`data/kline_daily_enriched` 的 parquet footer、`data/kline_daily` 目錄 | 主檔最新 `updated_at` 為 2026-09-17、2,377 列，沒有刷新紀錄；7812 不在主檔，00793B、00847B、8183 仍是 active；上市 ETF 55 檔未確認分類；enriched 668 個分區都是同一個 82 欄 schema，因子紀錄沒有 `limit_rules`；`kline_daily` 仍有 4 個殘留分區 |
 
 限制：
 
-- 第 1 階段的程式已在 `0bfa82f` 提交，S8 等後續修改還在工作樹；標「第 1 階段全部完成後」的數字是對目前工作樹執行的結果。`pnpm build` 由實作者執行（結束碼 0），本次文件同步沒有重跑。
-- 第 1 階段之後沒有執行完整的後端 test suite，只跑了上表列出的範圍。
+- 第 1 階段已全部提交；標「第 1 階段全部完成後」的數字是對當時工作樹執行的結果。第 2 階段的數字是對目前工作樹（HEAD `c4ec192` 加上未提交的第 2 階段修改）執行的結果。`pnpm build` 第 1 階段由實作者執行（結束碼 0），第 2 階段的文件同步沒有重跑。
+- 第 1、2 階段之後都沒有執行完整的後端 test suite，只跑了上表列出的範圍；第 2 階段也沒有重跑 `tests\backtest` 全目錄。
+- 第 2 階段的資料寫入（主檔刷新、enriched 全量重新發佈、策略快取重算、`kline_daily` 殘留隔離）都還沒執行；本頁對本機資料的描述來自唯讀核對。
 - 其餘各組沒有跑測試，判定靠靜態閱讀與唯讀抽查。本輪沒有執行即時市場實跑或歷史資料回補。enriched 的全量重新發佈不是本次文件同步執行的，這裡只做唯讀核對。
 - 2026-10-04 記錄的驗收命令（`152 passed`、`147 passed`、`91 passed` 等）沒有涵蓋 `test_worker_process.py`，所以當時寫的「獨立驗收沒有 P0–P3 finding」，只對那幾個測試檔成立。
 - 原始重現資產 `findings_index.json`、`coverage.json`、`reference/manifest.json` 與部分腳本沒有納入版本庫，原稽核的數字無法只靠目前倉庫完整重跑。
 - `docs/audit-2026-09-24/sections/` 目前也沒有納入版本庫，本頁對各章的連結只在本機有效。
 - 原章節中 2026-09-24 的個別樣本數、影響檔數與百分比沒有用目前資料重跑，不應直接當成現況統計。
 - A12 被推翻 finding 的章節標題仍殘留 `P3 → P3`，內文才標 `none`。
-- 法規口徑沿用 2026-10-04 依[財政部證券交易稅條例](https://law-out.mof.gov.tw/LawContent.aspx?id=FL006079&kw=0.00150.&media=print)、[臺灣證券交易所 ETF 規章](https://www.twse.com.tw/zh/products/securities/etf/overview/rules.html)、[臺灣證券交易所交易制度](https://www.twse.com.tw/zh/products/system/trading.html)與[櫃買中心當沖規則](https://www.tpex.org.tw/zh-tw/mainboard/trading/day-trading/rules.html)所做的重核，本輪沒有重新查證；新上市規則的條文例外，已於 2026-10-06 查證。券商折扣與最低手續費維持為可設定的模擬參數，不宣稱是法定固定值。
+- 法規口徑沿用 2026-10-04 依[財政部證券交易稅條例](https://law-out.mof.gov.tw/LawContent.aspx?id=FL006079&kw=0.00150.&media=print)、[臺灣證券交易所 ETF 規章](https://www.twse.com.tw/zh/products/securities/etf/overview/rules.html)、[臺灣證券交易所交易制度](https://www.twse.com.tw/zh/products/system/trading.html)與[櫃買中心當沖規則](https://www.tpex.org.tw/zh-tw/mainboard/trading/day-trading/rules.html)所做的重核，本輪沒有重新查證；新上市規則的條文例外，已於 2026-10-06 查證。第 2 階段新增的依據：TDR 證交稅 0.1% 依台財稅第811672688號函（[財政部稅務入口網問答](https://www.etax.nat.gov.tw/etwmain/tax-info/understanding/tax-q-and-a/national/securities-transaction-tax/filing/LeJ1WWV)），TDR 當沖適用 0.1% 是我們的解讀；上櫃 ETF 的成分範圍與主被動型態依 TPEx ETF/detail（2026-10-07 查詢）；這兩項本次文件同步沒有重新連線查證。券商折扣與最低手續費維持為可設定的模擬參數，不宣稱是法定固定值。
 
 ## 維護方式
 
