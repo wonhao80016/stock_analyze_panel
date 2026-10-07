@@ -40,7 +40,8 @@ class TaiwanStockIdentity(BaseModel):
     listing_date: Optional[str] = Field(None, description="掛牌日期 YYYY-MM-DD")
     industry: Optional[str] = Field(None, description="產業類別，如 半導體業, 電子零組件")
     cfi_code: Optional[str] = Field(None, description="ISO 10962 CFI 碼")
-    etf_category: Optional[str] = Field(None, description="ETF 分類: domestic_equity, foreign_equity, bond, leveraged, inverse")
+    etf_category: Optional[str] = Field(None, description="ETF 分類: domestic_equity, foreign_equity, bond, leveraged, inverse, futures, unknown")
+    security_class: Optional[str] = Field(None, description="證券類別: tdr (臺灣存託憑證) 或空值")
 
 
 class TaiwanStockPriceLimit(BaseModel):

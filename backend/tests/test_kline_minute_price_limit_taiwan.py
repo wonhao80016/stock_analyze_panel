@@ -146,9 +146,9 @@ def test_a_foreign_component_etf_has_no_limit(isolated_data, symbol):
     assert got["price_limit"] == {"rate": None, "limit_up": None, "limit_down": None, "source": "no_limit"}
 
 
-@pytest.mark.parametrize("symbol", ["00998A.TPEX", "9999.TWSE"])
+@pytest.mark.parametrize("symbol", ["00980T.TPEX", "9999.TWSE"])
 def test_an_unconfirmed_rule_is_unknown_rather_than_ten_percent(isolated_data, symbol):
-    """00998A has no confirmed underlying scope; 9999 is not in the security master."""
+    """00980T has no confirmed underlying scope; 9999 is not in the security master."""
     got = _minute(symbol, "etf", {BEFORE: 20.0}, EVENT)
 
     assert got["price_limit"] == {"rate": None, "limit_up": None, "limit_down": None, "source": "unknown"}

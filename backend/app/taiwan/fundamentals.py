@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from app.taiwan.providers.taiwan_values import TAIPEI, parse_number, parse_taiwan_date
+from app.taiwan.providers.taiwan_values import MISSING_VALUES, TAIPEI, parse_number, parse_taiwan_date
 
 STATEMENT_CATEGORIES = ("ci", "basi", "bd", "fh", "ins", "mim")
 NORMALIZED_STATUSES = {
@@ -50,12 +50,30 @@ def _whole_number(raw: object) -> int | None:
     return None if value is None else round(value)
 
 
-def _par_value_twd(raw: object) -> float | None:
+# Currency labels seen in the official par-value text (TDR and KY listings use foreign ones).
+_PAR_VALUE_CURRENCIES = (
+    ("新台幣", "TWD"), ("新臺幣", "TWD"), ("美金", "USD"), ("美元", "USD"), ("USD", "USD"),
+    ("港幣", "HKD"), ("HKD", "HKD"), ("泰銖", "THB"), ("人民幣", "CNY"), ("日圓", "JPY"),
+)
+
+
+def _par_value(raw: object) -> dict[str, Any]:
+    """Par value as the official text, its currency, and the amount only when it is in NTD.
+
+    Text without a currency label (some TDRs publish a bare "0.1") stays unpriced: it is not
+    stated in NTD.
+    """
     text = str(raw or "").strip()
-    if not text or text in {"-", "--", "N/A"}:
-        return None
+    if text in MISSING_VALUES:
+        return {"par_value_twd": None, "par_value_raw": None, "par_value_currency": None}
+    currency = next((code for label, code in _PAR_VALUE_CURRENCIES if label in text), None)
     match = re.search(r"([0-9][0-9,]*(?:\.[0-9]+)?)", text)
-    return parse_number(match.group(1)) if match else None
+    amount = parse_number(match.group(1)) if match else None
+    return {
+        "par_value_twd": amount if currency == "TWD" else None,
+        "par_value_raw": text,
+        "par_value_currency": currency,
+    }
 
 
 def roc_month(raw: object) -> str:
@@ -258,9 +276,7 @@ class TaiwanOfficialFundamentals:
             "capital_twd": _whole_number(
                 row.get("實收資本額") or row.get("Paidin.Capital.NTDollars")
             ),
-            "par_value_twd": _par_value_twd(
-                row.get("普通股每股面額") or row.get("ParValueOfCommonStock")
-            ),
+            **_par_value(row.get("普通股每股面額") or row.get("ParValueOfCommonStock")),
         }
         return self._record(
             symbol, "share_capital_record", report_date, row, exchange, url,

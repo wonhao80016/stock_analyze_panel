@@ -7,6 +7,8 @@ resume-capable, and never attempt a full 2335-symbol sweep in one shot.
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,9 +18,14 @@ import polars as pl
 
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.providers.hybrid_provider import TaiwanHybridProvider
-from app.taiwan.providers.snapshot_provider import OfficialDailySnapshotAdapter
+from app.taiwan.providers.snapshot_provider import (
+    IncompleteSnapshotError,
+    OfficialDailySnapshotAdapter,
+)
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar
-from app.taiwan.universe import get_security_master
+from app.taiwan.symbol import parse_symbol
+from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
+from app.taiwan.universe.service import SecurityMasterUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +33,9 @@ DEFAULT_CONCURRENCY = 5
 DEFAULT_START_DATE = "2024-01-01"
 
 
-def _get_universe() -> list[str]:
+def _get_universe(master: TaiwanSecurityMaster | None = None) -> list[str]:
     """Return canonical symbols supported for screening."""
-    master = get_security_master()
+    master = master or get_security_master()
     rows = master.to_provider_dataframe(asset_type="stock")
     etf_rows = master.to_provider_dataframe(asset_type="etf")
     combined = pl.concat([rows, etf_rows], how="diagonal_relaxed")
@@ -108,6 +115,30 @@ def _determine_fetch_ranges_for_symbol(
     return _coalesce_dates_to_ranges(missing_dates)
 
 
+def _canonical_symbols(symbols: list[str]) -> tuple[list[str], list[str]]:
+    """Return the distinct canonical symbols and the distinct inputs that do not parse, in input order."""
+    canonical: dict[str, None] = {}
+    invalid: dict[str, None] = {}
+    for raw in symbols:
+        try:
+            canonical[parse_symbol(raw.upper()).canonical] = None
+        except ValueError:
+            invalid[raw.strip()] = None
+    return list(canonical), list(invalid)
+
+
+def _per_symbol_entry(stats: dict[str, Any], symbol: str) -> dict[str, Any]:
+    return stats["per_symbol"].setdefault(symbol, {"symbol": symbol, "rows": 0, "ranges": [], "status": "empty"})
+
+
+def _mark_failed(stats: dict[str, Any], symbol: str, status: str, error: str) -> None:
+    if symbol not in stats["failed"]:
+        stats["failed"].append(symbol)
+    entry = _per_symbol_entry(stats, symbol)
+    entry["status"] = status
+    entry["error"] = error
+
+
 class TaiwanDailyRefreshService:
     """Refresh Taiwan daily data into TaiwanDailyStore.
 
@@ -139,6 +170,7 @@ class TaiwanDailyRefreshService:
         start_date: date,
         end_date: date,
         force: bool = False,
+        refetch: Iterable[date] = (),
     ) -> dict[str, Any]:
         """Fetch and persist market-wide daily snapshots for trading days in [start_date, end_date].
 
@@ -146,11 +178,17 @@ class TaiwanDailyRefreshService:
           - Exactly 1 HTTP request for TWSE MI_INDEX
           - Exactly 1 HTTP request for TPEx dailyQuotes
         per trading day (2 HTTP requests total per date instead of ~2,335).
+        Stored days in *refetch* are fetched again like half-snapshot and provisional days.
+        SecurityMasterUnavailableError propagates rather than failing a single date.
         """
         stored = self._store.available_dates()
         latest_stored = max(stored, default=None)
         in_range = sorted(d for d in stored if start_date <= d <= end_date)
-        repairs = set(self._store.incomplete_dates(in_range)) | set(self._store.provisional_dates(in_range))
+        repairs = (
+            set(self._store.incomplete_dates(in_range))
+            | set(self._store.provisional_dates(in_range))
+            | set(refetch).intersection(in_range)
+        )
         available = set(stored) - repairs if not force else set()
         stats: dict[str, Any] = {
             "dates_requested": 0,
@@ -184,6 +222,8 @@ class TaiwanDailyRefreshService:
                     stats["dates_skipped"] += 1
                     if cur in repairs:
                         stats["repair_failed_dates"].append({"date": str(cur), "error": "no rows"})
+            except SecurityMasterUnavailableError:
+                raise
             except Exception as exc:
                 logger.warning("Daily snapshot refresh failed for %s: %s", cur, exc)
                 failure = {"date": str(cur), "error": str(exc)}
@@ -225,81 +265,144 @@ class TaiwanDailyRefreshService:
         if start > end:
             return {"error": "start > end"}
 
-        # Read existing dates in [start, end] for requested symbols
-        existing_by_symbol: dict[str, set[date]] = {s: set() for s in symbols}
-        all_rows = self._store.read_range(symbols, start, end)
-        if not all_rows.is_empty():
-            for row in all_rows.iter_rows(named=True):
-                existing_by_symbol[row["symbol"]].add(row["date"])
-
-        # Determine fetch jobs (symbol, fetch_start, fetch_end)
-        jobs: list[tuple[str, date, date]] = []
-        for sym in symbols:
-            ranges = _determine_fetch_ranges_for_symbol(
-                existing_by_symbol[sym], start, end, self._calendar
-            )
-            for r_start, r_end in ranges:
-                jobs.append((sym, r_start, r_end))
-
-        if not jobs:
-            return {"message": "all dates up to date", "symbols_fetched": 0, "rows_written": 0, "jobs_executed": 0}
-
+        symbols, invalid = _canonical_symbols(symbols)
         stats: dict[str, Any] = {
-            "symbols_total": len(symbols),
+            "symbols_total": len(symbols) + len(invalid),
             "symbols_fetched": 0,
             "jobs_executed": 0,
             "rows_written": 0,
             "failed": [],
             "per_symbol": {},
         }
+        for raw in invalid:
+            _mark_failed(stats, raw, "invalid", "not a canonical CODE.TWSE / CODE.TPEX symbol")
+
+        # Read existing dates in [start, end] for requested symbols
+        existing_by_symbol: dict[str, set[date]] = {s: set() for s in symbols}
+        all_rows = self._store.read_range(symbols, start, end) if symbols else pl.DataFrame()
+        if not all_rows.is_empty():
+            for row in all_rows.iter_rows(named=True):
+                existing_by_symbol[row["symbol"]].add(row["date"])
+
+        # Determine fetch jobs (symbol, fetch_start, fetch_end)
+        jobs: list[tuple[str, date, date]] = []
+        # TPEx bars come from dailyQuotes (exact shares incl. block trades), not tradingStock lots.
+        tpex_symbols_by_date: dict[date, list[str]] = {}
+        # Parsing the active codes too tells an empty dailyQuotes table from absent requested codes.
+        tpex_codes: set[str] = set()
+        master = self._snapshot_adapter.security_master
+        for sym in symbols:
+            if sym.endswith(".TPEX"):
+                # Delisted symbols stay backfillable for the days they traded.
+                inst = master.get_instrument(sym)
+                if (
+                    inst is None
+                    or not inst.is_supported
+                    or inst.instrument_type not in ("stock", "etf")
+                ):
+                    _mark_failed(
+                        stats, sym, "unsupported", "not a supported stock or ETF in the security master"
+                    )
+                    continue
+                if not tpex_codes:
+                    tpex_codes = {
+                        s.split(".")[0] for s in _get_universe(master) if s.endswith(".TPEX")
+                    }
+                tpex_codes.add(sym.split(".")[0])
+                for d in _iter_candidate_dates(start, end, self._calendar):
+                    if d not in existing_by_symbol[sym]:
+                        tpex_symbols_by_date.setdefault(d, []).append(sym)
+                continue
+            ranges = _determine_fetch_ranges_for_symbol(
+                existing_by_symbol[sym], start, end, self._calendar
+            )
+            for r_start, r_end in ranges:
+                jobs.append((sym, r_start, r_end))
+
+        if not jobs and not tpex_symbols_by_date:
+            if stats["failed"]:
+                return stats
+            return {"message": "all dates up to date", "symbols_fetched": 0, "rows_written": 0, "jobs_executed": 0}
 
         with ThreadPoolExecutor(max_workers=self._concurrency) as executor:
             futures = {
-                executor.submit(self._fetch_and_store, sym, j_start, j_end): (sym, j_start, j_end)
+                executor.submit(self._fetch_and_store, sym, j_start, j_end, existing_by_symbol[sym]): ([sym], j_start, j_end)
                 for sym, j_start, j_end in jobs
             }
+            futures.update({
+                executor.submit(self._fetch_tpex_date_and_store, d, day_symbols, tpex_codes): (
+                    day_symbols,
+                    d,
+                    d,
+                )
+                for d, day_symbols in tpex_symbols_by_date.items()
+            })
             symbols_seen = set()
             for future in as_completed(futures):
-                sym, j_start, j_end = futures[future]
+                job_symbols, j_start, j_end = futures[future]
                 try:
-                    result = future.result()
-                    rows_got = result.get("rows", 0)
+                    rows_by_symbol = future.result()
+                except Exception as exc:
+                    logger.warning("Refresh failed for %s (%s..%s): %s", ", ".join(job_symbols), j_start, j_end, exc)
+                    for sym in job_symbols:
+                        _mark_failed(stats, sym, "error", str(exc))
+                    continue
+                stats["jobs_executed"] += 1
+                for sym in job_symbols:
+                    rows_got = rows_by_symbol.get(sym, 0)
                     if rows_got > 0:
                         symbols_seen.add(sym)
-                    stats["jobs_executed"] += 1
                     stats["rows_written"] += rows_got
-                    if sym not in stats["per_symbol"]:
-                        stats["per_symbol"][sym] = {
-                            "symbol": sym,
-                            "rows": 0,
-                            "ranges": [],
-                            "status": "ok" if rows_got > 0 else "empty",
-                        }
-                    stats["per_symbol"][sym]["rows"] += result.get("rows", 0)
-                    stats["per_symbol"][sym]["ranges"].append({
+                    entry = _per_symbol_entry(stats, sym)
+                    if rows_got > 0 and entry["status"] == "empty":
+                        entry["status"] = "ok"
+                    entry["rows"] += rows_got
+                    entry["ranges"].append({
                         "start": j_start.isoformat(),
                         "end": j_end.isoformat(),
-                        "rows": result.get("rows", 0),
+                        "rows": rows_got,
                     })
-                except Exception as exc:
-                    logger.warning("Refresh failed for %s (%s..%s): %s", sym, j_start, j_end, exc)
-                    if sym not in stats["failed"]:
-                        stats["failed"].append(sym)
-                    stats["per_symbol"][sym] = {"error": str(exc)}
 
             stats["symbols_fetched"] = len(symbols_seen)
 
         return stats
 
-    def _fetch_and_store(self, symbol: str, start: date, end: date) -> dict[str, Any]:
-        """Fetch a single symbol's daily data for [start, end] and store it atomically."""
+    def _fetch_and_store(self, symbol: str, start: date, end: date, existing_dates: set[date]) -> dict[str, int]:
+        """Fetch a single symbol's daily data for [start, end] and store the days not yet stored."""
         df = self._provider.get_daily([symbol], start_time=start, end_time=end)
         if df.is_empty():
-            return {"symbol": symbol, "rows": 0, "status": "empty"}
+            return {}
+        df = df.with_columns(pl.col("date").cast(pl.Date, strict=False))
+        df = df.filter(pl.col("date").is_between(start, end) & ~pl.col("date").is_in(sorted(existing_dates)))
+        if df.is_empty():
+            return {}
+        self._store.write_batch(df, skip_existing=True)
+        return {symbol: df.height}
 
-        rows = df.height
-        written = self._store.write_batch(df)
-        return {"symbol": symbol, "rows": rows, "written": written, "status": "ok"}
+    def _fetch_tpex_date_and_store(
+        self, day: date, symbols: list[str], codes: set[str]
+    ) -> dict[str, int]:
+        """Store one TPEx dailyQuotes day for *symbols*, which must lack a stored row on *day*.
+
+        *codes* are the TPEx codes parsed from dailyQuotes; it must include those of *symbols*.
+        """
+        # TWSE decides whether the day traded, as in fetch_date; TPEx alone may answer a closed day.
+        if not self._has_stored_twse_rows(day) and self._snapshot_adapter.fetch_twse(day).is_empty():
+            return {}
+        df = self._snapshot_adapter.fetch_tpex(day, codes=codes)
+        if df.is_empty():
+            raise IncompleteSnapshotError(f"TPEx dailyQuotes has no rows for traded day {day}")
+        df = df.filter(pl.col("symbol").is_in(symbols))
+        if df.is_empty():
+            return {}
+        self._store.write_batch(df, skip_existing=True)
+        return dict(Counter(df["symbol"].to_list()))
+
+    def _has_stored_twse_rows(self, day: date) -> bool:
+        if not self._store.has_date(day):
+            return False
+        stored = self._store.read_range(None, day, day)
+        return not stored.is_empty() and stored["symbol"].str.ends_with(".TWSE").any()
 
     def refresh_today(self) -> dict[str, Any]:
         """Refresh all universe symbols for today only."""

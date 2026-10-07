@@ -1921,18 +1921,19 @@ class KlineRepository:
         except Exception:  # noqa: BLE001
             return None
 
+    def taiwan_daily_dates(self) -> list[date]:
+        """Sessions stored in TaiwanDailyStore, the Taiwan daily source of truth (not kline_daily)."""
+        from app.taiwan.daily_store import TaiwanDailyStore
+
+        root = Path(self.store.data_dir) / "taiwan" / "daily"
+        if not root.is_dir():
+            return []
+        return TaiwanDailyStore(root).available_dates()
+
     def earliest_daily_date(self) -> date | None:
-        """本地日K数据的最早日期。"""
-        try:
-            res = self.execute_one(
-                "SELECT min(date) FROM kline_daily",
-            )
-            if res and res[0]:
-                d = res[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:
-            return None
-        return None
+        """Earliest stored Taiwan daily session."""
+        dates = self.taiwan_daily_dates()
+        return dates[0] if dates else None
 
     def earliest_minute_date(self) -> date | None:
         """本地分钟K数据的最早日期。"""
@@ -1948,17 +1949,9 @@ class KlineRepository:
         return None
 
     def latest_daily_date(self) -> date | None:
-        """本地日K数据的最新日期。"""
-        try:
-            res = self.execute_one(
-                "SELECT max(date) FROM kline_daily",
-            )
-            if res and res[0]:
-                d = res[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:
-            return None
-        return None
+        """Latest stored Taiwan daily session; a partition exists only for a day the market traded."""
+        dates = self.taiwan_daily_dates()
+        return dates[-1] if dates else None
 
     def latest_enriched_date(self, asset_type: str = "stock") -> date | None:
         """Return the newest partition available to matrix-native consumers."""
@@ -2334,12 +2327,6 @@ class KlineRepository:
         elif asset_type == "index":
             self._index_enriched_cache = merged_cache
             self._index_enriched_cache_date = dt
-
-    def flush_live_daily(self, df: pl.DataFrame) -> None:
-        """覆写当天 kline_daily 分区 (实时行情落盘, 非merge)。"""
-        if df.is_empty() or "date" not in df.columns:
-            return
-        self.flush_live_daily_asset("stock", df)
 
     def flush_live_daily_asset(
         self, asset_type: str, df: pl.DataFrame, *, force: bool = False

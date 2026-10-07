@@ -7,7 +7,7 @@ Covers:
   - MarginTrading: Margin Trading & Short Selling with strict unit normalization (shares).
   - MarketQuote: Official closing snapshot / quote with explicit fallback metadata.
   - MarketIndex: TAIEX and TPEx benchmark market index series.
-  - EtfCategory: Hardened ETF classification (domestic equity, foreign, bond, leveraged, inverse, unknown).
+  - EtfCategory: Hardened ETF classification (domestic equity, foreign, bond, leveraged, inverse, futures, unknown).
 """
 from __future__ import annotations
 
@@ -36,9 +36,10 @@ class EtfCategory(str, Enum):
 
     DOMESTIC_EQUITY = "domestic_equity"    # e.g. 0050, 006208 (10% limit, 0.1% tax)
     FOREIGN_EQUITY = "foreign_equity"      # e.g. 00646, 00830 (NO_LIMIT, 0.1% tax)
-    BOND = "bond"                          # e.g. 00720B, 00679B (NO_LIMIT, 0% tax incentive)
+    BOND = "bond"                          # e.g. 00720B, 00679B (no limit only if foreign-component)
     LEVERAGED = "leveraged"                # e.g. 00631L (NO_LIMIT or custom limit)
     INVERSE = "inverse"                    # e.g. 00632R (NO_LIMIT or custom limit)
+    FUTURES = "futures"                    # e.g. 00635U futures trust (NO_LIMIT on foreign commodity futures)
     UNKNOWN = "unknown"                    # Explicit fallback, never silently assume domestic
 
 

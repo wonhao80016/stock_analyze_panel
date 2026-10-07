@@ -1,6 +1,6 @@
 {
-  "contract_version": "1.0.0",
-  "rules_as_of": "2026-08-30",
+  "contract_version": "1.0.1",
+  "rules_as_of": "2026-10-07",
   "currency": "TWD",
   "timezone": "Asia/Taipei",
   "symbols": [
@@ -21,9 +21,15 @@
   "taxes": [
     {"class":"ordinary_stock","trade_date":"2026-08-30","rate":0.003,"valid_through":null},
     {"class":"day_trade_stock","trade_date":"2026-08-30","rate":0.0015,"valid_through":"2027-12-31"},
+    {"class":"day_trade_stock","trade_date":"2027-12-31","rate":0.0015,"valid_through":"2027-12-31"},
+    {"class":"day_trade_stock","trade_date":"2028-01-03","rate":0.003,"valid_through":null},
     {"class":"domestic_etf","trade_date":"2026-08-30","rate":0.001,"valid_through":null},
     {"class":"foreign_component_etf","trade_date":"2026-08-30","rate":0.001,"valid_through":null},
-    {"class":"passive_bond_etf","trade_date":"2026-08-30","rate":0,"valid_through":"2026-12-31"}
+    {"class":"tdr","trade_date":"2026-08-30","rate":0.001,"valid_through":null},
+    {"class":"tdr_day_trade","trade_date":"2026-08-30","rate":0.001,"valid_through":null},
+    {"class":"passive_bond_etf","trade_date":"2026-08-30","rate":0,"valid_through":"2026-12-31"},
+    {"class":"passive_bond_etf","trade_date":"2026-12-31","rate":0,"valid_through":"2026-12-31"},
+    {"class":"passive_bond_etf","trade_date":"2027-01-04","rate":0.001,"valid_through":null}
   ],
   "missing_values": ["","-","--","N/A"],
   "explicit_zero_values": ["0","0.0"],

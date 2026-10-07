@@ -428,21 +428,25 @@ def run_all(req: RunAllRequest, request: Request):
         sid: dict((all_overrides.get(sid) or {}).get("params") or {})
         for sid in strategy_ids
     }
-    context = svc.build_strategy_context(
-        engine,
-        as_of,
-        strategy_ids,
-        timeframe=req.timeframe,
-        params_map=params_map,
-        overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
-    )
+    try:
+        context = svc.build_strategy_context(
+            engine,
+            as_of,
+            strategy_ids,
+            timeframe=req.timeframe,
+            params_map=params_map,
+            overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
+        )
+        engine_results = engine.run_all(
+            context,
+            params_map=params_map,
+            overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
+            strategy_ids=strategy_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     results: dict[str, dict] = {}
-    for sid, result in engine.run_all(
-        context,
-        params_map=params_map,
-        overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
-        strategy_ids=strategy_ids,
-    ).items():
+    for sid, result in engine_results.items():
         results[sid] = {"total": result.total, "as_of": str(as_of)}
 
     return {"as_of": str(as_of), "results": results}

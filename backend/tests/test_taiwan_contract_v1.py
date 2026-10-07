@@ -32,6 +32,8 @@ def test_taiwan_market_contract_v1_tax_windows():
         "domestic_etf": (TaxClass.DOMESTIC_ETF, False),
         "foreign_component_etf": (TaxClass.FOREIGN_ETF, False),
         "passive_bond_etf": (TaxClass.BOND_ETF, False),
+        "tdr": (TaxClass.TDR, False),
+        "tdr_day_trade": (TaxClass.TDR, True),
     }
     for case in FIXTURE["taxes"]:
         tax_class, day_trade = classes[case["class"]]

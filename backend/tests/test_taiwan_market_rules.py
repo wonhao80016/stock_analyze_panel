@@ -3,7 +3,7 @@
 Covers:
   - Commission model: statutory default 0.0 min commission, configurable discount/fee
   - Securities tax model: ordinary stock (0.3%), domestic ETF (0.1%), day-trading (0.15%), bond ETF (0%)
-  - Regulatory effective dates & RegulatoryRuleUnavailableError upon statutory expiry
+  - Regulatory effective dates of the statutory tax reductions
   - Lot model: board lot (1000) vs odd lot (1), share alignment
   - Tick size model: stock 6 tiers, ETF 2 tiers, price limit boundary vs order rounding
   - Price limit single source of truth: delegation in price_limits.py, NO_LIMIT handling
@@ -29,7 +29,6 @@ from app.taiwan.market_rules import (
     LotModel,
     PriceLimitClass,
     PriceLimitModel,
-    RegulatoryRuleUnavailableError,
     SecuritiesTaxModel,
     SettlementModel,
     TaiwanMarketProfile,
@@ -105,24 +104,33 @@ class TestSecuritiesTaxModel:
         trade_date = date(2026, 8, 28)
         assert tax_model.calc_tax(100_000.0, TaxClass.ORDINARY_STOCK, is_day_trade=True, trade_date=trade_date) == 150.0
 
-    def test_day_trade_tax_raises_when_expired(self):
-        """Do not speculate on future laws beyond enacted expiry date."""
+    def test_day_trade_tax_reverts_to_the_stock_rate_when_the_reduction_ends(self):
+        """Securities Transaction Tax Act art. 2-2 halves the day-trade rate only through 2027-12-31."""
         tax_model = SecuritiesTaxModel()
-        post_expiry = date(2028, 1, 5)
-        with pytest.raises(RegulatoryRuleUnavailableError, match="Day-trade tax incentive"):
-            tax_model.get_tax_rate(TaxClass.ORDINARY_STOCK, is_day_trade=True, trade_date=post_expiry)
+        last_day = date(2027, 12, 31)
+        post_expiry = date(2028, 1, 3)
+        assert tax_model.get_tax_rate(TaxClass.ORDINARY_STOCK, is_day_trade=True, trade_date=last_day) == 0.0015
+        assert tax_model.get_tax_rate(TaxClass.ORDINARY_STOCK, is_day_trade=True, trade_date=post_expiry) == 0.003
+
+    def test_day_trade_reduction_applies_to_stocks_only(self):
+        tax_model = SecuritiesTaxModel()
+        trade_date = date(2026, 8, 28)
+        assert tax_model.get_tax_rate(TaxClass.DOMESTIC_ETF, is_day_trade=True, trade_date=trade_date) == 0.001
+        assert tax_model.get_tax_rate(TaxClass.BOND_ETF, is_day_trade=True, trade_date=trade_date) == 0.0
 
     def test_bond_etf_tax_free_within_enacted_window(self):
         tax_model = SecuritiesTaxModel()
         trade_date = date(2026, 8, 28)
         assert tax_model.calc_tax(100_000.0, TaxClass.BOND_ETF, trade_date=trade_date) == 0.0
 
-    def test_bond_etf_tax_raises_when_expired(self):
-        """Do not speculate on future laws beyond enacted expiry date."""
+    def test_bond_etf_tax_reverts_to_the_etf_rate_when_the_suspension_ends(self):
+        """The suspension ends 2026-12-31, then bond ETFs pay 0.1%.
+
+        Securities Transaction Tax Act art. 2-1 suspension; art. 2(2) rate.
+        """
         tax_model = SecuritiesTaxModel()
-        post_expiry = date(2027, 1, 5)
-        with pytest.raises(RegulatoryRuleUnavailableError, match="Bond ETF 0% tax exemption expired"):
-            tax_model.get_tax_rate(TaxClass.BOND_ETF, trade_date=post_expiry)
+        assert tax_model.get_tax_rate(TaxClass.BOND_ETF, trade_date=date(2026, 12, 31)) == 0.0
+        assert tax_model.get_tax_rate(TaxClass.BOND_ETF, trade_date=date(2027, 1, 4)) == 0.001
 
 
 # ── 3. Lot Model Tests ─────────────────────────────────────────

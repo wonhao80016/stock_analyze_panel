@@ -22,6 +22,8 @@ them is a true float turnover.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +33,7 @@ import polars as pl
 
 from app.taiwan.providers.snapshot_provider import get_with_retry
 from app.taiwan.providers.taiwan_values import TAIPEI, parse_taiwan_date
+from app.taiwan.universe.models import TDR_SECURITY_CLASS, derive_security_class
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +60,43 @@ def _whole_shares(raw: Any) -> int | None:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+# Keyed by the master cache file's (path, mtime_ns, size): realtime polls call as_instruments()
+# every few seconds and must not rescan the master each time.
+_master_tdrs: tuple[tuple[str, int, int], frozenset[str]] | None = None
+_master_tdrs_lock = threading.Lock()
+
+
+def _master_tdr_symbols() -> frozenset[str]:
+    """TDR symbols of the security master, recomputed only when its cache file changes."""
+    global _master_tdrs
+    from app.taiwan.universe import get_security_master
+
+    master = get_security_master()
+    stat = os.stat(master.cache_path)
+    signature = (str(master.cache_path), stat.st_mtime_ns, stat.st_size)
+    with _master_tdrs_lock:
+        cached = _master_tdrs
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    frame = master.to_dataframe()
+    tdrs = frozenset(frame.filter(pl.col("security_class") == TDR_SECURITY_CLASS)["symbol"].to_list())
+    with _master_tdrs_lock:
+        _master_tdrs = (signature, tdrs)
+    return tdrs
+
+
+def _tdr_symbols(symbols: list[str]) -> set[str]:
+    """TDRs among *symbols*; without a readable master only six-digit 91xxxx codes are recognized."""
+    try:
+        return set(symbols) & _master_tdr_symbols()
+    except Exception as e:
+        logger.warning("taiwan share capital: no security master, TDRs matched by code only: %s", e)
+        return {
+            symbol for symbol in symbols
+            if derive_security_class(symbol.split(".")[0], None, None) == TDR_SECURITY_CLASS
+        }
 
 
 class TaiwanShareCapitalStore:
@@ -173,7 +213,8 @@ class TaiwanShareCapitalStore:
 
         The column is named float_shares because that is the pipeline's name for
         the turnover denominator; see this module's docstring for what the number
-        actually counts.
+        actually counts. TDRs are left out: their official count is the underlying
+        company's shares, not receipts, so their turnover stays null.
         """
         df = self.load()
         # A file whose columns have drifted must read as "no denominator", not raise:
@@ -181,7 +222,8 @@ class TaiwanShareCapitalStore:
         # stop over a cosmetic field, losing indicators and signals too.
         if df.is_empty() or not {"symbol", "issued_shares"} <= set(df.columns):
             return pl.DataFrame(schema={"symbol": pl.Utf8, "float_shares": pl.Float64})
-        return df.select(
+        tdrs = _tdr_symbols(df["symbol"].to_list())
+        return df.filter(~pl.col("symbol").is_in(list(tdrs))).select(
             pl.col("symbol"),
             pl.col("issued_shares").cast(pl.Float64).alias("float_shares"),
         )

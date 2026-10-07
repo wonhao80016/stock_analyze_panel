@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { Activity, ArrowUpRight, BellRing, Database, Eye, HelpCircle, Layers, Loader2, Target, TrendingUp } from 'lucide-react'
-import { api, type AlertEvent, type IndustryMetrics, type StrategyDetail } from '@/lib/api'
+import { api, industryLabel, type AlertEvent, type IndustryMetrics, type StrategyDetail } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -300,19 +300,14 @@ function MarketStrengthCard() {
   )
 }
 
-// ===== Phase 8C-B: 台股產業強弱摘要 — 只顯示 Top/Bottom, 不做完整 34 檔表格 =====
-// 直接重用既有 /api/taiwan/industry-intelligence (api.taiwanIndustryIntelligence),
-// 與 TaiwanScreener 預設排序 (turnover/desc) 同一份 query key, 排名於前端依
-// average_change_pct 對既有資料排序, 不新增 backend 計算。此 API 回傳的
-// industry 欄位本身已是可讀產業名稱 (34 大類股中文名), 非數字代碼, 無需額外
-// mapping(Phase 8C-C 已於 backend 修正 TPEx/TWSE 數字代碼正規化)。
+// Shares TaiwanScreener's industry query key (turnover/desc) and ranks by average_change_pct client-side.
 function IndustryStrengthList({ title, rows, tone }: { title: string; rows: IndustryMetrics[]; tone: 'bull' | 'bear' }) {
   return (
     <div className="min-w-0 space-y-1">
       <div className={`text-[10px] font-medium ${tone === 'bull' ? 'text-bull' : 'text-bear'}`}>{title}</div>
       {rows.map(ind => (
         <div key={ind.industry} className="flex items-center justify-between gap-2 rounded-md bg-elevated/40 px-2 py-1 text-[11px]">
-          <span className="truncate text-foreground" title={ind.industry}>{ind.industry}</span>
+          <span className="truncate text-foreground" title={industryLabel(ind.industry)}>{industryLabel(ind.industry)}</span>
           <span className={`shrink-0 font-mono font-semibold ${pctClass(ind.average_change_pct)}`}>{fmtStockPct(ind.average_change_pct)}</span>
         </div>
       ))}
@@ -333,6 +328,7 @@ function IndustryStrengthCard() {
   const bottomCount = Math.min(5, Math.max(0, sorted.length - topCount))
   const top = sorted.slice(0, topCount)
   const bottom = sorted.slice(sorted.length - bottomCount).reverse()
+  const qualityStatus = ind.data?.data_quality?.overall_status
 
   return (
     <section className="rounded-card border border-border bg-surface/80 p-2.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm">
@@ -346,10 +342,17 @@ function IndustryStrengthCard() {
       ) : sorted.length === 0 ? (
         <p className="py-4 text-xs text-muted">目前尚無可比較的產業資料。</p>
       ) : (
-        <div className="grid grid-cols-2 gap-2">
-          <IndustryStrengthList title="最強" rows={top} tone="bull" />
-          <IndustryStrengthList title="最弱" rows={bottom} tone="bear" />
-        </div>
+        <>
+          {qualityStatus && qualityStatus !== 'complete' && (
+            <div className="mb-1.5 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-[11px] text-warning">
+              {qualityStatus === 'provisional' ? '產業統計為盤後初值，次日校正' : '產業資料尚未完整，以下結果僅供參考'}
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <IndustryStrengthList title="最強" rows={top} tone="bull" />
+            <IndustryStrengthList title="最弱" rows={bottom} tone="bear" />
+          </div>
+        </>
       )}
     </section>
   )

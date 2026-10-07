@@ -21,6 +21,35 @@ not ticker/name heuristics. Official ETF product pages establish domestic-index
 leveraged/inverse identity; TWSE trading rules then apply `10% * abs(multiplier)`.
 This rule registry does not populate Phase 6E structured multiplier/direction fields.
 
+ETF classification for price limits:
+
+- TWSE ETFs come from `t187ap47_L`. When 「是否包含國外成分股」 is 是 or 否, every fund type except
+  futures trusts (index, active, balanced, linked, offshore, foreign-currency listing, bond) is
+  `official_metadata` with scope `foreign` or `domestic`. 「指數股票型期貨信託基金」 maps to the
+  `futures` category (`inverse` when the multiplier is negative, e.g. 00716R) and is confirmed
+  only when the flag is 是; otherwise it stays unconfirmed (fail-closed).
+- The ISIN path with injected TWSE product metadata carries the same flag in
+  `OfficialEtfProductMeta.underlying_scope` and uses it for futures trusts (same rule as above)
+  and for bond fund types (scope from the flag; `foreign` when the flag is absent). Leveraged and
+  inverse fund types on that path still take scope from index/name keywords.
+- TPEx ETFs come from the ISIN table and are classified by CFI code. CFI attributes carry no
+  country, so `CEOGEU` stays `unknown`. `CEOIBU`, `CEOJBU` and `CEOGBU` are `bond` with foreign
+  scope; every listed TPEx bond ETF is 「國外債券」 on the TPEx ETF product spec.
+- Audited TPEx entries in `OFFICIAL_ETF_RULE_PROFILES` override the CFI result:
+  006201, 00888, 00928 are domestic-component (10%); 00877, 00886, 00887, 009822, 00411A,
+  00858, 00955, 009806, 009807, 009814, 009815, 009823, 009825, 00998A are foreign-component
+  (no limit; the last ten are the CEOIEU entries of the TPEx 「國外成分股ETF」 list). 00980T stays
+  unknown. Evidence: the TPEx ETF product spec API
+  (`https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=<domestic|foreign>&code=<code>&response=json`,
+  fields 「ETF類別」 and 「升降幅度」, checked 2026-10-07) and the 2026-09-23 TPEx daily quotes, where
+  only 006201, 00888 and 00928 had real limit prices and the other ETFs showed 9999.95/0.01
+  (`docs/audit-2026-09-24/sections/A05-limits-signals.md`).
+- Price limits follow component scope only, per the
+  [TWSE trading rules](https://www.twse.com.tw/zh/products/system/trading.html): domestic-component
+  ETFs (index or active) 10%, domestic leveraged/inverse 10% times the multiplier; foreign-component
+  ETFs (including active), offshore ETFs and futures trusts on foreign commodity futures have no
+  limit. A bond ETF has no limit because it is foreign-component, not because it is a bond ETF.
+
 ## Official endpoints
 
 - TWSE companies: `opendata/t187ap03_L`
@@ -42,16 +71,25 @@ This rule registry does not populate Phase 6E structured multiplier/direction fi
 - TWSE ETF split resumption prices: `split/TWTCAU`
 - TPEx ex-rights/ex-dividend results: `bulletin/exDailyQ`
 - TPEx capital reduction resumption prices: `bulletin/revivt`
+- TPEx ETF directory: the ISIN table `isin.twse.com.tw/isin/C_public.jsp?strMode=4`
+- TPEx ETF product spec (management style): `www.tpex.org.tw/www/zh-tw/ETF/detail`
 
 TPEx ETF identity is retained from the official ISIN directory. Product
 classification remains `data_insufficient` until an official structured metadata
-source is integrated; code/name heuristics are not used to fill this gap.
+source is integrated; code/name heuristics are not used to fill this gap. This is
+the Phase 6E structured product data; the price-limit classification above and the
+security master's management style (see Security master refresh) are separate.
 
 ## Normalized contract
 
 - `volume` is shares/units. TPEx monthly `成交仟股` is multiplied by 1,000.
 - `amount` is TWD. TPEx monthly `成交仟元` is multiplied by 1,000.
 - ROC dates such as `115/08/30` and `1150830` normalize to `2026-08-30`.
+- Security master `listing_date` is ISO `YYYY-MM-DD`. The directories publish ROC
+  7-digit (TWSE ETFs), `YYYYMMDD` (companies) and `YYYY/MM/DD` (TPEx ISIN) dates; all
+  three are normalized when written, an older cache is normalized in memory when read
+  (the file is not rewritten), and an unparseable date becomes null, which leaves an
+  ordinary stock's price limit unknown.
 - Daily `timestamp` is explicitly `13:30 Asia/Taipei`.
 - Missing values (`""`, `-`, `--`, `N/A`) become null; explicit zero stays zero;
   malformed numeric input raises a schema/parse error.
@@ -74,6 +112,125 @@ official provider and dataset provenance. FinMind currently supplies price data
 only, so there is no reliable institutional/margin fallback; official failures are
 raised instead of returned as empty success. Rolling flows and ratios remain in
 `app.taiwan.enrichment.factors`, outside raw providers.
+
+## Security master refresh
+
+`TaiwanSecurityMaster.refresh` (`app/taiwan/universe/service.py`) rebuilds
+`data/taiwan/security_master.parquet` from the official company directories
+(`t187ap03_L`, `mopsfin_t187ap03_O`), the TWSE ETF directory (`t187ap47_L`) and the
+TPEx ISIN table.
+
+- When it runs: a full-market daily update (the 16:30 and 21:40 scheduled jobs, or
+  the CLI without `--symbols`) and the settings page update button refresh the master
+  before fetching daily bars, but only when the target session is today
+  (Asia/Taipei), the time is 16:00 or later and today is a potential trading day.
+  `data/taiwan/security_master.refresh.json` records the last success, so later runs
+  on the same day skip the refresh; only a success whose TPEx management style lookups
+  all finished counts (`styles_complete`), so a first load or a run whose lookups
+  stopped early is followed by another refresh that day. A failed or busy refresh only adds a note; the
+  update continues with the previous list.
+- CLI: `python -m app.taiwan.daily_update --refresh-master` refreshes at any time and
+  then runs the update; `--master-dry-run` fetches the official lists and prints the
+  changes as JSON without writing anything or running the update. `--force` with
+  either lets the refresh accept count drops and removals beyond the limits below;
+  with `--refresh-master` it also makes the daily update refetch its whole date range.
+- Validation happens before anything is written. Both company directories must be
+  non-empty and every record well-formed. Against the previous master, each
+  exchange's active stock and ETF counts must stay at or above 90%, and at most
+  max(20, 2% of the previous count) symbols per exchange may disappear. A failed
+  refresh leaves the cache file and the loaded master unchanged.
+- Delisting: a previously active symbol missing from the official list stays in the
+  master with `listing_status="delisted"` and `delisted_at` (the refresh day, kept
+  while it stays missing). `get_instrument` still finds it; universes leave it out;
+  market, industry and abnormal-move statistics count it for target days before
+  `delisted_at`. A symbol that reappears becomes active again.
+- Writing: every row of one refresh carries one Asia/Taipei `updated_at`. The file is
+  written to a temporary file and atomically replaced; the replace is retried briefly
+  while a Windows reader holds the file. A lock file next to the cache makes a second
+  refresh in this or another process return busy. Each process reloads the master
+  when the file changes on disk.
+- `data/taiwan/security_master.refresh.json` holds `last_attempt`, `last_success` and
+  `error`, and after a success `styles_complete`, the per-exchange counts, `added`, `removed`, the number
+  of reclassified symbols and the management style lookups.
+- First load: only a missing cache file is downloaded, through the same refresh
+  without the management style lookups. An unreadable cache is never replaced by a
+  download on first load or by the automatic refresh; the API, strategy endpoints
+  included, answers 503 instead. A manual `--refresh-master` with an unreadable cache
+  refreshes against an empty baseline (no count comparison) and overwrites it.
+- The bootstrap data package keeps a local master whose newest `updated_at` is at
+  least as recent as the bundled one, carries local delisted rows and management
+  styles into a bundled one it installs, and reloads the master at once.
+- TPEx ETF management style: the ISIN table has no active/passive marker, and the
+  bond ETF tax exemption needs one. A refresh carries a known style forward and looks
+  up only TPEx ETFs without one on the TPEx ETF product spec
+  (`https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=<bond|domestic|foreign>&code=<code>&response=json`,
+  field 「ETF類別」: 主動 is active, 被動 is passive). Lookups are one per second and
+  stop after three consecutive request failures. An ETF whose style stays unknown
+  pays the ordinary ETF rate; in the 2026-10-07 review 00838B and 00992B could not be
+  resolved. TWSE ETFs take the style from the official fund type.
+- Known gap: a symbol delisted before the first master snapshot was never recorded,
+  so for target days before that snapshot the universe may be undercounted.
+
+### New listings
+
+Every full-market daily run, and the update button, looks at the newest 20 stored
+partitions (`REPAIR_WINDOW_PARTITIONS`) for days that lack a row of a supported
+active stock or ETF whose `listing_date` falls inside that window, and refetches
+those days through the snapshot path. Only days before the listing's first stored
+row count: once it has a row, a later day without one is treated as a halt, not a
+gap. A listing day that could not be fetched makes the daily status partial with a
+note; it is retried on the next run only while it precedes the listing's first
+stored row (otherwise refetch it with `--symbols`). A symbol listed before the
+window, halted or delisted never triggers a refetch. When the refresh changed the
+master, the update button also republishes enriched; the scheduled runs publish
+every time, and the recorded limit rules decide whether every partition is
+rewritten (see Corporate actions and forward adjustment).
+
+### Taiwan depositary receipts
+
+- A TDR is `instrument_type="stock"` with `security_class="tdr"`. The class comes from
+  the company directory's industry code 91, a six-digit code starting with 91, or a
+  name ending in -DR; a cache written before the column existed derives it on read.
+  Code 91 marks TDRs and is not an industry, so a TDR's industry is null: industry
+  statistics count it as UNCLASSIFIED, RELATIVE_STRENGTH_OUTLIER is not applicable,
+  and the research context marks its industry not applicable.
+- The official share count of a TDR is the underlying company's issued shares, not
+  receipts, so TDR turnover and market cap are null (`as_instruments` of the share
+  capital store leaves TDRs out). Par value keeps the official text and its currency;
+  `par_value_twd` is set only when the text states NTD.
+- Securities transaction tax is 0.1%
+  ([MOF Q&A](https://www.etax.nat.gov.tw/etwmain/tax-info/understanding/tax-q-and-a/national/securities-transaction-tax/filing/LeJ1WWV),
+  ruling 台財稅第811672688號函). Day trades also pay 0.1%: that is our reading of
+  Securities Transaction Tax Act art. 2-2, whose reduced rate covers listed or OTC
+  stocks only.
+  The initial-listing no-limit window does not apply; the limit is 10%. Strategies
+  that trade only stocks still include TDRs.
+
+### Per-symbol daily refresh
+
+`python -m app.taiwan.daily_update --symbols ...` fetches TPEx symbols from the TPEx
+daily quotes of each day (`www/zh-tw/afterTrading/dailyQuotes`, the snapshot source), so
+volume and amount are exact shares and TWD including block trades. TWSE symbols keep
+the per-symbol provider. A TPEx symbol only has to be a supported stock or ETF in the
+master, whatever its listing status, so a delisted one can be backfilled for the days
+it traded. The path only fills missing rows: stored rows, including a provisional
+partition, are never rewritten. Symbols that could not be refreshed are listed with
+their reason in the daily note. When rows were written, enriched is republished from
+the earliest written day, not only the recent window.
+
+### Daily data integrity report
+
+`app/services/data_integrity.py` checks the newest 20 sessions before today. The
+calendar is the dates holding a stored TAIEX (`t00.TWSE`) bar or a daily partition,
+from the first stored partition on, so holidays are never gaps. Each day is reported
+as `missing` (a TAIEX date without a daily partition), `one_exchange` (no TWSE or no
+TPEx rows), `provisional` (written on its own day, except the newest stored day) or
+`enriched_stale` (enriched partition absent or older than the daily partition). The
+report only feeds the log written 30 seconds after startup: nothing is repaired,
+enabling realtime quotes is not blocked, and the legacy A-share `kline_*` tables are
+not read. Taiwan bars are not written to or read from the legacy `kline_daily` table
+either: the default start of backtest streams, the minute chart's trading day and
+`/api/data/status` take their dates from the `taiwan/daily` partition names.
 
 ## Market-wide institutional amounts
 
@@ -170,13 +327,22 @@ and adjustment factors from them.
   volume unchanged. The reduction volume ratio includes any capital refund and is an
   approximation.
 - `.taiwan_enriched_factors.json` in the data directory records the factor set of the
-  last full publish. When the factors change, or the previous full publish never
-  committed, every enriched partition is rewritten as one `EnrichedPublication`, and
-  the record is saved before the publication is committed, so a record that cannot be
-  saved leaves the publication incomplete. While a publication is incomplete, daily
-  bars are served from the memory cache and the screener service answers 503 instead
-  of an empty result; the next scheduled run or the settings update button rewrites
-  everything and commits. A full rewrite takes about 20 seconds, and in the dividend
+  last full publish and, under `limit_rules`, each stored symbol's price-limit rule
+  (limit percentage, tick table and initial-listing window). Every enriched partition
+  is rewritten as one `EnrichedPublication` when the factors change, when the previous
+  full publish never committed, when a symbol with rows before the refreshed window
+  changed its limit rule (for example after a security master reclassification), or
+  when a published partition outside the window has another schema than this run's
+  output (only parquet footers are read). A record saved before `limit_rules` existed
+  adopts the current rules as its baseline without a rebuild, so a rule change that
+  happened before that first run needs `python -m app.taiwan.enriched_refresh --full`.
+  Corrections of an event's official `ref_limit_up/down` are not part of the record and
+  do not trigger a rebuild. The record is saved before the publication is committed,
+  so a record that cannot be saved leaves the publication incomplete. While a
+  publication is incomplete, daily bars are served from the memory cache and the
+  screener service answers 503 instead of an empty result; the next scheduled run or
+  the settings update button rewrites everything and commits. A full rewrite of the
+  history since 2024-01 took 48 to 116 seconds in the 2026-10 logs, and in the dividend
   season full rewrites are frequent.
 - Intraday, events dated after the recorded factor set are applied on read to the
   history of the daily chart, the watchlist mini chart and the live indicator state,

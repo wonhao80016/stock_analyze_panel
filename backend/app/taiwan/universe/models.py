@@ -22,6 +22,7 @@ from app.taiwan.market_rules import (
     TickSizeClass,
     ipo_no_limit_until,
 )
+from app.taiwan.universe.industry_classification import resolve_industry_name
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,74 @@ OFFICIAL_ETF_RULE_PROFILES = {
     "00632R.TWSE": OfficialEtfRuleProfile(
         "inverse", "domestic", -1.0,
         "https://www.twse.com.tw/zh/ETFortune/etfInfo/00632R",
+    ),
+    "006201.TPEX": OfficialEtfRuleProfile(
+        "domestic_equity", "domestic", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=domestic&code=006201&response=json",
+    ),
+    "00888.TPEX": OfficialEtfRuleProfile(
+        "domestic_equity", "domestic", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=domestic&code=00888&response=json",
+    ),
+    "00928.TPEX": OfficialEtfRuleProfile(
+        "domestic_equity", "domestic", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=domestic&code=00928&response=json",
+    ),
+    "00877.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=00877&response=json",
+    ),
+    "00886.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=00886&response=json",
+    ),
+    "00887.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=00887&response=json",
+    ),
+    "009822.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=009822&response=json",
+    ),
+    "00411A.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=00411A&response=json",
+    ),
+    "00858.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=00858&response=json",
+    ),
+    "00955.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=00955&response=json",
+    ),
+    "009806.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=009806&response=json",
+    ),
+    "009807.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=009807&response=json",
+    ),
+    "009814.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=009814&response=json",
+    ),
+    "009815.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=009815&response=json",
+    ),
+    "009823.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=009823&response=json",
+    ),
+    "009825.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=009825&response=json",
+    ),
+    "00998A.TPEX": OfficialEtfRuleProfile(
+        "foreign_equity", "foreign", 1.0,
+        "https://www.tpex.org.tw/www/zh-tw/ETF/detail?type=foreign&code=00998A&response=json",
     ),
 }
 
@@ -64,7 +133,7 @@ class TaiwanInstrument:
     name: str                 # Official Traditional Chinese name (e.g. "台積電")
     instrument_type: str      # "stock" | "etf" | "unsupported"
     listing_status: str       # "active" | "delisted" | "suspended" | "unsupported"
-    listing_date: str | None  # "YYYY/MM/DD" or None
+    listing_date: str | None  # ISO "YYYY-MM-DD" or None
     isin: str | None          # e.g. "TW0002330008"
     industry: str | None      # e.g. "半導體業", "光電業"
     cfi_code: str | None      # ISO 10962 CFI code (e.g. "ESVUFR", "CEOJEU", "CEOIEU")
@@ -79,9 +148,37 @@ class TaiwanInstrument:
     etf_management_style: str | None = None   # "active" | "passive" | None
     currency: str = "TWD"
     lot_size: int = 1000
+    security_class: str | None = None         # "tdr" for Taiwan depositary receipts, else None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+TDR_SECURITY_CLASS = "tdr"
+# t187ap03_L industry code "91" is used only by the ISIN TDR category; it is not an industry.
+TDR_INDUSTRY_CODE = "91"
+
+
+def is_tdr_industry(industry: str | None) -> bool:
+    """Whether a raw or resolved industry value is the TDR marker "91"."""
+    if industry is None:
+        return False
+    return resolve_industry_name(industry) == resolve_industry_name(TDR_INDUSTRY_CODE)
+
+
+def derive_security_class(code: str | None, name: str | None, industry: str | None) -> str | None:
+    """Return "tdr" for the 91 industry marker, a six-digit 91 code or a -DR name; else None.
+
+    TWSE assigns 910101-919999 to TDRs listed since 2009-12-15; older TDRs keep four-digit codes.
+    """
+    code = code or ""
+    if (
+        is_tdr_industry(industry)
+        or (len(code) == 6 and code.startswith("91"))
+        or (name or "").strip().upper().endswith("-DR")
+    ):
+        return TDR_SECURITY_CLASS
+    return None
 
 
 class ListingDateUnknownError(ValueError):
@@ -118,9 +215,9 @@ class MarketProfileBridge:
         if instrument.instrument_type == "etf":
             cls.verify_confirmed_etf(instrument)
             cat = instrument.etf_category or EtfCategory.UNKNOWN.value
-            # Strictly audit: Only plain-vanilla bond ETFs (multiplier == 1.0) are exempt (0% tax).
-            # Leveraged/Inverse bond ETFs (e.g. 00688L/00689R) are subject to statutory 0.1% tax
-            # under Ministry of Finance ruling (台財稅字第10504709410號).
+            # Only passive bond ETFs with multiplier 1 are BOND_ETF, taxed 0% only inside the statutory
+            # window (SecuritiesTaxModel); leveraged/inverse bond ETFs (00688L/00689R) pay 0.1% under
+            # MOF ruling No. 10504709410.
             if (
                 cat == EtfCategory.BOND.value
                 and instrument.etf_management_style == "passive"
@@ -128,7 +225,13 @@ class MarketProfileBridge:
             ):
                 return TaxClass.BOND_ETF
             return TaxClass.DOMESTIC_ETF
-        return TaxClass.ORDINARY_STOCK
+        # Duck-typed instruments carry no code/name to derive from, only an explicit class.
+        is_tdr = (
+            cls.is_tdr(instrument)
+            if isinstance(instrument, TaiwanInstrument)
+            else getattr(instrument, "security_class", None) == TDR_SECURITY_CLASS
+        )
+        return TaxClass.TDR if is_tdr else TaxClass.ORDINARY_STOCK
 
     @classmethod
     def get_tick_size_class(cls, instrument: TaiwanInstrument) -> TickSizeClass:
@@ -154,14 +257,20 @@ class MarketProfileBridge:
             ) from exc
 
     @staticmethod
-    def initial_listing_rule_applies(instrument: TaiwanInstrument) -> bool:
-        """Whether the no-limit window of an initial listing applies: ordinary stocks, not TDRs.
+    def is_tdr(instrument: TaiwanInstrument) -> bool:
+        """Whether the instrument is a Taiwan depositary receipt.
 
-        Taiwan depositary receipts have six-digit codes starting with 91, or names ending in -DR.
+        An explicit security_class decides; without one, the code, name and industry marker decide.
         """
-        code = instrument.code or ""
-        is_tdr = (len(code) == 6 and code.startswith("91")) or (instrument.name or "").strip().upper().endswith("-DR")
-        return instrument.instrument_type == "stock" and not is_tdr
+        if instrument.security_class is not None:
+            return instrument.security_class == TDR_SECURITY_CLASS
+        derived = derive_security_class(instrument.code, instrument.name, instrument.industry)
+        return derived == TDR_SECURITY_CLASS
+
+    @classmethod
+    def initial_listing_rule_applies(cls, instrument: TaiwanInstrument) -> bool:
+        """Whether the no-limit window of an initial listing applies: ordinary stocks, not TDRs."""
+        return instrument.instrument_type == "stock" and not cls.is_tdr(instrument)
 
     @classmethod
     def ipo_no_limit_window(cls, instrument: TaiwanInstrument, sessions: ListingSessions) -> tuple[date, date] | None:
@@ -217,7 +326,8 @@ class MarketProfileBridge:
         Domestic plain ETF (0050, 006208): 0.10 (10%)
         Domestic leveraged ETF (00631L, 2X): 0.20 (20%)
         Domestic inverse ETF (00632R, -1X): 0.10 (10%)
-        Foreign / Bond ETF (00646, 00720B, 00633L): None (NO_LIMIT)
+        Foreign-component ETF, incl. bond and futures trust (00646, 00720B, 00633L, 00635U): None
+        Domestic-component bond ETF: 0.10, as for any domestic-component ETF
 
         Without *trade_date* the initial-listing window is not applied. *sessions* defaults to the
         stored daily-bar calendar.
@@ -236,7 +346,6 @@ class MarketProfileBridge:
                 if official_profile.underlying_scope == "foreign":
                     return None
                 return round(0.10 * abs(official_profile.price_limit_multiplier), 4)
-            cat = instrument.etf_category or EtfCategory.UNKNOWN.value
 
             scope = instrument.underlying_scope or "unknown"
             if scope == "unknown":
@@ -245,8 +354,8 @@ class MarketProfileBridge:
                     "Confirmed underlying scope (domestic or foreign) is required."
                 )
 
-            # Foreign-component ETFs and bond ETFs have no price limit in Taiwan
-            if scope == "foreign" or cat == EtfCategory.BOND.value:
+            # TWSE/TPEx limits follow component scope, not asset class: a bond ETF is no-limit only if foreign.
+            if scope == "foreign":
                 return None
 
             if scope == "domestic":

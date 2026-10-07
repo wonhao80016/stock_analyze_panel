@@ -8,7 +8,8 @@ import { QueryClientProvider, QueryClient } from '@tanstack/react-query'
 import { TaiwanScreener } from './TaiwanScreener'
 import { api } from '@/lib/api'
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   api: {
     taiwanScreenerRun: vi.fn(),
     taiwanDataStatus: vi.fn(),
@@ -512,6 +513,30 @@ describe('Industry name display (Phase 8C-C)', () => {
     expect(await screen.findByRole('button', { name: '半導體業' })).toBeInTheDocument()
   })
 
+  it('shows the UNCLASSIFIED bucket as 未分類 and filters by its API value', async () => {
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(
+      buildIndustryIntelligence([buildIndustryMetric({ industry: 'UNCLASSIFIED' })]) as any,
+    )
+    renderScreener()
+
+    fireEvent.click(await screen.findByRole('button', { name: '未分類' }))
+    expect(screen.queryByText('UNCLASSIFIED')).not.toBeInTheDocument()
+    await waitFor(() => expect(lastRunPayload().industry).toBe('UNCLASSIFIED'))
+  })
+
+  it('shows 未分類 for an abnormal-diagnostics stock without industry (the route lists stocks only)', async () => {
+    vi.mocked(api.taiwanAbnormalDiagnostics).mockResolvedValue(buildAbnormalDiagnostics([
+      buildAbnormalSignal({ symbol: '910322.TWSE', code: '910322', name: '康師傅-DR', industry: null }),
+      buildAbnormalSignal(),
+    ]) as any)
+    renderScreener()
+
+    const tdrRow = (await screen.findByRole('button', { name: /康師傅-DR/ })).closest('tr') as HTMLElement
+    const tsmcRow = screen.getByRole('button', { name: /台積電/ }).closest('tr') as HTMLElement
+    expect(within(tdrRow).getByText('未分類')).toBeInTheDocument()
+    expect(within(tsmcRow).getByText('半導體')).toBeInTheDocument()
+  })
+
   it('industry intelligence table defaults to top 10 rows with an expand control for the rest', async () => {
     const many = Array.from({ length: 15 }, (_, i) => buildIndustryMetric({ industry: `產業${i + 1}` }))
     vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(buildIndustryIntelligence(many) as any)
@@ -525,6 +550,81 @@ describe('Industry name display (Phase 8C-C)', () => {
     fireEvent.click(expandButton)
     expect(await screen.findByRole('button', { name: '產業15' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '收合 ▴' })).toHaveAttribute('aria-expanded', 'true')
+  })
+})
+
+describe('Industry and abnormal data-quality badges', () => {
+  function withStatus<T extends { data_quality: any }>(snapshot: T, overall_status: string): T {
+    return { ...snapshot, data_quality: { ...snapshot.data_quality, overall_status } }
+  }
+
+  it('industry table shows the incomplete-data badge when overall_status is partial', async () => {
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(
+      withStatus(buildIndustryIntelligence([buildIndustryMetric()]), 'partial') as any,
+    )
+    renderScreener()
+
+    await screen.findByRole('button', { name: '半導體業' })
+    expect(screen.getByText('產業資料尚未完整，以下結果僅供參考')).toBeInTheDocument()
+  })
+
+  it('industry table shows the provisional badge when overall_status is provisional', async () => {
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(
+      withStatus(buildIndustryIntelligence([buildIndustryMetric()]), 'provisional') as any,
+    )
+    renderScreener()
+
+    await screen.findByRole('button', { name: '半導體業' })
+    expect(screen.getByText('產業統計為盤後初值，次日校正')).toBeInTheDocument()
+    expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
+  })
+
+  it('industry table shows no badge when overall_status is complete', async () => {
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(
+      buildIndustryIntelligence([buildIndustryMetric()]) as any,
+    )
+    renderScreener()
+
+    await screen.findByRole('button', { name: '半導體業' })
+    expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
+    expect(screen.queryByText('產業統計為盤後初值，次日校正')).not.toBeInTheDocument()
+  })
+
+  it('abnormal panel shows the incomplete-data badge when overall_status is partial', async () => {
+    vi.mocked(api.taiwanAbnormalDiagnostics).mockResolvedValue({
+      ...buildAbnormalDiagnostics([buildAbnormalSignal()]),
+      data_quality: { overall_status: 'partial', universe_supported_count: 100, evaluated_symbol_count: 99 },
+    } as any)
+    renderScreener()
+
+    await screen.findByRole('button', { name: /台積電/ })
+    expect(screen.getByText('異常偵測資料尚未完整，以下結果僅供參考')).toBeInTheDocument()
+  })
+
+  it('abnormal panel shows the provisional badge when overall_status is provisional', async () => {
+    vi.mocked(api.taiwanAbnormalDiagnostics).mockResolvedValue({
+      ...buildAbnormalDiagnostics([buildAbnormalSignal()]),
+      data_quality: { overall_status: 'provisional', universe_supported_count: 100, evaluated_symbol_count: 100 },
+    } as any)
+    renderScreener()
+
+    await screen.findByRole('button', { name: /台積電/ })
+    expect(screen.getByText('異常偵測為盤後初值，次日校正')).toBeInTheDocument()
+  })
+
+  it.each([
+    ['complete', { overall_status: 'complete', universe_supported_count: 100, evaluated_symbol_count: 100 }],
+    ['missing', undefined],
+  ])('abnormal panel shows no badge when overall_status is %s', async (_label, dataQuality) => {
+    vi.mocked(api.taiwanAbnormalDiagnostics).mockResolvedValue({
+      ...buildAbnormalDiagnostics([buildAbnormalSignal()]),
+      data_quality: dataQuality,
+    } as any)
+    renderScreener()
+
+    await screen.findByRole('button', { name: /台積電/ })
+    expect(screen.queryByText('異常偵測資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
+    expect(screen.queryByText('異常偵測為盤後初值，次日校正')).not.toBeInTheDocument()
   })
 })
 

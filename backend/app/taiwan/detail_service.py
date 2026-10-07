@@ -41,7 +41,7 @@ from app.taiwan.index_daily import get_index_daily_service
 from app.taiwan.enrichment.index import TaiwanIndexProvider
 from app.taiwan.enrichment.institutional import TaiwanInstitutionalProvider
 from app.taiwan.enrichment.margin import TaiwanMarginProvider
-from app.taiwan.universe.models import MarketProfileBridge
+from app.taiwan.universe.models import TDR_SECURITY_CLASS, MarketProfileBridge
 from app.taiwan.providers.hybrid_provider import TaiwanHybridProvider
 from app.taiwan.realtime.calendar import taipei_now
 from app.taiwan.realtime.service import get_realtime_service
@@ -104,6 +104,7 @@ class TaiwanStockDetailService:
                 industry=master_item.industry,
                 cfi_code=master_item.cfi_code,
                 etf_category=master_item.etf_category if master_item.etf_category else None,
+                security_class=TDR_SECURITY_CLASS if MarketProfileBridge.is_tdr(master_item) else None,
             )
         elif (benchmark := get_benchmark(symbol_str)) is not None:
             identity = TaiwanStockIdentity(

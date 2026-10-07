@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import os
 import threading
 import time
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
@@ -92,6 +94,86 @@ def _report_input(
     except Exception:
         logger.exception("input status for %s on %s could not be derived", group, target_date)
         sink[group] = InputStatus(state="unverified")
+
+
+_TAIWAN_SYMBOL = r"\.(TWSE|TPEX)$"
+
+
+def _has_taiwan_symbols(*frames: pl.DataFrame | None) -> bool:
+    return any(
+        frame is not None
+        and "symbol" in frame.columns
+        and bool(
+            frame.select(pl.col("symbol").cast(pl.Utf8).str.contains(_TAIWAN_SYMBOL).any()).item()
+        )
+        for frame in frames
+    )
+
+
+# Re-read only on a new (path, mtime, size): open readers block os.replace of the file on Windows.
+_master_asset_types: tuple[tuple[str, int, int], dict[str, str]] | None = None
+_master_asset_types_lock = threading.Lock()
+
+
+def _read_master_asset_types(cache_path) -> dict[str, str]:
+    global _master_asset_types
+    stat = os.stat(cache_path)
+    signature = (str(cache_path), stat.st_mtime_ns, stat.st_size)
+    with _master_asset_types_lock:
+        cached = _master_asset_types
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    frame = pl.read_parquet(cache_path, columns=["symbol", "instrument_type"])
+    types = dict(frame.iter_rows())
+    with _master_asset_types_lock:
+        _master_asset_types = (signature, types)
+    return types
+
+
+class _SecurityMasterAssetTypes(Mapping[str, str]):
+    """instrument_type per symbol from the security master cache file, resolved on first lookup.
+
+    Never loads the master itself, so it cannot trigger an exchange download or rewrite the cache.
+    A missing or unreadable cache raises SecurityMasterUnavailableError on every lookup without
+    reading the file again.
+    """
+
+    def __init__(self) -> None:
+        self._types: dict[str, str] | None = None
+        self._error: str | None = None
+
+    def _resolved(self) -> dict[str, str]:
+        from app.taiwan.universe.service import SecurityMasterUnavailableError
+
+        if self._error is not None:
+            raise SecurityMasterUnavailableError(self._error)
+        if self._types is None:
+            from app.taiwan.universe import get_security_master
+
+            try:
+                self._types = _read_master_asset_types(get_security_master().cache_path)
+            except Exception as exc:
+                self._error = f"Taiwan Security Master unavailable: {exc}"
+                raise SecurityMasterUnavailableError(self._error) from exc
+        return self._types
+
+    def __getitem__(self, symbol: str) -> str:
+        return self._resolved()[symbol]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._resolved())
+
+    def __len__(self) -> int:
+        return len(self._resolved())
+
+
+def taiwan_symbol_asset_types(
+    asset_type: str, *frames: pl.DataFrame | None
+) -> Mapping[str, str] | None:
+    """Security master asset types for stock/ETF data holding Taiwan symbols; None for anything else."""
+    if asset_type not in ("stock", "etf") or not _has_taiwan_symbols(*frames):
+        return None
+    return _SecurityMasterAssetTypes()
 
 
 @dataclass
@@ -513,6 +595,8 @@ class ScreenerService:
                 CURRENT: sink.get(CURRENT, InputStatus()),
                 HISTORY: sink.get(HISTORY, InputStatus()) if history_bars > 1 else None,
             },
+            # Taiwan daily enriched data holds stocks and ETFs together; only the master tells them apart.
+            symbol_asset_types=taiwan_symbol_asset_types(self.asset_type, current, history),
         )
 
     def latest_date(self) -> date | None:

@@ -19,7 +19,6 @@ from app.backtest.worker import _decode_backtest_config, encode_backtest_config
 from app.taiwan.market_rules import (
     BacktestMode,
     LotModel,
-    RegulatoryRuleUnavailableError,
     TaiwanMarketProfile,
     TradingCostModel,
 )
@@ -88,8 +87,7 @@ def test_taiwan_profiles_apply_symbol_tax_and_trading_units() -> None:
     assert config.sell_transaction_cost(100_000, "00720B.TWSE", date(2016, 12, 31)) == pytest.approx(242.5)
     assert config.sell_transaction_cost(100_000, "00720B.TWSE", date(2017, 1, 1)) == pytest.approx(142.5)
     assert config.sell_transaction_cost(100_000, "00720B.TWSE", date(2026, 12, 31)) == pytest.approx(142.5)
-    with pytest.raises(RegulatoryRuleUnavailableError):
-        config.sell_transaction_cost(100_000, "00720B.TWSE", date(2027, 1, 1))
+    assert config.sell_transaction_cost(100_000, "00720B.TWSE", date(2027, 1, 4)) == pytest.approx(242.5)
     config.day_trade_eligible_by_symbol = {"2330.TWSE": True}
     assert config.sell_transaction_cost(
         100_000,
@@ -97,13 +95,12 @@ def test_taiwan_profiles_apply_symbol_tax_and_trading_units() -> None:
         date(2027, 12, 31),
         is_day_trade=True,
     ) == pytest.approx(292.5)
-    with pytest.raises(RegulatoryRuleUnavailableError):
-        config.sell_transaction_cost(
-            100_000,
-            "2330.TWSE",
-            date(2028, 1, 1),
-            is_day_trade=True,
-        )
+    assert config.sell_transaction_cost(
+        100_000,
+        "2330.TWSE",
+        date(2028, 1, 3),
+        is_day_trade=True,
+    ) == pytest.approx(442.5)
 
 
 def test_taiwan_profile_isolated_from_non_taiwan_universes() -> None:

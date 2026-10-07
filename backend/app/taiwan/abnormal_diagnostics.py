@@ -48,10 +48,11 @@ ETF COVERAGE (Phase 7J):
       `industry`, which is always None for ETFs — a different classification axis entirely,
       not something this phase invents a substitute for). Never evaluated as
       triggered/not-triggered for an ETF; always listed in `not_applicable_signals` instead.
-- `TaiwanAbnormalDiagnosticItem.not_applicable_signals: list[str]` — always [] for stocks,
-  always ["RELATIVE_STRENGTH_OUTLIER"] for ETFs. This does NOT change the meaning of
-  `signals` (still only triggered signals) or `signal_count` (still only the count of
-  triggered applicable signals, never "how many diagnostic types were evaluated").
+- `TaiwanAbnormalDiagnosticItem.not_applicable_signals: list[str]` — [] for stocks with a
+  domestic industry; ["RELATIVE_STRENGTH_OUTLIER"] for ETFs, TDRs and unclassified stocks.
+  This does NOT change the meaning of `signals` (still only triggered signals) or
+  `signal_count` (still only the count of triggered applicable signals, never "how many
+  diagnostic types were evaluated").
 """
 from __future__ import annotations
 
@@ -69,10 +70,16 @@ from app.taiwan.corporate_actions import (
 )
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import DatasetFreshnessStatus, resolve_target_latest_trading_date
-from app.taiwan.industry_intelligence import TaiwanIndustryIntelligenceService
+from app.taiwan.industry_intelligence import UNCLASSIFIED_INDUSTRY, TaiwanIndustryIntelligenceService
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
-from app.taiwan.market_intelligence import TaiwanMarketIntelligenceService
+from app.taiwan.market_intelligence import (
+    TaiwanMarketIntelligenceService,
+    daily_coverage_complete,
+    delisted_after,
+    listed_by,
+    stored_partition_status,
+)
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.service import UniverseType
@@ -145,7 +152,7 @@ class TaiwanAbnormalDiagnosticItem(BaseModel):
     signals: list[DiagnosticSignalEvidence] = Field(default_factory=list)
     not_applicable_signals: list[str] = Field(
         default_factory=list,
-        description="因標的類別而結構性不適用之訊號類型 (如 ETF 之 RELATIVE_STRENGTH_OUTLIER)；股票恆為空清單",
+        description="因標的類別而結構性不適用之訊號類型 (如 ETF、存託憑證或未分類股票之 RELATIVE_STRENGTH_OUTLIER); 有國內產業之股票為空清單",
     )
     market_context: CompactMarketContext
     industry_context: CompactIndustryContext
@@ -161,7 +168,7 @@ class DiagnosticsDataQuality(BaseModel):
     daily_status: DatasetFreshnessStatus
     institutional_status: DatasetFreshnessStatus
     margin_status: DatasetFreshnessStatus
-    overall_status: Literal["complete", "partial", "unavailable"]
+    overall_status: Literal["complete", "provisional", "partial", "unavailable"]
 
 
 class TaiwanAbnormalDiagnosticsSnapshot(BaseModel):
@@ -177,6 +184,11 @@ class TaiwanAbnormalDiagnosticsSnapshot(BaseModel):
 
 
 # ── Service Implementation ────────────────────────────────────
+
+
+def _has_industry(inst: Any) -> bool:
+    """A null or blank industry is the UNCLASSIFIED bucket of the industry snapshot; TDRs have none."""
+    return bool((inst.industry or "").strip())
 
 
 class TaiwanAbnormalDiagnosticsService:
@@ -247,8 +259,16 @@ class TaiwanAbnormalDiagnosticsService:
         #    controls exactly which instrument types participate, not whatever the
         #    Security Master's "all" definition happens to include in the future.
         stock_symbols = self.security_master.get_universe(UniverseType.TAIWAN_STOCKS)
+        universe_types = ["stock"]
         if include_etfs:
             stock_symbols = stock_symbols + self.security_master.get_universe(UniverseType.TAIWAN_ETFS)
+            universe_types.append("etf")
+        # A historical target also covers symbols delisted after it.
+        delisted = delisted_after(self.security_master.to_dataframe(supported_only=True), target)
+        if not delisted.is_empty():
+            stock_symbols = stock_symbols + sorted(
+                delisted.filter(pl.col("instrument_type").is_in(universe_types))["symbol"].to_list()
+            )
         universe_count = len(stock_symbols)
         if not stock_symbols:
             return self._empty_snapshot(target)
@@ -352,7 +372,11 @@ class TaiwanAbnormalDiagnosticsService:
 
             if exchange_filter and inst_master.exchange != exchange_filter:
                 continue
-            if industry_filter and inst_master.industry != industry_filter:
+            has_industry = _has_industry(inst_master)
+            if industry_filter == UNCLASSIFIED_INDUSTRY:
+                if inst_master.instrument_type != "stock" or has_industry:
+                    continue
+            elif industry_filter and inst_master.industry != industry_filter:
                 continue
 
             t_daily = target_daily_map.get(sym)
@@ -604,7 +628,7 @@ class TaiwanAbnormalDiagnosticsService:
                     ))
 
             # ── Signal 10: RELATIVE_STRENGTH_OUTLIER ──
-            ind_m = ind_metrics_map.get(inst_master.industry or "")
+            ind_m = ind_metrics_map.get(inst_master.industry) if has_industry else None
             c5_base = c5_base_map.get(sym)
             if ind_m and ind_m.average_return_5d is not None and c5_base and close_p is not None:
                 ret_5d = (close_p / c5_base) - 1.0
@@ -628,11 +652,10 @@ class TaiwanAbnormalDiagnosticsService:
                     ))
 
             # Structurally not-applicable signals (Phase 7J) — explicit, not inferred from
-            # absence. RELATIVE_STRENGTH_OUTLIER is keyed on company `industry`, which is
-            # never populated for ETFs (a different classification axis entirely) — it is
-            # never evaluated as triggered/not-triggered for an ETF, only listed here.
+            # absence. RELATIVE_STRENGTH_OUTLIER is keyed on company `industry`, which ETFs,
+            # TDRs and unclassified stocks lack — never evaluated for them, only listed here.
             not_applicable_signals: list[str] = []
-            if inst_master.instrument_type == "etf":
+            if inst_master.instrument_type == "etf" or not has_industry:
                 not_applicable_signals.append("RELATIVE_STRENGTH_OUTLIER")
 
             # Filter by specific signal type if requested
@@ -691,10 +714,25 @@ class TaiwanAbnormalDiagnosticsService:
         d_status: DatasetFreshnessStatus = "current" if len(df_target_daily) > 0 else "unavailable"
         i_status: DatasetFreshnessStatus = "current" if len(df_target_inst) > 0 else "unavailable"
         m_status: DatasetFreshnessStatus = "current" if len(df_target_margin) > 0 else "unavailable"
-        overall: Literal["complete", "partial", "unavailable"] = (
-            "complete" if all(s == "current" for s in [d_status, i_status, m_status])
-            else ("partial" if d_status == "current" else "unavailable")
+        # Must match market intelligence's status precedence.
+        universe_df = self.security_master.to_dataframe(supported_only=True).filter(
+            pl.col("symbol").is_in(stock_symbols)
         )
+        coverage_complete = daily_coverage_complete(
+            listed_by(universe_df, target), set(target_daily_map)
+        )
+        partitions = stored_partition_status(self.daily_store, [target, *prior_5_dates])
+        overall: Literal["complete", "provisional", "partial", "unavailable"]
+        if d_status != "current":
+            overall = "unavailable"
+        elif not coverage_complete or partitions == "partial":
+            overall = "partial"
+        elif partitions == "provisional" and i_status == "current" and m_status == "current":
+            overall = "provisional"
+        elif i_status == "current" and m_status == "current":
+            overall = "complete"
+        else:
+            overall = "partial"
 
         dq = DiagnosticsDataQuality(
             target_trade_date=str(target),

@@ -88,7 +88,9 @@ class TaiwanDailyStore:
 
     # ── Write ──────────────────────────────────────────────────────
 
-    def write_batch(self, df: pl.DataFrame, partition_date: date | None = None) -> int:
+    def write_batch(
+        self, df: pl.DataFrame, partition_date: date | None = None, *, skip_existing: bool = False
+    ) -> int:
         """Atomically append rows to the daily parquet dataset, grouped by date.
 
         Each distinct date in *df* is written to its own partition directory:
@@ -102,6 +104,10 @@ class TaiwanDailyStore:
             df: Polars DataFrame whose columns are a superset of
                 TAIWAN_DAILY_COLUMNS.
             partition_date:  Ignored.  Kept for API compatibility.
+            skip_existing: Keep stored rows and drop incoming rows whose (symbol, date)
+                is already stored, checked under the partition lock. An unreadable
+                partition then raises instead of being replaced, and a provisional
+                partition stays provisional.
 
         Returns:
             Number of rows written (after dedup).
@@ -124,12 +130,12 @@ class TaiwanDailyStore:
         for part_date in sorted(df.select(pl.col("date")).unique().sort("date").to_pandas()["date"].tolist()):
             part_date_obj = part_date.to_pydatetime().date() if hasattr(part_date, "to_pydatetime") else part_date
             group = df.filter(pl.col("date") == part_date_obj)
-            total_written += self._write_partition(part_date_obj, group)
+            total_written += self._write_partition(part_date_obj, group, skip_existing=skip_existing)
 
         logger.debug("write_batch total rows written: %d", total_written)
         return total_written
 
-    def _write_partition(self, d: date, df: pl.DataFrame) -> int:
+    def _write_partition(self, d: date, df: pl.DataFrame, *, skip_existing: bool = False) -> int:
         """Write *df* to the partition directory for date *d*, merging if exists.
 
         The entire read-merge-dedup-replace sequence is protected by a
@@ -142,13 +148,23 @@ class TaiwanDailyStore:
             target = partition_dir / "part.parquet"
 
             # Merge with existing partition if present.
+            new_rows = df.height
+            keep_provisional = False
             if target.exists():
+                keep_provisional = skip_existing and is_provisional_mtime(d, target.stat().st_mtime)
                 try:
                     existing = pl.scan_parquet(target, missing_columns="insert", extra_columns="ignore").collect()
+                    if skip_existing:
+                        df = df.join(existing.select("symbol", "date"), on=["symbol", "date"], how="anti")
+                        new_rows = df.height
                     if not existing.is_empty():
                         df = pl.concat([existing, df], how="diagonal_relaxed")
                 except Exception as exc:
+                    if skip_existing:
+                        raise
                     logger.warning("Failed to read existing partition %s: %s", target, exc)
+                if new_rows == 0:
+                    return df.height
 
             # Final dedup + deterministic sort.
             before = df.height
@@ -161,6 +177,11 @@ class TaiwanDailyStore:
                 os.close(tmp_fd)
                 df.write_parquet(tmp_path)
                 Path(tmp_path).replace(target)
+                if keep_provisional and not is_provisional_mtime(d, target.stat().st_mtime):
+                    # Rows already stored are still same-day figures, so the day must stay provisional;
+                    # the last second of day d also stays newer than an enriched publish made that day.
+                    last_second = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=TAIPEI_TZ).timestamp()
+                    os.utime(target, (last_second, last_second))
                 invalidate_listing_sessions(self._data_dir)
                 logger.debug("Wrote %d rows to %s", df.height, target)
             except BaseException:

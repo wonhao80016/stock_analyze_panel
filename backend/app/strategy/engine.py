@@ -11,7 +11,7 @@ import logging
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
@@ -29,6 +29,7 @@ from app.strategy.scoring import (
     scoring_value_expr,
     scoring_warmup_bars,
 )
+from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ DEFAULT_BASIC_FILTER: dict = {
     "exclude_new_days": 30,
     "boards": ["TWSE", "TPEX"],
 }
+
+STRATEGY_ASSET_TYPES = frozenset({"stock", "etf", "index"})
 
 # 叠加策略硬上限：子策略数量。控制信号计算成本与字段并集膨胀，避免 OOM。
 MAX_COMPOSITE_CHILDREN = 8
@@ -164,6 +167,8 @@ class StrategyDataContext:
     cache_key: str | None = None
     # Loader outcome per input ("current"/"history"); diagnostics only, strategies never read it.
     input_status: dict[str, Any] | None = None
+    # Taiwan symbol -> asset type; restricts picks of Taiwan symbols to the strategy's asset_types.
+    symbol_asset_types: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -459,6 +464,12 @@ class StrategyEngine:
             ):
                 raise ValueError(f"META[{field_name!r}] must be a non-empty string list")
             meta[field_name] = list(dict.fromkeys(values))
+        unknown_asset_types = sorted(set(meta["asset_types"]) - STRATEGY_ASSET_TYPES)
+        if unknown_asset_types:
+            raise ValueError(
+                f"META['asset_types'] has unsupported values {unknown_asset_types}; "
+                f"expected values from {sorted(STRATEGY_ASSET_TYPES)}"
+            )
 
         # 归一化 params 为标准 list[dict]: custom/AI 策略的 META["params"] 可能是
         # dict / list[str] 等非标准格式 (LLM 偶发漂移 / 用户手改), 不归一化的话会在
@@ -627,6 +638,40 @@ class StrategyEngine:
                 f"strategy {strategy.meta['id']} does not support timeframe "
                 f"{context.timeframe!r}; supported={timeframes}"
             )
+
+    @staticmethod
+    def _supported_symbols(
+        strategy: StrategyDef,
+        context: StrategyDataContext,
+        symbols: Iterable[str],
+    ) -> set[str] | None:
+        """The given symbols the strategy may pick, or None when the context carries no asset types.
+
+        Only Taiwan symbols are checked; one missing from context.symbol_asset_types has no known
+        asset type and is never picked.
+        """
+        if context.symbol_asset_types is None:
+            return None
+        asset_types = set(strategy.meta.get("asset_types", ["stock"]))
+        return {
+            symbol
+            for symbol in symbols
+            if not str(symbol).endswith(TAIWAN_SUFFIXES)
+            or context.symbol_asset_types.get(symbol) in asset_types
+        }
+
+    @classmethod
+    def _keep_supported_symbols(
+        cls,
+        df: pl.DataFrame,
+        strategy: StrategyDef,
+        context: StrategyDataContext,
+    ) -> pl.DataFrame:
+        if context.symbol_asset_types is None or df.is_empty():
+            return df
+        candidates = df.get_column("symbol").cast(pl.Utf8).unique().to_list()
+        supported = cls._supported_symbols(strategy, context, candidates) or set()
+        return df.filter(pl.col("symbol").cast(pl.Utf8).is_in(sorted(supported)))
 
     @staticmethod
     def resolve_params(
@@ -943,6 +988,7 @@ class StrategyEngine:
         # Pool 过滤
         if pool:
             df = df.filter(pl.col("symbol").is_in(pool))
+        df = self._keep_supported_symbols(df, s, context)
 
         # Stage 2: 策略过滤
         if s.filter_fn:
@@ -1195,6 +1241,15 @@ class StrategyEngine:
                 dtype=bool,
                 count=len(market.symbols),
             )
+        entry_mask = asset_mask
+        supported_symbols = self._supported_symbols(strategy, context, market.symbols)
+        if supported_symbols is not None:
+            supported_mask = np.fromiter(
+                (symbol in supported_symbols for symbol in market.symbols),
+                dtype=bool,
+                count=len(market.symbols),
+            )
+            entry_mask = supported_mask if asset_mask is None else asset_mask & supported_mask
 
         signals = MatrixStrategyPipeline().run(
             strategy.matrix_strategy,
@@ -1206,7 +1261,7 @@ class StrategyEngine:
                 scoring_directions=effective_scoring_directions(overrides),
                 order_by=strategy.meta.get("order_by"),
                 descending=bool(strategy.meta.get("descending", True)),
-                asset_mask=asset_mask,
+                asset_mask=entry_mask,
             ),
         )
         target_ids = [
@@ -1219,8 +1274,9 @@ class StrategyEngine:
         target_time = target_ids[-1]
         entry_active = signals.entry[target_time]
         exit_active = signals.exit[target_time]
+        if entry_mask is not None:
+            entry_active = entry_active & entry_mask
         if asset_mask is not None:
-            entry_active = entry_active & asset_mask
             exit_active = exit_active & asset_mask
         entry_signal_hits = self._matrix_signal_hits(
             entry_active,
@@ -1357,8 +1413,10 @@ class StrategyEngine:
                     row_by_symbol[sym] = row
 
         order_desc = bool(strategy.meta.get("descending", True))
+        # Children may support more asset types than the composite; the composite's own types bound its picks.
+        supported = self._supported_symbols(strategy, context, merged.scores)
         ranked_symbols = sorted(
-            merged.scores.keys(),
+            (symbol for symbol in merged.scores if supported is None or symbol in supported),
             key=lambda s: merged.scores[s],
             reverse=order_desc,
         )

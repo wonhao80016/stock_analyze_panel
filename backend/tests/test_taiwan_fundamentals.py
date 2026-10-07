@@ -154,6 +154,8 @@ def test_current_share_capital_preserves_distinct_concepts_without_historical_av
         "float_shares": None,
         "capital_twd": expected[1],
         "par_value_twd": expected[2],
+        "par_value_raw": "新台幣 10.0000元",
+        "par_value_currency": "TWD",
     }
     assert got.available_at is None and got.published_at is None
     assert got.status == "data_insufficient"

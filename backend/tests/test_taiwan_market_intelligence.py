@@ -255,7 +255,7 @@ def test_provisional_daily_with_current_chips_and_older_master_is_provisional():
     assert snapshot.data_quality.overall_status == "provisional"
 
 
-def test_master_without_single_as_of_date_is_partial():
+def test_master_updated_at_does_not_gate_coverage():
     service = _quality_service(_PROD_TARGET, ["A.TWSE", "B.TPEX"], ["A.TWSE", "B.TPEX"])
     service.security_master.to_dataframe.return_value = (
         service.security_master.to_dataframe.return_value.with_columns(
@@ -263,10 +263,10 @@ def test_master_without_single_as_of_date_is_partial():
         )
     )
 
-    assert service.get_snapshot(_PROD_TARGET).data_quality.overall_status == "partial"
+    assert service.get_snapshot(_PROD_TARGET).data_quality.overall_status == "complete"
 
 
-def test_historical_target_without_point_in_time_universe_is_partial():
+def test_historical_target_counts_only_symbols_listed_by_then():
     target = date(2026, 8, 27)
     service = _quality_service(
         target,
@@ -287,7 +287,7 @@ def test_historical_target_without_point_in_time_universe_is_partial():
 
     assert snapshot.data_quality.universe_supported_symbols == 2
     assert snapshot.data_quality.missing_symbols_count == 0
-    assert snapshot.data_quality.overall_status == "partial"
+    assert snapshot.data_quality.overall_status == "complete"
 
 
 def test_current_universe_filters_non_products_and_keeps_zero_volume_products():

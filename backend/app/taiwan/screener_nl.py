@@ -69,7 +69,7 @@ SYSTEM_PROMPT = """你是一個嚴格的「台股選股條件結構化轉換編�
 【支援欄位清單 (WhiteList)】：
 - exchange: "TWSE" | "TPEX" | "ALL"
 - instrument: "stock" | "etf" | "ALL"
-- industry: string (如 "半導體業", "電子零組件業")
+- industry: string (如 "半導體業", "電子零組件業"；「未分類」或無產業別的股票(含存託憑證)請填 "UNCLASSIFIED")
 - price_min, price_max: float (股價元)
 - change_pct_min, change_pct_max: float (小數, 如 0.05 為 5%)
 - volume_min, volume_max: float (股數, 1張=1000股)

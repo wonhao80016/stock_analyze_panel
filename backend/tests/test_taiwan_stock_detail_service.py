@@ -322,9 +322,9 @@ def _offline_service(symbol: str, price: float, prev_close: float) -> TaiwanStoc
     return svc
 
 
-@pytest.mark.parametrize("symbol", ["9999.TWSE", "00998A.TPEX"])
+@pytest.mark.parametrize("symbol", ["9999.TWSE", "00980T.TPEX"])
 def test_service_unknown_limit_rule_has_no_rate_or_prices(symbol):
-    """9999 is not in the security master; 00998A has no confirmed underlying scope."""
+    """9999 is not in the security master; 00980T has no confirmed underlying scope."""
     res = _offline_service(symbol, 101.0, 100.0).get_stock_detail(symbol)
 
     assert res.price_limit.price_limit_pct is None

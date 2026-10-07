@@ -29,6 +29,8 @@ import {
 } from 'lucide-react'
 import {
   api,
+  industryLabel,
+  UNCLASSIFIED_INDUSTRY,
   type TaiwanScreenerRunRequest,
   type ScreenerResultItem,
   type TaiwanScreenerTranslation,
@@ -40,6 +42,19 @@ import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
 import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS, VOLUME_PATTERN_DEFINITIONS } from '@/lib/signals'
 import { useStockPreview } from '@/components/StockPreviewProvider'
+
+function DataQualityBadge({ status, provisionalText, incompleteText }: {
+  status: 'complete' | 'provisional' | 'partial' | 'unavailable' | undefined
+  provisionalText: string
+  incompleteText: string
+}) {
+  if (!status || status === 'complete') return null
+  return status === 'provisional' ? (
+    <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-medium text-[10px]">{provisionalText}</span>
+  ) : (
+    <span className="px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400 font-medium text-[10px]">{incompleteText}</span>
+  )
+}
 
 export function TaiwanScreener() {
   const navigate = useNavigate()
@@ -666,6 +681,11 @@ export function TaiwanScreener() {
               <Layers className="w-4 h-4 text-cyan-400" />
               <span className="font-semibold text-zinc-200 text-sm">台股產業類股輪動 (Industry Intelligence)</span>
               <span className="text-zinc-500 font-mono text-[11px]">{indData.industries.length} 大類股統計 (點擊產業名稱可套用篩選)</span>
+              <DataQualityBadge
+                status={indData.data_quality?.overall_status}
+                provisionalText="產業統計為盤後初值，次日校正"
+                incompleteText="產業資料尚未完整，以下結果僅供參考"
+              />
             </div>
             <div className="flex items-center gap-2 text-[11px] text-zinc-400">
               <span>排序:</span>
@@ -720,7 +740,7 @@ export function TaiwanScreener() {
                         className="hover:text-purple-400 hover:underline text-left cursor-pointer"
                         title="點擊套用此產業至選股篩選"
                       >
-                        {ind.industry}
+                        {industryLabel(ind.industry)}
                       </button>
                     </td>
                     <td className="py-1.5 px-2 text-right text-zinc-400">{ind.supported_symbol_count}</td>
@@ -808,6 +828,11 @@ export function TaiwanScreener() {
                   全市場偵測到 {abnormalData.diagnostic_count} 檔標的觸發客觀異常訊號 (規則判定)
                 </span>
               )}
+              <DataQualityBadge
+                status={abnormalData?.data_quality?.overall_status}
+                provisionalText="異常偵測為盤後初值，次日校正"
+                incompleteText="異常偵測資料尚未完整，以下結果僅供參考"
+              />
             </div>
             <div className="flex items-center gap-2 text-[11px] text-zinc-400">
               <span>訊號篩選:</span>
@@ -922,7 +947,7 @@ export function TaiwanScreener() {
                         <span className="text-zinc-500 font-mono text-[10px]">({item.code})</span>
                       </button>
                     </td>
-                    <td className="py-1.5 px-2 font-sans text-zinc-400">{item.industry || '—'}</td>
+                    <td className="py-1.5 px-2 font-sans text-zinc-400">{item.industry || industryLabel(UNCLASSIFIED_INDUSTRY)}</td>
                     <td className="py-1.5 px-2 text-right text-zinc-200">{item.close ?? '—'}</td>
                     <td className="py-1.5 px-2 text-right">
                       {item.change_pct !== null ? (

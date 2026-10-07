@@ -66,7 +66,8 @@ function buildWatchlistEnriched(rows: any[]) {
   return { rows, as_of: '2026-09-05', elapsed_ms: 1 }
 }
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   api: {
     taiwanDataStatus: vi.fn().mockResolvedValue({
       daily_as_of: null,
@@ -171,6 +172,17 @@ describe('Dashboard — Market Clarity (Phase 8C-B)', () => {
     expect(screen.getByText('航運業')).toBeInTheDocument()
   })
 
+  it('labels the UNCLASSIFIED industry bucket as 未分類', async () => {
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(buildIndustryIntelligence([
+      buildIndustry('半導體業', 0.05),
+      buildIndustry('UNCLASSIFIED', -0.03),
+    ]) as any)
+    renderDashboard()
+
+    expect(await screen.findByText('未分類')).toBeInTheDocument()
+    expect(screen.queryByText('UNCLASSIFIED')).not.toBeInTheDocument()
+  })
+
   it('empty watchlist shows a compact empty state with CTA, not a large empty table', async () => {
     vi.mocked(api.watchlistEnriched).mockResolvedValue(buildWatchlistEnriched([]) as any)
     renderDashboard()
@@ -188,6 +200,42 @@ describe('Dashboard — Market Clarity (Phase 8C-B)', () => {
 
     expect(await screen.findByText('台積電')).toBeInTheDocument()
     expect(screen.getByText('鴻海')).toBeInTheDocument()
+  })
+
+  it('industry card shows the incomplete-data badge when overall_status is partial', async () => {
+    const snapshot = buildIndustryIntelligence([buildIndustry('半導體業', 0.05), buildIndustry('航運業', -0.02)])
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue({
+      ...snapshot,
+      data_quality: { ...snapshot.data_quality, overall_status: 'partial' },
+    } as any)
+    renderDashboard()
+
+    expect(await screen.findByText('半導體業')).toBeInTheDocument()
+    expect(screen.getByText('產業資料尚未完整，以下結果僅供參考')).toBeInTheDocument()
+  })
+
+  it('industry card shows the provisional badge when overall_status is provisional', async () => {
+    const snapshot = buildIndustryIntelligence([buildIndustry('半導體業', 0.05), buildIndustry('航運業', -0.02)])
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue({
+      ...snapshot,
+      data_quality: { ...snapshot.data_quality, overall_status: 'provisional' },
+    } as any)
+    renderDashboard()
+
+    expect(await screen.findByText('半導體業')).toBeInTheDocument()
+    expect(screen.getByText('產業統計為盤後初值，次日校正')).toBeInTheDocument()
+    expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
+  })
+
+  it('industry card shows no badge when overall_status is complete', async () => {
+    vi.mocked(api.taiwanIndustryIntelligence).mockResolvedValue(buildIndustryIntelligence([
+      buildIndustry('半導體業', 0.05),
+    ]) as any)
+    renderDashboard()
+
+    expect(await screen.findByText('半導體業')).toBeInTheDocument()
+    expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
+    expect(screen.queryByText('產業統計為盤後初值，次日校正')).not.toBeInTheDocument()
   })
 
   it('market/industry query failure does not crash the Dashboard', async () => {

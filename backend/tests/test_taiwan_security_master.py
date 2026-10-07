@@ -26,13 +26,25 @@ from app.taiwan.universe import (
     TaiwanSecurityMaster,
     UniverseType,
 )
-from app.taiwan.universe.adapters import TpexInstrumentAdapter, TwseInstrumentAdapter
+from app.taiwan.universe.adapters import (
+    OfficialEtfProductMeta,
+    TpexInstrumentAdapter,
+    TwseInstrumentAdapter,
+)
 from tests.test_taiwan_instruments import TPEX_SAMPLE_HTML, TWSE_SAMPLE_HTML
+
+_TWSE_SAMPLE_PRODUCT_TYPES = {
+    "0050": OfficialEtfProductMeta("國內成分證券指數股票型基金", "臺灣50指數"),
+    "006208": OfficialEtfProductMeta("國內成分證券指數股票型基金", "臺灣50指數"),
+}
 
 
 class _MockTwseAdapter(TwseInstrumentAdapter):
     def get_instruments(self, html_content: str | None = None):
-        return super().get_instruments(html_content or TWSE_SAMPLE_HTML)
+        return super().get_instruments(
+            html_content or TWSE_SAMPLE_HTML,
+            official_product_types=_TWSE_SAMPLE_PRODUCT_TYPES,
+        )
 
 
 class _MockTpexAdapter(TpexInstrumentAdapter):

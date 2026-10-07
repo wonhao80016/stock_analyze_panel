@@ -59,7 +59,7 @@ from app.taiwan.market_rules import PriceLimitModel, TickSizeModel
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 from app.taiwan.symbol import parse_symbol
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
-from app.taiwan.universe.models import MarketProfileBridge, TaiwanInstrument
+from app.taiwan.universe.models import TDR_SECURITY_CLASS, MarketProfileBridge, TaiwanInstrument
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,7 @@ class StockIdentityEvidence(BaseModel):
     exchange: str
     instrument_type: str
     industry: str | None = None
+    security_class: str | None = None  # "tdr" for Taiwan depositary receipts
     currency: str = "TWD"
     listing_status: str
     listing_date: str | None = None
@@ -373,6 +374,7 @@ class TaiwanStockResearchContextService:
             exchange=inst.exchange,
             instrument_type=inst.instrument_type,
             industry=inst.industry,
+            security_class=TDR_SECURITY_CLASS if MarketProfileBridge.is_tdr(inst) else None,
             currency=inst.currency,
             listing_status=inst.listing_status,
             listing_date=inst.listing_date,
@@ -659,7 +661,13 @@ class TaiwanStockResearchContextService:
 
         # 6. Industry Context (Reused Phase 7B)
         industry_evidence = None
-        if inst.instrument_type == "stock" and inst.industry:
+        if MarketProfileBridge.is_tdr(inst):
+            # A TDR has no domestic industry, so industry evidence does not apply rather than missing.
+            industry_evidence = IndustryContextEvidence(
+                status="not_applicable",
+                meta=EvidenceMeta(classification="MISSING", source="taiwan_security_master"),
+            )
+        elif inst.instrument_type == "stock" and inst.industry:
             ind_snap = self.industry_intel_svc.get_snapshot(target)
             target_ind_metric = next((im for im in ind_snap.industries if im.industry == inst.industry), None)
             if target_ind_metric:

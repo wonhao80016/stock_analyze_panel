@@ -2022,6 +2022,9 @@ def taiwan_limit_profile(symbols: list[str], sessions: ListingSessions | None = 
     from app.taiwan.universe import get_security_master
     from app.taiwan.universe.models import MarketProfileBridge
 
+    # Reloading a master replaced by another process clears the profiles cached from the old one.
+    if any(s in _taiwan_limit_profile_cache for s in symbols):
+        getattr(get_security_master(), "reload_if_changed", lambda: None)()
     # A lookup may load the master, which clears the shared cache, so results are read from this local copy.
     profiles = {s: _taiwan_limit_profile_cache.get(s) for s in symbols}
     missing = [s for s, profile in profiles.items() if profile is None]
@@ -2066,11 +2069,11 @@ def taiwan_limit_profile(symbols: list[str], sessions: ListingSessions | None = 
 
 
 def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
-    """新增 distance_to_upper_limit / distance_to_lower_limit (小数制, 0.01 = 1%)。
+    """Add distance_to_upper_limit / distance_to_lower_limit (decimal, 0.01 = 1%).
 
-    基准价一律用 prev_close (法定口徑), 与 screener.py 用 close 的既有 bug 不同。
-    NO_LIMIT 标的 (外资成分/债券 ETF、underlying_scope 未确认) 两列皆为 null;
-    Polars 对 null 的比较结果为 null, df.filter() 会自然剔除, 天然 fail-closed。
+    The limit base is prev_close, the statutory reference, never close.
+    No-limit symbols (foreign-component ETFs incl. bond ETFs, unconfirmed underlying_scope) get
+    null in both columns, so filters on them drop those rows (fail-closed).
     """
     from app.taiwan.market_rules import PriceLimitModel
 

@@ -32,12 +32,13 @@ class TaxClass(str, Enum):
     DOMESTIC_ETF = "domestic_etf"      # 0.1%
     BOND_ETF = "bond_etf"              # 0.0% (effective until 2026-12-31)
     FOREIGN_ETF = "foreign_etf"        # 0.1%
+    TDR = "tdr"                        # 0.1% (Taiwan depositary receipt)
 
 
 class PriceLimitClass(str, Enum):
     """Price limit rule classification."""
     ORDINARY_TEN_PERCENT = "ordinary_10pct"
-    NO_LIMIT = "no_limit"              # Foreign-component ETF, bond ETF, IPO 5 days
+    NO_LIMIT = "no_limit"              # Foreign-component ETF (incl. bond ETF), IPO 5 days
     LEVERAGED_DOMESTIC = "leveraged_domestic"  # Domestic leveraged/inverse ETF (10% * abs(multiplier))
 
 
@@ -100,13 +101,16 @@ class SecuritiesTaxModel:
 
     Taxes are levied EXCLUSIVELY on the SELL side.
     Day-trade and bond ETF exemptions have statutory effective windows.
-    Querying beyond the enacted expiry date raises RegulatoryRuleUnavailableError rather than guessing.
+    After each window ends the regular rate applies again under current law: the ETF rate after the
+    bond ETF suspension (Securities Transaction Tax Act art. 2-1), the class rate after the day-trade
+    reduction (art. 2-2).
     """
     ordinary_stock_rate: float = 0.003
     day_trade_stock_rate: float = 0.0015
     domestic_etf_rate: float = 0.001
     foreign_etf_rate: float = 0.001
     bond_etf_rate: float = 0.0
+    tdr_rate: float = 0.001
 
     # Statutory expiry dates from enacted legislation
     day_trade_expiry: date = date(2027, 12, 31)
@@ -120,22 +124,21 @@ class SecuritiesTaxModel:
         trade_date: date | None = None,
     ) -> float:
         """Get applicable tax rate based on asset class, day-trade status, and date."""
-        if is_day_trade:
-            if trade_date is not None and trade_date > self.day_trade_expiry:
-                raise RegulatoryRuleUnavailableError(
-                    f"Day-trade tax incentive (0.15%) expired on {self.day_trade_expiry}. "
-                    f"Statutory policy for trade_date {trade_date} is unverified by law."
-                )
+        # TDR transfers are taxed at 0.1% (MOF ruling 811672688); the stock day-trade rate does not apply.
+        if tax_class == TaxClass.TDR:
+            return self.tdr_rate
+        if (
+            is_day_trade
+            and tax_class == TaxClass.ORDINARY_STOCK
+            and (trade_date is None or trade_date <= self.day_trade_expiry)
+        ):
             return self.day_trade_stock_rate
 
         if tax_class == TaxClass.BOND_ETF:
             if trade_date is not None and trade_date < self.bond_etf_start:
                 return self.domestic_etf_rate
             if trade_date is not None and trade_date > self.bond_etf_expiry:
-                raise RegulatoryRuleUnavailableError(
-                    f"Bond ETF 0% tax exemption expired on {self.bond_etf_expiry}. "
-                    f"Statutory policy for trade_date {trade_date} is unverified by law."
-                )
+                return self.domestic_etf_rate
             return self.bond_etf_rate
 
         if tax_class in (TaxClass.DOMESTIC_ETF, TaxClass.FOREIGN_ETF):
@@ -370,7 +373,7 @@ class PriceLimitModel:
         Returns:
             0.10 for ordinary stocks and domestic equity ETFs.
             0.10 * abs(multiplier) for domestic leveraged/inverse ETFs (e.g. 0.20 for 2X, 0.10 for -1X).
-            None for NO_LIMIT class (foreign ETFs, bond ETFs, 5-day IPOs).
+            None for NO_LIMIT class (foreign-component ETFs incl. bond ETFs, 5-day IPOs).
         """
         if limit_class == PriceLimitClass.NO_LIMIT:
             return None

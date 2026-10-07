@@ -4,6 +4,7 @@ import { cn } from '@/lib/cn'
 
 type Props = {
   response?: TaiwanCurrentDataResponse
+  securityClass?: 'tdr' | null
   isLoading: boolean
   isError: boolean
   isFetching: boolean
@@ -74,6 +75,11 @@ function percent(value: unknown) {
   return parsed == null ? '--' : `${number(parsed)}%`
 }
 
+// Only an NTD par value is priced; a foreign-currency or unlabelled one keeps its official text.
+function parValue(values: Record<string, unknown>) {
+  return present(values.par_value_twd) ? `${number(values.par_value_twd)} 元` : text(values.par_value_raw)
+}
+
 function DataRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-start justify-between gap-3 border-b border-border/50 py-1.5 last:border-0">
@@ -126,7 +132,7 @@ function SectionCard({
   )
 }
 
-function StockSections({ sections }: { sections: Record<string, TaiwanDataSection> }) {
+function StockSections({ sections, isTdr }: { sections: Record<string, TaiwanDataSection>; isTdr: boolean }) {
   const revenue = sections.monthly_revenue
   const revenueData = record(revenue?.data)
   const revenueValues = record(revenueData.values)
@@ -172,9 +178,9 @@ function StockSections({ sections }: { sections: Record<string, TaiwanDataSectio
       <SectionCard title="股本資料" section={capital}>
         <div className="text-xs">
           <DataRow label="出表日期" value={text(capitalData.period_end)} />
-          <DataRow label="已發行普通股數" value={number(capitalValues.issued_shares, 0)} />
+          <DataRow label={isTdr ? 'TDR原股發行股數' : '已發行普通股數'} value={number(capitalValues.issued_shares, 0)} />
           <DataRow label="實收資本額" value={money(capitalValues.capital_twd)} />
-          <DataRow label="每股面額" value={present(capitalValues.par_value_twd) ? `${number(capitalValues.par_value_twd)} 元` : '--'} />
+          <DataRow label="每股面額" value={parValue(capitalValues)} />
           <DataRow label="流通股數" value={number(capitalValues.float_shares, 0)} />
         </div>
       </SectionCard>
@@ -215,7 +221,7 @@ function EtfSections({ sections }: { sections: Record<string, TaiwanDataSection>
   )
 }
 
-export function TaiwanReferenceData({ response, isLoading, isError, isFetching, onRetry }: Props) {
+export function TaiwanReferenceData({ response, securityClass, isLoading, isError, isFetching, onRetry }: Props) {
   return (
     <section aria-labelledby="taiwan-reference-heading" className="space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-border bg-surface p-4">
@@ -257,7 +263,7 @@ export function TaiwanReferenceData({ response, isLoading, isError, isFetching, 
       {response && !isLoading && !isError && (
         response.security_type === 'etf'
           ? <EtfSections sections={response.sections} />
-          : <StockSections sections={response.sections} />
+          : <StockSections sections={response.sections} isTdr={securityClass === 'tdr'} />
       )}
     </section>
   )

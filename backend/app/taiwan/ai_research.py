@@ -130,10 +130,12 @@ def build_evidence_registry(
         "exchange": ctx.identity.exchange,
         "instrument_type": ctx.identity.instrument_type,
         "industry": ctx.identity.industry,
+        "security_class": ctx.identity.security_class,
     }
     registry_keys.update([
         "identity.symbol", "identity.code", "identity.name",
         "identity.exchange", "identity.instrument_type", "identity.industry",
+        "identity.security_class",
     ])
 
     # 2. Market Context
@@ -158,8 +160,10 @@ def build_evidence_registry(
             missing_items.append("market_context")
 
     # 3. Industry Context
-    if ctx.industry_context.status in ("current", "complete") and ctx.industry_context.industry:
+    # A provisional snapshot is the latest day's after-close figures, usable with its status attached.
+    if ctx.industry_context.status in ("current", "complete", "provisional") and ctx.industry_context.industry:
         payload["industry_context"] = {
+            "status": ctx.industry_context.status,
             "industry": ctx.industry_context.industry,
             "turnover_share": ctx.industry_context.turnover_share,
             "advance_ratio": ctx.industry_context.advance_ratio,
@@ -167,10 +171,12 @@ def build_evidence_registry(
             "relative_strength_20d": ctx.industry_context.relative_strength_20d,
         }
         registry_keys.update([
-            "industry_context.industry", "industry_context.turnover_share",
+            "industry_context.status", "industry_context.industry", "industry_context.turnover_share",
             "industry_context.advance_ratio", "industry_context.relative_strength_5d",
             "industry_context.relative_strength_20d",
         ])
+    elif ctx.industry_context.status == "not_applicable":
+        missing_items.append("industry_not_applicable_for_tdr")
     else:
         if "industry_context" not in missing_items:
             missing_items.append("industry_context")
@@ -329,6 +335,7 @@ SYSTEM_PROMPT = """你是一個客觀、確定性導向的「台股個股研究�
    - 你只能使用傳入的 JSON 數據進行解讀。
    - 嚴禁捏造新聞、法說會內容、非數據列出的財務指標、產業未驗證傳言或未來催化劑 (Catalysts)。
    - 若欄位為 null 或 missing，必須如實說明「目前資料不足」或「未提供」，不得私自推估數值。
+   - 若 industry_context.status 為 provisional，代表產業統計為盤後初值、次日可能校正，引用時必須註明為初值。
 3. 證據引用規定 (Evidence Refs)：
    - key_observations 與 risk_factors 中的每一條觀察，必須附帶 1~3 個「合法證據鍵 (evidence_refs)」。
    - 只能引用在提供的證據鍵白名單中的鍵值（例如 price_context.return_5d, industry_context.relative_strength_5d 等）。
@@ -344,9 +351,10 @@ SYSTEM_PROMPT = """你是一個客觀、確定性導向的「台股個股研究�
    - 數值為 0（例如 foreign_net_1d=0, margin_change=0）代表「客觀數值為零 / 當日無變動」，絕對不得描述為資料缺失、遺失或未提供。
    - abnormal.signal_count 代表「已觸發且適用之異常訊號數量」，並非「已評估之診斷種類總數」。signal_count=0 僅代表「無適用之異常訊號被觸發」，不得延伸解讀為「所有診斷類型皆已檢查且正常」。
    - 若證據中出現 abnormal.not_applicable_signals（或比較情境下之 {symbol}.abnormal.not_applicable_signals），其中列出之訊號類型代表「該類型訊號因標的類別而結構性不適用，並未被評估」，絕對不得描述為零、缺失、正常或「已檢查但未觸發」。例如 ETF 的 RELATIVE_STRENGTH_OUTLIER，僅可陳述為「此類型訊號不適用於此標的類別」。
-6. ETF 標的處理：
+6. ETF 與存託憑證標的處理：
    - 若為 ETF 標的，個別公司基本面 (fundamentals) 狀態為 not_applicable，必須陳述為「ETF 不適用個別公司財務指標」，絕對不得描述為「資料缺失」、「資料品質不佳」或「基本面惡化」。
    - 槓桿 (leveraged) 或反向 (inverse) 乘數必須如實依據提供之數字陳述，不得給予投資方向建議。
+   - 若 identity.security_class 為 tdr（臺灣存託憑證），產業分類不適用 (industry_not_applicable_for_tdr)，必須陳述為「存託憑證不適用國內產業分類」，絕對不得描述為「產業資料缺失」。
 7. 輸出格式：
    - 必須嚴格輸出純 JSON 物件，符合指定之綱要結構，不得包含任何 Markdown 外框或閒聊文字。
 """

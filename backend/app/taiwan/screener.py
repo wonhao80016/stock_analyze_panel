@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from app.taiwan.corporate_actions import REF_LIMIT_DOWN, REF_LIMIT_UP, REF_PREV_CLOSE
 from app.taiwan.daily_store import TaiwanDailyStore, listing_sessions
 from app.taiwan.enriched_reader import read_enriched_partition
+from app.taiwan.industry_intelligence import UNCLASSIFIED_INDUSTRY, unclassified_industry_expr
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_rules import PriceLimitModel
@@ -493,7 +494,10 @@ class TaiwanScreenerService:
     def _apply_filters(self, df: pl.DataFrame, req: TaiwanScreenerRequest) -> pl.DataFrame:
         """Apply strongly typed whitelist filters."""
         # Industry
-        if req.industry and req.industry != "ALL":
+        if req.industry == UNCLASSIFIED_INDUSTRY:
+            # Mirrors the industry snapshot bucket, which counts stocks only.
+            df = df.filter((pl.col("instrument_type") == "stock") & unclassified_industry_expr())
+        elif req.industry and req.industry != "ALL":
             df = df.filter(pl.col("industry") == req.industry)
 
         # Price

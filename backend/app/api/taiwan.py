@@ -61,6 +61,7 @@ from app.taiwan.screener_nl import (
     TaiwanScreenerTranslator,
 )
 from app.taiwan.symbol import parse_symbol
+from app.taiwan.universe.service import SecurityMasterUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,8 @@ def update_taiwan_history_to_latest():
         result = svc.update_to_latest()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as exc:
         logger.exception("Update to latest failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -225,6 +228,8 @@ def compare_taiwan_stocks(request: TaiwanStockCompareRequest):
         return svc.compare(request.symbols, target_date=target_dt)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Taiwan stock comparison failed for %s: %s", request.symbols, e)
         raise HTTPException(
@@ -250,6 +255,8 @@ async def compare_taiwan_stocks_ai_research(request: TaiwanComparisonAIRequest):
     svc = TaiwanComparisonAIResearchService()
     try:
         return await svc.generate_comparison(request.symbols, target_date=target_dt)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Taiwan stock comparison AI research failed for %s: %s", request.symbols, e)
         raise HTTPException(
@@ -265,6 +272,8 @@ def get_taiwan_current_data(
     """Return isolated current/reference sections for one Taiwan security."""
     try:
         parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid Taiwan symbol: {symbol}") from exc
     try:
@@ -282,6 +291,8 @@ def get_taiwan_stock_detail(
     try:
         # Validate symbol format (e.g. 2330.TWSE, 8069.TPEX)
         parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=400,
@@ -291,6 +302,8 @@ def get_taiwan_stock_detail(
     svc = get_taiwan_stock_detail_service()
     try:
         return svc.get_stock_detail(symbol, days=days)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to aggregate Taiwan stock detail for %s: %s", symbol, e)
         raise HTTPException(
@@ -307,6 +320,8 @@ def get_taiwan_institutional_history(
     """獲取單一台股標的三大法人買賣超歷史序列 (讀取本地已回補資料，不觸發即時抓取)。"""
     try:
         parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
 
@@ -315,6 +330,8 @@ def get_taiwan_institutional_history(
         return svc.get_institutional_history(symbol, days=days)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to get institutional history for %s: %s", symbol, e)
         raise HTTPException(status_code=500, detail=f"三大法人歷史查詢失敗: {e}") from e
@@ -328,6 +345,8 @@ def get_taiwan_margin_history(
     """獲取單一台股標的融資融券餘額與變化歷史序列 (讀取本地已回補資料，不觸發即時抓取)。"""
     try:
         parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
 
@@ -336,6 +355,8 @@ def get_taiwan_margin_history(
         return svc.get_margin_history(symbol, days=days)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to get margin history for %s: %s", symbol, e)
         raise HTTPException(status_code=500, detail=f"融資融券歷史查詢失敗: {e}") from e
@@ -360,6 +381,8 @@ def get_taiwan_stock_research_context(
         return svc.get_research_context(symbol, target_date=target_dt)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to compute Taiwan stock research context for %s: %s", symbol, e)
         raise HTTPException(
@@ -385,6 +408,8 @@ async def generate_taiwan_stock_ai_research(
     svc = TaiwanAIResearchService()
     try:
         return await svc.generate_report(symbol, target_date=target_dt)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to generate AI stock research report for %s: %s", symbol, e)
         raise HTTPException(
@@ -419,6 +444,8 @@ def get_taiwan_abnormal_diagnostics(
             industry_filter=industry,
             exchange_filter=exchange,
         )
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to compute Taiwan abnormal diagnostics: %s", e)
         raise HTTPException(
@@ -434,6 +461,8 @@ def run_taiwan_screener(request: TaiwanScreenerRunRequest):
     svc = TaiwanScreenerService()
     try:
         return svc.run(request)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Taiwan screener execution failed: %s", e)
         raise HTTPException(
@@ -465,6 +494,8 @@ def get_taiwan_market_intelligence(
     svc = TaiwanMarketIntelligenceService()
     try:
         return svc.get_snapshot(target_date=target_dt)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to compute Taiwan market intelligence snapshot: %s", e)
         raise HTTPException(status_code=500, detail=f"市場情報快照生成失敗: {e}") from e
@@ -488,6 +519,8 @@ def get_taiwan_industry_intelligence(
     svc = TaiwanIndustryIntelligenceService()
     try:
         return svc.get_snapshot(target_date=target_dt, sort_by=sort_by, order=order)
+    except SecurityMasterUnavailableError:
+        raise
     except Exception as e:
         logger.exception("Failed to compute Taiwan industry intelligence snapshot: %s", e)
         raise HTTPException(status_code=500, detail=f"產業情報快照生成失敗: {e}") from e

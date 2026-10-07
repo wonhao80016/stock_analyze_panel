@@ -9,7 +9,7 @@ Strictly adheres to:
   - Zero external dependencies (uses standard library html.parser.HTMLParser)
   - Multi-tier ETF classification priority:
       1. Official product metadata (TWSE t187ap47_L / TPEx)
-      2. ISO 10962 CFI code (CEOIBU, CEOJBU, CEOGDU, CEOGEU)
+      2. ISO 10962 CFI code (CEOIBU, CEOJBU, CEOGBU, CEOGDU; CEOGEU stays unknown)
       3. Multi-character name heuristics (degraded fallback)
   - Parameterized underlying_scope ("domestic" | "foreign" | "unknown") and leverage_multiplier
   - Strict statutory price limit rules:
@@ -24,6 +24,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from html import unescape
@@ -32,7 +34,12 @@ from html.parser import HTMLParser
 import httpx
 
 from app.taiwan.universe.industry_classification import resolve_industry_name
-from app.taiwan.universe.models import TaiwanInstrument
+from app.taiwan.universe.models import (
+    OFFICIAL_ETF_RULE_PROFILES,
+    TaiwanInstrument,
+    derive_security_class,
+    is_tdr_industry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +50,7 @@ TPEX_ISIN_URL = "https://isin.twse.com.tw/isin/C_public.jsp?strMode=4"
 TWSE_ETF_PRODUCTS_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap47_L"
 TWSE_COMPANIES_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
 TPEX_COMPANIES_URL = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
+TPEX_ETF_DETAIL_URL = "https://www.tpex.org.tw/www/zh-tw/ETF/detail"
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,11 @@ class OfficialEtfProductMeta:
     """Official ETF product metadata from TWSE t187ap47_L."""
     fund_type: str         # 基金類型
     underlying_index: str  # 標的指數/追蹤指數名稱
+    underlying_scope: str = "unknown"  # 是否包含國外成分股: 是 -> foreign, 否 -> domestic
+
+
+def scope_from_foreign_flag(flag: object) -> str:
+    return {"是": "foreign", "否": "domestic"}.get(str(flag or "").strip(), "unknown")
 
 
 class _IsinTableParser(HTMLParser):
@@ -123,14 +136,22 @@ def classify_etf_provenance(
         if isinstance(meta, OfficialEtfProductMeta):
             f_type = meta.fund_type
             idx_name = meta.underlying_index
+            flag_scope = meta.underlying_scope
         else:
             f_type = str(meta)
             idx_name = ""
+            flag_scope = "unknown"
 
         # Check Bond
         if "債券" in f_type or "債" in f_type:
-            # Check if underlying bond is domestic or foreign
-            return "bond", "official_metadata", "foreign", multiplier
+            scope = flag_scope if flag_scope != "unknown" else "foreign"
+            return "bond", "official_metadata", scope, multiplier
+
+        # Futures trusts trade without a daily limit only on foreign commodity futures.
+        elif "期貨信託" in f_type:
+            cat = "inverse" if multiplier < 0 else "futures"
+            source = "official_metadata" if flag_scope == "foreign" else "unknown"
+            return cat, source, flag_scope, multiplier
 
         # Check Leveraged / Inverse
         elif "槓桿" in f_type or "反向" in f_type:
@@ -160,8 +181,9 @@ def classify_etf_provenance(
 
     # 2. Second priority: ISO 10962 CFI Code
     if cfi_code:
-        # Debt/Bond ETF (e.g. 00720B is CEOJBU, 00710B is CEOIBU)
-        if cfi_code in ("CEOIBU", "CEOJBU"):
+        # Debt/Bond ETF (e.g. 00720B is CEOJBU, 00710B is CEOIBU, 00694B is CEOGBU).
+        # Foreign scope relies on every listed TPEx bond ETF being 國外債券 (TPEx ETF/detail); CFI has no country.
+        if cfi_code in ("CEOIBU", "CEOJBU", "CEOGBU"):
             return "bond", "cfi_code", "foreign", multiplier
         # Leveraged / Inverse / Commodity Derivatives (e.g. 00631L/00632R is CEOGDU)
         elif cfi_code in ("CEOGDU", "CEOGMU"):
@@ -173,9 +195,9 @@ def classify_etf_provenance(
             else:
                 scope = "unknown"
             return cat, "cfi_code", scope, multiplier
-        # Plain-Vanilla Domestic Equity ETF (e.g. 0050, 006208, 0051 is CEOGEU)
+        # CFI has no country attribute: CEOGEU covers 006201 (domestic) and 00877 (foreign).
         elif cfi_code == "CEOGEU":
-            return "domestic_equity", "cfi_code", "domestic", multiplier
+            return "unknown", "unknown", "unknown", multiplier
 
     # 3. Third priority / degraded fallback: Multi-character Name Heuristics
     # Strictly disallow single-character triggers (like "美" or "債")
@@ -194,6 +216,20 @@ def classify_etf_provenance(
 
     # 4. Unknown
     return "unknown", "unknown", "unknown", multiplier
+
+
+def normalize_listing_date(raw: object) -> str | None:
+    """ISO YYYY-MM-DD from an official ROC, YYYYMMDD, YYYY/MM/DD or ISO date; None when unparseable."""
+    from app.taiwan.providers.taiwan_values import parse_taiwan_date
+
+    text = "" if raw is None else str(raw).strip()
+    if not text or text.lower() == "nan":
+        return None
+    try:
+        return parse_taiwan_date(text.replace("-", "/")).isoformat()
+    except ValueError:
+        logger.warning("Unparseable listing date dropped: %r", text)
+        return None
 
 
 def parse_isin_html(
@@ -238,7 +274,7 @@ def parse_isin_html(
             continue
 
         isin = tds[1].strip() or None
-        listing_date = tds[2].strip() or None
+        listing_date = normalize_listing_date(tds[2])
         industry = tds[4].strip() or None
         cfi_code = tds[5].strip() or None
 
@@ -260,6 +296,10 @@ def parse_isin_html(
                 cfi_code=cfi_code,
                 official_product_types=official_product_types,
             )
+            audited = OFFICIAL_ETF_RULE_PROFILES.get(f"{code}.{exchange}")
+            if audited is not None:
+                etf_category, underlying_scope = audited.category, audited.underlying_scope
+                classification_source = "official_metadata"
             product_meta = (official_product_types or {}).get(code)
             if isinstance(product_meta, OfficialEtfProductMeta):
                 etf_management_style = etf_management_style_of(product_meta.fund_type)
@@ -324,6 +364,7 @@ def fetch_official_twse_etf_products(timeout: float = 10.0) -> dict[str, Officia
                 product_map[str(code).strip()] = OfficialEtfProductMeta(
                     fund_type=str(cat).strip(),
                     underlying_index=str(idx_name).strip(),
+                    underlying_scope=scope_from_foreign_flag(r.get("是否包含國外成分股")),
                 )
         return product_map
     except Exception as e:
@@ -363,11 +404,90 @@ class TwseInstrumentAdapter:
         )
 
 
+def parse_tpex_etf_management_style(payload: object, code: str) -> str | None:
+    """Management style, "active" or "passive", from 「ETF類別」 of *code*'s TPEx ETF/detail payload."""
+    tables = payload.get("tables") if isinstance(payload, dict) else None
+    if not isinstance(tables, list) or not tables or not isinstance(tables[0], dict):
+        return None
+    fields = tables[0].get("fields") or []
+    data = tables[0].get("data") or []
+    if not data or "ETF類別" not in fields or "證券代號" not in fields:
+        return None
+    row = data[0]
+    code_cell = str(row[fields.index("證券代號")]).strip()
+    if re.split(r"[\s(]", code_cell, maxsplit=1)[0] != code:
+        return None
+    category = str(row[fields.index("ETF類別")]).strip()
+    if category.startswith("主動"):
+        return "active"
+    if category.startswith("被動"):
+        return "passive"
+    return None
+
+
 class TpexInstrumentAdapter:
     """Fetches and parses TPEx official ISIN securities list."""
 
-    def __init__(self, url: str = TPEX_ISIN_URL) -> None:
+    def __init__(
+        self,
+        url: str = TPEX_ISIN_URL,
+        transport: httpx.BaseTransport | None = None,
+        detail_request_interval: float = 1.0,
+    ) -> None:
         self.url = url
+        self._transport = transport
+        # TPEx answers bursts of ETF/detail requests with a redirect to its error page.
+        self.detail_request_interval = detail_request_interval
+
+    def fetch_etf_management_styles(
+        self, detail_types: dict[str, str], **kwargs: float
+    ) -> dict[str, str | None]:
+        """iter_etf_management_styles() collected into a dict."""
+        return dict(self.iter_etf_management_styles(detail_types, **kwargs))
+
+    def iter_etf_management_styles(
+        self,
+        detail_types: dict[str, str],
+        timeout: float = 10.0,
+        max_consecutive_failures: int = 3,
+    ) -> Iterator[tuple[str, str | None]]:
+        """Yield (code, management style) from TPEx ETF/detail for each code actually queried.
+
+        *detail_types* maps a code to the page's type parameter (bond, domestic or foreign). A payload
+        that cannot be read yields None for that code; lookups stop after *max_consecutive_failures*
+        request errors in a row, and unqueried codes are not yielded.
+        """
+        failures = 0
+        with httpx.Client(
+            transport=self._transport, headers=OFFICIAL_HEADERS, timeout=timeout
+        ) as client:
+            for index, (code, detail_type) in enumerate(detail_types.items()):
+                if index and self.detail_request_interval > 0:
+                    time.sleep(self.detail_request_interval)
+                try:
+                    response = client.get(
+                        TPEX_ETF_DETAIL_URL,
+                        params={"type": detail_type, "code": code, "response": "json"},
+                    )
+                    response.raise_for_status()
+                    payload = json.loads(response.content.decode("utf-8-sig"))
+                except (httpx.HTTPError, OSError, ValueError) as exc:
+                    failures += 1
+                    logger.warning("TPEx ETF detail lookup failed for %s: %s", code, exc)
+                    if failures >= max_consecutive_failures:
+                        logger.warning(
+                            "Stopping TPEx ETF detail lookups after %d consecutive failures",
+                            failures,
+                        )
+                        break
+                    continue
+                failures = 0
+                try:
+                    style = parse_tpex_etf_management_style(payload, code)
+                except (IndexError, KeyError, TypeError) as exc:
+                    logger.warning("Unreadable TPEx ETF detail payload for %s: %s", code, exc)
+                    style = None
+                yield code, style
 
     def fetch_live_html(self, timeout: float = 15.0) -> str:
         response = httpx.get(self.url, headers=OFFICIAL_HEADERS, timeout=timeout)
@@ -426,13 +546,16 @@ def _official_company_directory(exchange: str, url: str) -> list[TaiwanInstrumen
         if not code or not name:
             raise ValueError(f"official directory schema changed: {url}")
         code = str(code).strip()
+        name = str(name).strip()
+        industry = str(industry or "").strip() or None
+        industry_name = None if is_tdr_industry(industry) else resolve_industry_name(industry)
         instruments.append(TaiwanInstrument(
-            symbol=f"{code}.{exchange}", code=code, exchange=exchange, name=str(name).strip(),
-            instrument_type="stock", listing_status="active", listing_date=str(listed or "").strip() or None,
-            isin=None, industry=resolve_industry_name(str(industry or "").strip() or None), cfi_code=None,
-            raw_category="股票",
+            symbol=f"{code}.{exchange}", code=code, exchange=exchange, name=name,
+            instrument_type="stock", listing_status="active", listing_date=normalize_listing_date(listed),
+            isin=None, industry=industry_name, cfi_code=None, raw_category="股票",
             is_supported=True, source="TWSE_OPENAPI" if exchange == "TWSE" else "TPEX_OPENAPI",
             updated_at=now, underlying_scope="domestic",
+            security_class=derive_security_class(code, name, industry),
         ))
     return instruments
 
@@ -444,7 +567,7 @@ def _official_twse_etf_directory() -> list[TaiwanInstrument]:
         code, name = row.get("基金代號"), row.get("基金簡稱")
         if not code or not name:
             raise ValueError(f"official directory schema changed: {TWSE_ETF_PRODUCTS_URL}")
-        scope = {"是": "foreign", "否": "domestic"}.get(str(row.get("是否包含國外成分股", "")).strip(), "unknown")
+        scope = scope_from_foreign_flag(row.get("是否包含國外成分股"))
         fund_type = str(row.get("基金類型", "")).strip()
         ordinary_types = {"國內成分證券指數股票型基金", "國外成分證券指數股票型基金"}
         code = str(code).strip()
@@ -456,22 +579,27 @@ def _official_twse_etf_directory() -> list[TaiwanInstrument]:
         multiplier = leverage_multiplier_of(code, display_name)
         is_leveraged_type = "槓桿" in fund_type or "反向" in fund_type
         is_bond_type = "債券" in fund_type
+        is_futures_type = "期貨信託" in fund_type
         if is_bond_type:
             category = "bond"
+        elif is_futures_type:
+            category = "inverse" if multiplier < 0 else "futures"
         elif is_leveraged_type:
             category = "inverse" if multiplier < 0 else "leveraged"
         else:
             category = "foreign_equity" if scope == "foreign" else "domestic_equity" if scope == "domestic" else "unknown"
+        if is_futures_type:
+            confirmed = scope == "foreign"
+        else:
+            confirmed = (
+                scope != "unknown" or fund_type in ordinary_types or is_leveraged_type or is_bond_type
+            )
         instruments.append(TaiwanInstrument(
             symbol=f"{code}.TWSE", code=code, exchange="TWSE", name=display_name, instrument_type="etf",
-            listing_status="active", listing_date=str(row.get("上市日期") or "").strip() or None,
+            listing_status="active", listing_date=normalize_listing_date(row.get("上市日期")),
             isin=None, industry=None, cfi_code=None, raw_category=fund_type, is_supported=True,
             source="TWSE_OPENAPI", updated_at=now, etf_category=category,
-            classification_source=(
-                "official_metadata"
-                if fund_type in ordinary_types or is_leveraged_type or is_bond_type
-                else None
-            ),
+            classification_source="official_metadata" if confirmed else None,
             underlying_scope=scope,
             leverage_multiplier=multiplier,
             etf_management_style=etf_management_style_of(fund_type),

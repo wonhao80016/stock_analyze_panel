@@ -116,24 +116,27 @@ class OfficialDailySnapshotAdapter:
             timeout=timeout,
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         )
-        # Pre-build supported symbol sets
-        self._twse_allowlist: set[str] = set()
-        self._tpex_allowlist: set[str] = set()
-        self._rebuild_allowlists()
 
-    def _rebuild_allowlists(self) -> None:
+    def _allowlist(self, exchange: str) -> set[str]:
+        """Codes of the supported active stocks and ETFs the security master lists on *exchange*.
+
+        Read at every parse rather than once per adapter, so a master refreshed after the adapter
+        was built applies to the next fetch.
+        """
         stocks = self.security_master.to_provider_dataframe(asset_type="stock")
         etfs = self.security_master.to_provider_dataframe(asset_type="etf")
         combined = pl.concat([stocks, etfs], how="diagonal_relaxed")
+        allowlists: dict[str, set[str]] = {"TWSE": set(), "TPEX": set()}
         if not combined.is_empty():
             for row in combined.iter_rows(named=True):
                 sym = row["symbol"]
                 ex = row.get("exchange")
                 code = sym.split(".")[0]
                 if ex == "TWSE" or sym.endswith(".TWSE"):
-                    self._twse_allowlist.add(code)
+                    allowlists["TWSE"].add(code)
                 elif ex == "TPEX" or sym.endswith(".TPEX"):
-                    self._tpex_allowlist.add(code)
+                    allowlists["TPEX"].add(code)
+        return allowlists[exchange]
 
     def fetch_date(self, target_date: date) -> pl.DataFrame:
         """Fetch and normalize full-market daily OHLCV for target_date.
@@ -165,7 +168,11 @@ class OfficialDailySnapshotAdapter:
         return not stamped or stamped == target_date.strftime("%Y%m%d")
 
     def fetch_twse(self, target_date: date) -> pl.DataFrame:
-        """Fetch and parse TWSE MI_INDEX for a single trading date."""
+        """Fetch and parse TWSE MI_INDEX for a single trading date.
+
+        The security master loads first, so an unavailable master raises before any request.
+        """
+        self.security_master.ensure_loaded()
         date_str = target_date.strftime("%Y%m%d")
         url = f"{TWSE_MI_INDEX_URL}?date={date_str}&type=ALL&response=json"
         payload = self._request_json(url)
@@ -215,12 +222,13 @@ class OfficialDailySnapshotAdapter:
             logger.error("TWSE MI_INDEX table schema mismatch: %s. Fields: %s", e, fields)
             return pl.DataFrame()
 
+        allowlist = self._allowlist("TWSE")
         parsed: list[dict[str, Any]] = []
         for r in rows:
             if len(r) <= max(code_idx, vol_idx, amt_idx, open_idx, high_idx, low_idx, close_idx):
                 continue
             code = str(r[code_idx]).strip()
-            if code not in self._twse_allowlist:
+            if code not in allowlist:
                 continue
 
             open_val = _parse_snapshot_number(r[open_idx])
@@ -253,8 +261,13 @@ class OfficialDailySnapshotAdapter:
         df = pl.DataFrame(parsed)
         return self._sanitize_and_filter(df)
 
-    def fetch_tpex(self, target_date: date) -> pl.DataFrame:
-        """Fetch and parse TPEx dailyQuotes for a single trading date."""
+    def fetch_tpex(self, target_date: date, codes: set[str] | None = None) -> pl.DataFrame:
+        """Fetch and parse TPEx dailyQuotes for a single trading date.
+
+        The security master loads first, so an unavailable master raises before any request.
+        *codes*, when given, replaces the allowlist of supported active stocks and ETFs.
+        """
+        self.security_master.ensure_loaded()
         roc_year = target_date.year - 1911
         date_str = f"{roc_year}/{target_date.month:02d}/{target_date.day:02d}"
         url = f"{TPEX_DAILY_QUOTES_URL}?date={date_str}&response=json"
@@ -278,13 +291,14 @@ class OfficialDailySnapshotAdapter:
 
         fields = quote_table.get("fields", [])
         data_rows = quote_table.get("data", [])
-        return self._parse_tpex_table(data_rows, fields, target_date)
+        return self._parse_tpex_table(data_rows, fields, target_date, codes)
 
     def _parse_tpex_table(
         self,
         rows: list[list[str]],
         fields: list[str],
         target_date: date,
+        codes: set[str] | None = None,
     ) -> pl.DataFrame:
         """Parse raw TPEx dailyQuotes data rows into canonical schema."""
         try:
@@ -299,12 +313,13 @@ class OfficialDailySnapshotAdapter:
             logger.error("TPEx dailyQuotes table schema mismatch: %s. Fields: %s", e, fields)
             return pl.DataFrame()
 
+        allowlist = self._allowlist("TPEX") if codes is None else codes
         parsed: list[dict[str, Any]] = []
         for r in rows:
             if len(r) <= max(code_idx, vol_idx, amt_idx, open_idx, high_idx, low_idx, close_idx):
                 continue
             code = str(r[code_idx]).strip()
-            if code not in self._tpex_allowlist:
+            if code not in allowlist:
                 continue
 
             open_val = _parse_snapshot_number(r[open_idx])

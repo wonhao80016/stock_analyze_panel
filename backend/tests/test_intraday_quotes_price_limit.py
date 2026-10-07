@@ -51,11 +51,11 @@ def test_a_foreign_component_etf_has_no_limit():
 
 
 def test_an_unconfirmed_etf_is_unknown():
-    assert _limit_fields(_quotes("00998A.TPEX", 20.0)) == (None, False, None, None)
+    assert _limit_fields(_quotes("00980T.TPEX", 20.0)) == (None, False, None, None)
 
 
 def test_one_unknown_symbol_leaves_the_others_intact():
-    prev_closes = {"2454.TWSE": 5180.0, "00998A.TPEX": 20.0, "00885.TWSE": 30.0, "0050.TWSE": 111.85}
+    prev_closes = {"2454.TWSE": 5180.0, "00980T.TPEX": 20.0, "00885.TWSE": 30.0, "0050.TWSE": 111.85}
     quotes = {}
     for symbol, prev_close in prev_closes.items():
         quote = MagicMock()
@@ -72,17 +72,17 @@ def test_one_unknown_symbol_leaves_the_others_intact():
     rows = {row["symbol"]: _limit_fields(row) for row in res.json()["quotes"]}
     assert rows == {
         "2454.TWSE": (0.1, False, 5695.0, 4665.0),
-        "00998A.TPEX": (None, False, None, None),
+        "00980T.TPEX": (None, False, None, None),
         "00885.TWSE": (None, True, None, None),
         "0050.TWSE": (0.1, False, 123.0, 100.7),
     }
 
 
 def test_search_marks_an_unconfirmed_etf_as_unknown():
-    res = client.get("/api/intraday/taiwan/search", params={"q": "00998A"})
+    res = client.get("/api/intraday/taiwan/search", params={"q": "00980T"})
 
     assert res.status_code == 200
-    hit = next(item for item in res.json()["results"] if item["symbol"] == "00998A.TPEX")
+    hit = next(item for item in res.json()["results"] if item["symbol"] == "00980T.TPEX")
     assert (hit["price_limit_pct"], hit["is_no_limit"]) == (None, False)
 
 

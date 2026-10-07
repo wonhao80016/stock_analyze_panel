@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { TaiwanStockDetail, dailyRowsToOHLC, signColorClass, signPrefix } from './TaiwanStockDetail'
+import { TaiwanStockDetail, dailyRowsToOHLC, etfCategoryLabel, signColorClass, signPrefix } from './TaiwanStockDetail'
 import { changeBase, unadjustedClose } from '@/components/EChartsCandlestick'
 import { api } from '@/lib/api'
 
@@ -226,5 +226,109 @@ describe('TaiwanStockDetail — daily K rows', () => {
     expect(changeBase(bars, 1)).toBe(47.16)
     expect(unadjustedClose(bars[0])).toBe(188.65)
     expect(unadjustedClose(bars[1])).toBeNull()
+  })
+})
+
+describe('TaiwanStockDetail — ETF category badge', () => {
+  it('labels every security-master category in Traditional Chinese', () => {
+    expect(etfCategoryLabel('domestic_equity')).toBe('國內成分')
+    expect(etfCategoryLabel('foreign_equity')).toBe('國外成分')
+    expect(etfCategoryLabel('bond')).toBe('債券')
+    expect(etfCategoryLabel('leveraged')).toBe('槓桿')
+    expect(etfCategoryLabel('inverse')).toBe('反向')
+    expect(etfCategoryLabel('futures')).toBe('期貨')
+    expect(etfCategoryLabel('unknown')).toBe('未分類')
+  })
+
+  it('keeps an unrecognized category visible as-is', () => {
+    expect(etfCategoryLabel('commodity')).toBe('commodity')
+  })
+
+  it('shows the futures label on a futures-trust ETF', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...buildDetailResponse('etf'),
+      symbol: '00635U.TWSE',
+      identity: {
+        ...buildDetailResponse('etf').identity,
+        symbol: '00635U.TWSE',
+        code: '00635U',
+        name: '期元大S&P黃金',
+        etf_category: 'futures',
+      },
+    } as any)
+    renderAt(['/stocks/00635U.TWSE'], 0)
+
+    expect(await screen.findByText('ETF · 期貨')).toBeInTheDocument()
+  })
+})
+
+describe('TaiwanStockDetail — depositary receipts', () => {
+  function tdrDetail() {
+    return {
+      ...buildDetailResponse(),
+      symbol: '910322.TWSE',
+      identity: {
+        ...buildDetailResponse().identity,
+        symbol: '910322.TWSE',
+        code: '910322',
+        name: '康師傅-DR',
+        industry: null,
+        security_class: 'tdr',
+      },
+    }
+  }
+
+  function capitalData(values: Record<string, unknown>) {
+    return {
+      symbol: '910322.TWSE',
+      exchange: 'TWSE',
+      security_type: 'stock',
+      identity: {},
+      sections: {
+        share_capital_record: {
+          dataset: 'share_capital_record',
+          status: 'data_insufficient',
+          usage_scope: 'current_reference',
+          historically_eligible: false,
+          data: { period_end: '2026-09-22', values },
+        },
+      },
+    }
+  }
+
+  it('shows the depositary receipt badge', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue(tdrDetail() as any)
+    renderAt(['/stocks/910322.TWSE'], 0)
+
+    expect(await screen.findByText('存託憑證')).toBeInTheDocument()
+  })
+
+  it('labels the underlying share count and keeps a foreign par value as official text', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue(tdrDetail() as any)
+    vi.mocked(api.taiwanCurrentData).mockResolvedValue(capitalData({
+      issued_shares: 5_620_600_000,
+      par_value_twd: null,
+      par_value_raw: '美金0.0050元',
+      par_value_currency: 'USD',
+    }) as any)
+    renderAt(['/stocks/910322.TWSE'], 0)
+
+    expect(await screen.findByText('TDR原股發行股數')).toBeInTheDocument()
+    expect(screen.queryByText('已發行普通股數')).not.toBeInTheDocument()
+    expect(screen.getByText('美金0.0050元')).toBeInTheDocument()
+  })
+
+  it('keeps the ordinary share label and NTD par value for a stock', async () => {
+    vi.mocked(api.taiwanCurrentData).mockResolvedValue(capitalData({
+      issued_shares: 25_930_380_458,
+      par_value_twd: 10,
+      par_value_raw: '新台幣 10.0000元',
+      par_value_currency: 'TWD',
+    }) as any)
+    renderAt(['/stocks/2330.TWSE'], 0)
+
+    expect(await screen.findByText('已發行普通股數')).toBeInTheDocument()
+    expect(screen.getByText('10 元')).toBeInTheDocument()
+    expect(screen.queryByText('存託憑證')).not.toBeInTheDocument()
   })
 })

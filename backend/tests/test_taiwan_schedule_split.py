@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,6 +17,7 @@ from app.taiwan.corporate_actions import TaiwanCorporateActionRefreshService
 from app.taiwan.daily_update import TaiwanDailyUpdateService
 from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+from app.taiwan.universe.service import SecurityMasterRefreshResult
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +25,16 @@ def _no_market_amount_requests(monkeypatch):
     monkeypatch.setattr(TaiwanMarketInstitutionalRefreshService, "refresh_through", lambda self, target: {})
     monkeypatch.setattr(TaiwanCorporateActionRefreshService, "refresh_publish_window", lambda self, first, target: {})
     monkeypatch.setattr(TaiwanShareCapitalStore, "refresh", lambda self: 0)
+
+
+@pytest.fixture(autouse=True)
+def _no_master_refresh(monkeypatch):
+    """A run after 16:00 on a trading day refreshes the default security master online."""
+    master = MagicMock()
+    master.refresh.return_value = SecurityMasterRefreshResult(
+        ok=True, dry_run=False, attempted_at="t"
+    )
+    monkeypatch.setattr("app.taiwan.daily_update.get_security_master", lambda: master)
 
 
 @pytest.fixture

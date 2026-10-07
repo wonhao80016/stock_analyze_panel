@@ -52,6 +52,18 @@ export const signColorClass = (v: number | null | undefined) => {
 
 export const signPrefix = (v: number | null | undefined) => (v != null && v > 0 ? '+' : '')
 
+const ETF_CATEGORY_LABELS: Record<string, string> = {
+  domestic_equity: '國內成分',
+  foreign_equity: '國外成分',
+  bond: '債券',
+  leveraged: '槓桿',
+  inverse: '反向',
+  futures: '期貨',
+  unknown: '未分類',
+}
+
+export const etfCategoryLabel = (category: string) => ETF_CATEGORY_LABELS[category] ?? category
+
 export const dailyRowsToOHLC = (rows: TaiwanDailyItem[]): OHLC[] =>
   rows.map(r => ({
     date: r.date,
@@ -406,9 +418,14 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                       {data.identity.industry}
                     </span>
                   )}
+                  {data.identity.security_class === 'tdr' && (
+                    <span className="rounded bg-surface px-2 py-0.5 text-xs text-muted border border-border">
+                      存託憑證
+                    </span>
+                  )}
                   {data.identity.etf_category && (
                     <span className="rounded bg-accent/15 px-2 py-0.5 text-xs font-medium text-accent border border-accent/30">
-                      ETF · {data.identity.etf_category}
+                      ETF · {etfCategoryLabel(data.identity.etf_category)}
                     </span>
                   )}
                 </div>
@@ -795,6 +812,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
           {!isIndex && (
           <TaiwanReferenceData
             response={currentDataQuery.data}
+            securityClass={data?.identity?.security_class}
             isLoading={currentDataQuery.isLoading}
             isError={currentDataQuery.isError}
             isFetching={currentDataQuery.isFetching}

@@ -24,8 +24,18 @@ from pydantic import BaseModel, Field
 from app.config import temp_root
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
-from app.taiwan.daily_update import publish_enriched, resolve_target_latest_trading_date
+from app.taiwan.daily_update import (
+    MasterRefreshOutcome,
+    master_refresh_due,
+    pending_listing_dates,
+    publish_enriched,
+    refresh_security_master,
+    resolve_target_latest_trading_date,
+)
 from app.taiwan.data_root import taiwan_data_root
+from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar, taipei_now
+from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
+from app.taiwan.universe.service import write_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +189,96 @@ def locate_taiwan_in_extracted(extract_dir: Path) -> Path:
     raise ValueError(f"Could not locate taiwan data directory in {extract_dir}")
 
 
+def _read_master_frame(path: Path) -> pl.DataFrame | None:
+    try:
+        return pl.read_parquet(path)
+    except Exception:
+        return None
+
+
+def _latest_master_stamp(frame: pl.DataFrame) -> datetime | None:
+    """Newest updated_at in a security master frame, naive ones read as Asia/Taipei; None if unknown."""
+    if "updated_at" not in frame.columns:
+        return None
+    stamps: list[datetime] = []
+    for value in frame["updated_at"].drop_nulls().to_list():
+        try:
+            stamp = datetime.fromisoformat(str(value))
+        except ValueError:
+            continue
+        stamps.append(stamp if stamp.tzinfo else stamp.replace(tzinfo=TAIPEI_TZ))
+    return max(stamps, default=None)
+
+
+def _with_local_knowledge(
+    bundled: pl.DataFrame, local: pl.DataFrame, delisted_on: str | None
+) -> pl.DataFrame:
+    """*bundled* plus the delisted rows and ETF management styles that only *local* holds.
+
+    A locally active instrument missing from *bundled* is kept as delisted on *delisted_on*.
+    """
+    if {"symbol", "etf_management_style"} <= set(local.columns):
+        styles = local.filter(pl.col("etf_management_style").is_not_null()).select(
+            "symbol", pl.col("etf_management_style").cast(pl.String).alias("_local_style")
+        )
+        if "etf_management_style" not in bundled.columns:
+            bundled = bundled.with_columns(
+                pl.lit(None, dtype=pl.String).alias("etf_management_style")
+            )
+        bundled = (
+            bundled.join(styles, on="symbol", how="left")
+            .with_columns(
+                pl.coalesce(pl.col("etf_management_style").cast(pl.String), "_local_style").alias(
+                    "etf_management_style"
+                )
+            )
+            .drop("_local_style")
+        )
+    if "listing_status" in local.columns:
+        missing = local.filter(~pl.col("symbol").is_in(bundled["symbol"].to_list()))
+        gone = missing.filter(pl.col("listing_status") == "active").with_columns(
+            pl.lit("delisted").alias("listing_status"),
+            pl.lit(delisted_on, dtype=pl.String).alias("delisted_at"),
+        )
+        carried = pl.concat(
+            [missing.filter(pl.col("listing_status") == "delisted"), gone], how="diagonal_relaxed"
+        )
+        if not carried.is_empty():
+            bundled = pl.concat([bundled, carried], how="diagonal_relaxed")
+    return bundled
+
+
+def import_security_master(source: Path, dest: Path) -> bool:
+    """Install the bundled master *source* at *dest* unless *dest* is as recent; True when replaced.
+
+    Runs under the master's refresh lock and keeps *dest* while a refresh holds it. Delisted rows
+    and ETF management styles only *dest* knows are kept, and the in-process master reloads at once.
+    """
+    with TaiwanSecurityMaster(cache_path=dest).refresh_lock() as held:
+        if not held:
+            logger.warning("Keeping the local security master; a refresh holds its lock")
+            return False
+        bundled = pl.read_parquet(source)
+        local = _read_master_frame(dest) if dest.exists() else None
+        local_stamp = _latest_master_stamp(local) if local is not None else None
+        bundled_stamp = _latest_master_stamp(bundled)
+        if local_stamp is not None and (bundled_stamp is None or bundled_stamp <= local_stamp):
+            logger.info(
+                "Keeping the local security master updated %s; the bundled one is from %s",
+                local_stamp,
+                bundled_stamp,
+            )
+            return False
+        if local is not None:
+            delisted_on = (
+                bundled_stamp.astimezone(TAIPEI_TZ).date().isoformat() if bundled_stamp else None
+            )
+            bundled = _with_local_knowledge(bundled, local, delisted_on)
+        write_atomically(dest, bundled.write_parquet)
+    get_security_master().reload_if_changed()
+    return True
+
+
 def _publish_default(only_if_behind: bool) -> bool:
     return publish_enriched(only_if_behind=only_if_behind)
 
@@ -193,6 +293,7 @@ class TaiwanBootstrapService:
         store: TaiwanDailyStore | None = None,
         refresh_service: TaiwanDailyRefreshService | None = None,
         publish: Callable[[bool], bool] | None = None,
+        security_master: TaiwanSecurityMaster | None = None,
     ) -> None:
         self.download_url = download_url
         self.expected_sha256 = expected_sha256.lower()
@@ -201,6 +302,9 @@ class TaiwanBootstrapService:
         # The configured enriched table belongs to the default store; an injected store
         # must not publish into it unless the caller supplies a publisher.
         self._publish = publish or (_publish_default if store is None else (lambda _only_if_behind: False))
+        # Likewise the default security master is refreshed only when the default store is used.
+        self._security_master = security_master
+        self._uses_default_master = security_master is None and store is None
 
     def start_bootstrap(self, force: bool = False) -> str:
         """Start bootstrap process in a background thread."""
@@ -362,11 +466,7 @@ class TaiwanBootstrapService:
                 if "user_data" in [p.lower() for p in dest_root.parts]:
                     raise RuntimeError("安全違規: 目標路徑不得包含 user_data")
 
-                # Move/replace security_master.parquet safely
-                dest_sec = dest_root / "security_master.parquet"
-                tmp_dest_sec = dest_root / f"security_master.parquet.tmp_{uuid.uuid4().hex[:6]}"
-                shutil.copy2(str(sec_src), str(tmp_dest_sec))
-                tmp_dest_sec.replace(dest_sec)
+                import_security_master(sec_src, dest_root / "security_master.parquet")
 
                 # Merge daily partitions (never delete existing partitions)
                 dest_daily = dest_root / "daily"
@@ -434,8 +534,18 @@ class TaiwanBootstrapService:
                 # Temp dir is automatically cleaned up by TemporaryDirectory context manager
                 pass
 
+    def _master(self) -> TaiwanSecurityMaster | None:
+        if self._security_master is not None:
+            return self._security_master
+        return get_security_master() if self._uses_default_master else None
+
     def update_to_latest(self) -> dict[str, Any]:
-        """Directly update existing local store to latest trading day (no zip download)."""
+        """Directly update existing local store to latest trading day (no zip download).
+
+        Refreshes the security master first under the daily update's rules and refetches the stored
+        days missing a recent listing (pending_listing_dates), so a later click retries a failed
+        backfill; a changed master also republishes the enriched table.
+        """
         st = self.store
         dates = st.available_dates()
         if not dates:
@@ -443,20 +553,39 @@ class TaiwanBootstrapService:
 
         latest = dates[-1]
         target = resolve_target_latest_trading_date()
-        repairs = st.repair_dates(target)
+        master = self._master()
+        master_outcome: MasterRefreshOutcome | None = None
+        now = taipei_now()
+        if master is not None and master_refresh_due(target, now, TaiwanTradingCalendar()):
+            master_outcome = refresh_security_master(master, now=now, automatic=True)
+        backfill = pending_listing_dates(st, master, target) if master is not None else []
+        republish = master_outcome is not None and master_outcome.changed
+        master_info: dict[str, Any] = {}
+        master_suffix = ""
+        if master_outcome is not None:
+            master_info["security_master"] = master_outcome.summary
+            if master_outcome.note:
+                master_suffix = ", 證券主檔未更新, 沿用原有清單"
+        repairs = sorted(set(st.repair_dates(target)) | set(backfill))
 
         if latest >= target and not repairs:
-            published = self._publish(True)
+            published = self._publish(not republish)
             return {
                 "ok": True,
                 "already_current": True,
-                "message": f"本地資料已是最新 ({latest})" + (", 已補算技術指標" if published else ""),
+                "message": f"本地資料已是最新 ({latest})"
+                + (", 已補算技術指標" if published else "")
+                + master_suffix,
                 "dates_fetched": 0,
                 "enriched_published": published,
+                **master_info,
             }
 
         start = min([latest + timedelta(days=1), *repairs])
-        res = self.refresh_service.refresh_dates(start_date=start, end_date=target)
+        refetch_kwargs = {"refetch": backfill} if backfill else {}
+        res = self.refresh_service.refresh_dates(
+            start_date=start, end_date=target, **refetch_kwargs
+        )
         fetched = res.get("dates_fetched", 0)
         failures = [
             (f"{f['date']} 行情抓取失敗", f["error"]) for f in res.get("failed_dates") or []
@@ -466,17 +595,18 @@ class TaiwanBootstrapService:
         if failures and not fetched:
             raise RuntimeError(f"{failures[0][0]}: {failures[0][1]}")
         # Screening takes its basis day from these bars, so their indicators must be published too.
-        published = self._publish(not fetched)
+        published = self._publish(not fetched and not republish)
         message = f"成功更新 {fetched} 個交易日 (最新至 {target})"
         if failures:
             message = f"已更新 {fetched} 個交易日, {failures[0][0]}, 請稍後再試"
         return {
             "ok": True,
             "already_current": False,
-            "message": message,
+            "message": message + master_suffix,
             "dates_fetched": fetched,
             "enriched_published": published,
             "stats": res,
+            **master_info,
         }
 
 

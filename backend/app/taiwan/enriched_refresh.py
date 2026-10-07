@@ -11,7 +11,9 @@ on or before the newest stored bar, so the newest close equals the stored price;
 raw_close, raw_high and raw_low keep the stored prices. A new factor rescales all
 history, so whenever the factor set differs from the one last published every
 partition is rewritten under an EnrichedPublication, which makes readers fail
-instead of mixing scales until the rewrite commits.
+instead of mixing scales until the rewrite commits. A changed price-limit rule of a symbol
+with rows outside the refreshed window, or a historical partition whose schema differs
+from the current output, rewrites every partition the same way.
 """
 from __future__ import annotations
 
@@ -20,12 +22,18 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
 
-from app.enriched_generation import EnrichedPublication, enriched_publication_incomplete
+from app.enriched_generation import (
+    EnrichedGenerationUnavailableError,
+    EnrichedPublication,
+    _exclusive_generation_lock,
+    enriched_publication_incomplete,
+)
 from app.indicators.pipeline import compute_enriched, filter_halt_days, with_limit_streak
 from app.taiwan.corporate_actions import (
     REF_LIMIT_DOWN,
@@ -45,6 +53,10 @@ logger = logging.getLogger(__name__)
 
 ENRICHED_DIR_NAME = "kline_daily_enriched"
 FACTOR_SET_FILE = ".taiwan_enriched_factors.json"
+LIMIT_RULES_KEY = "limit_rules"
+NO_LIMIT_RULE = "none"
+OPEN_WINDOW = "open"
+LOGGED_SYMBOLS = 10
 
 
 def _enriched_root() -> Path:
@@ -92,9 +104,11 @@ class TaiwanEnrichedRefreshService:
         rebuild, which is enough to flip a borderline cross. The full market costs
         about a second, so there is nothing to save by truncating.
 
-        When the factor set through *end* differs from the last published one, or the last
-        full publication never committed, the window widens to every stored day: partitions
-        outside it would keep the old scale, and only a full publication can commit.
+        When the factor set through *end* differs from the last full publish, a symbol with rows
+        outside the window changed its price-limit rule, the last full publication never
+        committed, or a partition outside the window has another schema than this run's output,
+        the window widens to every stored day: partitions outside it would keep the old scale,
+        limits or columns, and only a full publication can commit.
         """
         available = self.daily_store.available_dates()
         if not available:
@@ -104,11 +118,22 @@ class TaiwanEnrichedRefreshService:
         end = end or max(available)
         start = start or min(available)
         events = self.corporate_actions.read(end=max(available))
+        sessions = listing_sessions(self.daily_store)
+        stored_symbols = sorted(sessions.first_sessions)
+        limits = self._limit_profile(stored_symbols, sessions)
+        unlisted = self._missing_from_master(stored_symbols)
+        limit_rules = self._limit_rules(limits, sorted(set(stored_symbols) - set(unlisted)))
+        rewritten_since = start if end >= max(available) else None
         if (start > min(available) or end < max(available)) and (
-            self.factors_changed(events, end) or self.publication_incomplete()
+            self.factors_changed(events, end)
+            or self.publication_incomplete()
+            or self.limit_rules_changed(
+                limit_rules, sessions.first_sessions, rewritten_since, unlisted
+            )
         ):
             logger.info(
-                "taiwan enriched: factors changed or last publication incomplete, republishing every partition"
+                "taiwan enriched: factors or limit rules changed, or last publication incomplete, "
+                "republishing every partition"
             )
             start, end = min(available), max(available)
         full = start <= min(available) and end >= max(available)
@@ -119,10 +144,9 @@ class TaiwanEnrichedRefreshService:
             logger.info("taiwan enriched refresh skipped: empty window")
             return 0
 
-        # Issued shares are the turnover denominator; without them the column is
-        # absent entirely and any strategy scoring on turnover_rate cannot run.
-        # compute_enriched nulls it for every Taiwan row that is not today, so the
-        # current count never reaches a historical date.
+        # Issued shares are the turnover denominator; without them turnover_rate stays null so the
+        # schema never depends on the share-capital file. compute_enriched nulls it for every
+        # Taiwan row that is not today, so the current count never reaches a historical date.
         instruments = self.share_capital.as_instruments()
         if instruments.is_empty():
             logger.warning(
@@ -136,15 +160,27 @@ class TaiwanEnrichedRefreshService:
         enriched = compute_enriched(raw, factors=factors, instruments=instruments)
         if enriched.is_empty():
             return 0
-        enriched = self._add_limit_signals(enriched, listing_sessions(self.daily_store))
+        if "turnover_rate" not in enriched.columns:
+            enriched = enriched.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
+        enriched = self._add_limit_signals(enriched, sessions, limits)
         enriched = add_volume_patterns(enriched, available)
+        if not full and self._history_schema_differs(enriched, start, end):
+            logger.info(
+                "taiwan enriched: a historical partition has another schema, republishing every partition"
+            )
+            if end < max(available):
+                return self.refresh(min(available), max(available))
+            start, full = min(available), True
         enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if enriched.is_empty():
             return 0
 
-        written = (
-            self._publish_all(enriched, factors, end) if full else self._publish_partitions(enriched)
-        )
+        if full:
+            published_rules = {**limit_rules, **dict.fromkeys(unlisted, NO_LIMIT_RULE)}
+            written = self._publish_all(enriched, factors, end, published_rules)
+        else:
+            written = self._publish_partitions(enriched)
+            self._save_limit_rules(limit_rules, keep=unlisted)
         logger.info(
             "taiwan enriched refresh: %d rows across %s..%s%s",
             written, start.isoformat(), end.isoformat(), " (every partition)" if full else "",
@@ -163,8 +199,14 @@ class TaiwanEnrichedRefreshService:
                 written += group.height
         return written
 
-    def _publish_all(self, enriched: pl.DataFrame, factors: pl.DataFrame, through: date) -> int:
-        """Rewrite every partition as one publication and record its factor set before committing.
+    def _publish_all(
+        self,
+        enriched: pl.DataFrame,
+        factors: pl.DataFrame,
+        through: date,
+        limit_rules: dict[str, str],
+    ) -> int:
+        """Rewrite every partition as one publication and record its factor set and limit rules before committing.
 
         A record that cannot be saved leaves the publication incomplete, so readers never pair
         the new prices with the previous record and apply pending factors twice.
@@ -176,6 +218,7 @@ class TaiwanEnrichedRefreshService:
         try:
             written = self._publish_partitions(enriched, publication)
             self._record_factor_set(factors, through)
+            self._record_limit_rules(limit_rules)
             publication.commit()
         except BaseException:
             publication.abandon()
@@ -214,12 +257,154 @@ class TaiwanEnrichedRefreshService:
         return self._fingerprint(adjustment_factors(events, through)) != self._published_fingerprint()
 
     def _record_factor_set(self, factors: pl.DataFrame, through: date) -> None:
-        payload = {
-            "fingerprint": self._fingerprint(factors),
-            "factors": factors.height,
-            "through": through.isoformat(),
-            "published_at": datetime.now(TAIPEI).isoformat(),
-        }
+        self._write_record(
+            {
+                "fingerprint": self._fingerprint(factors),
+                "factors": factors.height,
+                "through": through.isoformat(),
+                "published_at": datetime.now(TAIPEI).isoformat(),
+            }
+        )
+
+    @staticmethod
+    def _limit_rules(profile: pl.DataFrame, symbols: list[str]) -> dict[str, str]:
+        """Per symbol, a key of the limit inputs that change only with its rule; NO_LIMIT_RULE without a board.
+
+        The initial-listing window's last session is OPEN_WINDOW until five sessions are stored.
+        """
+        keys = {}
+        for row in profile.iter_rows(named=True):
+            ipo_start, ipo_end = row["ipo_start"], row["ipo_end"]
+            if ipo_end is None:
+                window_end = "-"
+            else:
+                window_end = OPEN_WINDOW if ipo_end == date.max else ipo_end.isoformat()
+            keys[row["symbol"]] = "|".join(
+                (
+                    repr(row["limit_pct"]),
+                    "etf" if row["is_etf_tick"] else "stock",
+                    ipo_start.isoformat() if ipo_start is not None else "-",
+                    window_end,
+                )
+            )
+        return {sym: keys.get(sym, NO_LIMIT_RULE) for sym in symbols}
+
+    @staticmethod
+    def _rule_changed(published: object, current: str) -> bool:
+        """Whether *current* would change rows published under *published*; a malformed one always does.
+
+        Rows published under an open initial-listing window all lie inside it, so its closing
+        on the fifth session changes none of them.
+        """
+        if not isinstance(published, str):
+            return True
+        if published == current:
+            return False
+        head, _, last = published.rpartition("|")
+        return not (last == OPEN_WINDOW and current.rpartition("|")[0] == head)
+
+    @staticmethod
+    def _missing_from_master(symbols: list[str]) -> list[str]:
+        from app.taiwan.universe import get_security_master
+
+        master = get_security_master()
+        return [sym for sym in symbols if master.get_instrument(sym) is None]
+
+    def _read_record(self) -> dict | None:
+        try:
+            payload = json.loads(self.factor_set_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def limit_rules_changed(
+        self,
+        rules: dict[str, str],
+        first_sessions: Mapping[str, date],
+        rewritten_since: date | None,
+        unlisted: list[str] | tuple[str, ...] = (),
+    ) -> bool:
+        """Whether a symbol with rows before *rewritten_since* (None: any symbol) changed its limit rule.
+
+        A symbol of *rules* missing from the record counts as changed once it has such rows: its
+        rule was never saved. A record saved before limit rules existed adopts *rules*, and
+        NO_LIMIT_RULE for *unlisted*, as its baseline without a rebuild; no record or an
+        unreadable one leaves the decision to the factor check.
+        """
+        payload = self._read_record()
+        if payload is None:
+            return False
+        published = payload.get(LIMIT_RULES_KEY)
+        if not isinstance(published, dict):
+            logger.info(
+                "taiwan enriched: factor record has no limit rules, "
+                "adopting the current limit rules as baseline without republishing"
+            )
+            self._save_limit_rules({**rules, **dict.fromkeys(unlisted, NO_LIMIT_RULE)})
+            return False
+        changed = sorted(
+            sym
+            for sym, key in rules.items()
+            if (sym not in published or self._rule_changed(published[sym], key))
+            and (rewritten_since is None or first_sessions[sym] < rewritten_since)
+        )
+        if changed:
+            logger.info(
+                "taiwan enriched: limit rules changed for %d symbols with published history: %s%s",
+                len(changed),
+                ", ".join(changed[:LOGGED_SYMBOLS]),
+                " ..." if len(changed) > LOGGED_SYMBOLS else "",
+            )
+        return bool(changed)
+
+    def _record_limit_rules(self, rules: dict[str, str]) -> None:
+        payload = json.loads(self.factor_set_path.read_text(encoding="utf-8"))
+        self._write_record({**payload, LIMIT_RULES_KEY: rules})
+
+    def _save_limit_rules(
+        self, rules: dict[str, str], keep: list[str] | tuple[str, ...] = ()
+    ) -> None:
+        """Merge *rules* and the published rules of *keep* into the record outside any publication.
+
+        Best effort: a symbol left unsaved counts as changed once it has rows before the window.
+        """
+        try:
+            with _exclusive_generation_lock(self._root.parent, "stock"):
+                if self.publication_incomplete():
+                    return
+                payload = self._read_record()
+                if payload is None:
+                    return
+                published = payload.get(LIMIT_RULES_KEY)
+                published = published if isinstance(published, dict) else {}
+                merged = {**{sym: published[sym] for sym in keep if sym in published}, **rules}
+                if merged != published:
+                    self._write_record({**payload, LIMIT_RULES_KEY: merged})
+        except (OSError, EnrichedGenerationUnavailableError) as exc:
+            logger.warning("taiwan enriched: limit rules not saved: %s", exc)
+
+    def _history_schema_differs(self, enriched: pl.DataFrame, start: date, end: date) -> bool:
+        """Whether a published partition outside [start, end] has another schema than *enriched*.
+
+        Reads only the parquet footers. Only days *enriched* covers count, so a full publish
+        always clears the condition.
+        """
+        expected = dict(enriched.schema)
+        days = enriched.select(pl.col("date").unique().sort()).to_series()
+        for d in days.filter((days < start) | (days > end)).to_list():
+            path = self._root / f"date={d.isoformat()}" / "part.parquet"
+            try:
+                schema = pl.read_parquet_schema(path)
+            except FileNotFoundError:
+                continue
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                logger.warning("taiwan enriched partition %s unreadable: %s", path.parent.name, exc)
+                return True
+            if dict(schema) != expected:
+                return True
+        return False
+
+    def _write_record(self, payload: dict) -> None:
         target = self.factor_set_path
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), prefix=".taiwan_enriched_factors_", suffix=".tmp")
@@ -262,7 +447,12 @@ class TaiwanEnrichedRefreshService:
             "ipo_start": pl.Date, "ipo_end": pl.Date,
         })
 
-    def _add_limit_signals(self, enriched: pl.DataFrame, sessions: ListingSessions | None = None) -> pl.DataFrame:
+    def _add_limit_signals(
+        self,
+        enriched: pl.DataFrame,
+        sessions: ListingSessions | None = None,
+        profile: pl.DataFrame | None = None,
+    ) -> pl.DataFrame:
         """Derive the Taiwan limit-board signals from the statutory daily limits.
 
         The shared pipeline skips these because it wants an A-share instrument
@@ -271,16 +461,18 @@ class TaiwanEnrichedRefreshService:
         and the previous close moved onto the raw scale; a corporate-action session
         uses the limits the exchange published. The limit streaks are counted from these signals.
         A session inside an initial listing's no-limit window, placed on *sessions* (default: the
-        stored calendar), has no limit board.
+        stored calendar), has no limit board. A *profile* from _limit_profile is used as given.
         """
         cols = ["signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"]
         enriched = enriched.with_columns([
             pl.lit(None, dtype=pl.Float64).alias(c)
             for c in (REF_LIMIT_UP, REF_LIMIT_DOWN) if c not in enriched.columns
         ])
-        profile = self._limit_profile(
-            enriched["symbol"].unique().to_list(), sessions if sessions is not None else listing_sessions()
-        )
+        if profile is None:
+            profile = self._limit_profile(
+                enriched["symbol"].unique().to_list(),
+                sessions if sessions is not None else listing_sessions(),
+            )
         if profile.is_empty():
             out = enriched.with_columns([pl.lit(False).alias(c) for c in cols])
         else:
@@ -319,8 +511,9 @@ class TaiwanEnrichedRefreshService:
         """Republish the newest partitions, for the daily update job.
 
         Starts at stale_since() instead when that is earlier: every day from there
-        on was published before its current bars, or not at all. A changed factor set or
-        an incomplete last publication turns it into a rewrite of every partition (see refresh).
+        on was published before its current bars, or not at all. A changed factor set or limit
+        rule, an incomplete last publication or a historical partition with another schema turns
+        it into a rewrite of every partition (see refresh).
         """
         available = sorted(self.daily_store.available_dates())
         if not available:

@@ -7,9 +7,7 @@ extend_history(向前扩展历史日K)、repair_daily(修正日K)、rebuild_enri
 
 sync_minute_single(个股分时图"获取数据"按钮用, 与被删的批量 sync_minute 是
 不同端点)完全未动。kline_sync.py 的 sync_and_persist_minute 仍被
-sync_minute_single 与 daily_pipeline.py 真实使用; run_repair_daily
-(backend/app/services/repair_daily.py)仍被 data_integrity.py 的启动自愈
-(launch_integrity_repair → boot_integrity_check)真实使用; run_pipeline
+sync_minute_single 与 daily_pipeline.py 真实使用; run_pipeline
 (app/indicators/pipeline.py)仍被 daily_pipeline.py / quote_service.py 真实
 使用——均完全未动。extend_history.py 保留(其 run_extend_history 现无其他
 调用方, 留待后续独立的 service-level orphan 稽核, 本 phase 不处理)。
@@ -171,16 +169,19 @@ def _get_taiwan_stock_info(symbol: str) -> dict:
     """Name from the Taiwan security master; total_shares is issued common shares,
     display-only market cap and stocks only (docs/taiwan-share-capital-phase-6h.md).
     float_shares stays null: Taiwan has no public-float source, and none may be substituted.
+    A TDR has none either: its official count is the underlying company's shares, not receipts.
     """
     name = None
     is_stock = False
     try:
         from app.taiwan.universe import get_security_master
+        from app.taiwan.universe.models import MarketProfileBridge, TaiwanInstrument
 
         inst = get_security_master().get_instrument(symbol)
         if inst is not None:
             name = inst.name
-            is_stock = getattr(inst, "instrument_type", None) == "stock"
+            is_tdr = isinstance(inst, TaiwanInstrument) and MarketProfileBridge.is_tdr(inst)
+            is_stock = getattr(inst, "instrument_type", None) == "stock" and not is_tdr
     except Exception:
         pass
 

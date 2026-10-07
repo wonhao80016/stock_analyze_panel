@@ -19,7 +19,9 @@ Core Design Principles:
 """
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 from pydantic import BaseModel, Field
@@ -34,7 +36,9 @@ from app.taiwan.institutional_margin_refresh import (
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
-from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now, taipei_today
+from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar, taipei_now, taipei_today
+from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
+from app.taiwan.universe.service import SecurityMasterUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,7 @@ class TaiwanDailyUpdateResult(BaseModel):
     margin: DatasetRefreshStats
     freshness: FreshnessStatus
     overall_status: UpdateStatus
+    security_master: dict[str, Any] | None = None
 
 
 def resolve_target_latest_trading_date(
@@ -150,6 +155,145 @@ def resolve_missing_date_range(
     return cur, target_latest
 
 
+def master_refresh_due(target: date, now: datetime, calendar: TaiwanTradingCalendar) -> bool:
+    """Whether a daily run for *target* at *now* refreshes the security master on its own.
+
+    Only a run for today's session (Asia/Taipei), on a potential trading day, at or after the
+    post-close cutoff does.
+    """
+    local = now.astimezone(TAIPEI_TZ)
+    cutoff = local.replace(
+        hour=DEFAULT_POST_CLOSE_HOUR, minute=DEFAULT_POST_CLOSE_MINUTE, second=0, microsecond=0
+    )
+    today = local.date()
+    return target == today and local >= cutoff and calendar.is_trading_day(today) is not False
+
+
+@dataclass(frozen=True)
+class MasterRefreshOutcome:
+    """A daily run's security master refresh; *changed* means instruments or their rules changed."""
+
+    summary: dict[str, Any]
+    note: str | None = None
+    changed: bool = False
+
+
+def pending_listing_dates(
+    store: TaiwanDailyStore, master: TaiwanSecurityMaster, target: date
+) -> list[date]:
+    """Newest REPAIR_WINDOW_PARTITIONS stored days up to *target* before a recent listing's first row.
+
+    Only supported active stocks and ETFs whose listing date falls inside that window count, so a
+    halt after the first stored row, or a halted or delisted older symbol, never causes a refetch;
+    a listing leaves the check once its listing date leaves the window.
+    """
+    window = [d for d in store.available_dates()[-REPAIR_WINDOW_PARTITIONS:] if d <= target]
+    if not window:
+        return []
+    listed: dict[str, date] = {}
+    for asset_type in ("stock", "etf"):
+        frame = master.to_provider_dataframe(asset_type=asset_type)
+        if frame.is_empty() or "list_date" not in frame.columns:
+            continue
+        for symbol, raw in frame.select("symbol", "list_date").iter_rows():
+            try:
+                listed_on = date.fromisoformat(raw or "")
+            except (TypeError, ValueError):
+                continue
+            if window[0] <= listed_on <= window[-1]:
+                listed[symbol] = listed_on
+    if not listed:
+        return []
+    stored = store.scan_range(sorted(listed), min(listed.values()), window[-1])
+    first_stored: dict[str, date] = {}
+    for symbol, d in zip(stored["symbol"].to_list(), stored["date"].to_list(), strict=True):
+        if d < first_stored.get(symbol, date.max):
+            first_stored[symbol] = d
+    return sorted(
+        {
+            d
+            for d in window
+            for symbol, listed_on in listed.items()
+            if listed_on <= d < first_stored.get(symbol, date.max)
+        }
+    )
+
+
+def master_refreshed_on(master: TaiwanSecurityMaster, day: date) -> bool:
+    """Whether *master*'s refresh record holds a complete successful refresh on *day* (Asia/Taipei).
+
+    A success whose TPEx management style lookups were skipped or cut short does not count.
+    """
+    try:
+        record = json.loads(master.refresh_metadata_path.read_text(encoding="utf-8"))
+        stamp = datetime.fromisoformat(record["last_success"])
+        complete = record.get("styles_complete") is True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+    if not complete:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=TAIPEI_TZ)
+    return stamp.astimezone(TAIPEI_TZ).date() == day
+
+
+def refresh_security_master(
+    master: TaiwanSecurityMaster,
+    *,
+    now: datetime,
+    force: bool = False,
+    automatic: bool = False,
+) -> MasterRefreshOutcome | None:
+    """Refresh *master* for a daily run; never raises, a failed or busy refresh only yields a note.
+
+    An *automatic* refresh returns None when the master already refreshed successfully today, and
+    skips with a note when its cache file exists but cannot be loaded, since refreshing against an
+    empty baseline would bypass the validation against the previous list.
+    """
+    if automatic:
+        if master_refreshed_on(master, now.astimezone(TAIPEI_TZ).date()):
+            logger.info("Security master already refreshed today; skipping the automatic refresh")
+            return None
+        if master.cache_path.exists():
+            try:
+                master.ensure_loaded()
+            except SecurityMasterUnavailableError as exc:
+                note = f"Security master refresh skipped, its cache file is unreadable: {exc}"
+                logger.warning("%s", note)
+                return MasterRefreshOutcome(
+                    summary={"ok": False, "busy": False, "error": str(exc), "note": note},
+                    note=note,
+                )
+    try:
+        result = master.refresh(now=now, force=force)
+    except Exception as exc:
+        logger.exception("Security master refresh failed: %s", exc)
+        note = f"Security master not refreshed, keeping the previous list: {exc}"
+        return MasterRefreshOutcome(
+            summary={"ok": False, "busy": False, "error": str(exc), "note": note}, note=note
+        )
+    summary: dict[str, Any] = {
+        "ok": result.ok,
+        "busy": result.busy,
+        "error": result.error,
+        "added": result.added,
+        "removed": result.removed,
+        "reclassified": len(result.changed),
+        "note": None,
+    }
+    if not result.ok:
+        note = (
+            "Security master refresh skipped: another refresh is in progress"
+            if result.busy
+            else f"Security master not refreshed, keeping the previous list: {result.error}"
+        )
+        logger.warning("%s", note)
+        return MasterRefreshOutcome(summary={**summary, "note": note}, note=note)
+    return MasterRefreshOutcome(
+        summary=summary, changed=bool(result.added or result.removed or result.changed)
+    )
+
+
 def _refresh_corporate_actions(
     window: tuple[date, date] | None, service: TaiwanCorporateActionRefreshService | None
 ) -> str | None:
@@ -177,12 +321,14 @@ def publish_enriched(
     only_if_behind: bool = False,
     corporate_actions: TaiwanCorporateActionRefreshService | None = None,
     notes: list[str] | None = None,
+    since: date | None = None,
 ) -> bool:
     """Refresh issued shares and corporate-action reference prices, then republish the enriched table.
 
     Returns whether a publish ran. With only_if_behind it runs only when a recent
     day's enriched partition is missing or older than its bars, or the last full
-    publication never committed. A failed reference-price
+    publication never committed. A *since* before the recent window extends the republish back
+    to that day, for bars written into older days. A failed reference-price
     fetch never stops the publish, and a failed publish never raises; both are logged and,
     when *notes* is given, appended to it.
     """
@@ -200,13 +346,17 @@ def publish_enriched(
         TaiwanShareCapitalStore().refresh()
     except Exception as e:
         logger.warning("Taiwan share capital refresh failed: %s", e)
-    note = _refresh_corporate_actions(
-        TaiwanEnrichedRefreshService(daily_store=daily_store).recent_window(), corporate_actions
-    )
+    window = TaiwanEnrichedRefreshService(daily_store=daily_store).recent_window()
+    note = _refresh_corporate_actions(window, corporate_actions)
     if note and notes is not None:
         notes.append(note)
     try:
-        TaiwanEnrichedRefreshService(daily_store=daily_store).refresh_recent()
+        if since is not None and window is not None and since < window[0]:
+            TaiwanEnrichedRefreshService(daily_store=daily_store).refresh(
+                start=since, end=window[1]
+            )
+        else:
+            TaiwanEnrichedRefreshService(daily_store=daily_store).refresh_recent()
     except Exception as e:
         logger.warning("Taiwan enriched publish failed: %s", e)
         if notes is not None:
@@ -228,8 +378,12 @@ class TaiwanDailyUpdateService:
         calendar: TaiwanTradingCalendar | None = None,
         market_inst_service: TaiwanMarketInstitutionalRefreshService | None = None,
         corporate_action_service: TaiwanCorporateActionRefreshService | None = None,
+        security_master: TaiwanSecurityMaster | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
+        # The default master follows the default root; injected stores refresh only a passed master.
+        self._security_master = security_master
+        self._uses_default_master = security_master is None and daily_store is None
         self.daily_store = daily_store or TaiwanDailyStore()
         self.inst_store = inst_store or TaiwanInstitutionalStore()
         self.margin_store = margin_store or TaiwanMarginStore()
@@ -296,6 +450,11 @@ class TaiwanDailyUpdateService:
             scheduled_timezone="Asia/Taipei",
         )
 
+    def _master(self) -> TaiwanSecurityMaster | None:
+        if self._security_master is not None:
+            return self._security_master
+        return get_security_master() if self._uses_default_master else None
+
     def _refresh_market_institutional(self, target: date) -> str | None:
         try:
             res = self.market_inst_service.refresh_through(target)
@@ -322,6 +481,8 @@ class TaiwanDailyUpdateService:
         force: bool = False,
         refresh_institutional: bool = True,
         refresh_margin: bool = True,
+        refresh_master: bool | None = None,
+        master_force: bool = False,
     ) -> TaiwanDailyUpdateResult:
         """Execute daily incremental refresh across datasets.
 
@@ -336,12 +497,35 @@ class TaiwanDailyUpdateService:
             refresh_margin: Whether to refresh margin balances. Defaults to True. The exchange
                             publishes margin later than institutional, so the scheduler runs
                             them on separate triggers.
+            refresh_master: None refreshes the security master before the full-market daily step
+                            when master_refresh_due(target) and it has not refreshed successfully
+                            today; True refreshes it regardless; False never. A failed or busy
+                            refresh only adds a note to the daily stats. Independently, every
+                            full-market daily step refetches the stored days in
+                            pending_listing_dates; a failed refetch makes the daily status partial.
+            master_force: Let the master refresh accept count drops and removals beyond its
+                          validation limits.
 
         Returns:
             Structured TaiwanDailyUpdateResult.
         """
         run_start = taipei_now()
         target = target_date or resolve_target_latest_trading_date(self.calendar, as_of_dt=run_start)
+
+        master = self._master()
+        master_outcome: MasterRefreshOutcome | None = None
+        if master is not None and (
+            refresh_master is True
+            or (
+                refresh_master is None
+                and refresh_daily
+                and daily_symbols is None
+                and master_refresh_due(target, run_start, self.calendar)
+            )
+        ):
+            master_outcome = refresh_security_master(
+                master, now=run_start, force=master_force, automatic=refresh_master is None
+            )
 
         # 1. Determine date ranges per dataset
         d_dates = self.daily_store.available_dates()
@@ -365,11 +549,20 @@ class TaiwanDailyUpdateService:
 
         # 2. Daily OHLCV Refresh
         daily_stats = DatasetRefreshStats()
+        written_since: date | None = None
         if not refresh_daily:
             daily_stats.status = "skipped"
             daily_stats.note = "Daily refresh skipped by caller configuration."
         else:
             try:
+                backfill: list[date] = []
+                if daily_symbols is None and master is not None:
+                    backfill = pending_listing_dates(self.daily_store, master, target)
+                    if backfill:
+                        logger.info(
+                            "Refetching daily partitions missing recent listings: %s",
+                            ", ".join(map(str, backfill)),
+                        )
                 d_range = resolve_missing_date_range(d_max, target, self.calendar) if not force else (start_bound, end_bound)
                 if not force and daily_symbols is None:
                     # The missing range starts after the latest stored day, so a recent day
@@ -378,7 +571,9 @@ class TaiwanDailyUpdateService:
                     repair_dates = self.daily_store.repair_dates(target)
                     if repair_dates:
                         logger.info("Refetching daily partitions: %s", ", ".join(map(str, repair_dates)))
-                        d_range = (repair_dates[0], target)
+                    first_refetch = min([*repair_dates, *backfill], default=None)
+                    if first_refetch is not None:
+                        d_range = (first_refetch, target)
                 if not d_range and not force:
                     daily_stats.status = "success"
                     daily_stats.dates_skipped = 1
@@ -396,9 +591,33 @@ class TaiwanDailyUpdateService:
                             daily_stats.dates_fetched = 1 if res.get("symbols_fetched", 0) > 0 else 0
                             daily_stats.dates_skipped = 1 if res.get("symbols_fetched", 0) == 0 else 0
                             daily_stats.rows_written = res.get("rows_written", 0)
+                            written_since = min(
+                                (
+                                    date.fromisoformat(r["start"])
+                                    for entry in (res.get("per_symbol") or {}).values()
+                                    for r in entry.get("ranges") or []
+                                    if r.get("rows", 0) > 0
+                                ),
+                                default=None,
+                            )
+                            failed_symbols = res.get("failed") or []
+                            if failed_symbols:
+                                daily_stats.status = "partial" if daily_stats.rows_written > 0 else "failed"
+                                reasons = []
+                                for sym in failed_symbols:
+                                    entry = (res.get("per_symbol") or {}).get(sym) or {}
+                                    status = entry.get("status", "failed")
+                                    reasons.append(f"{sym} ({entry.get('error') if status == 'error' else status})")
+                                daily_stats.note = "Symbols not refreshed: " + ", ".join(reasons)
                     else:
                         # Full-market refresh -> use fast official snapshot path (TWSE 1 + TPEx 1)
-                        res = self.daily_service.refresh_dates(start_date=d_start, end_date=d_end, force=force)
+                        refetch_kwargs: dict[str, Any] = {}
+                        if backfill:
+                            d_start = min(d_start, backfill[0])
+                            refetch_kwargs["refetch"] = backfill
+                        res = self.daily_service.refresh_dates(
+                            start_date=d_start, end_date=d_end, force=force, **refetch_kwargs
+                        )
                         daily_stats.dates_requested = res.get("dates_requested", 0)
                         daily_stats.dates_fetched = res.get("dates_fetched", 0)
                         daily_stats.dates_skipped = res.get("dates_skipped", 0)
@@ -411,10 +630,30 @@ class TaiwanDailyUpdateService:
                             daily_stats.status = "failed" if daily_stats.dates_fetched == 0 else "partial"
                         else:
                             daily_stats.status = "success"
+                        failed = [*daily_stats.failed_dates, *repair_failed]
+                        missed = sorted(
+                            {f["date"] for f in failed if "date" in f}
+                            & {d.isoformat() for d in backfill}
+                        )
+                        if missed:
+                            if daily_stats.status == "success":
+                                daily_stats.status = "partial"
+                            missed_note = (
+                                "Recent listings still missing on "
+                                + ", ".join(missed)
+                                + "; days before a listing's first stored row are retried"
+                                " on the next run"
+                            )
+                            daily_stats.note = "; ".join(
+                                n for n in (daily_stats.note, missed_note) if n
+                            )
             except Exception as e:
                 logger.exception("Daily refresh failed: %s", e)
                 daily_stats.status = "failed"
                 daily_stats.failed_dates.append({"error": str(e)})
+
+        if master_outcome is not None and master_outcome.note:
+            daily_stats.note = "; ".join(n for n in (master_outcome.note, daily_stats.note) if n)
 
         # 3. Institutional Refresh (TWSE + TPEx = 2 HTTP calls per date)
         inst_stats = DatasetRefreshStats()
@@ -495,7 +734,12 @@ class TaiwanDailyUpdateService:
         if refresh_daily and daily_stats.status in {"success", "skipped", "partial"}:
             # Reference-price and publish failures only extend the daily note, never the daily status.
             notes: list[str] = []
-            publish_enriched(self.daily_store, corporate_actions=self.corporate_action_service, notes=notes)
+            publish_enriched(
+                self.daily_store,
+                corporate_actions=self.corporate_action_service,
+                notes=notes,
+                since=written_since,
+            )
             if notes:
                 daily_stats.note = "; ".join([n for n in (daily_stats.note, *notes) if n])
 
@@ -531,6 +775,7 @@ class TaiwanDailyUpdateService:
             margin=margin_stats,
             freshness=freshness,
             overall_status=overall_status,
+            security_master=master_outcome.summary if master_outcome is not None else None,
         )
 
         logger.info(
@@ -550,10 +795,42 @@ def main():
     parser.add_argument("--skip-daily", action="store_true", help="Skip Daily OHLCV refresh")
     parser.add_argument("--symbols", nargs="+", help="Specific symbols to refresh for Daily OHLCV (uses per-symbol path)")
     parser.add_argument("--target-date", type=str, help="Target date YYYY-MM-DD override")
-    parser.add_argument("--force", action="store_true", help="Force refetch existing dates")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Force refetch existing dates; with --symbols it widens the date range but only fills "
+            "missing rows; with --refresh-master or --master-dry-run the security master also "
+            "accepts count drops and delistings beyond its safety limits"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-master",
+        action="store_true",
+        help=(
+            "Refresh the security master from the official directories before the update, "
+            "whatever the time (otherwise a full-market run for today's session after 16:00 "
+            "Asia/Taipei refreshes it until one refresh succeeds that day). Unless the daily step "
+            f"is skipped, it refetches the newest {REPAIR_WINDOW_PARTITIONS} stored days that "
+            "lack a row of a stock or ETF listed within them"
+        ),
+    )
+    parser.add_argument(
+        "--master-dry-run",
+        action="store_true",
+        help=(
+            "Fetch the official directories and print the security master changes a refresh "
+            "would make as JSON, then exit without writing anything or running the update"
+        ),
+    )
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    if args.master_dry_run:
+        preview = get_security_master().refresh(dry_run=True, force=args.force)
+        print(json.dumps(asdict(preview), indent=2, ensure_ascii=False, default=str))
+        return
 
     svc = TaiwanDailyUpdateService()
     t_date = date.fromisoformat(args.target_date) if args.target_date else None
@@ -568,6 +845,8 @@ def main():
         refresh_daily=not args.skip_daily,
         daily_symbols=args.symbols,
         force=args.force,
+        refresh_master=True if args.refresh_master else None,
+        master_force=args.refresh_master and args.force,
     )
     print(json.dumps(res.model_dump(), indent=2, ensure_ascii=False))
 

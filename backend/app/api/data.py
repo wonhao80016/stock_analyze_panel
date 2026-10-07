@@ -1,13 +1,5 @@
-"""数据画像 API —— 让前端知道"我们本地有什么数据"。
+"""Data status API: what local data the panel holds."""
 
-Phase 8B-5.18: 移除已确认 zero 前端/后端/scheduler/脚本消费者的
-POST /clear(清空所有本地 parquet, 原供已删除的 Data.tsx 使用)与
-GET /schema/{table}(表结构查看, 原供 Data.tsx 的 schema viewer 使用)。
-两者专属的 _TABLE_FIELD_DESC / _SCHEMA_VIEWS 常量一并移除。
-invalidate_data_cache / invalidate_storage_cache(仍被 daily_pipeline.py /
-extend_history.py / kline.py / pipeline.py / data_integrity.py 使用)、
-EnrichedPublication(仍被 repository.py 的即时/排程写入使用)完全未变更。
-"""
 from __future__ import annotations
 
 import logging
@@ -128,22 +120,14 @@ def _safe_aggregate(repo, view: str) -> dict | None:
     }
 
 
-def _safe_aggregate_daily(repo, view: str = "kline_daily") -> dict | None:
-    """日K轻量统计 — 零数据扫描。
+def _safe_aggregate_daily(repo) -> dict | None:
+    """Daily stats of the Taiwan daily store, from partition names only (no parquet read).
 
-    从分区目录名获取日期范围和交易日数，不读任何 parquet。
-    标的数从 instruments 小表获取（~5000行，毫秒级）。
+    The symbol count still comes from the small instruments table.
     """
-    daily_dir = repo.store.data_dir / "kline_daily"
-    if not daily_dir.exists():
-        return None
-    dates: list[str] = []
-    for d in daily_dir.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            dates.append(d.name[5:])
+    dates = [d.isoformat() for d in repo.taiwan_daily_dates()]
     if not dates:
         return None
-    dates.sort()
 
     symbols = _count_instruments_symbols(repo)
 
@@ -352,15 +336,12 @@ def _safe_aggregate_etf_daily(repo) -> dict | None:
 
 
 def _safe_aggregate_adj_factor(repo) -> dict | None:
-    """adj_factor 视图统计,日期范围对齐日 K 覆盖区间。"""
+    """adj_factor view stats over the date range of the Taiwan daily store."""
     try:
-        # 取日 K 的日期范围作为过滤条件
-        dr = repo.execute_one(
-            "SELECT min(date), max(date) FROM kline_daily"
-        )
-        if not dr or not dr[0]:
+        dates = repo.taiwan_daily_dates()
+        if not dates:
             return None
-        d_min, d_max = dr[0], dr[1]
+        d_min, d_max = dates[0], dates[-1]
         row = repo.execute_one(
             """SELECT count(*) AS rows,
                       count(DISTINCT symbol) AS symbols,
@@ -490,6 +471,7 @@ def _compute_storage(data_dir: Path) -> dict:
     # 只统计关心的子目录
     subdirs = {
         "daily": data_dir / "kline_daily",
+        "taiwan_daily": data_dir / "taiwan" / "daily",
         "enriched": data_dir / "kline_daily_enriched",
         "index_daily": data_dir / "kline_index_daily",
         "index_enriched": data_dir / "kline_index_enriched",

@@ -903,6 +903,7 @@ export interface TaiwanStockIdentity {
   industry?: string | null
   cfi_code?: string | null
   etf_category?: string | null
+  security_class?: 'tdr' | null
 }
 
 export interface TaiwanStockPriceLimit {
@@ -1310,6 +1311,13 @@ export interface IndustryConstituentMover {
   turnover: number
 }
 
+/** Industry value of stocks without a domestic industry (TDRs included); an API value, not a label. */
+export const UNCLASSIFIED_INDUSTRY = 'UNCLASSIFIED'
+
+export function industryLabel(industry: string): string {
+  return industry === UNCLASSIFIED_INDUSTRY ? '未分類' : industry
+}
+
 export interface IndustryMetrics {
   industry: string
   supported_symbol_count: number
@@ -1368,7 +1376,7 @@ export interface TaiwanIndustryIntelligenceSnapshot {
     daily_status: 'current' | 'stale' | 'unavailable'
     institutional_status: 'current' | 'stale' | 'unavailable'
     margin_status: 'current' | 'stale' | 'unavailable'
-    overall_status: 'complete' | 'partial' | 'unavailable'
+    overall_status: 'complete' | 'provisional' | 'partial' | 'unavailable'
   }
 }
 
@@ -1390,6 +1398,7 @@ export interface TaiwanStockResearchContext {
     exchange: string
     instrument_type: string
     industry: string | null
+    security_class?: 'tdr' | null
     currency: string
     listing_status: string
     listing_date: string | null
@@ -1599,7 +1608,7 @@ export interface TaiwanAbnormalDiagnosticsSnapshot {
     daily_status: 'current' | 'stale' | 'unavailable'
     institutional_status: 'current' | 'stale' | 'unavailable'
     margin_status: 'current' | 'stale' | 'unavailable'
-    overall_status: 'complete' | 'partial' | 'unavailable'
+    overall_status: 'complete' | 'provisional' | 'partial' | 'unavailable'
   }
   provenance: string[]
 }
@@ -2606,7 +2615,7 @@ export const api = {
   // extend_history、repair_daily、rebuild_enriched 已確認 zero 消費者並整組
   // 刪除(見 backend/app/api/kline.py)。sync_minute_single(本檔上方,個股分時圖
   // 用)完全未動, 與被刪的 batch sync_minute 是不同端點。kline_sync.py/
-  // data_integrity.py/repair_daily.py/extend_history.py/run_pipeline 均未動,
+  // extend_history.py/run_pipeline 均未動,
   // daily_pipeline.py 自身的分鐘K同步流程(stage label "sync_minute")亦不受影響。
   // Phase 8B-FINAL: syncSymbol(對應 backend POST /api/kline/sync)已確認 zero
   // 消費者並與其 backend handler 一併刪除, 避免留下「前端方法已死但 backend

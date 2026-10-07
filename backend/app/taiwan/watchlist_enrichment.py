@@ -29,6 +29,8 @@ from typing import Any
 
 import polars as pl
 
+from app.taiwan.universe.models import MarketProfileBridge, TaiwanInstrument
+
 logger = logging.getLogger(__name__)
 
 # Row keys share their names with api/watchlist.py::_WATCHLIST_COLS; the indicator
@@ -86,15 +88,18 @@ def _taiwan_live_date(q: Any) -> str | None:
 
 
 def _taiwan_turnover_rate(
-    q: Any, asset_type: str, issued_shares: Any, today: Any,
+    q: Any, asset_type: str, issued_shares: Any, today: Any, inst: Any = None,
 ) -> float | None:
     """Issued-share turnover for today's quote only.
 
     Taiwan has no historical share-count source (docs/taiwan-share-capital-phase-6h.md),
     so a fallback quote from a previous session (q.trade_date != today) must stay null
-    rather than being priced with today's issued-share count.
+    rather than being priced with today's issued-share count. A TDR stays null too: its
+    official count is the underlying company's shares, not receipts.
     """
     if q is None or asset_type != "stock":
+        return None
+    if isinstance(inst, TaiwanInstrument) and MarketProfileBridge.is_tdr(inst):
         return None
     if q.trade_date is None or q.trade_date != today:
         return None
@@ -257,6 +262,6 @@ def enrich_taiwan_watchlist_rows(
             "live_date": _taiwan_live_date(q),
             "indicator_date": indicator_date if ind else None,
             **{f: _sanitize_float(ind.get(f)) for f in _TAIWAN_INDICATOR_FIELDS},
-            "turnover_rate": _taiwan_turnover_rate(q, asset_type, issued_shares_map.get(symbol), today),
+            "turnover_rate": _taiwan_turnover_rate(q, asset_type, issued_shares_map.get(symbol), today, inst),
         })
     return rows

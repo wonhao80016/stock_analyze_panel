@@ -37,10 +37,25 @@ from app.taiwan.daily_update import (
 )
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
+from app.taiwan.market_intelligence import (
+    daily_coverage_complete,
+    delisted_after,
+    listed_by,
+    stored_partition_status,
+)
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 
 logger = logging.getLogger(__name__)
+
+
+# Bucket of stocks without a domestic industry, TDRs included; an API value, not a display label.
+UNCLASSIFIED_INDUSTRY = "UNCLASSIFIED"
+
+
+def unclassified_industry_expr() -> pl.Expr:
+    """Rows bucketed as UNCLASSIFIED: a null or blank industry."""
+    return pl.col("industry").is_null() | (pl.col("industry").str.strip_chars() == "")
 
 
 # ── Response Contract Models ──────────────────────────────────
@@ -130,7 +145,7 @@ class IndustryDataQuality(BaseModel):
     daily_status: DatasetFreshnessStatus = "unavailable"
     institutional_status: DatasetFreshnessStatus = "unavailable"
     margin_status: DatasetFreshnessStatus = "unavailable"
-    overall_status: Literal["complete", "partial", "unavailable"] = "unavailable"
+    overall_status: Literal["complete", "provisional", "partial", "unavailable"] = "unavailable"
 
 
 class TaiwanIndustryIntelligenceSnapshot(BaseModel):
@@ -201,22 +216,22 @@ class TaiwanIndustryIntelligenceService:
 
         # 1. Base Universe: Active Supported Stocks only (ETFs excluded from industry rankings)
         master_df = self.security_master.to_dataframe(supported_only=True)
-        active_stocks = master_df.filter(
-            (pl.col("listing_status") == "active") & (pl.col("instrument_type") == "stock")
+        still_trading = list(delisted_after(master_df, target)["symbol"].to_list())
+        master_df = master_df.filter(
+            (pl.col("listing_status") == "active") | pl.col("symbol").is_in(still_trading)
         )
+        active_stocks = master_df.filter(pl.col("instrument_type") == "stock")
         total_stocks_count = len(active_stocks)
-        etf_count = len(master_df.filter(
-            (pl.col("listing_status") == "active") & (pl.col("instrument_type") == "etf")
-        ))
+        etf_count = len(master_df.filter(pl.col("instrument_type") == "etf"))
 
         # Classify unclassified (industry null/empty -> UNCLASSIFIED)
         active_stocks = active_stocks.with_columns(
-            pl.when(pl.col("industry").is_null() | (pl.col("industry").str.strip_chars() == ""))
-            .then(pl.lit("UNCLASSIFIED"))
+            pl.when(unclassified_industry_expr())
+            .then(pl.lit(UNCLASSIFIED_INDUSTRY))
             .otherwise(pl.col("industry"))
             .alias("industry")
         )
-        classified_count = len(active_stocks.filter(pl.col("industry") != "UNCLASSIFIED"))
+        classified_count = len(active_stocks.filter(pl.col("industry") != UNCLASSIFIED_INDUSTRY))
         unclassified_count = total_stocks_count - classified_count
         coverage_pct = round((classified_count / total_stocks_count * 100.0), 2) if total_stocks_count > 0 else 100.0
 
@@ -228,39 +243,50 @@ class TaiwanIndustryIntelligenceService:
         hist_5d = self.daily_store.read_range(symbols, d_5d, d_5d) if d_5d else pl.DataFrame()
         hist_20d = self.daily_store.read_range(symbols, d_20d, d_20d) if d_20d else pl.DataFrame()
 
-        # Dataset Freshness
-        daily_available = self.daily_store.available_dates()
-        daily_as_of = max(daily_available) if daily_available else None
+        # Dataset Freshness (NO look-ahead: later partitions never make target current)
+        daily_as_of = max(
+            (d for d in self.daily_store.available_dates() if d <= target), default=None
+        )
         daily_status: DatasetFreshnessStatus = (
-            "current" if (daily_as_of and daily_as_of >= target)
-            else ("stale" if daily_as_of else "unavailable")
+            "current" if daily_as_of == target else ("stale" if daily_as_of else "unavailable")
         )
 
         # 3. Batch Read Institutional & Margin Stores (NO look-ahead)
         inst_df = self.inst_store.read_range(symbols, target, target)
-        inst_available = self.inst_store.available_dates()
-        inst_as_of = max(inst_available) if inst_available else None
+        inst_as_of = max(
+            (d for d in self.inst_store.available_dates() if d <= target), default=None
+        )
         inst_status: DatasetFreshnessStatus = (
-            "current" if (inst_as_of and inst_as_of >= target)
-            else ("stale" if inst_as_of else "unavailable")
+            "current" if inst_as_of == target else ("stale" if inst_as_of else "unavailable")
         )
 
         margin_df = self.margin_store.read_range(symbols, target, target)
-        m_available = self.margin_store.available_dates()
-        m_as_of = max(m_available) if m_available else None
+        m_as_of = max((d for d in self.margin_store.available_dates() if d <= target), default=None)
         m_status: DatasetFreshnessStatus = (
-            "current" if (m_as_of and m_as_of >= target)
-            else ("stale" if m_as_of else "unavailable")
+            "current" if m_as_of == target else ("stale" if m_as_of else "unavailable")
         )
 
-        # Overall Quality Status
+        # Must match market intelligence's status precedence.
+        snapshot_symbols = (
+            set(curr_daily["symbol"].to_list()) if not curr_daily.is_empty() else set()
+        )
+        coverage_complete = daily_coverage_complete(
+            listed_by(active_stocks, target), snapshot_symbols
+        )
+        partitions = stored_partition_status(
+            self.daily_store, [d for d in (target, d_prev, d_5d, d_20d) if d is not None]
+        )
         statuses = [daily_status, inst_status, m_status]
-        if all(s == "current" for s in statuses):
-            overall_status = "complete"
-        elif any(s == "current" for s in statuses) or any(s == "stale" for s in statuses):
-            overall_status = "partial"
-        else:
+        if total_stocks_count == 0 or not snapshot_symbols:
             overall_status = "unavailable"
+        elif not coverage_complete or partitions == "partial":
+            overall_status = "partial"
+        elif partitions == "provisional" and all(s == "current" for s in statuses):
+            overall_status = "provisional"
+        elif all(s == "current" for s in statuses):
+            overall_status = "complete"
+        else:
+            overall_status = "partial"
 
         # 4. Join Base Dataframe
         if not curr_daily.is_empty():

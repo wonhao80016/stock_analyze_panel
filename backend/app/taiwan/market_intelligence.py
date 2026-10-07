@@ -20,7 +20,7 @@ STRICT CONSTRAINTS:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 import polars as pl
@@ -67,18 +67,83 @@ def _listing_date(raw: object) -> date | None:
             return None
 
 
-def _security_master_as_of(universe: pl.DataFrame) -> date | None:
-    if universe.is_empty() or "updated_at" not in universe.columns:
-        return None
-    dates: set[date] = set()
-    for raw in universe["updated_at"].to_list():
-        if raw is None or not str(raw).strip():
-            return None
-        try:
-            dates.add(datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00")).date())
-        except ValueError:
-            return None
-    return next(iter(dates)) if len(dates) == 1 else None
+def _trading_on(row: dict, target: date) -> bool:
+    listed = _listing_date(row.get("listing_date"))
+    if listed is not None and listed > target:
+        return False
+    if row.get("listing_status") != "delisted":
+        return True
+    delisted = _listing_date(row.get("delisted_at"))
+    return delisted is not None and delisted > target
+
+
+def delisted_after(universe: pl.DataFrame, target: date) -> pl.DataFrame:
+    """Delisted rows of *universe* that still traded on *target*: their delisted_at is after it."""
+    if universe.is_empty() or not {"listing_status", "delisted_at"} <= set(universe.columns):
+        return universe.clear()
+    delisted = universe.filter(pl.col("listing_status") == "delisted")
+    still_trading = [
+        row["symbol"]
+        for row in delisted.select(["symbol", "delisted_at"]).iter_rows(named=True)
+        if (day := _listing_date(row["delisted_at"])) is not None and day > target
+    ]
+    return delisted.filter(pl.col("symbol").is_in(still_trading))
+
+
+def listed_by(universe: pl.DataFrame, target: date) -> pl.DataFrame:
+    """Rows of *universe* trading on *target*: listed on or before it and not delisted by then.
+
+    An unknown listing date counts as listed; a delisted row counts only before its delisted_at date.
+    """
+    columns = [
+        c for c in ("symbol", "listing_date", "listing_status", "delisted_at") if c in universe.columns
+    ]
+    if universe.is_empty() or columns == ["symbol"]:
+        return universe
+    eligible_symbols = [
+        row["symbol"]
+        for row in universe.select(columns).iter_rows(named=True)
+        if _trading_on(row, target)
+    ]
+    return universe.filter(pl.col("symbol").is_in(eligible_symbols))
+
+
+def daily_coverage_complete(universe: pl.DataFrame, snapshot_symbols: set[str]) -> bool:
+    """Whether the target-date daily rows cover the listed *universe* on both exchanges.
+
+    *universe* must already be limited by listed_by() to the target date; *snapshot_symbols*
+    are the symbols holding a daily row on that date.
+    """
+    if universe.is_empty():
+        return False
+    supported = set(universe["symbol"].to_list())
+    twse_symbols = set(universe.filter(pl.col("exchange") == "TWSE")["symbol"].to_list())
+    tpex_symbols = set(universe.filter(pl.col("exchange") == "TPEX")["symbol"].to_list())
+    matched_count = len(snapshot_symbols & supported)
+    return (
+        matched_count > 0
+        and matched_count / len(supported) >= DAILY_COVERAGE_COMPLETE_RATIO
+        and bool(twse_symbols)
+        and bool(tpex_symbols)
+        and bool(snapshot_symbols & twse_symbols)
+        and bool(snapshot_symbols & tpex_symbols)
+    )
+
+
+def stored_partition_status(
+    daily_store: TaiwanDailyStore, dates: list[date]
+) -> Literal["complete", "provisional", "partial"]:
+    """Worst state among the stored daily partitions of *dates*.
+
+    A partition missing TWSE or TPEx rows is partial; one last written on its own trading
+    day is provisional. Dates without a partition are left to the caller.
+    """
+    if set(daily_store.incomplete_dates(dates)):
+        return "partial"
+    if set(daily_store.provisional_dates(dates)):
+        return "provisional"
+    return "complete"
+
 
 # Band bounds are decimal change (0.05 = 5%), lower inclusive / upper exclusive.
 CHANGE_DISTRIBUTION_BANDS: tuple[tuple[str, float | None, float | None], ...] = (
@@ -484,16 +549,9 @@ class TaiwanMarketIntelligenceService:
         # 1. Load Security Master supported universe
         universe_df = self.security_master.to_dataframe(supported_only=True)
         if not universe_df.is_empty():
-            universe_df = universe_df.filter(pl.col("listing_status") == "active")
+            universe_df = universe_df.filter(pl.col("listing_status").is_in(["active", "delisted"]))
             universe_df = universe_df.filter(pl.col("instrument_type").is_in(["stock", "etf"]))
-        universe_as_of = _security_master_as_of(universe_df)
-        if not universe_df.is_empty() and "listing_date" in universe_df.columns:
-            eligible_symbols = [
-                row["symbol"]
-                for row in universe_df.select(["symbol", "listing_date"]).iter_rows(named=True)
-                if (listed := _listing_date(row["listing_date"])) is None or listed <= target
-            ]
-            universe_df = universe_df.filter(pl.col("symbol").is_in(eligible_symbols))
+        universe_df = listed_by(universe_df, target)
         supported_symbols = universe_df["symbol"].to_list() if not universe_df.is_empty() else []
         supported_count = len(supported_symbols)
 
@@ -703,22 +761,11 @@ class TaiwanMarketIntelligenceService:
             ),
         )
 
-        expected_exchanges_present = bool(twse_symbols) and bool(tpex_symbols)
-        snapshot_exchanges_present = twse_snapshot_count > 0 and tpex_snapshot_count > 0
-        daily_coverage_complete = (
-            supported_count > 0
-            and matched_symbols_count > 0
-            and matched_symbols_count / supported_count >= DAILY_COVERAGE_COMPLETE_RATIO
-            and expected_exchanges_present
-            and snapshot_exchanges_present
-            # A master refreshed after target is not point-in-time for it; an older one is accepted.
-            and universe_as_of is not None
-            and universe_as_of <= target
-        )
+        coverage_complete = daily_coverage_complete(universe_df, snapshot_symbols)
         dataset_statuses = [daily_status, inst_status, m_status]
         if supported_count == 0 or matched_symbols_count == 0:
             overall_status = "unavailable"
-        elif not daily_coverage_complete:
+        elif not coverage_complete:
             overall_status = "partial"
         elif daily_status == "provisional" and all(s == "current" for s in (inst_status, m_status)):
             overall_status = "provisional"

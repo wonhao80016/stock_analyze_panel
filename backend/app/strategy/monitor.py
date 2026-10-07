@@ -1012,12 +1012,16 @@ class MonitorRuleEngine:
         # 旧实现因"实时监控不支持 history loader"直接跳过 → 反包等策略盘中永不触发。
         # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
         # loader 为 None (未装配) 时退回跳过, 保持旧行为, 不破坏无历史场景。
+        from app.services.screener import taiwan_symbol_asset_types
         from app.strategy.engine import StrategyDataContext
+
+        symbol_asset_types = taiwan_symbol_asset_types(at, df)
         current_context = StrategyDataContext(
             asset_type=at,
             timeframe="1d",
             as_of=cn_today(),
             current=df,
+            symbol_asset_types=symbol_asset_types,
         )
         if getattr(s, "execution_backend", "polars_expr") == "composite":
             # 叠加策略首版不支持实时监控: 各子策略需独立预热实时矩阵, 热路径成本为 N 倍,
@@ -1036,6 +1040,7 @@ class MonitorRuleEngine:
                 as_of=cn_today(),
                 current=df,
                 market=matrix,
+                symbol_asset_types=symbol_asset_types,
             )
         required_history_bars = 1
         history_resolver = getattr(self._strategy_engine, "required_history_bars", None)
@@ -1073,6 +1078,7 @@ class MonitorRuleEngine:
                     history=pl.concat(
                         [hist_df, df], how="diagonal_relaxed"
                     ),
+                    symbol_asset_types=symbol_asset_types,
                 )
             except Exception as e:
                 logger.warning("策略 %s 加载历史窗口失败, 跳过: %s", sid, e)

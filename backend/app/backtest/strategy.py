@@ -642,6 +642,34 @@ def _configure_taiwan_matcher(
     }
 
 
+def _unsupported_asset_type_symbols(
+    symbols: list[str] | tuple[str, ...],
+    asset_types: list[str],
+) -> set[str]:
+    """Taiwan symbols the security master types outside the strategy's asset_types.
+
+    Symbols missing from the master are left to taiwan_limit_rule_exclusions, which excludes them.
+    """
+    taiwan_symbols = [
+        str(symbol) for symbol in symbols if str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES)
+    ]
+    if not taiwan_symbols:
+        return set()
+    from app.taiwan.universe import get_security_master
+
+    supported = set(asset_types)
+    try:
+        master = get_security_master()
+        instruments = {symbol: master.get_instrument(symbol) for symbol in taiwan_symbols}
+    except Exception as exc:
+        raise ValueError(f"Taiwan Security Master unavailable: {exc}") from exc
+    return {
+        symbol
+        for symbol, instrument in instruments.items()
+        if instrument is not None and instrument.instrument_type not in supported
+    }
+
+
 BOARD_LOT_MINIMUM_COMMISSION = 20.0
 ODD_LOT_MINIMUM_COMMISSION = 1.0
 
@@ -1406,6 +1434,13 @@ class StrategyBacktestService:
             excluded = {item["symbol"] for item in excluded_symbols}
             if excluded and excluded >= set(execution_symbols):
                 return _err(f"回测标的均缺少已确认的涨跌幅规则: {', '.join(sorted(excluded))}")
+            asset_types = s.meta.get("asset_types", ["stock"])
+            wrong_type = _unsupported_asset_type_symbols(execution_symbols, asset_types)
+            excluded |= wrong_type
+            if wrong_type and excluded >= set(execution_symbols):
+                listed = sorted(wrong_type)
+                shown = ", ".join(listed[:5]) + (f" 等 {len(listed)} 檔" if len(listed) > 5 else "")
+                return _err(f"策略僅支援 {'/'.join(asset_types)}, 以下標的類型不符: {shown}")
             _configure_taiwan_matcher(matcher_config, [s for s in execution_symbols if s not in excluded])
         except ValueError as e:
             return _err(str(e))

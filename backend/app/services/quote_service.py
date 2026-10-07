@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 _WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notification-push")
 
 
+def _is_taiwan_symbol() -> pl.Expr:
+    return pl.any_horizontal([pl.col("symbol").str.ends_with(suffix) for suffix in TAIWAN_SUFFIXES])
+
+
 class QuoteSubscriber:
     """一个 SSE 连接对应一个订阅者: 独立事件 + 独立队列。
 
@@ -287,6 +291,7 @@ class QuoteService:
         # Whether this round's quote records came from a live source. None = no
         # status signal (non-Taiwan providers today) -> gate does not apply.
         self._quote_source_realtime: bool | None = None
+        self._taiwan_full_recompute_skip_logged = False
 
     # ================================================================
     # 生命周期
@@ -375,7 +380,7 @@ class QuoteService:
     def paused(self):
         """上下文管理器: 进入时暂停轮询取数, 退出时(含异常)自动恢复。
 
-        供盘后管道/数据修正复用:
+        用法:
             with quote_service.paused():
                 run_pipeline(...)
         无论正常结束还是异常/crash, finally 都会 resume (除非进程直接被 kill)。
@@ -858,22 +863,19 @@ class QuoteService:
         _persist_last_fetch(fetched_at)
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
 
-        # ---- 写 kline_daily (不复权原始价格, 只有 OHLCV) ----
-        # 非即时来源不参与"今日"这根K: 见 _records_datable_today。报价快取仍保有
-        # 它们, 画面照常显示价格与其 provenance, 只是不会被写成今天的日K。
+        # Only realtime quotes become today's bar (see _records_datable_today); the
+        # quote cache above still keeps the others for display.
         daily_df = self._build_daily(self._records_datable_today(stock_records))
-        if not daily_df.is_empty() and self._repo:
-            try:
-                self._repo.flush_live_daily(daily_df)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("日K写盘失败: %s", e)
-
         etf_daily_df = self._build_daily(self._records_datable_today(etf_records))
-        if not etf_daily_df.is_empty() and self._repo:
+        # Taiwan bars are owned by TaiwanDailyStore; kline_daily/kline_etf_daily take non-Taiwan rows only.
+        for asset_type, bars in (("stock", daily_df), ("etf", etf_daily_df)):
+            legacy_bars = bars.filter(~_is_taiwan_symbol()) if not bars.is_empty() else bars
+            if legacy_bars.is_empty() or not self._repo:
+                continue
             try:
-                self._repo.flush_live_daily_asset("etf", etf_daily_df)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("ETF 日K写盘失败: %s", e)
+                self._repo.flush_live_daily_asset(asset_type, legacy_bars)
+            except Exception as e:
+                logger.warning("live %s daily write failed: %s", asset_type, e)
 
         # ---- 构建 API 直接值的补充表 (不写 daily, 只用于 enriched 计算) ----
         quote_extra = self._build_quote_extra(stock_records)
@@ -1076,8 +1078,7 @@ class QuoteService:
 
         The provider already emits a millisecond quote_ts; casting its datetime
         "timestamp" instead yields microseconds, a silent factor of 1000 that makes
-        session_progress_from_ts read every intraday bar as a finished session and
-        stops data_integrity recognising a mid-session snapshot.
+        session_progress_from_ts read every intraday bar as a finished session.
         """
         if "quote_ts" in df.columns:
             return pl.col("quote_ts").cast(pl.Int64, strict=False).alias("quote_ts")
@@ -1745,11 +1746,29 @@ class QuoteService:
                 if enriched_today.is_empty():
                     logger.warning("增量计算结果为空, 回退到全量计算")
                     use_incremental = False
+                else:
+                    self._taiwan_full_recompute_skip_logged = False
 
             # ---- 全量回退路径 ----
             if not use_incremental:
                 from datetime import timedelta
                 from app.indicators.pipeline import compute_enriched
+
+                # kline_daily holds no Taiwan history: Taiwan stock rows wait for the incremental
+                # state, and Taiwan etf/index rows have no rebuild path here.
+                non_taiwan = daily_df.filter(~_is_taiwan_symbol())
+                if (
+                    asset_type == "stock"
+                    and non_taiwan.height < daily_df.height
+                    and not self._taiwan_full_recompute_skip_logged
+                ):
+                    self._taiwan_full_recompute_skip_logged = True
+                    logger.info(
+                        "realtime enriched full recompute skipped for Taiwan symbols until the incremental state is ready"
+                    )
+                if non_taiwan.is_empty():
+                    return
+                daily_df = non_taiwan
 
                 logger.info("enriched 全量计算 (live_agg=%s, 上次日期=%s)",
                             "ok" if not live_agg.is_empty() else "空", prev_date)

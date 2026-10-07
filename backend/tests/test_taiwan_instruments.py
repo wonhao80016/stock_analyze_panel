@@ -116,7 +116,7 @@ class TestTaiwanInstrumentAdaptersOffline:
         assert tsmc.instrument_type == "stock"
         assert tsmc.is_supported is True
         assert tsmc.isin == "TW0002330008"
-        assert tsmc.listing_date == "1994/09/05"
+        assert tsmc.listing_date == "1994-09-05"
         assert tsmc.industry == "半導體業"
         assert tsmc.cfi_code == "ESVUFR"
 
@@ -127,8 +127,8 @@ class TestTaiwanInstrumentAdaptersOffline:
         assert etf0050.instrument_type == "etf"
         assert etf0050.is_supported is True
         assert etf0050.isin == "TW0000050004"
-        assert etf0050.etf_category == "domestic_equity"
-        assert etf0050.classification_source == "cfi_code"
+        assert etf0050.etf_category == "unknown"
+        assert etf0050.classification_source == "unknown"
 
         # 3. Preferred shares (1101B) -> unsupported
 
@@ -212,7 +212,16 @@ class TestOfficialCompanyDirectoryIndustryNormalization:
 
     def test_unmapped_numeric_industry_code_gets_honest_fallback(self, monkeypatch):
         self._mock_json_get(monkeypatch, [
+            {"公司代號": "9999", "公司簡稱": "測試", "上市日期": "20021213", "產業別": "99"},
+        ])
+        items = _official_company_directory("TWSE", adapters.TWSE_COMPANIES_URL)
+        assert items[0].industry == "未知產業（99）"
+        assert items[0].security_class is None
+
+    def test_depositary_receipt_code_marks_tdr_instead_of_industry(self, monkeypatch):
+        self._mock_json_get(monkeypatch, [
             {"公司代號": "9103", "公司簡稱": "美食-DR", "上市日期": "20021213", "產業別": "91"},
         ])
         items = _official_company_directory("TWSE", adapters.TWSE_COMPANIES_URL)
-        assert items[0].industry == "未知產業（91）"
+        assert items[0].industry is None
+        assert items[0].security_class == "tdr"

@@ -46,6 +46,7 @@ from app.jobs import daily_pipeline
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
+from app.taiwan.universe.service import SecurityMasterUnavailableError
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
@@ -158,8 +159,6 @@ async def _application_lifespan(app: FastAPI):
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
 
-    # 停机缺口自检: 延迟后台扫描, 发现最近交易日的盘中快照/缺口时自动创建
-    # 修复任务 (盘中停机→次日开实时场景, 不修则坏数据被"只刷今天"分支永久留存)
     try:
         import threading
 
@@ -462,6 +461,13 @@ async def capability_denied_handler(request: Request, exc: CapabilityDenied) -> 
 @app.exception_handler(EnrichedGenerationUnavailableError)
 async def enriched_generation_unavailable_handler(
     request: Request, exc: EnrichedGenerationUnavailableError
+) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(SecurityMasterUnavailableError)
+async def security_master_unavailable_handler(
+    request: Request, exc: SecurityMasterUnavailableError
 ) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 

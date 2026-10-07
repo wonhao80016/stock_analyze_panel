@@ -23,9 +23,8 @@ Background (Phase 8C-C Final Completion):
   Code "91" is intentionally excluded: every company using it in the official
   directories is a Taiwan Depositary Receipt ("-DR" suffix name), i.e. "91"
   is an instrument-type marker (foreign company via TDR), not a real
-  industry — there is no genuine industry name to map it to, so it correctly
-  falls through to the honest "unknown code" fallback below rather than being
-  assigned a fabricated label.
+  industry. resolve_industry_name() leaves it to the "unknown code" fallback;
+  the security-master callers map it to security_class="tdr" with industry None.
 """
 from __future__ import annotations
 

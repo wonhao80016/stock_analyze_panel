@@ -35,6 +35,22 @@ def _benchmark_refresh_is_offline(request, monkeypatch):
     monkeypatch.setattr(daily_pipeline, "refresh_benchmark_index", lambda _label: None)
 
 
+@pytest.fixture
+def deny_network(monkeypatch):
+    """Fail any socket connection that leaves the machine."""
+    import socket
+
+    real_connect = socket.socket.connect
+
+    def guarded_connect(sock, address):
+        host = address[0] if isinstance(address, tuple) else str(address)
+        if host not in ("127.0.0.1", "::1", "localhost"):
+            raise OSError(f"network access denied in tests: {host}")
+        return real_connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+
+
 @pytest.fixture(autouse=True)
 def _api_tests_are_unauthenticated_local(request, monkeypatch):
     if request.node.get_closest_marker("real_auth"):

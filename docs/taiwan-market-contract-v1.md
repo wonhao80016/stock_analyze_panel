@@ -1,10 +1,12 @@
 # Taiwan Market Contract v1
 
-Status: v1.0.0, rules verified as of 2026-08-30. The language-neutral golden fixture is `docs/taiwan_market_contract_v1.json`.
+Status: v1.0.1, rules verified as of 2026-10-07. The language-neutral golden fixture is `docs/taiwan_market_contract_v1.json`.
+
+v1.0.1 (2026-10-07) corrects tax rules within v1: the TDR tax class (0.1%), bond ETF sales after the statutory suspension and day trades after the reduction window pay the regular rate instead of failing closed, and the day-trade reduction applies to ordinary stocks only. v1.1 still extends the v1.0 identity and price-limit rules.
 
 ## 1. Identity
 
-`symbol` is the source code; `canonical_symbol` is `{code}.{TWSE|TPEX}`. `exchange` is `TWSE` or `TPEX`; `security_type` v1 is `stock` or `etf`; `currency` is `TWD`; ordinary board-lot size is 1,000 shares/units and odd-lot minimum is one. Index is observed in both projects but is outside the v1 tradable-security identity. Warrant, bond, preferred, TDR, REIT and ETN remain deferred until both projects have verified official metadata rather than code heuristics.
+`symbol` is the source code; `canonical_symbol` is `{code}.{TWSE|TPEX}`. `exchange` is `TWSE` or `TPEX`; `security_type` v1 is `stock` or `etf`; `currency` is `TWD`; ordinary board-lot size is 1,000 shares/units and odd-lot minimum is one. Index is observed in both projects but is outside the v1 tradable-security identity. Warrant, bond, preferred, TDR, REIT and ETN remain deferred until both projects have verified official metadata rather than code heuristics. Until then this project keeps a listed TDR as `security_type` `stock` with the marker `security_class` `tdr` (official directory industry code 91, a six-digit code starting with 91, or a name ending in -DR), so the TDR tax rate below applies and the initial-listing no-limit window does not.
 
 ## 2. Provenance and status
 
@@ -23,9 +25,9 @@ Institutional raw fields are daily `foreign`, `investment_trust`, `dealer`, `dea
 ## 5. Trading rules
 
 - Commission rate, discount and minimum are broker configuration. TWSE says brokers set their own rate; Contract v1 has no statutory/default commission rate or statutory minimum.
-- Securities tax is sell-side: ordinary stock 0.3%; eligible stock day trade 0.15% through 2027-12-31; ETF 0.1%; passive bond ETF 0% only through the enacted 2026-12-31 window. Dates beyond a legislated window fail closed. A proposed extension is not effective law.
+- Securities tax is sell-side: ordinary stock 0.3%; eligible stock day trade 0.15% through 2027-12-31; ETF 0.1%; Taiwan depositary receipt (TDR) 0.1% ([MOF Q&A](https://www.etax.nat.gov.tw/etwmain/tax-info/understanding/tax-q-and-a/national/securities-transaction-tax/filing/LeJ1WWV), ruling 台財稅第811672688號函), and 0.1% for a TDR day trade as this project's reading of art. 2-2, whose reduced rate covers listed or OTC stocks only; passive bond ETF 0% only through the enacted 2026-12-31 suspension, after which the ETF rate of 0.1% applies under current law (Securities Transaction Tax Act art. 2-1). After the day-trade reduction ends on 2027-12-31 (Securities Transaction Tax Act art. 2-2), a stock day trade pays the ordinary 0.3% rate under current law. A proposed extension is not effective law.
 - Stock tick tiers are 0.01/0.05/0.10/0.50/1/5 at 10/50/100/500/1000 boundaries. ETF tick is 0.01 below 50 and 0.05 from 50.
-- Domestic-component ordinary ETF and ordinary stock limit is 10%. Foreign-component ETF has no limit. Domestic leveraged/inverse ETF uses 10% times the absolute multiplier. Bond classification alone does not determine the limit; underlying scope does.
+- Domestic-component ordinary ETF and ordinary stock limit is 10%. Foreign-component ETF has no limit. Domestic leveraged/inverse ETF uses 10% times the absolute multiplier. Bond classification alone does not determine the limit; underlying scope does: a domestic-component bond ETF would have 10%, and today every listed bond ETF is foreign-component, so none has a limit (TWSE trading rules; TPEx ETF product spec 「升降幅度」). Futures-trust ETFs have no limit only when the official foreign-components flag is 是 (foreign commodity futures); otherwise the classification stays unconfirmed.
 - A limit-up is the greatest valid tick not above the raw ceiling; limit-down is the least valid tick not below the raw floor.
 - Standard settlement is T+2 business days. Settlement does not itself define day-trade eligibility.
 
