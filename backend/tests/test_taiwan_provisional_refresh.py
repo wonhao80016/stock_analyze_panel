@@ -1,9 +1,8 @@
 """Days stored on their own trading day are provisional and are refetched.
 
-The exchanges revise volume, amount and institutional flows after the evening
-publication, so a partition last written on day D (Taipei time) is not final.
-A refetch on D itself (the 21:40 run) leaves it provisional; the first run on a
-later day rewrites it and finalizes it.
+A partition last written on day D (Taipei time) is not final. A daily partition
+rewritten on D at or after the daily final cutoff (the 21:40 run) is final; an
+institutional one stays provisional until the first run on a later day rewrites it.
 """
 from __future__ import annotations
 
@@ -92,7 +91,7 @@ def test_provisional_dates_follow_the_taipei_calendar_day_of_the_write(tmp_path,
     for d in days:
         write(d)
     _set_mtime(root, days[0], _taipei(days[0], 0, 0))
-    _set_mtime(root, days[1], _taipei(days[1], 23, 59))
+    _set_mtime(root, days[1], _taipei(days[1], 21, 29))
     _set_mtime(root, days[2], _taipei(date(2026, 9, 17), 0, 0))
     _set_mtime(root, days[3], _taipei(date(2026, 9, 18), 8, 0))
 
@@ -119,7 +118,7 @@ def test_repair_dates_combine_half_snapshots_and_provisional_days_up_to_the_targ
         store.write_batch(_daily_rows(["2330.TWSE", "6488.TPEX"], d))
     _set_mtime(root, half, _taipei(NEXT, 9))
     _set_mtime(root, final, _taipei(NEXT, 9))
-    _set_mtime(root, provisional, _taipei(provisional, 21, 40))
+    _set_mtime(root, provisional, _taipei(provisional, 16, 30))
     _set_mtime(root, after, _taipei(after, 21, 40))
 
     assert store.repair_dates(D) == [half, provisional]

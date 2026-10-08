@@ -574,10 +574,10 @@ export function TaiwanScreener() {
               <span className="font-semibold text-zinc-200 text-sm">台股全市場量化統計快照 (Market Intelligence)</span>
               <span className="text-zinc-500 font-mono text-[11px]">交易日: {intelData.trade_date}</span>
               {/* trade_date is the expected latest session, not the stored data date. Badge follows overall_status:
-                  provisional awaits next-day correction; other non-complete states mean stats may not reflect that session. */}
+                  provisional is the after-close value, finalized by the evening run; other non-complete states mean stats may not reflect that session. */}
               {intelData.data_quality?.overall_status === 'provisional' ? (
                 <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-medium text-[10px]">
-                  盤後初值，次日校正
+                  盤後初值，晚間定稿
                 </span>
               ) : intelData.data_quality?.overall_status !== 'complete' && (
                 <span className="px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400 font-medium text-[10px]">
@@ -683,7 +683,7 @@ export function TaiwanScreener() {
               <span className="text-zinc-500 font-mono text-[11px]">{indData.industries.length} 大類股統計 (點擊產業名稱可套用篩選)</span>
               <DataQualityBadge
                 status={indData.data_quality?.overall_status}
-                provisionalText="產業統計為盤後初值，次日校正"
+                provisionalText="產業統計為盤後初值，晚間定稿"
                 incompleteText="產業資料尚未完整，以下結果僅供參考"
               />
             </div>
@@ -830,7 +830,7 @@ export function TaiwanScreener() {
               )}
               <DataQualityBadge
                 status={abnormalData?.data_quality?.overall_status}
-                provisionalText="異常偵測為盤後初值，次日校正"
+                provisionalText="異常偵測為盤後初值，晚間定稿"
                 incompleteText="異常偵測資料尚未完整，以下結果僅供參考"
               />
             </div>

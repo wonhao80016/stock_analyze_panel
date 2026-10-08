@@ -136,7 +136,8 @@ def stored_partition_status(
     """Worst state among the stored daily partitions of *dates*.
 
     A partition missing TWSE or TPEx rows is partial; one last written on its own trading
-    day is provisional. Dates without a partition are left to the caller.
+    day before the daily final cutoff is provisional. Dates without a partition are left to
+    the caller.
     """
     if set(daily_store.incomplete_dates(dates)):
         return "partial"

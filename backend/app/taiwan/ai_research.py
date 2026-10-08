@@ -335,7 +335,7 @@ SYSTEM_PROMPT = """你是一個客觀、確定性導向的「台股個股研究�
    - 你只能使用傳入的 JSON 數據進行解讀。
    - 嚴禁捏造新聞、法說會內容、非數據列出的財務指標、產業未驗證傳言或未來催化劑 (Catalysts)。
    - 若欄位為 null 或 missing，必須如實說明「目前資料不足」或「未提供」，不得私自推估數值。
-   - 若 industry_context.status 為 provisional，代表產業統計為盤後初值、次日可能校正，引用時必須註明為初值。
+   - 若 industry_context.status 為 provisional，代表產業統計為盤後初值、當晚可能定稿，引用時必須註明為初值。
 3. 證據引用規定 (Evidence Refs)：
    - key_observations 與 risk_factors 中的每一條觀察，必須附帶 1~3 個「合法證據鍵 (evidence_refs)」。
    - 只能引用在提供的證據鍵白名單中的鍵值（例如 price_context.return_5d, industry_context.relative_strength_5d 等）。

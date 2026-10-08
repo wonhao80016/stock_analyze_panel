@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import time
 from pathlib import Path
 
 from pydantic import Field, field_validator, model_validator
@@ -72,6 +73,9 @@ _ENV_FILE = Path(
 )
 
 
+DEFAULT_TAIWAN_DAILY_FINAL_CUTOFF = time(21, 30)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),
@@ -127,6 +131,25 @@ class Settings(BaseSettings):
 
     # 静态文件(前端 dist) — frozen: 资源目录的 static/; 非 frozen: frontend/dist
     static_dir: Path = _RESOURCE_ROOT / "static" if _IS_FROZEN else (_PROJECT_ROOT / "frontend" / "dist")
+
+    # Taipei time from which a daily partition written on its own trading day counts as final.
+    # TWSE's last daily closing file of the day is produced around 17:30.
+    taiwan_daily_final_cutoff: time = DEFAULT_TAIWAN_DAILY_FINAL_CUTOFF
+
+    @field_validator("taiwan_daily_final_cutoff", mode="before")
+    @classmethod
+    def _blank_cutoff_is_default(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_TAIWAN_DAILY_FINAL_CUTOFF
+        return value
+
+    @field_validator("taiwan_daily_final_cutoff")
+    @classmethod
+    def _cutoff_is_naive(cls, value: time) -> time:
+        # Partition mtimes are compared as naive Taipei times; an aware time would raise there.
+        if value.tzinfo is not None:
+            raise ValueError("taiwan_daily_final_cutoff must be a Taipei wall-clock time without a timezone")
+        return value
 
     @field_validator("cache_dir", mode="before")
     @classmethod

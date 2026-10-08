@@ -223,7 +223,7 @@ describe('Dashboard — Market Clarity (Phase 8C-B)', () => {
     renderDashboard()
 
     expect(await screen.findByText('半導體業')).toBeInTheDocument()
-    expect(screen.getByText('產業統計為盤後初值，次日校正')).toBeInTheDocument()
+    expect(screen.getByText('產業統計為盤後初值，晚間定稿')).toBeInTheDocument()
     expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
   })
 
@@ -235,7 +235,7 @@ describe('Dashboard — Market Clarity (Phase 8C-B)', () => {
 
     expect(await screen.findByText('半導體業')).toBeInTheDocument()
     expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
-    expect(screen.queryByText('產業統計為盤後初值，次日校正')).not.toBeInTheDocument()
+    expect(screen.queryByText('產業統計為盤後初值，晚間定稿')).not.toBeInTheDocument()
   })
 
   it('market/industry query failure does not crash the Dashboard', async () => {
@@ -302,6 +302,27 @@ describe('Dashboard — Market data honesty (DAILY_USE_CORE_UX_FIXES P1-1)', () 
     expect(screen.queryByText('偏強')).not.toBeInTheDocument()
     expect(screen.queryByText('偏弱')).not.toBeInTheDocument()
     expect(screen.queryByText('中性')).not.toBeInTheDocument()
+  })
+
+  it('E. provisional data shows the after-close initial-value notice instead of the incomplete-data notice', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(buildMarketIntelligence({
+      data_quality: { target_trade_date: '2026-09-09', previous_trade_date: '2026-09-08', overall_status: 'provisional', universe_supported_symbols: 2375, daily_snapshot_symbols: 2375, missing_symbols_count: 0 },
+    }) as any)
+    renderDashboard()
+
+    expect(await screen.findByText('市場統計為盤後初值，晚間定稿')).toBeInTheDocument()
+    expect(screen.queryByText(/今日市場資料尚未完整/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/前一交易日：/)).not.toBeInTheDocument()
+  })
+
+  it('F. unavailable data keeps the incomplete-data notice', async () => {
+    vi.mocked(api.taiwanMarketIntelligence).mockResolvedValue(buildMarketIntelligence({
+      data_quality: { target_trade_date: '2026-09-09', previous_trade_date: '2026-09-08', overall_status: 'unavailable', universe_supported_symbols: 2375, daily_snapshot_symbols: 0, missing_symbols_count: 2375 },
+    }) as any)
+    renderDashboard()
+
+    expect(await screen.findByText(/今日市場資料尚未完整/)).toBeInTheDocument()
+    expect(screen.queryByText('市場統計為盤後初值，晚間定稿')).not.toBeInTheDocument()
   })
 })
 

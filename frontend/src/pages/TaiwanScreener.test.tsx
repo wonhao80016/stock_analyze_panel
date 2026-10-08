@@ -575,7 +575,7 @@ describe('Industry and abnormal data-quality badges', () => {
     renderScreener()
 
     await screen.findByRole('button', { name: '半導體業' })
-    expect(screen.getByText('產業統計為盤後初值，次日校正')).toBeInTheDocument()
+    expect(screen.getByText('產業統計為盤後初值，晚間定稿')).toBeInTheDocument()
     expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
   })
 
@@ -587,7 +587,7 @@ describe('Industry and abnormal data-quality badges', () => {
 
     await screen.findByRole('button', { name: '半導體業' })
     expect(screen.queryByText('產業資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
-    expect(screen.queryByText('產業統計為盤後初值，次日校正')).not.toBeInTheDocument()
+    expect(screen.queryByText('產業統計為盤後初值，晚間定稿')).not.toBeInTheDocument()
   })
 
   it('abnormal panel shows the incomplete-data badge when overall_status is partial', async () => {
@@ -609,7 +609,7 @@ describe('Industry and abnormal data-quality badges', () => {
     renderScreener()
 
     await screen.findByRole('button', { name: /台積電/ })
-    expect(screen.getByText('異常偵測為盤後初值，次日校正')).toBeInTheDocument()
+    expect(screen.getByText('異常偵測為盤後初值，晚間定稿')).toBeInTheDocument()
   })
 
   it.each([
@@ -624,7 +624,7 @@ describe('Industry and abnormal data-quality badges', () => {
 
     await screen.findByRole('button', { name: /台積電/ })
     expect(screen.queryByText('異常偵測資料尚未完整，以下結果僅供參考')).not.toBeInTheDocument()
-    expect(screen.queryByText('異常偵測為盤後初值，次日校正')).not.toBeInTheDocument()
+    expect(screen.queryByText('異常偵測為盤後初值，晚間定稿')).not.toBeInTheDocument()
   })
 })
 
@@ -720,7 +720,7 @@ describe('Market Intelligence date honesty (Data Freshness & Source Labels batch
 
     await screen.findByText('交易日: 2026-09-08')
     expect(screen.queryByText('尚無完整市場資料，以下統計非今日實際行情')).not.toBeInTheDocument()
-    expect(screen.queryByText('盤後初值，次日校正')).not.toBeInTheDocument()
+    expect(screen.queryByText('盤後初值，晚間定稿')).not.toBeInTheDocument()
   })
 
   it('shows the provisional label instead of the no-complete-data notice when overall_status is provisional', async () => {
@@ -730,7 +730,7 @@ describe('Market Intelligence date honesty (Data Freshness & Source Labels batch
     renderScreener()
 
     await screen.findByText('交易日: 2026-09-08')
-    expect(screen.getByText('盤後初值，次日校正')).toBeInTheDocument()
+    expect(screen.getByText('盤後初值，晚間定稿')).toBeInTheDocument()
     expect(screen.queryByText('尚無完整市場資料，以下統計非今日實際行情')).not.toBeInTheDocument()
   })
 
@@ -742,7 +742,7 @@ describe('Market Intelligence date honesty (Data Freshness & Source Labels batch
 
     await screen.findByText('交易日: 2026-09-08')
     expect(screen.getByText('尚無完整市場資料，以下統計非今日實際行情')).toBeInTheDocument()
-    expect(screen.queryByText('盤後初值，次日校正')).not.toBeInTheDocument()
+    expect(screen.queryByText('盤後初值，晚間定稿')).not.toBeInTheDocument()
   })
 })
 

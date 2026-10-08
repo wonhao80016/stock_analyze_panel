@@ -255,9 +255,13 @@ function MarketStrengthCard() {
         <>
           {dataIncomplete && (
             <div className="mb-1.5 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-[11px] text-warning">
-              今日市場資料尚未完整，以下統計僅供參考
-              {intel.data?.data_quality?.previous_trade_date && (
-                <>；前一交易日：{intel.data.data_quality.previous_trade_date}</>
+              {intel.data?.data_quality?.overall_status === 'provisional' ? '市場統計為盤後初值，晚間定稿' : (
+                <>
+                  今日市場資料尚未完整，以下統計僅供參考
+                  {intel.data?.data_quality?.previous_trade_date && (
+                    <>；前一交易日：{intel.data.data_quality.previous_trade_date}</>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -345,7 +349,7 @@ function IndustryStrengthCard() {
         <>
           {qualityStatus && qualityStatus !== 'complete' && (
             <div className="mb-1.5 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-[11px] text-warning">
-              {qualityStatus === 'provisional' ? '產業統計為盤後初值，次日校正' : '產業資料尚未完整，以下結果僅供參考'}
+              {qualityStatus === 'provisional' ? '產業統計為盤後初值，晚間定稿' : '產業資料尚未完整，以下結果僅供參考'}
             </div>
           )}
           <div className="grid grid-cols-2 gap-2">

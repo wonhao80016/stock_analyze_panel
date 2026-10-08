@@ -15,12 +15,14 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
+from app.config import settings
 from app.taiwan.market_rules import ListingSessions
 from app.taiwan.providers.base import (
     AmountUnit,
@@ -49,14 +51,22 @@ DEFAULT_TAIWAN_METADATA = SourceMetadata(
 REPAIR_WINDOW_PARTITIONS = 20
 
 
-def is_provisional_mtime(d: date, mtime: float) -> bool:
+def is_provisional_mtime(d: date, mtime: float, final_from: dt_time | None = None) -> bool:
     """Whether a partition for trading day *d* written at *mtime* may hold pre-final figures.
 
-    The exchanges revise a day's volume, amount and institutional flows after the
-    evening publication, so a partition last written on day *d* itself (Taipei time)
-    is provisional until it is rewritten on a later day.
+    A partition last written on day *d* itself (Taipei time) is provisional until it is
+    rewritten on a later day, or, when *final_from* is given, until it is rewritten on
+    day *d* at or after that Taipei time.
     """
-    return datetime.fromtimestamp(mtime, TAIPEI_TZ).date() <= d
+    written = datetime.fromtimestamp(mtime, TAIPEI_TZ)
+    if final_from is not None and written.date() == d and written.time() >= final_from:
+        return False
+    return written.date() <= d
+
+
+def daily_final_cutoff() -> dt_time:
+    """Taipei time from which a daily partition written on its trading day is final."""
+    return settings.taiwan_daily_final_cutoff
 
 
 class TaiwanDailyStore:
@@ -150,8 +160,11 @@ class TaiwanDailyStore:
             # Merge with existing partition if present.
             new_rows = df.height
             keep_provisional = False
+            final_from = daily_final_cutoff()
             if target.exists():
-                keep_provisional = skip_existing and is_provisional_mtime(d, target.stat().st_mtime)
+                keep_provisional = skip_existing and is_provisional_mtime(
+                    d, target.stat().st_mtime, final_from
+                )
                 try:
                     existing = pl.scan_parquet(target, missing_columns="insert", extra_columns="ignore").collect()
                     if skip_existing:
@@ -177,10 +190,14 @@ class TaiwanDailyStore:
                 os.close(tmp_fd)
                 df.write_parquet(tmp_path)
                 Path(tmp_path).replace(target)
-                if keep_provisional and not is_provisional_mtime(d, target.stat().st_mtime):
-                    # Rows already stored are still same-day figures, so the day must stay provisional;
-                    # the last second of day d also stays newer than an enriched publish made that day.
-                    last_second = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=TAIPEI_TZ).timestamp()
+                if keep_provisional and not is_provisional_mtime(
+                    d, target.stat().st_mtime, final_from
+                ):
+                    # Rows already stored are still pre-final figures, so the day stays provisional;
+                    # the second before the cutoff stays newer than an enriched publish made before it.
+                    last_second = (
+                        datetime.combine(d, final_from, TAIPEI_TZ) - timedelta(seconds=1)
+                    ).timestamp()
                     os.utime(target, (last_second, last_second))
                 invalidate_listing_sessions(self._data_dir)
                 logger.debug("Wrote %d rows to %s", df.height, target)
@@ -345,11 +362,12 @@ class TaiwanDailyStore:
             return None
 
     def provisional_dates(self, dates: list[date]) -> list[date]:
-        """Return the stored dates among *dates* whose partition was last written on the day itself."""
+        """Return the stored dates among *dates* whose partition is provisional (is_provisional_mtime)."""
         provisional: list[date] = []
+        final_from = daily_final_cutoff()
         for d in dates:
             mtime = self.partition_mtime(d)
-            if mtime is not None and is_provisional_mtime(d, mtime):
+            if mtime is not None and is_provisional_mtime(d, mtime, final_from):
                 provisional.append(d)
         return sorted(provisional)
 

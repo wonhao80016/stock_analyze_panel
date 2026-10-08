@@ -390,8 +390,8 @@ def _refresh_service_for(tmp_path: Path, *, written_on: datetime | None, both_ex
 def test_update_to_latest_refetches_a_latest_day_written_on_the_day_itself(tmp_path: Path, monkeypatch):
     """The settings button must finalize a provisional day, as the scheduled run does."""
     monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
-    evening = datetime(2024, 1, 2, 21, 40, tzinfo=ZoneInfo("Asia/Taipei"))
-    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=evening)
+    afternoon = datetime(2024, 1, 2, 16, 40, tzinfo=ZoneInfo("Asia/Taipei"))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=afternoon)
 
     res = svc.update_to_latest()
 
@@ -413,8 +413,8 @@ def test_update_to_latest_refetches_a_latest_day_holding_one_exchange(tmp_path: 
 def test_update_to_latest_reports_a_refetch_that_failed(tmp_path: Path, monkeypatch):
     """A provisional day that could not be refetched must not read as a successful update."""
     monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 2))
-    evening = datetime(2024, 1, 2, 21, 40, tzinfo=ZoneInfo("Asia/Taipei"))
-    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=evening)
+    afternoon = datetime(2024, 1, 2, 16, 40, tzinfo=ZoneInfo("Asia/Taipei"))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=afternoon)
     mock_refresh.refresh_dates.return_value = {
         "dates_fetched": 0, "failed_dates": [], "repair_failed_dates": [{"date": "2024-01-02", "error": "no rows"}],
     }
@@ -425,8 +425,8 @@ def test_update_to_latest_reports_a_refetch_that_failed(tmp_path: Path, monkeypa
 
 def test_update_to_latest_names_a_failed_refetch_next_to_new_days(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: date(2024, 1, 3))
-    evening = datetime(2024, 1, 2, 21, 40, tzinfo=ZoneInfo("Asia/Taipei"))
-    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=evening)
+    afternoon = datetime(2024, 1, 2, 16, 40, tzinfo=ZoneInfo("Asia/Taipei"))
+    svc, mock_refresh = _refresh_service_for(tmp_path, written_on=afternoon)
     mock_refresh.refresh_dates.return_value = {
         "dates_fetched": 1, "failed_dates": [], "repair_failed_dates": [{"date": "2024-01-02", "error": "no rows"}],
     }

@@ -198,7 +198,7 @@ SYSTEM_PROMPT_COMPARISON = """你是一個客觀、確定性導向的「台股�
      「A 成交量能高於 B」「A 為槓桿型 ETF，B 為一般型 ETF」——這些是資料事實比較，非投資偏好。
 2. 封閉事實邊界：只能使用傳入的 JSON 數據進行解讀，嚴禁捏造。若欄位為 null 或 missing，
    必須如實說明「該標的目前資料不足」，不得私自推估。
-   若 {symbol}.industry_context.status 為 provisional，代表產業統計為盤後初值、次日可能校正，引用時必須註明為初值。
+   若 {symbol}.industry_context.status 為 provisional，代表產業統計為盤後初值、當晚可能定稿，引用時必須註明為初值。
 3. 證據引用規定：
    - key_observations 與 risk_factors 中的每一條觀察，必須附帶 1 個以上「合法命名空間證據鍵」
      (格式: {symbol}.{key}，例如 "2330.TWSE.price_context.return_5d")。

@@ -6,8 +6,9 @@ as gaps and a lagging index does not hide the newest partitions. Each day is che
 
 - missing: a TAIEX date without a daily partition
 - one_exchange: the partition lacks TWSE or TPEx rows (or is unreadable)
-- provisional: the partition was last written on the day itself, except the newest
-  stored day, which stays provisional until the next day's update rewrites it
+- provisional: the partition was last written on the day itself before the daily final
+  cutoff (settings.taiwan_daily_final_cutoff, Taipei time), except the newest stored day,
+  which stays provisional until an update rewrites it at or after the cutoff
 - enriched_stale: the enriched partition is absent or older than the daily partition
 
 The report only feeds logs: nothing is repaired or blocked here. The legacy A-share
