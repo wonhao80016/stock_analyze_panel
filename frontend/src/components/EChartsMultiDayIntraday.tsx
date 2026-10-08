@@ -2,7 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, MinuteKlineSession } from '@/lib/api'
-import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
+import {
+  computeIntradayAverage,
+  computeVolumeCoverage,
+  formatCoverage,
+  formatMinuteTime,
+  FULL_DAY_TIMES,
+  markIsolatedPoints,
+  MIN_AVERAGE_COVERAGE,
+} from '@/lib/intraday-chart'
 import { useChartTheme } from '@/lib/theme'
 
 const COLORS = {
@@ -25,7 +33,8 @@ interface Props {
 interface InfoPoint {
   date: string
   row: MinuteKlineRow
-  average: number
+  average: number | null
+  coverage: number | null
   prevClose: number | null
 }
 
@@ -50,7 +59,7 @@ function buildModel(sessions: MinuteKlineSession[]) {
     start: number
     session: MinuteKlineSession
     values: (number | null)[]
-    averages: (number | null)[]
+    averages: (number | null)[] | null
   }[] = []
   const priceValues: number[] = []
 
@@ -63,6 +72,8 @@ function buildModel(sessions: MinuteKlineSession[]) {
       dayLabelByIndex.set(start + Math.floor(FULL_DAY_TIMES.length / 2), session.date.slice(5))
     }
 
+    const coverage = computeVolumeCoverage(session.rows)
+    const showAverage = coverage == null || coverage >= MIN_AVERAGE_COVERAGE
     const averagePrices = computeIntradayAverage(session.rows)
     const rowsByTime = new Map<string, { row: MinuteKlineRow; average: number }>()
     session.rows.forEach((row, index) => {
@@ -85,7 +96,8 @@ function buildModel(sessions: MinuteKlineSession[]) {
         continue
       }
 
-      const { row, average } = point
+      const { row } = point
+      const average = showAverage ? point.average : null
       dayValues.push(row.close)
       dayAverages.push(average)
       volumeData.push({
@@ -98,11 +110,13 @@ function buildModel(sessions: MinuteKlineSession[]) {
               : COLORS.volumeFlat,
         },
       })
-      priceValues.push(row.low, row.high, average)
+      priceValues.push(row.low, row.high)
+      if (average != null) priceValues.push(average)
       pointByIndex.set(index, {
         date: session.date,
         row,
         average,
+        coverage,
         prevClose: session.prev_close,
       })
     }
@@ -111,7 +125,7 @@ function buildModel(sessions: MinuteKlineSession[]) {
       start,
       session,
       values: dayValues,
-      averages: dayAverages,
+      averages: showAverage ? dayAverages : null,
     })
 
     if (sessionIndex < sessions.length - 1) {
@@ -216,10 +230,10 @@ export function EChartsMultiDayIntraday({
       return {
         name: session.date,
         type: 'line',
-        data,
+        data: markIsolatedPoints(data),
         symbol: 'none',
         smooth: false,
-        connectNulls: true,
+        connectNulls: false,
         lineStyle: { width: 1.2, color },
         areaStyle: { color, opacity: 0.08 },
         emphasis: { disabled: true },
@@ -258,15 +272,16 @@ export function EChartsMultiDayIntraday({
         data: markLineData,
       }
     }
-    const averageSeries: any[] = model.dayRanges.map(({ start, session, averages }) => {
+    const averageSeries: any[] = model.dayRanges.flatMap(({ start, session, averages }) => {
+      if (!averages) return []
       const data = new Array(totalLength).fill(null) as (number | null)[]
       for (let index = 0; index < averages.length; index++) data[start + index] = averages[index]
       return {
         name: `${session.date} 均價`,
         type: 'line',
-        data,
+        data: markIsolatedPoints(data),
         symbol: 'none',
-        connectNulls: true,
+        connectNulls: false,
         lineStyle: { width: 1, color: COLORS.average },
         emphasis: { disabled: true },
       }
@@ -415,7 +430,10 @@ export function EChartsMultiDayIntraday({
               {changePct != null && (
                 <span style={{ color: infoColor }}>{changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%</span>
               )}
-              <span className="text-muted">均價</span><span style={{ color: COLORS.average }}>{info.average.toFixed(2)}</span>
+              {info.average != null && (
+                <><span className="text-muted">均價</span><span style={{ color: COLORS.average }}>{info.average.toFixed(2)}</span></>
+              )}
+              {info.coverage != null && <span className="text-muted">{formatCoverage(info.coverage)}</span>}
               <span className="text-muted">量</span><span className="text-secondary">{info.row.volume.toFixed(0)}</span>
               <span className="text-muted">額</span><span className="text-secondary">{formatAmount(info.row.amount)}</span>
             </>

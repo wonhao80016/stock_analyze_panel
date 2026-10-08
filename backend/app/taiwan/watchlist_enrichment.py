@@ -19,6 +19,10 @@ network itself; it only orchestrates already-built services:
 signal_* (limit-up/board-related) stay ``None``.
 
 ``turnover_rate`` is filled for today's quotes only; see ``_taiwan_turnover_rate``.
+
+An intraday quote counts board-lot trades only and has no amount, so until the official daily
+row of its trade date is stored the row sets ``board_lot_volume`` and a null ``amount``; once
+stored, that row's volume and amount are used instead.
 """
 from __future__ import annotations
 
@@ -87,10 +91,27 @@ def _taiwan_live_date(q: Any) -> str | None:
     return q.trade_date.isoformat()
 
 
+def _official_session(q: Any, stored: dict | None) -> dict | None:
+    """The stored official daily row of the quote's trade date, once it is published."""
+    if q is None or stored is None or q.trade_date is None:
+        return None
+    return stored if stored.get("date") == q.trade_date else None
+
+
+def _is_board_lot_quote(q: Any, official: dict | None) -> bool:
+    return (
+        official is None
+        and q is not None
+        and q.source_meta is not None
+        and bool(q.source_meta.is_realtime)
+    )
+
+
 def _taiwan_turnover_rate(
     q: Any, asset_type: str, issued_shares: Any, today: Any, inst: Any = None,
+    official: dict | None = None,
 ) -> float | None:
-    """Issued-share turnover for today's quote only.
+    """Issued-share turnover for today's quote only, on the *official* row's volume when stored.
 
     Taiwan has no historical share-count source (docs/taiwan-share-capital-phase-6h.md),
     so a fallback quote from a previous session (q.trade_date != today) must stay null
@@ -103,7 +124,7 @@ def _taiwan_turnover_rate(
         return None
     if q.trade_date is None or q.trade_date != today:
         return None
-    volume = q.volume
+    volume = official.get("volume") if official is not None else q.volume
     if volume is None or issued_shares is None or issued_shares <= 0:
         return None
     return _sanitize_float(volume * 100.0 / issued_shares)
@@ -239,6 +260,12 @@ def enrich_taiwan_watchlist_rows(
         asset_type = (
             inst.instrument_type if inst and inst.instrument_type in ("stock", "etf") else "stock"
         )
+        official = _official_session(q, fallback_map.get(symbol))
+        board_lot = _is_board_lot_quote(q, official)
+        if official is not None:
+            amount = official.get("amount")
+        else:
+            amount = None if board_lot or q is None else q.amount
         rows.append({
             "symbol": symbol,
             "name": inst.name if inst else None,
@@ -250,7 +277,8 @@ def enrich_taiwan_watchlist_rows(
             "prev_close": _sanitize_float(q.prev_close) if q else None,
             "change_amount": _sanitize_float(q.change) if q else None,
             "change_pct": _to_fraction_pct(q.change_pct) if q else None,
-            "amount": _sanitize_float(q.amount) if q else None,
+            "amount": _sanitize_float(amount),
+            "board_lot_volume": board_lot,
             # Data Freshness & Source Labels batch (Post-8C follow-up): 透传既有
             # TaiwanRealtimeQuote 的 provenance/staleness metadata, 不新造 schema —
             # source_meta 直接重用 SourceMeta.to_dict()（Monitor /api/intraday/quotes
@@ -262,6 +290,8 @@ def enrich_taiwan_watchlist_rows(
             "live_date": _taiwan_live_date(q),
             "indicator_date": indicator_date if ind else None,
             **{f: _sanitize_float(ind.get(f)) for f in _TAIWAN_INDICATOR_FIELDS},
-            "turnover_rate": _taiwan_turnover_rate(q, asset_type, issued_shares_map.get(symbol), today, inst),
+            "turnover_rate": _taiwan_turnover_rate(
+                q, asset_type, issued_shares_map.get(symbol), today, inst, official
+            ),
         })
     return rows

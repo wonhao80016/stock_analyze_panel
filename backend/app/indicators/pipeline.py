@@ -789,6 +789,7 @@ def compute_limit_signals(
     instruments: pl.DataFrame,
     needed: set[str] | None = None,
     historical_shares: pl.DataFrame | None = None,
+    today: date | None = None,
 ) -> pl.DataFrame:
     """计算涨跌停相关信号。
 
@@ -800,6 +801,8 @@ def compute_limit_signals(
 
     输入必须包含: symbol, date, raw_close, raw_high, raw_low, open, high, low, close,
                   change_pct, vol_ratio_5d。
+    *today* is the only session that may use the instruments' current float shares; it
+    defaults to cn_today().
     """
     if df.is_empty():
         return df
@@ -848,7 +851,7 @@ def compute_limit_signals(
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
 
     if "turnover_rate" in want:
-        df = apply_historical_float_shares(df, historical_shares, today=cn_today())
+        df = apply_historical_float_shares(df, historical_shares, today=today or cn_today())
 
     # Turnover (%): CN volume is lots; Taiwan volume and float_shares are shares.
     if "turnover_rate" in want and "float_shares" in df.columns and "volume" in df.columns:
@@ -1026,6 +1029,7 @@ def compute_all(
     df: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    today: date | None = None,
 ) -> pl.DataFrame:
     """从 OHLCV 计算全套指标 + 信号。一站式调用。
 
@@ -1034,7 +1038,9 @@ def compute_all(
     df = compute_indicators(df)
     df = compute_signals(df)
     if instruments is not None and not instruments.is_empty():
-        df = compute_limit_signals(df, instruments, historical_shares=historical_shares)
+        df = compute_limit_signals(
+            df, instruments, historical_shares=historical_shares, today=today
+        )
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -1071,6 +1077,7 @@ def compute_enriched(
     factors: pl.DataFrame | None = None,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    today: date | None = None,
 ) -> pl.DataFrame:
     """对原始日 K 应用前复权 + 全量计算指标 + 信号, 产出完整 enriched (含全部指标列)。
 
@@ -1106,6 +1113,7 @@ def compute_enriched(
         df,
         instruments=instruments,
         historical_shares=historical_shares,
+        today=today,
     )
 
     return df

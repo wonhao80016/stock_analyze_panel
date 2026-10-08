@@ -38,13 +38,7 @@ def _read(tmp_path: Path) -> list[dict]:
 
 
 @pytest.fixture
-def recorder(tmp_path: Path, monkeypatch) -> MinuteBarRecorder:
-    monkeypatch.setattr(
-        "app.taiwan.realtime.minute_recorder.get_market_status",
-        lambda *a, **k: __import__(
-            "app.taiwan.realtime.calendar", fromlist=["MarketStatus"],
-        ).MarketStatus.OPEN,
-    )
+def recorder(tmp_path: Path) -> MinuteBarRecorder:
     return MinuteBarRecorder(data_dir=tmp_path)
 
 

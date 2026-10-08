@@ -11,7 +11,7 @@ import logging
 import urllib.request
 
 from app.taiwan.enrichment.models import SourceMeta
-from app.taiwan.realtime.calendar import get_market_status, taipei_now
+from app.taiwan.realtime.calendar import TAIPEI_TZ, get_market_status, taipei_now
 from app.taiwan.realtime.models import MarketStatus, RealtimeStatus, TaiwanRealtimeQuote
 from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 
@@ -34,6 +34,33 @@ def to_yahoo_ticker(sym: TaiwanSymbol | str) -> str:
     ts = sym if isinstance(sym, TaiwanSymbol) else parse_symbol(sym)
     suffix = ".TW" if ts.exchange == "TWSE" else ".TWO"
     return f"{ts.code}{suffix}"
+
+
+def _session_open(result: dict, trade_date: date) -> float | None:
+    """Open of the last chart bar with one, or None unless that bar is dated *trade_date*.
+
+    The chart meta carries no session open, so the open must come from the bar itself.
+    """
+    try:
+        opens = result["indicators"]["quote"][0]["open"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    timestamps = result.get("timestamp")
+    if (
+        not isinstance(opens, list)
+        or not isinstance(timestamps, list)
+        or len(timestamps) < len(opens)
+    ):
+        return None
+    for i in range(len(opens) - 1, -1, -1):
+        if opens[i] is None:
+            continue
+        try:
+            bar_date = datetime.fromtimestamp(timestamps[i], tz=TAIPEI_TZ).date()
+        except (TypeError, ValueError, OSError):
+            return None
+        return float(opens[i]) if bar_date == trade_date else None
+    return None
 
 
 class YahooRealtimeProvider:
@@ -123,7 +150,7 @@ class YahooRealtimeProvider:
             exchange=ts.exchange,
             last_price=last_price,
             prev_close=prev_close,
-            open=meta.get("regularMarketDayHigh"),  # approximated
+            open=_session_open(result_list[0], trade_date),
             high=meta.get("regularMarketDayHigh"),
             low=meta.get("regularMarketDayLow"),
             change=change,

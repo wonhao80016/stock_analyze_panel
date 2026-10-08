@@ -28,7 +28,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 
 import polars as pl
 
@@ -38,6 +39,15 @@ from app.strategy.intraday_signals import IntradaySignalEvaluator
 from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
+
+# Record statuses that may date today's bar: continuous trading and the closing-auction result.
+_LIVE_RECORD_STATUSES = frozenset({"realtime", "close_final"})
+# A symbol that traded today but had no closing-auction trade (e.g. halted); see TaiwanHybridProvider.
+_SETTLED_NO_CLOSE = "settled_no_close"
+
+# No today-dated quote by this time on a day the calendar has not confirmed suggests a closure.
+_SUSPECT_CLOSURE_AFTER = dt_time(9, 5)
+_SUSPECT_CLOSURE_PROBE_INTERVAL = timedelta(minutes=5)
 
 # 外部推播专用线程池 —— 与行情轮询线程隔离。
 # 若在 _poll_loop 上同步投递, API 慢/宕机会逐条累加,拖垮整条实时行情+告警轮询。
@@ -158,6 +168,13 @@ def _persist_last_fetch(fetched_at_ms: float) -> None:
         logger.debug("last_fetch_ms 持久化失败 (不影响行情): %s", e)
 
 
+def _positive(value: object) -> bool:
+    try:
+        return float(value) > 0  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
 def _monitor_name_map(repo) -> dict[str, str]:
     """监控回填用的 symbol → name 映射 (股票 + ETF + 指数, 股票优先)。
 
@@ -167,65 +184,26 @@ def _monitor_name_map(repo) -> dict[str, str]:
     return {s: n for s, n in repo.get_name_map().items() if n}
 
 
-def _taiwan_stock_symbols(symbols: list[str]) -> list[str]:
-    """ETF units are not company share capital, so only master-listed stocks qualify."""
-    try:
-        from app.taiwan.universe import get_security_master
+def _taiwan_live_rows(
+    repo, bars: pl.DataFrame, quote_extra: pl.DataFrame | None = None
+) -> pl.DataFrame:
+    """Today's enriched rows of the Taiwan *bars* from the publish pipeline, empty until it is ready.
 
-        master = get_security_master()
-        return [s for s in symbols if getattr(master.get_instrument(s), "instrument_type", None) == "stock"]
-    except Exception as e:
-        logger.debug("taiwan security master lookup failed during today enrichment: %s", e)
-        return []
-
-
-def _fill_taiwan_turnover_rate(df: pl.DataFrame) -> pl.DataFrame:
-    """Fill a null Taiwan turnover_rate from issued shares, for today's rows only.
-
-    A current share count must never price a past session
-    (docs/taiwan-share-capital-phase-6h.md).
+    The prev_close of *quote_extra* stands in for a corporate action the table does not list yet.
     """
-    if df.is_empty() or "symbol" not in df.columns or "volume" not in df.columns:
-        return df
-
-    taiwan_mask = pl.col("symbol").str.ends_with(".TWSE") | pl.col("symbol").str.ends_with(".TPEX")
-    if "date" in df.columns:
-        taiwan_mask = taiwan_mask & (pl.col("date") == pl.lit(cn_today()))
-    if "turnover_rate" not in df.columns:
-        df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
-
-    missing = df.filter(taiwan_mask & pl.col("turnover_rate").is_null())
-    if missing.is_empty():
-        return df
-    missing = missing.filter(pl.col("symbol").is_in(_taiwan_stock_symbols(missing["symbol"].to_list())))
-    if missing.is_empty():
-        return df
-
-    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
-    from app.volume_units import turnover_rate_pct_expr
-
-    try:
-        shares = TaiwanShareCapitalStore().as_instruments()
-    except Exception as e:
-        logger.debug("taiwan share capital read failed during today enrichment: %s", e)
-        return df
-    if shares.is_empty():
-        return df
-
-    filled = (
-        missing.select("symbol", "volume")
-        .join(shares, on="symbol", how="left")
-        .filter(pl.col("float_shares") > 0)
-        .select("symbol", turnover_rate_pct_expr().alias("turnover_rate"))
-    )
-    if filled.is_empty():
-        return df
-
-    return (
-        df.join(filled, on="symbol", how="left", suffix="_tw_fill")
-        .with_columns(pl.coalesce(["turnover_rate", "turnover_rate_tw_fill"]).alias("turnover_rate"))
-        .drop("turnover_rate_tw_fill")
-    )
+    if repo is None or bars.is_empty():
+        return pl.DataFrame()
+    if quote_extra is not None and {"symbol", "prev_close"} <= set(quote_extra.columns):
+        bars = bars.drop([c for c in ("prev_close",) if c in bars.columns]).join(
+            quote_extra.select("symbol", "prev_close").unique(subset=["symbol"], keep="last"),
+            on="symbol",
+            how="left",
+        )
+    rows = repo.get_taiwan_live_enriched().rows(bars)
+    if rows is None:
+        logger.debug("taiwan live history not prepared yet, %d intraday rows skipped", bars.height)
+        return pl.DataFrame()
+    return rows
 
 
 class QuoteService:
@@ -288,10 +266,21 @@ class QuoteService:
         # before the poll loop is allowed to go idle for the day.
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
+        # Today's closing-auction bookkeeping (see _track_closing_quotes). False when the last
+        # round's records carried no status, on which no close can be checked.
+        self._closing_day: date | None = None
+        self._intraday_symbols_today: set[str] = set()
+        self._traded_symbols_today: set[str] = set()
+        self._close_final_symbols: set[str] = set()
+        self._settled_no_close_symbols: set[str] = set()
+        # The Taiwan pool requested in the latest round; None for providers without one.
+        self._round_symbols: set[str] | None = None
+        self._last_closure_probe: datetime | None = None
+        self._closing_status_seen = False
+        self._closing_evaluated = False
         # Whether this round's quote records came from a live source. None = no
         # status signal (non-Taiwan providers today) -> gate does not apply.
         self._quote_source_realtime: bool | None = None
-        self._taiwan_full_recompute_skip_logged = False
 
     # ================================================================
     # 生命周期
@@ -607,17 +596,15 @@ class QuoteService:
                     phase = self._market_phase()
                     if self._should_fetch_for_phase(phase):
                         is_final = phase == "close_final"
-                        ok = self._fetch_quotes(final=is_final)
-                        if is_final:
-                            key = self._final_sync_key(phase)
-                            if key and ok:
-                                self._final_sync_done.add(key)
-                                self._final_sync_failed.pop(key, None)
-                                self._flush_minute_bars()
-                                logger.info("close final sync completed, entering closed state")
-                            elif key:
-                                self._final_sync_failed[key] = "fetch_failed"
-                                logger.warning("close final sync failed, will keep retrying")
+                        if phase == "regular" and self._holding_for_suspected_closure():
+                            logger.debug("no quote dated today yet, probing for a closure every 5 minutes")
+                        elif is_final and self._close_settled_elsewhere():
+                            self._final_sync_done.add(self._final_sync_key(phase))
+                            logger.info("close already settled for today, skipping final sync")
+                        else:
+                            ok = self._fetch_quotes(final=is_final)
+                            if is_final:
+                                self._settle_final_sync(phase, ok)
                     else:
                         logger.debug("非轮询阶段(%s), 跳过行情轮询", phase)
             except Exception as e:  # noqa: BLE001
@@ -627,6 +614,136 @@ class QuoteService:
             while self._running and self._enabled and waited < self._interval:
                 time.sleep(0.5)
                 waited += 0.5
+
+    def _settle_final_sync(self, phase: str, ok: bool) -> None:
+        """Close the day once every symbol that traded today has its closing-auction result.
+
+        Retries until the post-close session ends (14:30), then gives up with
+        "closing_quote_missing" so the day is never closed on a fallback snapshot; the
+        closing monitor pass still runs for the symbols whose result did arrive.
+        """
+        from app.taiwan.realtime.calendar import POST_CLOSE_END, taipei_now
+
+        key = self._final_sync_key(phase)
+        if not key:
+            return
+        if ok and self._closing_sync_complete():
+            self._final_sync_done.add(key)
+            self._final_sync_failed.pop(key, None)
+            self._flush_minute_bars()
+            logger.info("close final sync completed, entering closed state")
+        elif taipei_now().time() > POST_CLOSE_END:
+            self._final_sync_failed[key] = "closing_quote_missing"
+            self._flush_minute_bars()
+            logger.warning(
+                "close final sync gave up: no closing quote for %s",
+                sorted(self._closing_required_symbols() - self._close_final_symbols),
+            )
+            self._evaluate_monitors(pl.DataFrame(), None, closing_partial=True)
+        elif not ok:
+            self._final_sync_failed[key] = "fetch_failed"
+            logger.warning("close final sync failed, will keep retrying")
+        else:
+            logger.info("close final sync waiting for closing quotes, will keep retrying")
+
+    def _track_closing_quotes(self, records: list[dict]) -> None:
+        """Remember which symbols traded today and which have their closing result."""
+        from app.taiwan.realtime.calendar import taipei_today
+
+        today = taipei_today()
+        if self._closing_day != today:
+            self._closing_day = today
+            self._intraday_symbols_today = set()
+            self._traded_symbols_today = set()
+            self._close_final_symbols = set()
+            self._settled_no_close_symbols = set()
+            self._closing_status_seen = False
+            self._closing_evaluated = False
+        self._closing_status_seen = any(r.get("status") for r in records)
+        for r in records:
+            symbol, status = r.get("symbol"), r.get("status")
+            if not symbol:
+                continue
+            if status == "realtime":
+                self._intraday_symbols_today.add(symbol)
+                if _positive(r.get("volume")):
+                    self._traded_symbols_today.add(symbol)
+            elif status == "close_final":
+                self._close_final_symbols.add(symbol)
+            elif status == _SETTLED_NO_CLOSE:
+                self._settled_no_close_symbols.add(symbol)
+
+    def _holding_for_suspected_closure(self) -> bool:
+        """Whether to skip this regular-session round while an unscheduled closure is suspected.
+
+        On a weekday the calendar has not confirmed, no today-dated live quote by 09:05 suggests
+        an unannounced closure (e.g. typhoon); the pool is then probed every 5 minutes until one
+        arrives.
+        """
+        from app.services import preferences
+        from app.taiwan.realtime.calendar import is_trading_day, taipei_now
+
+        now = taipei_now()
+        if (
+            now.time() < _SUSPECT_CLOSURE_AFTER
+            or preferences.get_realtime_data_provider() not in ("taiwan", "tickflow")
+            or is_trading_day(now.date()) is True
+            or self._session_quote_seen(now.date())
+        ):
+            return False
+        last = self._last_closure_probe
+        if last is not None and last.date() == now.date() and now - last < _SUSPECT_CLOSURE_PROBE_INTERVAL:
+            return True
+        self._last_closure_probe = now
+        return False
+
+    def _session_quote_seen(self, day: date) -> bool:
+        """A live quote dated *day* has arrived in this process."""
+        return self._closing_day == day and bool(
+            self._intraday_symbols_today or self._close_final_symbols
+        )
+
+    def _closing_required_symbols(self) -> set[str]:
+        """Symbols that traded today, are still in the pool requested this round and may yet close."""
+        required = self._traded_symbols_today - self._settled_no_close_symbols
+        if self._round_symbols is None:
+            return required
+        return required & self._round_symbols
+
+    def _closing_sync_complete(self) -> bool:
+        """Every pool symbol that traded today has a closing-auction result.
+
+        An untraded symbol never gets one, so it does not block the close. A fallback
+        snapshot (STOCK_DAY_ALL or daily K) never counts. Records without any status come from
+        providers that report none, where a successful round is all that can be checked.
+        """
+        if not self._closing_status_seen:
+            return True
+        return bool(self._close_final_symbols) and self._closing_required_symbols() <= self._close_final_symbols
+
+    def _official_data_stored_today(self) -> bool:
+        from app.taiwan.realtime.calendar import taipei_today
+
+        try:
+            return bool(self._repo.date_has_official_stock_data(taipei_today()))
+        except Exception:
+            return False
+
+    def _close_settled_elsewhere(self) -> bool:
+        """Today's official data is already stored, so the closing quote must not replace it."""
+        from app.services import preferences
+
+        if preferences.get_realtime_data_provider() not in ("taiwan", "tickflow"):
+            return False
+        return self._official_data_stored_today()
+
+    def _without_settled_closing_quotes(self, records: list[dict]) -> list[dict]:
+        """Drop closing results once today's official data is stored (see _close_settled_elsewhere)."""
+        if not any(r.get("status") == "close_final" for r in records):
+            return records
+        if not self._official_data_stored_today():
+            return records
+        return [r for r in records if r.get("status") != "close_final"]
 
     def _fetch_quotes(self, *, final: bool = False) -> bool:
         """按当前档位拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。"""
@@ -671,7 +788,10 @@ class QuoteService:
                     sym_list = sym_list[: self.TAIWAN_REALTIME_MAX_SYMBOLS]
                 if not sym_list:
                     return
-                records = self._taiwan_realtime_records(sym_list)
+                records = self._without_settled_closing_quotes(
+                    self._taiwan_realtime_records(sym_list)
+                )
+                self._round_symbols = set(sym_list)
                 if records:
                     self._record_minute_bars(records)
                     self._process_full_market_records(records, t0=t0, now_ts=now_ts)
@@ -792,9 +912,9 @@ class QuoteService:
     def fetch_live_bar(self, symbol: str) -> dict | None:
         """Today's row for a symbol outside the polling pool, fetched on demand.
 
-        Same provider, realtime gate, change_pct scale and incremental indicator
-        pipeline as the poll, so the row matches what the symbol would show once it
-        joins the pool. Without the recursive state it is the bare OHLCV bar.
+        Same provider, realtime gate, change_pct scale and indicator pipeline as the
+        poll, so the row matches what the symbol would show once it joins the pool.
+        Without the prepared history (Taiwan) or recursive state it is the bare OHLCV bar.
         """
         from app.services import preferences
 
@@ -810,10 +930,13 @@ class QuoteService:
             return None
         live_bar = {**bar.row(0, named=True), "change_pct": records[0].get("change_pct")}
         try:
-            prev_enriched, _ = self._repo.get_enriched_latest()
-            enriched = self._enrich_today_incremental(
-                bar, self._build_quote_extra(records), self._repo.get_live_agg(), prev_enriched,
-            )
+            if bar.filter(_is_taiwan_symbol()).is_empty():
+                prev_enriched, _ = self._repo.get_enriched_latest()
+                enriched = self._enrich_today_incremental(
+                    bar, self._build_quote_extra(records), self._repo.get_live_agg(), prev_enriched,
+                )
+            else:
+                enriched = _taiwan_live_rows(self._repo, bar, self._build_quote_extra(records))
         except Exception as e:
             logger.debug("On-demand indicators failed for %s: %s", symbol, e)
             return live_bar
@@ -827,6 +950,7 @@ class QuoteService:
         # must not be evaluated by monitor rules (see _evaluate_monitors), so the
         # status is captured here before quote_extra drops the column.
         self._quote_source_realtime = self._records_realtime_status(records)
+        self._track_closing_quotes(records)
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
         core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
         all_index_symbols.update(core_index_symbols)
@@ -1063,14 +1187,14 @@ class QuoteService:
         PREVIOUS session's OHLC during trading hours. _build_daily stamps whatever it
         is given with cn_today(), so letting those through writes yesterday's close as
         today's bar - the price a screen then disagrees with. Only rows the provider
-        marked realtime qualify.
+        marked realtime or close_final (today's closing-auction result) qualify.
 
         Records with no status at all come from a provider that does not report one
         (the TickFlow SDK); the gate does not apply and they pass through unchanged.
         """
         if not any(r.get("status") for r in records):
             return records
-        return [r for r in records if r.get("status") == "realtime"]
+        return [r for r in records if r.get("status") in _LIVE_RECORD_STATUSES]
 
     @staticmethod
     def _quote_ts_expr(df: pl.DataFrame) -> pl.Expr | None:
@@ -1129,14 +1253,14 @@ class QuoteService:
 
     @staticmethod
     def _records_realtime_status(records: list[dict]) -> bool | None:
-        """整批 records 是否全部来自即时来源 (status=="realtime")。
+        """Whether every record of the round is live (status realtime or close_final).
 
-        None = 本轮 records 不带 status 信号 (非 Taiwan hybrid provider), 门槛不适用。
+        None when the records carry no status (providers other than the Taiwan hybrid): no gate applies.
         """
-        statuses = {r.get("status") for r in records if r.get("status")}
+        statuses = {r.get("status") for r in records if r.get("status")} - {_SETTLED_NO_CLOSE}
         if not statuses:
             return None
-        return statuses == {"realtime"}
+        return statuses <= _LIVE_RECORD_STATUSES
 
     @staticmethod
     def _build_quote_extra(records: list[dict]) -> pl.DataFrame:
@@ -1204,19 +1328,24 @@ class QuoteService:
     def _market_phase() -> str:
         """Taiwan quote polling phase (Asia/Taipei).
 
-        The regular session is continuous 09:00-13:30 with no lunch break, so the
-        close is the only final-sync boundary: "close_final" keeps polling until one
-        post-close snapshot has been captured.
+        The regular session runs 09:00-13:30 with no lunch break (continuous trading to 13:25,
+        then the closing auction), so the close is the only final-sync boundary: "close_final" keeps polling until the
+        closing-auction results are in (see _settle_final_sync). A published exchange holiday or a
+        closure the user marked for today is "closed"; an unverified weekday polls.
         """
+        from app.services import preferences
         from app.taiwan.realtime.calendar import (
             PRE_OPEN_START,
             REGULAR_OPEN_END,
             REGULAR_OPEN_START,
+            is_trading_day,
             taipei_now,
         )
 
         now = taipei_now()
-        if now.weekday() >= 5:
+        if is_trading_day(now.date()) is False:
+            return "closed"
+        if preferences.get_taiwan_market_closed_date() == now.date().isoformat():
             return "closed"
         t = now.time()
         if PRE_OPEN_START <= t < REGULAR_OPEN_START:
@@ -1236,28 +1365,63 @@ class QuoteService:
         return None
 
     def _should_poll_for_phase(self, phase: str) -> bool:
-        """是否处于会主动拉行情的阶段。final 阶段成功后即停止。"""
+        """Whether the phase polls quotes; the close stops once its final sync completes or gives up."""
         if phase in {"preopen", "regular"}:
             return True
         key = self._final_sync_key(phase)
-        return bool(key and key not in self._final_sync_done)
+        return bool(
+            key
+            and key not in self._final_sync_done
+            and self._final_sync_failed.get(key) != "closing_quote_missing"
+        )
 
     def _should_fetch_for_phase(self, phase: str) -> bool:
         return self._should_poll_for_phase(phase)
 
     @staticmethod
     def _is_continuous_trading() -> bool:
-        """Taiwan regular session (Asia/Taipei): 09:00-13:30 on weekdays.
+        """Taiwan continuous trading (Asia/Taipei): 09:00-13:25 on weekdays.
 
-        Stricter than the polling window, which also spans the 08:30-09:00 trial
-        matching and the post-close capture: alerts must not fire on indicative or
-        stale prices. Holidays are covered by the "snapshot date == today" freshness
-        check in _evaluate_monitors, so no verified trading calendar is needed here.
+        Stricter than the polling window, which also spans the 08:30-09:00 and
+        13:25-13:30 call auctions and the post-close capture: alerts must not fire on indicative or
+        stale prices. Published holidays come from the calendar and a closure the user
+        marked for today matches _market_phase; unscheduled closures are covered by the
+        "snapshot date == today" freshness check in _evaluate_monitors.
         """
-        from app.taiwan.realtime.calendar import get_market_status
+        from app.services import preferences
+        from app.taiwan.realtime.calendar import get_market_status, taipei_now
         from app.taiwan.realtime.models import MarketStatus
 
-        return get_market_status() == MarketStatus.OPEN
+        now = taipei_now()
+        if get_market_status(now) != MarketStatus.OPEN:
+            return False
+        return preferences.get_taiwan_market_closed_date() != now.date().isoformat()
+
+    def _take_closing_evaluation(self, *, partial: bool = False) -> bool:
+        """True once per day: when a live round completes the closing results, or at give-up.
+
+        Never in a process that saw no continuous trading today: after a restart, the process
+        that watched the session may already have alerted on the close.
+        """
+        if (
+            self._closing_evaluated
+            or not self._closing_status_seen
+            or not self._close_final_symbols
+            or not self._intraday_symbols_today
+        ):
+            return False
+        if not partial and (
+            self._quote_source_realtime is not True or not self._closing_sync_complete()
+        ):
+            return False
+        self._closing_evaluated = True
+        return True
+
+    def _closing_scope(self, enriched: pl.DataFrame) -> pl.DataFrame:
+        """Rows the closing pass may alert on: symbols whose closing result arrived."""
+        if enriched.is_empty() or "symbol" not in enriched.columns:
+            return enriched
+        return enriched.filter(pl.col("symbol").is_in(sorted(self._close_final_symbols)))
 
     @staticmethod
     def _save_enabled(enabled: bool) -> None:
@@ -1268,15 +1432,23 @@ class QuoteService:
     # 策略监控
     # ================================================================
 
-    def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
+    def _evaluate_monitors(
+        self,
+        daily_df: pl.DataFrame,
+        quote_extra: pl.DataFrame | None,
+        *,
+        closing_partial: bool = False,
+    ) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
-            # Alerts only during the regular session: the polling window is wider so it
-            # can warm up on pre-open trial matching and capture the close, but neither
-            # carries executable prices.
-            if not self._is_continuous_trading():
-                return
-            if getattr(self, "_quote_source_realtime", None) is False:
+            # Alerts only during continuous trading, plus one pass on the closing-auction
+            # result: the pre-open and 13:25-13:30 auctions only carry trial prices.
+            closing_pass = False
+            if closing_partial or not self._is_continuous_trading():
+                closing_pass = self._take_closing_evaluation(partial=closing_partial)
+                if not closing_pass:
+                    return
+            if not closing_partial and getattr(self, "_quote_source_realtime", None) is False:
                 logger.debug(
                     "跳过监控评估: 本轮行情来源非即时回退 (status!=realtime), "
                     "避免用官方回退/昨收数据误发告警",
@@ -1284,6 +1456,8 @@ class QuoteService:
                 return
             # 获取 enriched 数据 (刚算好的)
             enriched_today, enriched_date = self.get_enriched_today()
+            if closing_pass:
+                enriched_today = self._closing_scope(enriched_today)
             # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,
             # ETF/指数轮有各自的空表+日期守卫, 不受影响 (纯指数行情/自选场景可独立评估)。
             stock_ready = (not enriched_today.is_empty()) and (enriched_date == cn_today())
@@ -1326,6 +1500,8 @@ class QuoteService:
                     if engine.has_asset_rules("etf") and self._repo is not None:
                         try:
                             etf_enriched, _ = self._repo.get_enriched_latest_asset("etf", refresh=False)
+                            if closing_pass:
+                                etf_enriched = self._closing_scope(etf_enriched)
                             if not etf_enriched.is_empty():
                                 etf_enriched = self._inject_intraday_signals(etf_enriched, engine, "etf")
                                 rule_events = rule_events + engine.evaluate(
@@ -1534,7 +1710,7 @@ class QuoteService:
         close during the session, which would be written as a flat bar at the wrong
         price for every minute the realtime source is unavailable.
         """
-        live = [r for r in records if r.get("status") == "realtime"]
+        live = [r for r in records if r.get("status") in _LIVE_RECORD_STATUSES]
         if not live:
             return
         try:
@@ -1665,158 +1841,60 @@ class QuoteService:
         live_agg: pl.DataFrame,
         prev_enriched: pl.DataFrame,
     ) -> pl.DataFrame:
-        """Today's enriched rows from yesterday's recursive state plus today's OHLCV."""
+        """Today's enriched rows: Taiwan ones from the publish pipeline, others from yesterday's recursive state."""
         from app.indicators.pipeline import compute_enriched_today
-        from app.taiwan.realtime.calendar import session_progress, session_progress_from_ts
+        if daily_df.is_empty():
+            return pl.DataFrame()
+        taiwan_today = _taiwan_live_rows(
+            self._repo, daily_df.filter(_is_taiwan_symbol()), quote_extra
+        )
+        daily_df = daily_df.filter(~_is_taiwan_symbol())
+        if daily_df.is_empty():
+            return taiwan_today
         instruments = self._repo.get_instruments()
         today_ohlcv = daily_df
         if quote_extra is not None and not quote_extra.is_empty():
             today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
-        today_ohlcv = self._with_today_factors(today_ohlcv)
-        # The volume ratio is scaled by the session time elapsed at the quote's trade time.
-        progress: float | None = None
-        if "quote_ts" in daily_df.columns and not daily_df.is_empty():
-            valid_ts = daily_df["quote_ts"].drop_nulls()
-            if not valid_ts.is_empty():
-                progress = session_progress_from_ts(valid_ts.median())
-        if progress is None:
-            progress = session_progress()
+        # The only session clock here is Taiwan's, which does not fit other markets' volume.
         enriched = compute_enriched_today(
             live_agg=live_agg,
             prev_enriched=prev_enriched,
             today_ohlcv=today_ohlcv,
             instruments=instruments,
-            session_progress=progress,
+            session_progress=None,
         )
-        return _fill_taiwan_turnover_rate(enriched)
-
-    def _with_today_factors(self, today_ohlcv: pl.DataFrame) -> pl.DataFrame:
-        """Give every Taiwan row the factor of its events the published enriched scale lacks (1 without one).
-
-        Frames without Taiwan rows are returned unchanged; other markets' rows get nulls and keep _adj_factor.
-        """
-        if today_ohlcv.is_empty() or "symbol" not in today_ohlcv.columns:
-            return today_ohlcv
-        taiwan = pl.col("symbol").str.ends_with(TAIWAN_SUFFIXES[0])
-        for suffix in TAIWAN_SUFFIXES[1:]:
-            taiwan = taiwan | pl.col("symbol").str.ends_with(suffix)
-        if not today_ohlcv.select(taiwan.any()).item():
-            return today_ohlcv
-        from app.taiwan.corporate_actions import TODAY_FACTOR_SCHEMA
-        from app.taiwan.enriched_refresh import unpublished_factors
-
-        try:
-            factors = unpublished_factors(cn_today(), self._repo.get_live_agg_date())
-        except Exception as e:
-            logger.warning("today's corporate-action factors unavailable, intraday indicators unadjusted: %s", e)
-            factors = pl.DataFrame(schema=TODAY_FACTOR_SCHEMA)
-        joined = today_ohlcv.drop([c for c in ("_today_factor", "_today_volume_factor") if c in today_ohlcv.columns])
-        return joined.join(factors, on="symbol", how="left").with_columns([
-            pl.when(taiwan).then(pl.col(c).fill_null(1.0)).otherwise(None).alias(c)
-            for c in ("_today_factor", "_today_volume_factor")
-        ])
+        frames = [frame for frame in (taiwan_today, enriched) if not frame.is_empty()]
+        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
     def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False) -> None:
         """增量计算今天的 enriched: 用昨天的递推状态 + 今天 OHLCV → 只算今天 5500 行。
 
         quote_extra: API 直接提供的补充字段 (prev_close, change_pct 等),
                      不写 daily, 直接传给 compute_enriched_today 避免重复计算。
+        Taiwan stock rows come from the publish pipeline instead and ignore quote_extra.
         """
         try:
             today = cn_today()
             t0 = time.perf_counter()
 
-            # ---- 尝试增量路径 ----
-            live_agg = self._repo.get_live_agg() if asset_type == "stock" else pl.DataFrame()
-            prev_enriched, prev_date = (
-                self._repo.get_enriched_latest()
-                if asset_type == "stock"
-                else self._repo.get_enriched_latest_asset(asset_type)
-            )
-
-            use_incremental = (
-                asset_type == "stock"
-                and not live_agg.is_empty()
-                and not prev_enriched.is_empty()
-                and prev_date is not None
-            )
-
-            if use_incremental:
-                enriched_today = self._enrich_today_incremental(daily_df, quote_extra, live_agg, prev_enriched)
-                if enriched_today.is_empty():
-                    logger.warning("增量计算结果为空, 回退到全量计算")
-                    use_incremental = False
-                else:
-                    self._taiwan_full_recompute_skip_logged = False
-
-            # ---- 全量回退路径 ----
-            if not use_incremental:
-                from datetime import timedelta
-                from app.indicators.pipeline import compute_enriched
-
-                # kline_daily holds no Taiwan history: Taiwan stock rows wait for the incremental
-                # state, and Taiwan etf/index rows have no rebuild path here.
-                non_taiwan = daily_df.filter(~_is_taiwan_symbol())
-                if (
-                    asset_type == "stock"
-                    and non_taiwan.height < daily_df.height
-                    and not self._taiwan_full_recompute_skip_logged
-                ):
-                    self._taiwan_full_recompute_skip_logged = True
-                    logger.info(
-                        "realtime enriched full recompute skipped for Taiwan symbols until the incremental state is ready"
-                    )
-                if non_taiwan.is_empty():
-                    return
-                daily_df = non_taiwan
-
-                logger.info("enriched 全量计算 (live_agg=%s, 上次日期=%s)",
-                            "ok" if not live_agg.is_empty() else "空", prev_date)
-
-                cutoff = today - timedelta(days=90)
-                table = {"etf": "kline_etf_daily", "index": "kline_index_daily"}.get(asset_type, "kline_daily")
-                daily_glob = str(self._repo.store.data_dir / table / "**" / "*.parquet")
-                ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
-                hist_df = (
-                    scan_daily_parquet(daily_glob)
-                    .filter(pl.col("date") >= cutoff)
-                    .sort(["symbol", "date"])
-                    .collect()
+            taiwan_today = pl.DataFrame()
+            if asset_type == "stock" and not daily_df.is_empty():
+                taiwan_today = _taiwan_live_rows(
+                    self._repo, daily_df.filter(_is_taiwan_symbol()), quote_extra
                 )
-                if hist_df.is_empty():
-                    return
-
-                hist_cols = [c for c in ohlcv_cols if c in hist_df.columns]
-                hist_df = hist_df.select(hist_cols).filter(pl.col("date") != today)
-                daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
-                full_df = pl.concat([hist_df, daily_ohlcv], how="diagonal_relaxed")
-                full_df = full_df.sort(["symbol", "date"])
-
-                factor_dir = {"stock": "adj_factor", "etf": "adj_factor_etf"}.get(asset_type)
-                factor_path = self._repo.store.data_dir / factor_dir / "all.parquet" if factor_dir else None
-                factors = pl.DataFrame()
-                if factor_path and factor_path.exists():
-                    try:
-                        factors = pl.read_parquet(factor_path)
-                    except Exception:
-                        pass
-                instruments = self._repo.get_instruments() if asset_type == "stock" else None
-
-                enriched_full = compute_enriched(
-                    full_df,
-                    factors=factors,
-                    instruments=instruments,
-                    historical_shares=(
-                        self._repo.get_historical_shares()
-                        if asset_type == "stock"
-                        else None
-                    ),
-                )
-                enriched_today = enriched_full.filter(pl.col("date") == today)
-
+                daily_df = daily_df.filter(~_is_taiwan_symbol())
+            enriched_today, use_incremental = pl.DataFrame(), False
+            if not daily_df.is_empty():
+                enriched_today, use_incremental = self._enrich_live_rows(daily_df, quote_extra, asset_type, today)
+            mode_label = "增量" if use_incremental else "全量"
             if enriched_today.is_empty():
+                mode_label = "taiwan"
+            elif not taiwan_today.is_empty():
+                mode_label += "+taiwan"
+            frames = [frame for frame in (taiwan_today, enriched_today) if not frame.is_empty()]
+            if not frames:
                 return
-
+            enriched_today = pl.concat(frames, how="diagonal_relaxed")
 
             # ---- 写盘 + 更新缓存 ----
             if merge:
@@ -1825,8 +1903,88 @@ class QuoteService:
                 self._repo.flush_live_enriched_asset(asset_type, enriched_today)
 
             elapsed = time.perf_counter() - t0
-            mode_label = "增量" if use_incremental else "全量"
             logger.info("enriched %s: %d 只, %s, 耗时 %.0fms",
                         mode_label, len(enriched_today), today, elapsed * 1000)
         except Exception as e:  # noqa: BLE001
             logger.warning("enriched 计算失败: %s", e)
+
+    def _enrich_live_rows(
+        self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None, asset_type: str, today: date
+    ) -> tuple[pl.DataFrame, bool]:
+        """Today's rows of *daily_df*, Taiwan stocks excluded, and whether the incremental path made them."""
+        # ---- 尝试增量路径 ----
+        live_agg = self._repo.get_live_agg() if asset_type == "stock" else pl.DataFrame()
+        prev_enriched, prev_date = (
+            self._repo.get_enriched_latest()
+            if asset_type == "stock"
+            else self._repo.get_enriched_latest_asset(asset_type)
+        )
+
+        use_incremental = (
+            asset_type == "stock"
+            and not live_agg.is_empty()
+            and not prev_enriched.is_empty()
+            and prev_date is not None
+        )
+
+        if use_incremental:
+            enriched_today = self._enrich_today_incremental(daily_df, quote_extra, live_agg, prev_enriched)
+            if enriched_today.is_empty():
+                logger.warning("增量计算结果为空, 回退到全量计算")
+                use_incremental = False
+
+        # ---- 全量回退路径 ----
+        if not use_incremental:
+            from datetime import timedelta
+            from app.indicators.pipeline import compute_enriched
+
+            # kline_daily holds no Taiwan history: Taiwan etf/index rows have no rebuild path here.
+            non_taiwan = daily_df.filter(~_is_taiwan_symbol())
+            if non_taiwan.is_empty():
+                return pl.DataFrame(), False
+            daily_df = non_taiwan
+
+            logger.info("enriched 全量计算 (live_agg=%s, 上次日期=%s)",
+                        "ok" if not live_agg.is_empty() else "空", prev_date)
+
+            cutoff = today - timedelta(days=90)
+            table = {"etf": "kline_etf_daily", "index": "kline_index_daily"}.get(asset_type, "kline_daily")
+            daily_glob = str(self._repo.store.data_dir / table / "**" / "*.parquet")
+            ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
+            hist_df = (
+                scan_daily_parquet(daily_glob)
+                .filter(pl.col("date") >= cutoff)
+                .sort(["symbol", "date"])
+                .collect()
+            )
+            if hist_df.is_empty():
+                return pl.DataFrame(), False
+
+            hist_cols = [c for c in ohlcv_cols if c in hist_df.columns]
+            hist_df = hist_df.select(hist_cols).filter(pl.col("date") != today)
+            daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
+            full_df = pl.concat([hist_df, daily_ohlcv], how="diagonal_relaxed")
+            full_df = full_df.sort(["symbol", "date"])
+
+            factor_dir = {"stock": "adj_factor", "etf": "adj_factor_etf"}.get(asset_type)
+            factor_path = self._repo.store.data_dir / factor_dir / "all.parquet" if factor_dir else None
+            factors = pl.DataFrame()
+            if factor_path and factor_path.exists():
+                try:
+                    factors = pl.read_parquet(factor_path)
+                except Exception:
+                    pass
+            instruments = self._repo.get_instruments() if asset_type == "stock" else None
+
+            enriched_full = compute_enriched(
+                full_df,
+                factors=factors,
+                instruments=instruments,
+                historical_shares=(
+                    self._repo.get_historical_shares()
+                    if asset_type == "stock"
+                    else None
+                ),
+            )
+            enriched_today = enriched_full.filter(pl.col("date") == today)
+        return enriched_today, use_incremental

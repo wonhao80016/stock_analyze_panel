@@ -17,6 +17,7 @@ import pytest
 from app.api import backtest as backtest_api
 from app.api import data as data_api
 from app.api import kline
+from app.taiwan import universe
 from app.tickflow.repository import DataStore, KlineRepository
 
 TAIPEI = timezone(timedelta(hours=8))
@@ -264,6 +265,7 @@ def test_adj_factor_stats_span_the_taiwan_sessions(tmp_path, monkeypatch, deny_n
 
 
 TODAY = date(2026, 10, 7)
+TAIWAN_PREVIOUS_SESSION = date(2026, 10, 6)
 
 
 def _live_bar(symbol: str, d: date = TODAY) -> pl.DataFrame:
@@ -283,11 +285,20 @@ def _live_bar(symbol: str, d: date = TODAY) -> pl.DataFrame:
 
 
 class _WarmingRepo:
-    """A repository still warming up: no recursive state and no latest enriched day yet."""
+    """A repository still warming up: no recursive state and no latest enriched day yet.
+
+    Its Taiwan live history is prepared first, as KlineRepository._refresh_enriched does.
+    """
 
     def __init__(self, data_dir: Path) -> None:
+        from app.taiwan.live_enriched import TaiwanLiveEnriched
+
         self.store = SimpleNamespace(data_dir=data_dir)
         self.enriched_writes: list[pl.DataFrame] = []
+        self.taiwan_live = TaiwanLiveEnriched(data_dir)
+
+    def get_taiwan_live_enriched(self):
+        return self.taiwan_live
 
     def get_live_agg(self) -> pl.DataFrame:
         return pl.DataFrame()
@@ -316,15 +327,41 @@ def warming_service(tmp_path, monkeypatch, deny_network):
     monkeypatch.setattr(quote_service, "cn_today", lambda: TODAY)
     for d in (date(2026, 9, 15), date(2026, 9, 21)):
         _write_partition(tmp_path, "kline_daily", d + timedelta(days=1))
+    stored = tmp_path / "taiwan" / "daily" / f"date={TAIWAN_PREVIOUS_SESSION.isoformat()}"
+    stored.mkdir(parents=True)
+    _bars(TAIWAN_PREVIOUS_SESSION).with_columns(
+        pl.lit(None, dtype=pl.Int64).alias("quote_ts")
+    ).write_parquet(stored / "part.parquet")
+    monkeypatch.setattr(
+        universe, "_default_master", SimpleNamespace(get_instrument=lambda _symbol: None)
+    )
     service = quote_service.QuoteService()
     service._repo = _WarmingRepo(tmp_path)
+    service._repo.taiwan_live.prepare()
     return service
 
 
-def test_warm_up_fallback_does_not_build_taiwan_bars_from_kline_daily(warming_service):
+def test_warm_up_builds_taiwan_rows_from_the_taiwan_store(warming_service):
+    """During the warm-up Taiwan rows come from the publish pipeline over the Taiwan daily store."""
+    warming_service._flush_live_enriched(_live_bar("2330.TWSE"))
+
+    [written] = warming_service._repo.enriched_writes
+    row = written.row(0, named=True)
+    assert (row["symbol"], row["date"], row["close"]) == ("2330.TWSE", TODAY, 505.0)
+    assert row["prev_close"] == 10.5
+    assert row["signal_limit_up"] is not None and "vp_double" in written.columns
+
+
+def test_taiwan_rows_wait_for_a_prepared_history(warming_service, monkeypatch):
+    engine = warming_service._repo.taiwan_live
+    engine.invalidate()
+    scheduled: list[bool] = []
+    monkeypatch.setattr(engine, "prepare_in_background", lambda _key: scheduled.append(True))
+
     warming_service._flush_live_enriched(_live_bar("2330.TWSE"))
 
     assert warming_service._repo.enriched_writes == []
+    assert scheduled == [True]
 
 
 def test_warm_up_fallback_never_scans_kline_daily_for_taiwan(warming_service, monkeypatch):
@@ -344,17 +381,6 @@ def test_warm_up_fallback_never_scans_kline_daily_for_taiwan(warming_service, mo
 
     warming_service._flush_live_enriched(_live_bar("600000.SH"))
     assert len(scanned) == 1 and "kline_daily" in scanned[0]
-
-
-def test_warm_up_skip_is_logged_once(warming_service, caplog):
-    import logging
-
-    with caplog.at_level(logging.DEBUG, logger="app.services.quote_service"):
-        for _ in range(3):
-            warming_service._flush_live_enriched(_live_bar("2330.TWSE"))
-
-    skipped = [r for r in caplog.records if "full recompute skipped" in r.getMessage()]
-    assert len(skipped) == 1
 
 
 @pytest.fixture
@@ -433,19 +459,15 @@ class _IncrementalStockRepo(_WarmingRepo):
         return pl.DataFrame(), None
 
 
-def test_index_fallback_does_not_repeat_the_skip_log(warming_service, monkeypatch, caplog):
-    import logging
-
+def test_index_fallback_writes_nothing_beside_the_taiwan_stock_rows(warming_service, monkeypatch):
     warming_service._repo = _IncrementalStockRepo(warming_service._repo.store.data_dir)
+    warming_service._repo.taiwan_live.prepare()
     monkeypatch.setattr(warming_service, "_enrich_today_incremental", lambda daily, *a, **k: daily)
 
-    with caplog.at_level(logging.DEBUG, logger="app.services.quote_service"):
-        for _ in range(3):
-            warming_service._flush_live_enriched(_live_bar("2330.TWSE"), asset_type="stock")
-            warming_service._flush_live_enriched(_live_bar("t00.TWSE"), asset_type="index")
+    for _ in range(3):
+        warming_service._flush_live_enriched(_live_bar("2330.TWSE"), asset_type="stock")
+        warming_service._flush_live_enriched(_live_bar("t00.TWSE"), asset_type="index")
 
-    skipped = [r for r in caplog.records if "full recompute skipped" in r.getMessage()]
-    assert len(skipped) <= 1
     assert [len(df) for df in warming_service._repo.enriched_writes] == [1, 1, 1]
 
 

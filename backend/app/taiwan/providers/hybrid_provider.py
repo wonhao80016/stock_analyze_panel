@@ -180,22 +180,44 @@ class TaiwanHybridProvider:
     def _live_quote_frame(self, symbols: list[str]) -> pl.DataFrame:
         """Intraday quotes shaped like the daily frame the enrichment pipeline consumes.
 
-        Only quotes the realtime layer marks as live are kept. The official endpoint
+        Only quotes the realtime layer marks as live are kept: continuous-trading quotes
+        ("realtime") and today's closing-auction result ("close_final"). The official endpoint
         below publishes the previous session's close during trading hours, so a stale
         quote that reached this frame would be indistinguishable from a live one and
         would freeze every price at yesterday's close.
+
+        Next to closing results, a today-dated MIS quote from before 13:30 marks a symbol the
+        auction did not trade (e.g. halted) as "settled_no_close"; it is never today's bar.
         """
+        from app.taiwan.realtime.calendar import REGULAR_OPEN_END, taipei_now
+        from app.taiwan.realtime.models import RealtimeStatus
         from app.taiwan.realtime.service import get_realtime_service
 
         quotes = get_realtime_service().get_quotes(symbols)
+        now = taipei_now()
         rows: list[dict] = []
         for canonical, q in quotes.items():
-            if q.last_price is None or not q.source_meta.is_realtime:
+            if q.last_price is None:
+                continue
+            settled_no_close = (
+                q.source_meta.status == RealtimeStatus.OFFICIAL_SNAPSHOT.value
+                and q.source_meta.source == "twse:mis"
+                and q.quote_time is not None
+                and q.trade_date == now.date()
+                and q.quote_time.time() < REGULAR_OPEN_END <= now.time()
+            )
+            if not settled_no_close and not q.source_meta.is_realtime:
                 continue
             # A quote past its freshness threshold keeps is_realtime set, so it has
             # to be rejected explicitly or it would be relabelled as live below.
-            if q.source_meta.is_stale:
+            if q.source_meta.is_stale and not settled_no_close:
                 continue
+            if settled_no_close:
+                status = "settled_no_close"
+            elif q.source_meta.status == RealtimeStatus.CLOSE_FINAL.value:
+                status = RealtimeStatus.CLOSE_FINAL.value
+            else:
+                status = RealtimeStatus.REALTIME.value
             quote_time = q.quote_time
             rows.append({
                 "symbol": canonical,
@@ -215,9 +237,26 @@ class TaiwanHybridProvider:
                 "source_url": q.source_meta.source_url,
                 "retrieved_at": q.source_meta.fetched_at,
                 "trade_date": q.trade_date.isoformat() if q.trade_date else None,
-                "status": "realtime",
+                "status": status,
             })
-        return pl.DataFrame(rows) if rows else pl.DataFrame()
+        if all(row["status"] == "settled_no_close" for row in rows):
+            return pl.DataFrame()
+        return pl.DataFrame(rows)
+
+    @staticmethod
+    def _official_fallback_allowed() -> bool:
+        """Whether the official and daily fallbacks may run: never from the pre-open to the close.
+
+        In that window they return the previous session, which the realtime gate drops.
+        """
+        from app.taiwan.realtime.calendar import get_market_status
+        from app.taiwan.realtime.models import MarketStatus
+
+        return get_market_status() in (
+            MarketStatus.POST_CLOSE,
+            MarketStatus.CLOSED,
+            MarketStatus.NON_TRADING_DAY,
+        )
 
     def get_realtime(
         self,
@@ -234,6 +273,8 @@ class TaiwanHybridProvider:
                 return live
         except Exception as exc:
             logger.warning("Taiwan live quote failed: %s", exc)
+        if not self._official_fallback_allowed():
+            return pl.DataFrame()
         try:
             quote = self.official.fetch_quote(requested)
             if not quote.is_empty():

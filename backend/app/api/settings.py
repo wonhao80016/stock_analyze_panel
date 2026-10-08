@@ -437,6 +437,7 @@ def get_preferences() -> dict:
     return {
         "realtime_quotes_enabled": preferences.get_realtime_quotes_enabled(),
         "realtime_allowed": _realtime_allowed(),
+        "taiwan_market_closed_today": _taiwan_market_closed_today(),
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
@@ -801,6 +802,27 @@ def update_minute_sync(req: MinuteSyncPrefs) -> dict:
 
 class RealtimeQuotesPrefs(BaseModel):
     realtime_quotes_enabled: bool
+
+
+class MarketClosedTodayPrefs(BaseModel):
+    closed: bool
+
+
+def _taiwan_market_closed_today() -> bool:
+    from app.services import preferences
+    from app.taiwan.realtime.calendar import taipei_today
+
+    return preferences.get_taiwan_market_closed_date() == taipei_today().isoformat()
+
+
+@router.put("/preferences/market-closed-today")
+def update_market_closed_today(req: MarketClosedTodayPrefs) -> dict:
+    """Mark today (Asia/Taipei) as an unscheduled Taiwan market closure, which stops quote polling."""
+    from app.services import preferences
+    from app.taiwan.realtime.calendar import taipei_today
+
+    preferences.set_taiwan_market_closed_date(taipei_today().isoformat() if req.closed else None)
+    return {"taiwan_market_closed_today": _taiwan_market_closed_today()}
 
 
 class RealtimeQuoteScopePrefs(BaseModel):

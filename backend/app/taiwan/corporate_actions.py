@@ -434,11 +434,6 @@ def factors_between(events: pl.DataFrame, after: date | None, through: date) -> 
     )
 
 
-TODAY_FACTOR_SCHEMA: dict[str, pl.DataType] = {
-    "symbol": pl.String,
-    "_today_factor": pl.Float64,
-    "_today_volume_factor": pl.Float64,
-}
 _pending_factor_cache: dict[tuple[str, int, date | None, date], pl.DataFrame] = {}
 _PENDING_FACTOR_CACHE_LOCK = threading.Lock()
 _PENDING_FACTOR_CACHE_SIZE = 8
@@ -473,28 +468,6 @@ def pending_factors(
             _pending_factor_cache.clear()
         _pending_factor_cache[key] = result
     return result
-
-
-def today_factors(
-    after: date | None,
-    through: date,
-    store: TaiwanCorporateActionStore | None = None,
-) -> pl.DataFrame:
-    """Per symbol, the combined pending_factors of the events after *after* and on or before *through*.
-
-    Intraday code holds state that ends on *after*, the last published session, and
-    prices today on *through*: these factors move that state onto today's scale.
-    """
-    return (
-        pending_factors(after, through, store)
-        .group_by("symbol")
-        .agg(
-            pl.col("ex_factor").product().alias("_today_factor"),
-            pl.col("volume_factor").product().alias("_today_volume_factor"),
-        )
-        .sort("symbol")
-        .cast(TODAY_FACTOR_SCHEMA)
-    )
 
 
 def year_segments(start: date, end: date) -> list[tuple[date, date]]:

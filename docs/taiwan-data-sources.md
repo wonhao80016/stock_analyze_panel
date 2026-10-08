@@ -73,6 +73,7 @@ ETF classification for price limits:
 - TPEx capital reduction resumption prices: `bulletin/revivt`
 - TPEx ETF directory: the ISIN table `isin.twse.com.tw/isin/C_public.jsp?strMode=4`
 - TPEx ETF product spec (management style): `www.tpex.org.tw/www/zh-tw/ETF/detail`
+- TWSE market open/closed schedule: `rwd/zh/holidaySchedule/holidaySchedule` (see Trading calendar and holidays)
 
 TPEx ETF identity is retained from the official ISIN directory. Product
 classification remains `data_insufficient` until an official structured metadata
@@ -429,6 +430,113 @@ one matrix cannot truthfully expose a single `volume_unit` for both contracts.
 The current execution engine has no absolute-volume participation cap; volume is
 only used to identify non-trading rows, while slippage remains a configured bps
 model.
+
+## Trading calendar and holidays
+
+Exchange holidays come from the TWSE market schedule
+(`https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule?response=json&date=YYYY0101`,
+module `app/taiwan/realtime/holidays.py`). The payload lists every closure and two kinds of
+session markers; columns are located by the field names 「日期」 and 「名稱」, and a payload
+without them is treated as unrecognised, never guessed.
+
+- A name ending in 「交易日」 (e.g. 「國曆新年開始交易日」, 「農曆春節前最後交易日」) is a trading
+  day unless it contains 「無交易」; every other listed date is a closure, including the
+  settlement-only days 「市場無交易，僅辦理結算交割作業」.
+- Each year is cached at `data/taiwan/holidays/{year}.json` (atomic write) with the closures,
+  the listed trading days and the fetch date. Lookups only read this cache; they never fetch.
+- The scheduler job `taiwan_holiday_refresh` runs 30 s after start and every 3 hours. It fetches
+  the current year, and from November also the next year, until one fetch per year per day
+  succeeds or confirms the year is not published. A failed or unrecognised fetch keeps the
+  cached file and is retried on the next run.
+- A year with no cached schedule is unverified, never confirmed trading: weekdays behave as
+  before (quote polling runs, the MIS trade-date check rejects stale quotes).
+
+The default `TaiwanTradingCalendar()` reports a cached closure as a non-trading day, so the
+latest-trading-date resolution, refresh loops, `get_market_status` and quote polling skip it.
+The 16:30 and 21:40 scheduled updates still run on a cached closure (the cron is Monday to
+Friday): the run targets the previous trading session and finalizes it. The publish takes the
+newest stored session as "today", so a holiday or after-midnight republish no longer nulls that
+session's turnover.
+
+Unscheduled closures (typhoon days) are not in the schedule. The settings switch
+「今日休市（停止盤中輪詢）」 (`PUT /api/settings/preferences/market-closed-today`, stored as
+`taiwan_market_closed_date` in preferences) marks today as closed: quote polling stops and
+alerts treat the session as closed. It applies only on the date it was set and does not
+change the trading calendar or the scheduled updates.
+
+On a weekday the cached schedule does not list as closed, polling also probes for an
+unscheduled closure: while no today-dated MIS quote has been seen this session and it is past
+09:05 Asia/Taipei, quotes are polled every 5 minutes instead of every cycle. Once one today-dated
+quote has arrived, polling stays at the normal interval for the rest of the session.
+
+## Intraday quotes and the closing auction
+
+The session model is pre-open, continuous trading until 13:25, the closing auction
+13:25–13:30:00, then post-close. During the closing auction quotes are still polled, but
+monitor rules and alerts pause and are evaluated once on the 13:30 result.
+
+MIS quotes are classified by their own quote time and trade date, not by the wall clock:
+
+- `ts=1` is a trial match (`TRIAL_MATCH`) during either auction; it is shown but never counts
+  as a live trade.
+- A today-dated quote with `ts=0` and a quote time at or after 13:30:00 is the closing result
+  (`CLOSE_FINAL`). It is accepted as today's bar after the close, its volume becomes its own
+  13:30 minute bar, and it is never marked stale.
+- Any other today-dated quote during continuous trading or the closing auction is realtime;
+  everything else, including a quote dated on an earlier day, is an official snapshot and
+  never becomes today's bar.
+
+Final sync: after 13:30 the closing round is complete only when the fetch succeeded and every
+pool symbol that traded today has a `CLOSE_FINAL` quote; a STOCK_DAY_ALL or daily-K fallback
+never counts. Untraded symbols do not block it, and neither does a symbol settled without a
+close (`settled_no_close`: it traded today, but after 13:30 MIS only has an official snapshot
+stamped before 13:30). A round whose records carry no status field at all (a provider that
+reports none) counts as complete once the fetch succeeds. The round is retried on every poll until
+14:30, then given up with `closing_quote_missing` and one partial alert pass. If MIS publishes
+the closing results in batches, the round can finish once every traded symbol has one, before
+the exchange has published them all.
+
+These rules were checked against MIS samples recorded on 2026-10-08 at 08:45, 09:00, 09:32
+and 14:56 (`backend/tests/fixtures/mis_2026_10_08/`). No sample from 13:25–13:30 was
+recorded, so the closing-auction quotes in the tests are edited from those samples; a live
+check is planned for 2026-10-12.
+
+Official close-style quotes (STOCK_DAY_ALL and the TPEx close quotes) are cached for 10 minutes
+per URL with single-flight loading (a failure is cached for 30 seconds). They are a fallback
+only after the close and on non-trading days; during pre-open, continuous trading and the
+closing auction the realtime chain is MIS, then Yahoo, with no official download. Yahoo's open
+is the session bar's `indicators.quote[0].open`, or null when that bar is not today's.
+
+Intraday volume is MIS board-lot (整股) volume: it excludes odd lots, block trades and
+after-hours fixed-price trades. Intraday views label it 「盤中為整股量（不含零股、鉅額、盤後定價）」,
+turnover and volume ratios use it until the official daily bar is stored, and the intraday
+amount is shown as 「—」 (MIS gives none). Once the official bar is published, volume, amount
+and turnover come from it. The opening volume ratio is extrapolated to a full session from
+the elapsed session time, counted in whole minutes and at least 15 minutes (a factor of at
+most 18); the value and `signal_volume_surge` both use it and the chart labels it 「推估」.
+
+Minute bars: when more than 60 seconds of trading time passed between two polls, the
+cumulative volume change is stored as `unattributed_volume` instead of being credited to one
+minute; after a restart the stored total is the baseline. Volume before the first snapshot of
+the day is unattributed too. The intraday average-price line shows its coverage (attributed /
+(attributed + unattributed)) and is hidden below 80%; charts no longer connect missing minutes.
+
+## Intraday enriched rows
+
+Taiwan intraday enriched rows come from the pipeline that publishes the enriched table
+(`app/taiwan/live_enriched.py`): up to 1,200 stored sessions before today plus today's live bar
+run through `compute_taiwan_enriched`, so today's row matches the row the evening publish
+writes, limit signals and streaks included. Non-Taiwan rows keep the incremental
+`compute_enriched_today`. Until the history is prepared after a start, Taiwan rows are skipped
+rather than computed from a short history.
+
+Today's corporate actions are listed only after the session, so a quoted previous close that
+differs from the stored close stands in for the event's reference price. It is used only when
+the store holds the previous trading session for that exchange, no listed event falls after
+the symbol's last stored session, and the difference is at least 0.005; the kind is guessed
+from the price factor (below 1 a capital reduction, above the split factor a par-value change,
+otherwise a dividend). When the store is behind, no stand-in is made and a warning is logged
+once a day.
 # Point-in-time fundamentals
 
 Taiwan company fundamentals use official TWSE/TPEx MOPS open-data records and

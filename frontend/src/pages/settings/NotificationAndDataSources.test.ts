@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../../lib/api'
 
 const read = (relativePath: string) => readFileSync(resolve(__dirname, relativePath), 'utf-8')
 
@@ -78,5 +79,37 @@ describe('data source settings', () => {
     expect(dataSources).not.toContain("? 'TickFlow'")
     expect(dataSources).not.toContain('TickFlowKeyConfig')
     expect(dataSources).toContain('台灣官方資料源 (TWSE/TPEx)')
+  })
+})
+
+describe('manual market closure', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('puts the toggle next to the realtime quotes toggle', () => {
+    const code = read('Monitoring.tsx')
+    const realtime = code.indexOf('label="即時行情"')
+    const closed = code.indexOf('label="今日休市（停止盤中輪詢）"')
+    expect(realtime).toBeGreaterThan(-1)
+    expect(closed).toBeGreaterThan(realtime)
+    expect(code.slice(realtime, closed)).not.toContain('<Card')
+    expect(code).toContain('prefs?.taiwan_market_closed_today')
+    expect(code).toContain('api.updateMarketClosedToday(closed)')
+  })
+
+  it('sends the closed flag to the settings endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ taiwan_market_closed_today: true }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api.updateMarketClosedToday(true)).resolves.toEqual({ taiwan_market_closed_today: true })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/settings/preferences/market-closed-today')
+    expect(init.method).toBe('PUT')
+    expect(JSON.parse(init.body)).toEqual({ closed: true })
   })
 })

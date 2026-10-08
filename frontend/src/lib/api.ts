@@ -120,6 +120,8 @@ export interface MinuteKlineRow {
   close: number
   volume: number
   amount: number
+  /** Taiwan: volume traded across a recording gap, not part of this bar's volume. */
+  unattributed_volume?: number | null
 }
 
 export interface MinuteKlineSession {
@@ -153,8 +155,14 @@ export interface KlineRow {
   macd_hist?: number | null
   rsi_14?: number | null
   vol_ratio_5d?: number | null
+  /** Taiwan live candle: multiplier scaling its partial-session volume to a full session; above 1 the volume ratio is an estimate. */
+  volume_time_factor?: number | null
+  /** Taiwan: volume and turnover count intraday board-lot trades only and amount is null, until the official daily row is stored. */
+  board_lot_volume?: boolean
   [key: string]: any
 }
+
+export const BOARD_LOT_VOLUME_NOTE = '盤中為整股量（不含零股、鉅額、盤後定價）'
 
 // ===== Watchlist =====
 export interface WatchlistEntry {
@@ -795,6 +803,7 @@ export interface AlertEvent {
 export type TaiwanMarketStatus =
   | 'open'
   | 'pre_open'
+  | 'closing_auction'
   | 'post_close'
   | 'closed'
   | 'non_trading_day'
@@ -2216,6 +2225,7 @@ export interface CustomSourceConfig {
 
 export interface Preferences {
   realtime_quotes_enabled: boolean
+  taiwan_market_closed_today?: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
@@ -2415,6 +2425,11 @@ export const api = {
     request<{ realtime_quotes_enabled: boolean; realtime_allowed?: boolean; mode?: string; error?: string }>('/api/settings/preferences/realtime-quotes', {
       method: 'PUT',
       body: JSON.stringify({ realtime_quotes_enabled: enabled }),
+    }),
+  updateMarketClosedToday: (closed: boolean) =>
+    request<{ taiwan_market_closed_today: boolean }>('/api/settings/preferences/market-closed-today', {
+      method: 'PUT',
+      body: JSON.stringify({ closed }),
     }),
   updateRealtimeQuoteScope: (cfg: Partial<Pick<Preferences, 'realtime_pull_stock' | 'realtime_pull_etf' | 'realtime_pull_index' | 'realtime_index_mode' | 'realtime_index_symbols'>>) =>
     request<Partial<Preferences>>('/api/settings/preferences/realtime-quote-scope', {

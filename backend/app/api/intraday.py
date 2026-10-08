@@ -97,10 +97,16 @@ def status(request: Request):
         res = qs.status()
 
     # Enrich with Taiwan real-time layer state
+    from app.services import preferences
+    from app.taiwan.realtime.models import MarketStatus
+
     tw_svc = get_realtime_service()
     now_tpe = taipei_now()
+    market_status = get_market_status(now_tpe)
+    if preferences.get_taiwan_market_closed_date() == now_tpe.date().isoformat():
+        market_status = MarketStatus.NON_TRADING_DAY
     res["taiwan_market"] = {
-        "status": get_market_status(now_tpe).value,
+        "status": market_status.value,
         "taipei_time": now_tpe.isoformat(),
         "cache_hits": tw_svc.cache_hits,
         "cache_misses": tw_svc.cache_misses,

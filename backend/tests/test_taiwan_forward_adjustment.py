@@ -28,7 +28,7 @@ from app.taiwan.corporate_actions import (
     factors_between,
     forward_adjusted,
     official_ratio,
-    today_factors,
+    pending_factors,
 )
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
@@ -594,8 +594,9 @@ def test_todays_factors_never_include_a_later_event(tmp_path):
         _event("9927.TWSE", D[4], EXDIV, 70.10, 65.10),
     ))
 
-    assert today_factors(D[2], D[3], store).rows() == [("2379.TWSE", 729.0 / 704.0, 1.0)]
-    assert today_factors(D[3], D[3], store).is_empty()
+    pending = pending_factors(D[2], D[3], store).select("symbol", "ex_factor", "volume_factor")
+    assert pending.rows() == [("2379.TWSE", 729.0 / 704.0, 1.0)]
+    assert pending_factors(D[3], D[3], store).is_empty()
 
 
 def _record(data_dir: Path, through: date) -> None:

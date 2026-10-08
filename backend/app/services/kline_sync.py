@@ -520,7 +520,7 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
             existing = pl.read_parquet(out)
             if "datetime" in existing.columns:
                 existing = existing.filter(pl.col("datetime").is_not_null())
-            day_df = pl.concat([existing, day_df.drop("_trade_date")]).unique(
+            day_df = pl.concat([existing, day_df.drop("_trade_date")], how="diagonal_relaxed").unique(
                 subset=["symbol", "datetime"], keep="last",
             )
         else:

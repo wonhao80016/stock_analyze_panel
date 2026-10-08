@@ -129,7 +129,7 @@ class IndustryContextEvidence(BaseModel):
 class PriceContextEvidence(BaseModel):
     """Price, volume, amount, and return metrics (KNOWN & DERIVED)."""
 
-    trade_date: str
+    trade_date: str  # session the figures belong to; earlier than as_of_date when it has no bars
     open: float | None = None
     high: float | None = None
     low: float | None = None
@@ -387,22 +387,24 @@ class TaiwanStockResearchContextService:
 
         # 2. Historical Daily Window (NO look-ahead: dates <= target)
         available_dates = sorted([d for d in self.daily_store.available_dates() if d <= target])
-        target_in_store = target in available_dates
         daily_as_of = max(available_dates) if available_dates else None
         daily_status: DatasetFreshnessStatus = (
             "current" if (daily_as_of and daily_as_of >= target)
             else ("stale" if daily_as_of else "unavailable")
         )
+        # Before the evening update stores the target's bars, or on a holiday, the price and
+        # technical figures are the latest stored session's; data quality still judges the target.
+        price_date = daily_as_of or target
 
         # Up to 65 prior trading days for 20D/60D indicators
         window_dates = available_dates[-65:] if len(available_dates) >= 65 else available_dates
         hist_df = self.daily_store.read_range([canonical], window_dates[0] if window_dates else target, target) if window_dates else pl.DataFrame()
-        events = read_events_or_empty(self.corporate_actions, end=target, symbols=[canonical])
-        # Multi-day returns and extremes compare target with earlier sessions on target's scale.
-        hist_df = forward_adjusted(hist_df, events, target)
+        events = read_events_or_empty(self.corporate_actions, end=price_date, symbols=[canonical])
+        # Multi-day returns and extremes compare the priced session with earlier ones on its scale.
+        hist_df = forward_adjusted(hist_df, events, price_date)
 
         # Price Context & Technical Metrics
-        curr_row = hist_df.filter(pl.col("date") == target).tail(1) if not hist_df.is_empty() else pl.DataFrame()
+        curr_row = hist_df.filter(pl.col("date") == price_date).tail(1) if not hist_df.is_empty() else pl.DataFrame()
         prev_date = available_dates[-2] if len(available_dates) >= 2 else None
         prev_row = hist_df.filter(pl.col("date") == prev_date).tail(1) if (prev_date and not hist_df.is_empty()) else pl.DataFrame()
 
@@ -415,8 +417,8 @@ class TaiwanStockResearchContextService:
         p_close = float(prev_row["close"][0]) if not prev_row.is_empty() and prev_row["close"][0] is not None else None
         # A corporate-action session moves from the exchange reference price and has published limits.
         ref_row = None
-        if target_in_store:
-            ref = reference_prices(events, prev_date, target)
+        if daily_as_of is not None:
+            ref = reference_prices(events, prev_date, price_date)
             ref_row = ref.row(0, named=True) if not ref.is_empty() else None
         if ref_row is not None:
             p_close = float(ref_row["ref_price"])
@@ -454,13 +456,13 @@ class TaiwanStockResearchContextService:
                 dist_l20 = round((c_price / l_20d) - 1.0, 6)
 
         published = read_enriched_partition(
-            target, ["ma5", "ma20", "ma60", "vol_ratio_5d", "rsi_14"], [canonical]
+            price_date, ["ma5", "ma20", "ma60", "vol_ratio_5d", "rsi_14"], [canonical]
         )
         ind_row = published.row(0, named=True) if published is not None and not published.is_empty() else None
-        # Prices stay on the target session's traded scale; raw_close / close undoes later events.
+        # Prices stay on the priced session's traded scale; raw_close / close undoes later events.
         to_target = 1.0
         if ind_row:
-            scale_rows = read_enriched_partition(target, ["close", "raw_close"], [canonical])
+            scale_rows = read_enriched_partition(price_date, ["close", "raw_close"], [canonical])
             scale_row = scale_rows.row(0, named=True) if scale_rows is not None and not scale_rows.is_empty() else {}
             if scale_row.get("close") and scale_row.get("raw_close") and scale_row["close"] > 0:
                 to_target = scale_row["raw_close"] / scale_row["close"]
@@ -480,7 +482,7 @@ class TaiwanStockResearchContextService:
         )
 
         price_evidence = PriceContextEvidence(
-            trade_date=str(target),
+            trade_date=str(price_date),
             open=o_price,
             high=h_price,
             low=l_price,
@@ -499,7 +501,7 @@ class TaiwanStockResearchContextService:
             meta=EvidenceMeta(
                 classification="KNOWN" if c_price is not None else "MISSING",
                 source="taiwan_daily_store",
-                as_of=str(target),
+                as_of=str(price_date),
             ),
         )
 
@@ -516,7 +518,7 @@ class TaiwanStockResearchContextService:
                 classification="DERIVED" if ind_row else "MISSING",
                 source="kline_daily_enriched",
                 formula="published_enriched_partition",
-                as_of=str(target),
+                as_of=str(price_date),
             ),
         )
 
@@ -736,7 +738,7 @@ class TaiwanStockResearchContextService:
         # 8. Market Rules Context (Phase 3 MarketProfileBridge)
         rule_known = True
         try:
-            limit_pct = MarketProfileBridge.get_price_limit_pct(inst, target)
+            limit_pct = MarketProfileBridge.get_price_limit_pct(inst, price_date)
         except ValueError:
             limit_pct = None
             rule_known = False
@@ -748,7 +750,7 @@ class TaiwanStockResearchContextService:
 
         if p_close is not None and p_close > 0:
             if not is_no_lim and limit_pct is not None:
-                upper_l, lower_l = MarketProfileBridge.calc_limits(p_close, inst, target)
+                upper_l, lower_l = MarketProfileBridge.calc_limits(p_close, inst, price_date)
                 if ref_row is not None and ref_row["limit_up"] is not None and ref_row["limit_down"] is not None:
                     upper_l, lower_l = ref_row["limit_up"], ref_row["limit_down"]
             tick_sz = TickSizeModel.get_tick_size(p_close, MarketProfileBridge.get_tick_size_class(inst))
@@ -762,7 +764,7 @@ class TaiwanStockResearchContextService:
             meta=EvidenceMeta(
                 classification="KNOWN" if limit_pct is not None or is_no_lim else "MISSING",
                 source="taiwan_market_rules",
-                as_of=str(target),
+                as_of=str(price_date),
             ),
         )
 
@@ -770,7 +772,7 @@ class TaiwanStockResearchContextService:
         realtime_evidence = RealtimeContextEvidence(
             status="market_closed",
             last_price=c_price,
-            quote_ts=str(target),
+            quote_ts=str(price_date),
             meta=EvidenceMeta(classification="KNOWN" if c_price is not None else "MISSING", source="taiwan_daily_store"),
         )
         monitor_evidence = MonitorContextEvidence(
@@ -786,7 +788,7 @@ class TaiwanStockResearchContextService:
             SectionQualityMeta(section="margin", status=m_status, as_of=str(m_as_of)),
             SectionQualityMeta(section="market", status=market_snap.data_quality.overall_status, as_of=market_snap.trade_date),
             SectionQualityMeta(section="industry", status=industry_evidence.status, as_of=str(target)),
-            SectionQualityMeta(section="indicators", status="current" if ind_row else "unavailable", as_of=str(target)),
+            SectionQualityMeta(section="indicators", status="current" if ind_row else "unavailable", as_of=str(price_date)),
         ]
         active_statuses = [daily_status, inst_status, m_status]
         if all(s == "current" for s in active_statuses):

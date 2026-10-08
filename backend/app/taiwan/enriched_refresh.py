@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from pathlib import Path
 
@@ -41,7 +41,6 @@ from app.taiwan.corporate_actions import (
     TaiwanCorporateActionStore,
     adjustment_factors,
     attach_reference_prices,
-    today_factors,
 )
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore, listing_sessions
 from app.taiwan.market_rules import ListingSessions, PriceLimitModel
@@ -144,26 +143,22 @@ class TaiwanEnrichedRefreshService:
             logger.info("taiwan enriched refresh skipped: empty window")
             return 0
 
-        # Issued shares are the turnover denominator; without them turnover_rate stays null so the
-        # schema never depends on the share-capital file. compute_enriched nulls it for every
-        # Taiwan row that is not today, so the current count never reaches a historical date.
         instruments = self.share_capital.as_instruments()
         if instruments.is_empty():
             logger.warning(
                 "taiwan enriched refresh: no share capital on disk, turnover_rate will be null"
             )
-        raw = attach_reference_prices(
-            filter_halt_days(raw),
-            events.filter(pl.col("date") <= end),
-            with_limits=True,
+        enriched = compute_taiwan_enriched(
+            raw,
+            events,
+            end,
+            trading_days=available,
+            limits=limits,
+            instruments=instruments,
+            today=max(available),
         )
-        enriched = compute_enriched(raw, factors=factors, instruments=instruments)
         if enriched.is_empty():
             return 0
-        if "turnover_rate" not in enriched.columns:
-            enriched = enriched.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
-        enriched = self._add_limit_signals(enriched, sessions, limits)
-        enriched = add_volume_patterns(enriched, available)
         if not full and self._history_schema_differs(enriched, start, end):
             logger.info(
                 "taiwan enriched: a historical partition has another schema, republishing every partition"
@@ -418,34 +413,7 @@ class TaiwanEnrichedRefreshService:
 
     def _limit_profile(self, symbols: list[str], sessions: ListingSessions) -> pl.DataFrame:
         """Per-symbol statutory limit percentage, tick ladder and initial-listing no-limit window."""
-        from app.taiwan.universe import get_security_master
-        from app.taiwan.universe.models import MarketProfileBridge
-
-        master = get_security_master()
-        rows = []
-        for sym in symbols:
-            inst = master.get_instrument(sym)
-            if inst is None:
-                continue
-            try:
-                pct = MarketProfileBridge.get_price_limit_pct(inst)
-            except ValueError:
-                # Unconfirmed regulatory profile: leave the limits undefined.
-                continue
-            if pct is None:
-                continue
-            window = MarketProfileBridge.ipo_no_limit_window(inst, sessions)
-            rows.append({
-                "symbol": sym,
-                "limit_pct": float(pct),
-                "is_etf_tick": inst.instrument_type == "etf",
-                "ipo_start": window[0] if window else None,
-                "ipo_end": window[1] if window else None,
-            })
-        return pl.DataFrame(rows, schema={
-            "symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean,
-            "ipo_start": pl.Date, "ipo_end": pl.Date,
-        })
+        return limit_profile(symbols, sessions)
 
     def _add_limit_signals(
         self,
@@ -453,32 +421,13 @@ class TaiwanEnrichedRefreshService:
         sessions: ListingSessions | None = None,
         profile: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
-        """Derive the Taiwan limit-board signals from the statutory daily limits.
-
-        The shared pipeline skips these because it wants an A-share instrument
-        table for the limit prices; Taiwan carries its own rules instead. Limits and
-        ticks are raw-scale prices, so the comparison uses raw_close / raw_high / raw_low
-        and the previous close moved onto the raw scale; a corporate-action session
-        uses the limits the exchange published. The limit streaks are counted from these signals.
-        A session inside an initial listing's no-limit window, placed on *sessions* (default: the
-        stored calendar), has no limit board. A *profile* from _limit_profile is used as given.
-        """
-        cols = ["signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"]
-        enriched = enriched.with_columns([
-            pl.lit(None, dtype=pl.Float64).alias(c)
-            for c in (REF_LIMIT_UP, REF_LIMIT_DOWN) if c not in enriched.columns
-        ])
+        """add_taiwan_limit_signals with *profile* (default: _limit_profile on *sessions*, the stored calendar)."""
         if profile is None:
             profile = self._limit_profile(
                 enriched["symbol"].unique().to_list(),
                 sessions if sessions is not None else listing_sessions(),
             )
-        if profile.is_empty():
-            out = enriched.with_columns([pl.lit(False).alias(c) for c in cols])
-        else:
-            out = self._limit_signals(enriched.join(profile, on="symbol", how="left"))
-        out = with_limit_streak(out, "signal_limit_up", "consecutive_limit_ups")
-        return with_limit_streak(out, "signal_limit_down", "consecutive_limit_downs")
+        return add_taiwan_limit_signals(enriched, profile)
 
     @staticmethod
     def _limit_signals(out: pl.DataFrame) -> pl.DataFrame:
@@ -548,6 +497,97 @@ class TaiwanEnrichedRefreshService:
         return bars_written is not None and bars_written > published
 
 
+def compute_taiwan_enriched(
+    raw: pl.DataFrame,
+    events: pl.DataFrame,
+    end: date,
+    trading_days: Iterable[date],
+    limits: pl.DataFrame,
+    instruments: pl.DataFrame,
+    *,
+    today: date,
+) -> pl.DataFrame:
+    """Every enriched row the publish writes for the raw daily bars *raw* dated on or before *end*.
+
+    Prices are forward-adjusted with the *events* dated on or before *end*; *trading_days* is the
+    market calendar, *limits* a limit_profile frame and *instruments* the share-capital frame.
+    Issued shares are the turnover denominator; without them turnover_rate stays null, so the
+    schema never depends on the share-capital file. Only rows dated *today*, the newest stored
+    session rather than the wall-clock date, get it: the current count never reaches an earlier
+    session, and a republish on a holiday or after midnight keeps the newest one.
+    """
+    raw = attach_reference_prices(
+        filter_halt_days(raw),
+        events.filter(pl.col("date") <= end),
+        with_limits=True,
+    )
+    enriched = compute_enriched(
+        raw, factors=adjustment_factors(events, end), instruments=instruments, today=today
+    )
+    if enriched.is_empty():
+        return enriched
+    if "turnover_rate" not in enriched.columns:
+        enriched = enriched.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
+    enriched = add_taiwan_limit_signals(enriched, limits)
+    return add_volume_patterns(enriched, trading_days)
+
+
+def limit_profile(symbols: list[str], sessions: ListingSessions) -> pl.DataFrame:
+    """Per-symbol statutory limit percentage, tick ladder and initial-listing no-limit window on *sessions*."""
+    from app.taiwan.universe import get_security_master
+    from app.taiwan.universe.models import MarketProfileBridge
+
+    master = get_security_master()
+    rows = []
+    for sym in symbols:
+        inst = master.get_instrument(sym)
+        if inst is None:
+            continue
+        try:
+            pct = MarketProfileBridge.get_price_limit_pct(inst)
+        except ValueError:
+            # Unconfirmed regulatory profile: leave the limits undefined.
+            continue
+        if pct is None:
+            continue
+        window = MarketProfileBridge.ipo_no_limit_window(inst, sessions)
+        rows.append({
+            "symbol": sym,
+            "limit_pct": float(pct),
+            "is_etf_tick": inst.instrument_type == "etf",
+            "ipo_start": window[0] if window else None,
+            "ipo_end": window[1] if window else None,
+        })
+    return pl.DataFrame(rows, schema={
+        "symbol": pl.Utf8, "limit_pct": pl.Float64, "is_etf_tick": pl.Boolean,
+        "ipo_start": pl.Date, "ipo_end": pl.Date,
+    })
+
+
+def add_taiwan_limit_signals(enriched: pl.DataFrame, profile: pl.DataFrame) -> pl.DataFrame:
+    """Derive the Taiwan limit-board signals from the statutory daily limits.
+
+    The shared pipeline skips these because it wants an A-share instrument
+    table for the limit prices; Taiwan carries its own rules instead. Limits and
+    ticks are raw-scale prices, so the comparison uses raw_close / raw_high / raw_low
+    and the previous close moved onto the raw scale; a corporate-action session
+    uses the limits the exchange published. The limit streaks are counted from these signals.
+    A session inside an initial listing's no-limit window of *profile* (a limit_profile frame)
+    has no limit board.
+    """
+    cols = ["signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"]
+    enriched = enriched.with_columns([
+        pl.lit(None, dtype=pl.Float64).alias(c)
+        for c in (REF_LIMIT_UP, REF_LIMIT_DOWN) if c not in enriched.columns
+    ])
+    if profile.is_empty():
+        out = enriched.with_columns([pl.lit(False).alias(c) for c in cols])
+    else:
+        out = TaiwanEnrichedRefreshService._limit_signals(enriched.join(profile, on="symbol", how="left"))
+    out = with_limit_streak(out, "signal_limit_up", "consecutive_limit_ups")
+    return with_limit_streak(out, "signal_limit_down", "consecutive_limit_downs")
+
+
 def published_factor_through(data_dir: Path | None = None) -> date | None:
     """Newest session whose events the published enriched scale includes, from the last full publish."""
     path = (Path(data_dir) if data_dir is not None else _enriched_root().parent) / FACTOR_SET_FILE
@@ -558,17 +598,6 @@ def published_factor_through(data_dir: Path | None = None) -> date | None:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.warning("taiwan enriched factor record unreadable: %s", exc)
         return None
-
-
-def unpublished_factors(today: date, fallback_after: date | None = None) -> pl.DataFrame:
-    """Per symbol, the factors of events the published enriched scale does not include yet.
-
-    Those are the events after the last full publish's through date and on or before
-    *today*; a price quoted today is on their scale, published history is not. Without a
-    record the published table carries no factors and *fallback_after* bounds the window.
-    Columns: symbol, _today_factor, _today_volume_factor.
-    """
-    return today_factors(published_factor_through() or fallback_after, today)
 
 
 def refresh_taiwan_enriched(full: bool = False, repo=None) -> int:

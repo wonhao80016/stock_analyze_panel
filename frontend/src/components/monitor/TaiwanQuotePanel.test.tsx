@@ -6,6 +6,7 @@ import { TaiwanQuotePanel } from './TaiwanQuotePanel'
 
 vi.mock('@/lib/api', () => ({
   api: { watchlistList: vi.fn(), taiwanQuotes: vi.fn() },
+  BOARD_LOT_VOLUME_NOTE: '盤中為整股量（不含零股、鉅額、盤後定價）',
 }))
 
 afterEach(() => {
@@ -76,5 +77,26 @@ describe('TaiwanQuotePanel price-limit labels', () => {
     expect(screen.getByText('漲跌幅規則未知')).toBeInTheDocument()
     expect(screen.getByText('漲停價 (未知)')).toBeInTheDocument()
     expect(screen.queryByText('漲停價 (無限制)')).not.toBeInTheDocument()
+  })
+})
+
+describe('TaiwanQuotePanel intraday volume', () => {
+  it('labels a realtime quote as board-lot volume and shows its missing amount as a dash', async () => {
+    await renderPanel(quote({
+      amount: null as never,
+      source_meta: { source: 'twse:mis', status: 'realtime', is_stale: false, is_realtime: true } as never,
+    }))
+
+    expect(screen.getByText('盤中為整股量（不含零股、鉅額、盤後定價）')).toBeInTheDocument()
+    expect(screen.getByText('成交金額').nextElementSibling).toHaveTextContent('—')
+  })
+
+  it('shows an official snapshot without the label', async () => {
+    await renderPanel(quote({
+      source_meta: { source: 'twse:official', status: 'official_snapshot', is_stale: false, is_realtime: false } as never,
+    }))
+
+    expect(screen.queryByText('盤中為整股量（不含零股、鉅額、盤後定價）')).not.toBeInTheDocument()
+    expect(screen.getByText('成交金額').nextElementSibling).toHaveTextContent('520.00 萬')
   })
 })

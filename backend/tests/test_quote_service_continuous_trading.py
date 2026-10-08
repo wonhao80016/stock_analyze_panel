@@ -57,10 +57,17 @@ def test_no_lunch_break_1130_is_continuous():
         assert QuoteService._is_continuous_trading() is True
 
 
-def test_close_1330_is_continuous():
-    """13:30 收盤最後一刻, 仍屬連續交易。"""
-    with _set_now(13, 30, weekday=0):
+def test_close_1324_is_continuous():
+    """13:24 is the last minute before the closing auction and still continuous trading."""
+    with _set_now(13, 24, weekday=0):
         assert QuoteService._is_continuous_trading() is True
+
+
+def test_closing_auction_1325_to_1330_not_continuous():
+    """The 13:25-13:30 closing auction only carries trial prices, so alerts pause."""
+    for minute in (25, 27, 30):
+        with _set_now(13, minute, weekday=0):
+            assert QuoteService._is_continuous_trading() is False
 
 
 # ── 盤前試撮與盤後定價必須排除 (應返回 False) ────────────────────────

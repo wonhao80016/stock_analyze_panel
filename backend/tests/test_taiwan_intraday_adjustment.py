@@ -1,30 +1,23 @@
-"""Intraday indicators on and after a corporate-action day match the forward-adjusted history.
+"""compute_enriched_today moves the recursive history state onto today's scale by _today_factor.
 
 The expected row always comes from the same intraday code run on history that is already
-on today's scale with no factor to apply. Three moments are covered: the event day before
-the evening publish (published history still on the old scale), the event day after that
-publish rewrote history (the live state still ends the day before), and the next day.
+on today's scale with no factor to apply.
 """
 from __future__ import annotations
 
-import json
 import math
 from datetime import date, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
 from app.indicators.pipeline import compute_enriched_today, compute_indicators
-from app.services.quote_service import QuoteService
-from app.taiwan.corporate_actions import TaiwanCorporateActionStore, corporate_action_schema
 from app.tickflow.repository import DataStore, KlineRepository
 
 SYMBOL = "2379.TWSE"
 LATEST = date(2026, 9, 7)
 TODAY = date(2026, 9, 8)
-NEXT_DAY = date(2026, 9, 9)
 TODAY_BAR = {"open": 690.0, "high": 700.0, "low": 680.0, "close": 692.0, "volume": 3_000_000.0}
 
 
@@ -130,98 +123,3 @@ def test_the_state_does_not_move_without_an_event_today(tmp_path):
 
     assert neutral.select(plain.columns).equals(plain)
     assert plain["ex_rights"].to_list() == [False]
-
-
-def _event(symbol: str, d: date, pre: float, ref: float) -> dict:
-    return {
-        "symbol": symbol, "date": d, "kind": "exdiv", "pre_close": pre, "ref_price": ref, "limit_up": None,
-        "limit_down": None, "open_ref": ref, "ex_factor": pre / ref, "official_label": None, "provider": "twse",
-        "source": "test", "source_url": "u", "retrieved_at": None, "trade_date": d, "status": "official",
-    }
-
-
-@pytest.fixture
-def quote_path(tmp_path, monkeypatch):
-    """An event on TODAY in the table; returns a setter for the published record and today's date."""
-    from app.config import settings
-    from app.services import quote_service
-
-    monkeypatch.setattr(settings, "data_dir", tmp_path / "data")
-    pre_close = _published(1.0, 1.0).filter(pl.col("date") == LATEST)["raw_close"][0]
-    ref = pre_close / (729.0 / 704.0)
-    TaiwanCorporateActionStore().upsert(pl.DataFrame(
-        [_event(SYMBOL, TODAY, pre_close, ref), _event("9927.TWSE", NEXT_DAY, 70.10, 65.10)],
-        schema=corporate_action_schema(),
-    ))
-
-    def at(day: date, published_through: date | None) -> float:
-        monkeypatch.setattr(quote_service, "cn_today", lambda: day)
-        record = tmp_path / "data" / ".taiwan_enriched_factors.json"
-        record.unlink(missing_ok=True)
-        if published_through is not None:
-            record.write_text(json.dumps({"through": published_through.isoformat()}), encoding="utf-8")
-        return ref
-
-    return at
-
-
-def _through_quote_path(tmp_path: Path, history: pl.DataFrame, today: pl.DataFrame, baseline: date) -> pl.DataFrame:
-    repo = _repo(tmp_path, history, baseline)
-    joined = QuoteService._with_today_factors(SimpleNamespace(_repo=repo), today)
-    return compute_enriched_today(repo.get_live_agg(), history.filter(pl.col("date") == baseline), joined)
-
-
-def test_the_event_day_before_the_evening_publish(tmp_path, quote_path):
-    ref = quote_path(TODAY, LATEST)
-    factor = _published(1.0, 1.0).filter(pl.col("date") == LATEST)["raw_close"][0] / ref
-
-    got = _through_quote_path(tmp_path / "live", _published(1.0, 1.0), _today(ref), LATEST)
-    expected = _intraday(tmp_path / "expected", _published(factor, 1.0), _today(ref))
-
-    _assert_same(got, expected)
-    assert got["close"].to_list() == [692.0]
-
-
-def test_the_event_day_after_the_evening_publish_applies_the_factor_once(tmp_path, quote_path):
-    """The publish rewrote history onto the new scale; the live state still ends the day before."""
-    ref = quote_path(TODAY, TODAY)
-    factor = _published(1.0, 1.0).filter(pl.col("date") == LATEST)["raw_close"][0] / ref
-    republished = _published(factor, 1.0, raw_moves=False)
-    assert republished.filter(pl.col("date") == LATEST).select(pl.col("close") / pl.col("raw_close")).item() != 1.0
-
-    got = _through_quote_path(tmp_path / "live", republished, _today(ref), LATEST)
-    expected = _intraday(tmp_path / "expected", _published(factor, 1.0), _today(ref))
-
-    _assert_same(got, expected)
-    assert got["close"].to_list() == [692.0]
-
-
-def test_the_day_after_the_event(tmp_path, quote_path):
-    ref = quote_path(NEXT_DAY, TODAY)
-    factor = _published(1.0, 1.0).filter(pl.col("date") == LATEST)["raw_close"][0] / ref
-    history = _published(factor, 1.0, last=TODAY, raw_moves=False)
-
-    got = _through_quote_path(tmp_path / "live", history, _today(692.0, NEXT_DAY), TODAY)
-    expected = _intraday(tmp_path / "expected", _published(factor, 1.0, last=TODAY), _today(692.0, NEXT_DAY), TODAY)
-
-    _assert_same(got, expected)
-
-
-def test_the_quote_path_gives_taiwan_rows_a_factor_and_never_tomorrows(tmp_path, quote_path):
-    quote_path(TODAY, LATEST)
-    fake = SimpleNamespace(_repo=SimpleNamespace(get_live_agg_date=lambda: LATEST))
-    frame = pl.DataFrame({"symbol": [SYMBOL, "9927.TWSE", "600000.SH"], "close": [692.0, 66.0, 10.0]})
-
-    joined = QuoteService._with_today_factors(fake, frame).sort("symbol")
-
-    assert joined.select("symbol", "_today_factor", "_today_volume_factor").rows() == [
-        ("2379.TWSE", pytest.approx(729.0 / 704.0), 1.0), ("600000.SH", None, None), ("9927.TWSE", 1.0, 1.0),
-    ]
-
-
-def test_the_quote_path_leaves_other_markets_untouched(tmp_path, monkeypatch):
-    """Regression guard: frames without Taiwan symbols never read the corporate-action table."""
-    fake = SimpleNamespace(_repo=SimpleNamespace(get_live_agg_date=lambda: pytest.fail("read the Taiwan table")))
-    frame = pl.DataFrame({"symbol": ["600000.SH"], "close": [10.0]})
-
-    assert QuoteService._with_today_factors(fake, frame) is frame

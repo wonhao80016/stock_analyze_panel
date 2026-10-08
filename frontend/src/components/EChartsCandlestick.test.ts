@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { changeBase, rawChangeBase, unadjustedClose, unadjustedCloseHTML, type OHLC } from './EChartsCandlestick'
+import {
+  changeBase,
+  rawChangeBase,
+  unadjustedClose,
+  unadjustedCloseHTML,
+  volumeInfo,
+  volumeRatioAt,
+  volumeRatioInfo,
+  type OHLC,
+} from './EChartsCandlestick'
 
 function bar(date: string, close: number, prev_close?: number | null): OHLC {
   return { date, open: close, high: close, low: close, close, prev_close }
@@ -75,5 +84,46 @@ describe('unadjustedClose', () => {
     expect(unadjustedClose(adjusted('2026-09-30', 692, 692.001))).toBeNull()
     expect(unadjustedClose(bar('2026-09-30', 692))).toBeNull()
     expect(unadjustedCloseHTML(bar('2026-09-30', 692), '#fff')).toBe('')
+  })
+})
+
+function volumeBar(date: string, volume: number, extra: Partial<OHLC> = {}): OHLC {
+  return { date, open: 10, high: 10, low: 10, close: 10, volume, ...extra }
+}
+
+function fiveDaysThen(today: OHLC): OHLC[] {
+  return [
+    volumeBar('2026-09-30', 1000),
+    volumeBar('2026-10-01', 1000),
+    volumeBar('2026-10-02', 1000),
+    volumeBar('2026-10-05', 1000),
+    volumeBar('2026-10-06', 1000),
+    today,
+  ]
+}
+
+describe('volumeRatioAt', () => {
+  it('scales the partial volume of a live bar at 10:00 to a full session', () => {
+    const rows = fiveDaysThen(volumeBar('2026-10-07', 300, { volume_time_factor: 4.5 }))
+
+    expect(volumeRatioAt(rows, 5, 5)).toBeCloseTo(1.35, 12)
+    expect(volumeRatioInfo(rows, 5, 5)).toMatchObject({ label: '量比5', value: '1.35x 推估' })
+  })
+
+  it('shows a closed bar as it is, without the estimate label', () => {
+    const rows = fiveDaysThen(volumeBar('2026-10-07', 1500, { volume_time_factor: 1 }))
+
+    expect(volumeRatioAt(rows, 5, 5)).toBeCloseTo(1.5, 12)
+    expect(volumeRatioInfo(rows, 5, 5).value).toBe('1.50x')
+    expect(volumeRatioInfo(fiveDaysThen(volumeBar('2026-10-07', 1500)), 5, 5).value).toBe('1.50x')
+  })
+})
+
+describe('volumeInfo', () => {
+  it('labels intraday board-lot volume', () => {
+    expect(volumeInfo(volumeBar('2026-10-07', 300, { board_lot_volume: true })).value).toBe(
+      '300 盤中為整股量（不含零股、鉅額、盤後定價）',
+    )
+    expect(volumeInfo(volumeBar('2026-10-07', 300)).value).toBe('300')
   })
 })

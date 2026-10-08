@@ -763,6 +763,24 @@ def _frame_onto_todays_scale(df, scale_through: date | None, today: date):
     )
 
 
+def _mark_taiwan_live_volume(live_row: dict, q: dict, *, polled: bool) -> None:
+    """Flag a Taiwan candle whose volume is the intraday quote's rather than the official row's.
+
+    Intraday quotes count board-lot trades only and carry no amount; the intraday pipeline
+    stamps its rows with volume_time_factor, the published row has none. board_lot_volume
+    tells the two apart, and volume_time_factor scales the candle's volume to a full session.
+    """
+    factor = q.get("volume_time_factor")
+    if factor is None and not polled:
+        from app.taiwan.live_enriched import _volume_time_factor
+
+        factor = _volume_time_factor(q.get("quote_ts"))
+    live_row["board_lot_volume"] = factor is not None
+    if factor is not None:
+        live_row["volume_time_factor"] = factor
+        live_row["amount"] = None
+
+
 def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], asset_type: str = "stock") -> list[dict]:
     """如果有当日实时 enriched 数据, 用实时数据生成今日蜡烛并追加/覆盖。
 
@@ -839,6 +857,8 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
                 "atr_14", "vol_ratio_5d", "turnover_rate"):
         if key in q and q[key] is not None:
             live_row[key] = q[key]
+    if symbol.endswith(TAIWAN_SUFFIXES):
+        _mark_taiwan_live_volume(live_row, q, polled=bool(matches))
 
     # 如果已有今天的 enriched 行, 覆盖; 否则追加
     found = False
@@ -1103,7 +1123,7 @@ def get_minute_range(
     row_columns = [
         column
         for column in (
-            "datetime", "open", "high", "low", "close", "volume", "amount"
+            "datetime", "open", "high", "low", "close", "volume", "amount", "unattributed_volume"
         )
         if column in minute.columns
     ]

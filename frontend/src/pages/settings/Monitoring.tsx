@@ -37,6 +37,7 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
   const quoteMode = quoteStatus?.mode ?? 'none'
   const isWatchlistMode = quoteMode === 'watchlist'
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
+  const marketClosedToday = prefs?.taiwan_market_closed_today ?? false
   // 分時圖實時刷新間隔 (秒), 與後端 [3,60] clamp 對齊; 默認 6
   const intradayInterval = prefs?.minute_intraday_refresh_interval ?? 6
   // 滑塊本地草稿: 拖動時即時反饋, 停頓 2s 後落庫 (與行情輪詢滑塊一致)
@@ -94,6 +95,16 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
     qc.invalidateQueries({ queryKey: QK.preferences })
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
   }, [toggleQuote, qc])
+
+  const handleToggleMarketClosed = useCallback(async (closed: boolean) => {
+    try {
+      await api.updateMarketClosedToday(closed)
+    } catch {
+      // error toast already raised by the request layer
+    }
+    qc.invalidateQueries({ queryKey: QK.preferences })
+    qc.invalidateQueries({ queryKey: QK.quoteStatus })
+  }, [qc])
 
   // 勾選/取消勾選某個預設推播渠道 (LINE / Telegram 各自獨立)
   const toggleDefaultChannel = useCallback(async (ch: string, enabled: boolean) => {
@@ -182,6 +193,12 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
             checked={realtimeEnabled}
             onChange={handleToggleQuote}
             disabled={isPaused}
+          />
+          <ToggleRow
+            label="今日休市（停止盤中輪詢）"
+            desc={marketClosedToday ? '今日已停止輪詢,明日自動恢復' : '颱風假等臨時休市時開啟,只對今天生效'}
+            checked={marketClosedToday}
+            onChange={handleToggleMarketClosed}
           />
 
           <div className="mt-3 pt-3 border-t border-border">

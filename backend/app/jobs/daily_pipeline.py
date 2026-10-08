@@ -8,7 +8,7 @@ _refresh_single_view 仍被 api/kline.py 的个股分时"获取数据"按钮真�
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -280,8 +280,29 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    def _refresh_holiday_schedule() -> None:
+        from app.taiwan.realtime import holidays
+
+        holidays.refresh_upcoming_years()
+
+    # The store fetches each year at most once per day, so a short interval only bounds how
+    # long a fresh install or a new year stays unverified.
+    scheduler.add_job(
+        _refresh_holiday_schedule,
+        trigger=IntervalTrigger(hours=3),
+        id="taiwan_holiday_refresh",
+        next_run_time=datetime.now().astimezone() + timedelta(seconds=30),
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+        replace_existing=True,
+    )
+
     scheduler.start()
-    logger.info("scheduler started; reprobe@60min, taiwan@16:30 (daily+inst) & 21:40 (margin) mon-fri")
+    logger.info(
+        "scheduler started; reprobe@60min, taiwan@16:30 (daily+inst) & 21:40 (margin) mon-fri, "
+        "holiday schedule@3h"
+    )
     return scheduler
 
 

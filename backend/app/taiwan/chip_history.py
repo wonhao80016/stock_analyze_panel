@@ -63,11 +63,11 @@ def _default_symbol_exists(symbol_str: str) -> bool:
 
 
 def _trading_days_start(calendar: TaiwanTradingCalendar, end: date, days: int) -> date:
-    """Walk back from *end*, counting non-weekend days, until *days* are counted.
+    """Walk back from *end*, counting days not confirmed as non-trading, until *days* are counted.
 
-    No holiday set is preloaded here, so an unconfirmed weekday holiday still
-    counts toward the window; that only widens the query range slightly and
-    read_range() naturally returns no row for a date nothing was ever written to.
+    A weekday holiday in a year without a cached TWSE schedule still counts toward
+    the window; that only widens the query range slightly and read_range() naturally
+    returns no row for a date nothing was ever written to.
     """
     cursor = end
     counted = 0

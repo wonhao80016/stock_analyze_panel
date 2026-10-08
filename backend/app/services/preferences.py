@@ -69,6 +69,16 @@ def get_realtime_quotes_enabled() -> bool:
     return load().get("realtime_quotes_enabled", False)
 
 
+def get_taiwan_market_closed_date() -> str | None:
+    """ISO date the user marked as an unscheduled Taiwan market closure; it only applies on that date."""
+    value = load().get("taiwan_market_closed_date")
+    return value if isinstance(value, str) else None
+
+
+def set_taiwan_market_closed_date(day: str | None) -> None:
+    save({"taiwan_market_closed_date": day})
+
+
 def get_watchlist_groups_in_nav() -> bool:
     """自选分组是否显示在侧边栏（可展开二级子菜单）。默认 False。"""
     return load().get("watchlist_groups_in_nav", False)

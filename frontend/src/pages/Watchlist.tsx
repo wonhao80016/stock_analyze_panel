@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Rows3, BarChart3, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, ImagePlus, FolderOpen, FolderMinus, FolderPlus, Scale } from 'lucide-react'
-import { api, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
+import { api, BOARD_LOT_VOLUME_NOTE, type KlineRow, type MinuteKlineRow, type WatchlistGroup, type WatchlistGroupColor } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
@@ -587,7 +587,7 @@ const StockCard = React.memo(function StockCard({
 
         {/* 第三行: 指標 */}
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-muted leading-relaxed">
-          <span title="換手率">換手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span></span>
+          <span title={r.board_lot_volume ? `換手率（${BOARD_LOT_VOLUME_NOTE}）` : '換手率'}>換手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span>{r.board_lot_volume && <span className="ml-0.5">整股</span>}</span>
           <span title="量比">量比<span className="font-mono ml-0.5">{fmtPrice(r.vol_ratio_5d)}</span></span>
           <span title="RSI14">RSI<span className="font-mono ml-0.5">{r.rsi_14 != null ? r.rsi_14.toFixed(1) : '—'}</span></span>
           {r.indicator_date && <span title={`指標日期 ${r.indicator_date}`}>指標{String(r.indicator_date).slice(5)}</span>}
@@ -1799,10 +1799,15 @@ export function Watchlist() {
                   return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPct(pct)}</td>
                 }
                 if (key === 'amount') {
-                  return <td className={`${numCls} text-secondary`}>{fmtBigNum(r.rt_amount ?? r.amount)}</td>
+                  return <td className={`${numCls} text-secondary`} title={r.board_lot_volume ? BOARD_LOT_VOLUME_NOTE : undefined}>{fmtBigNum(r.rt_amount ?? r.amount)}</td>
                 }
                 if (key === 'turnover') {
-                  return <td className={`${numCls} ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</td>
+                  return (
+                    <td className={`${numCls} ${turnoverColor(r.turnover_rate)}`} title={r.board_lot_volume ? BOARD_LOT_VOLUME_NOTE : undefined}>
+                      {r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}
+                      {r.board_lot_volume && <span className="ml-0.5 text-[10px] text-muted">整股</span>}
+                    </td>
+                  )
                 }
                 // 訊號列
                 if (key === 'signals') {

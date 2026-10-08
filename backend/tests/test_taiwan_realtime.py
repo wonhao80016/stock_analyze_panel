@@ -653,50 +653,6 @@ class TestTimestampSafety:
         assert q.source_meta.is_stale is True
         assert "refused to fake" in q.source_meta.fallback_reason
 
-    def test_official_snapshot_uses_1330_not_midnight(self):
-        """Official snapshot must derive quote_time at 13:30, not midnight."""
-        from unittest.mock import patch
-        from dataclasses import dataclass
-
-        @dataclass
-        class MockSnap:
-            source: str = "twse:STOCK_DAY_ALL"
-            date: date = date(2026, 8, 28)
-            name: str = "台積電"
-            close: float = 2420.0
-            previous_close: float = 2410.0
-            open: float = 2440.0
-            high: float = 2445.0
-            low: float = 2410.0
-            change: float = 10.0
-            change_pct: float = 0.41
-            volume: int = 13498000
-            amount: float = 326000000.0
-
-        mis = TwseMisRealtimeProvider()
-        mis.fetch_quotes = lambda syms: {}
-        yahoo = YahooRealtimeProvider()
-        yahoo.fetch_quotes = lambda syms: {}
-
-        class MockOfficialProvider:
-            def get_quote(self, sym):
-                return MockSnap()
-
-        fake_now = datetime(2026, 8, 30, 10, 0, 0, tzinfo=TAIPEI_TZ)
-        svc = TaiwanRealtimeService(
-            mis_provider=mis, yahoo_provider=yahoo, official_close_provider=MockOfficialProvider()
-        )
-        with patch("app.taiwan.realtime.service.taipei_now", return_value=fake_now):
-            quotes = svc.get_quotes(["2330.TWSE"])
-
-        q = quotes["2330.TWSE"]
-        assert q.quote_time is not None
-        assert q.quote_time.hour == 13
-        assert q.quote_time.minute == 30
-        # Must NOT be midnight
-        assert not (q.quote_time.hour == 0 and q.quote_time.minute == 0)
-
-
 class TestProvenanceCorrectness:
     """Verify every source has correct explicit provenance metadata."""
 
@@ -767,52 +723,6 @@ class TestProvenanceCorrectness:
 
 class TestFreshnessCorrectness:
     """Verify freshness / stale handling across source types and sessions."""
-
-    def test_official_snapshot_during_open_is_stale(self):
-        """Official snapshot used during OPEN session must be marked stale (it's yesterday's data)."""
-        from unittest.mock import patch
-        from dataclasses import dataclass
-
-        @dataclass
-        class MockSnap:
-            source: str = "twse:STOCK_DAY_ALL"
-            date: date = date(2026, 8, 28)
-            name: str = "台積電"
-            close: float = 2420.0
-            previous_close: float = 2410.0
-            open: float = 2440.0
-            high: float = 2445.0
-            low: float = 2410.0
-            change: float = 10.0
-            change_pct: float = 0.41
-            volume: int = 13498000
-            amount: float = 326000000.0
-
-        mis = TwseMisRealtimeProvider()
-        mis.fetch_quotes = lambda syms: {}
-        yahoo = YahooRealtimeProvider()
-        yahoo.fetch_quotes = lambda syms: {}
-
-        class MockProvider:
-            def get_quote(self, sym):
-                return MockSnap()
-
-        from app.taiwan.realtime.calendar import TaiwanTradingCalendar
-        cal = TaiwanTradingCalendar(known_trading_days={date(2026, 8, 28)})
-        svc = TaiwanRealtimeService(
-            mis_provider=mis, yahoo_provider=yahoo,
-            official_close_provider=MockProvider(), trading_calendar=cal,
-        )
-        # Friday 10:00 — verified OPEN
-        fake_now = datetime(2026, 8, 28, 10, 0, 0, tzinfo=TAIPEI_TZ)  # Friday
-        with patch("app.taiwan.realtime.service.taipei_now", return_value=fake_now):
-            quotes = svc.get_quotes(["2330.TWSE"])
-
-        q = quotes["2330.TWSE"]
-        assert q.source_meta.source_type == "official_open_data"
-        assert q.source_meta.freshness_class == "eod_snapshot"
-        assert q.source_meta.is_stale is True  # Snapshot during open is stale!
-        assert q.source_meta.is_realtime is False
 
     def test_daily_fallback_during_open_remains_stale(self):
         """Daily K fallback during regular open must always be is_stale=True."""

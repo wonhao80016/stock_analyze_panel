@@ -8,7 +8,7 @@ import {
   TrendingDown,
   TrendingUp,
 } from 'lucide-react'
-import { api, type TaiwanRealtimeQuote } from '@/lib/api'
+import { api, BOARD_LOT_VOLUME_NOTE, type TaiwanRealtimeQuote } from '@/lib/api'
 
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -73,6 +73,9 @@ export function MarketStatusBadge({ status }: { status: string | undefined }) {
     cls = 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
   } else if (s === 'pre_open') {
     text = '盤前'
+    cls = 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
+  } else if (s === 'closing_auction') {
+    text = '收盤競價'
     cls = 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
   } else if (s === 'post_close') {
     text = '盤後'
@@ -209,6 +212,7 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
     ? selectedSymbol
     : panelSymbols[0]
   const currentQuote = quotes.find(q => q.symbol === activeSymbol) || quotes[0]
+  const boardLot = currentQuote?.source_meta?.is_realtime === true
 
   const isUp = (currentQuote?.change || 0) > 0
   const isDown = (currentQuote?.change || 0) < 0
@@ -350,14 +354,15 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
                 </div>
                 <div className="rounded-lg bg-elevated/40 p-2 border border-border/30">
                   <div className="text-muted text-[11px]">成交量</div>
-                  <div className="font-mono font-medium text-sm mt-0.5">{formatVolume(currentQuote.volume, volUnit)}</div>
+                  <div className="font-mono font-medium text-sm mt-0.5" title={boardLot ? BOARD_LOT_VOLUME_NOTE : undefined}>{formatVolume(currentQuote.volume, volUnit)}</div>
                 </div>
                 <div className="rounded-lg bg-elevated/40 p-2 border border-border/30">
                   <div className="text-muted text-[11px]">成交金額</div>
-                  <div className="font-mono font-medium text-sm mt-0.5" title={`TWD ${currentQuote.amount?.toLocaleString() || '--'}`}>
-                    {formatAmount(currentQuote.amount)}
+                  <div className="font-mono font-medium text-sm mt-0.5" title={boardLot ? BOARD_LOT_VOLUME_NOTE : `TWD ${currentQuote.amount?.toLocaleString() || '--'}`}>
+                    {boardLot && currentQuote.amount == null ? '—' : formatAmount(currentQuote.amount)}
                   </div>
                 </div>
+                {boardLot && <div className="col-span-full text-muted text-[11px]">{BOARD_LOT_VOLUME_NOTE}</div>}
                 <div className="rounded-lg bg-elevated/40 p-2 border border-border/30">
                   <div className="text-muted text-[11px]">漲停價 ({limitRuleLabel(currentQuote, '+')})</div>
                   <div className="font-mono font-medium text-sm text-rose-600 dark:text-rose-400 mt-0.5">

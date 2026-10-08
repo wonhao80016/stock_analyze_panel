@@ -35,6 +35,23 @@ def _benchmark_refresh_is_offline(request, monkeypatch):
     monkeypatch.setattr(daily_pipeline, "refresh_benchmark_index", lambda _label: None)
 
 
+@pytest.fixture(scope="session")
+def _empty_holiday_root(tmp_path_factory):
+    return tmp_path_factory.mktemp("holidays")
+
+
+@pytest.fixture(autouse=True)
+def _holiday_schedule_is_isolated(_empty_holiday_root, monkeypatch):
+    """The shared holiday cache under the real data dir would turn fixture dates into holidays."""
+    from app.taiwan.realtime import holidays
+
+    def _no_fetch(year: int) -> object:
+        raise RuntimeError(f"tests must not fetch the TWSE holiday schedule ({year})")
+
+    store = holidays.TaiwanHolidayStore(root=_empty_holiday_root, fetcher=_no_fetch)
+    monkeypatch.setattr(holidays, "_default_store", store)
+
+
 @pytest.fixture
 def deny_network(monkeypatch):
     """Fail any socket connection that leaves the machine."""

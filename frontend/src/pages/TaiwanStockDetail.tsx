@@ -24,6 +24,7 @@ import {
   type TaiwanDailyItem,
   type TaiwanInstitutionalHistoryRow,
   type TaiwanMarginHistoryRow,
+  type TaiwanStockResearchContext,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -75,6 +76,14 @@ export const dailyRowsToOHLC = (rows: TaiwanDailyItem[]): OHLC[] =>
     prev_close: r.prev_close ?? null,
     raw_close: r.raw_close ?? null,
   }))
+
+/** The session the research figures belong to, when it is not the requested date. */
+export const researchDataDate = (
+  ctx: Pick<TaiwanStockResearchContext, 'as_of_date' | 'price_context'>,
+): string | null =>
+  ctx.price_context.trade_date && ctx.price_context.trade_date !== ctx.as_of_date
+    ? ctx.price_context.trade_date
+    : null
 
 interface TaiwanStockDetailProps {
   /** Renders inside the preview dialog, which supplies its own chrome and chart. */
@@ -904,6 +913,11 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                     <span className="text-[10px] text-muted font-mono">
                       (狀態: {researchQuery.data.data_quality.overall_status === 'complete' ? '完整' : '部分'})
                     </span>
+                    {researchDataDate(researchQuery.data) && (
+                      <span className="text-[10px] text-amber-500 font-mono">
+                        資料日期 {researchDataDate(researchQuery.data)}
+                      </span>
+                    )}
                   </div>
                   <span className="text-[10px] text-muted font-mono">
                     已認證事實: {researchQuery.data.evidence_summary.known_fields_count} 項 | 衍生計算: {researchQuery.data.evidence_summary.derived_fields_count} 項

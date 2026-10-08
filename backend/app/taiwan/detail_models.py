@@ -63,7 +63,7 @@ class TaiwanStockRealtime(BaseModel):
     volume: Optional[int] = Field(None, description="累積成交量 (股)")
     amount: Optional[float] = Field(None, description="累積成交金額 (元)")
     quote_time: Optional[str] = Field(None, description="行情時間戳記 ISO 字串 (Asia/Taipei)")
-    market_status: str = Field("closed", description="市場狀態: open, closed, pre_open, non_trading_day")
+    market_status: str = Field("closed", description="市場狀態: pre_open, open, closing_auction, post_close, closed, non_trading_day")
     bid_price: Optional[float] = Field(None, description="買一價")
     ask_price: Optional[float] = Field(None, description="賣一價")
     bids: List[List[float]] = Field(default_factory=list, description="五檔買單 [[價, 股數], ...]")

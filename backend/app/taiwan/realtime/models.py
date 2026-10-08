@@ -19,8 +19,9 @@ class RealtimeStatus(str, Enum):
     DELAYED = "delayed"                                 # Delayed intraday quote (e.g. 15-min delay)
     OFFICIAL_SNAPSHOT = "official_snapshot"             # Official post-close snapshot
     FALLBACK = "fallback"                               # Secondary realtime provider fallback
-    OFFICIAL_SNAPSHOT_FALLBACK = "official_snapshot_fallback" # Fallback to official close snapshot
     DAILY_FALLBACK = "daily_fallback"                   # Fallback to latest Daily K-line
+    TRIAL_MATCH = "trial_match"                         # Call-auction trial snapshot (MIS ts=1); no trade
+    CLOSE_FINAL = "close_final"                         # Today's closing-auction result (MIS t >= 13:30, ts=0)
     STALE = "stale"                                     # Quote timestamp exceeded freshness threshold
     UNAVAILABLE = "unavailable"                         # Failed across all providers
 
@@ -32,9 +33,10 @@ class MarketStatus(str, Enum):
     and unverified / extraordinary closure states.
     """
     PRE_OPEN = "pre_open"                   # 08:30 - 09:00 (Pre-market trial matching)
-    OPEN = "open"                           # 09:00 - 13:30 (Continuous regular trading, verified)
+    OPEN = "open"                           # 09:00 - 13:25 (Continuous regular trading, verified)
     REGULAR_OPEN = "open"                   # Alias for OPEN
-    SCHEDULED_OPEN_UNVERIFIED = "scheduled_open_unverified" # 09:00 - 13:30 scheduled, but open state unverified
+    CLOSING_AUCTION = "closing_auction"     # 13:25 - 13:30 (Closing call auction, trial matching only)
+    SCHEDULED_OPEN_UNVERIFIED = "scheduled_open_unverified" # 08:30 - 14:30 scheduled, but open state unverified
     POST_CLOSE = "post_close"               # 13:30 - 14:30 (Post-market odd-lot & fixed-price)
     POST_CLOSE_SESSION = "post_close"       # Alias for POST_CLOSE
     CLOSED = "closed"                       # After 14:30 or before 08:30

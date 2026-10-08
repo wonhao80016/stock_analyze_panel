@@ -70,6 +70,8 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
       low: Number(r.low),
       close: Number(r.close),
       volume: Number(r.volume ?? 0),
+      volume_time_factor: r.volume_time_factor != null ? Number(r.volume_time_factor) : null,
+      board_lot_volume: r.board_lot_volume === true,
       prev_close: r.prev_close != null ? Number(r.prev_close) : null,
       raw_close: r.raw_close != null ? Number(r.raw_close) : null,
       ma5: r.ma5 != null ? Number(r.ma5) : null,

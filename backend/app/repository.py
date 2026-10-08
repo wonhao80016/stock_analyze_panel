@@ -344,6 +344,9 @@ class KlineRepository:
         self._name_map_cache: dict[str, str] | None = None
         self._index_enriched_cache: pl.DataFrame | None = None
         self._index_enriched_cache_date: date | None = None
+        from app.taiwan.live_enriched import TaiwanLiveEnriched
+
+        self._taiwan_live = TaiwanLiveEnriched(store.data_dir)
 
         # ---- enriched 后台预热 ----
         # 启动时 compute_indicators (107万行, 低配机 50s+) 移出 lifespan 关键路径,
@@ -522,6 +525,7 @@ class KlineRepository:
         self._name_map_cache = None
         self._index_enriched_cache = None
         self._index_enriched_cache_date = None
+        self._taiwan_live.invalidate()
 
     def _refresh_enriched(self) -> None:
         """从 parquet 加载 enriched 最新日到内存 + 构建聚合表。
@@ -531,6 +535,7 @@ class KlineRepository:
 
         优化: 扩大历史读取范围, 同时缓存完整历史 (含指标), 供 filter_history 策略直接复用。
         """
+        self._prepare_taiwan_live()
         try:
             started = time.perf_counter()
             refresh_generation = self.get_matrix_data_generation("stock")
@@ -675,6 +680,17 @@ class KlineRepository:
             logger.info("enriched refresh done fallback (%.2fs)", time.perf_counter() - started)
         except Exception as e:  # noqa: BLE001
             logger.warning("enriched 缓存刷新失败: %s", e)
+
+    def _prepare_taiwan_live(self) -> None:
+        """Rebuild the Taiwan intraday history when the stored bars, events or master changed."""
+        try:
+            self._taiwan_live.prepare()
+        except Exception as e:
+            logger.warning("taiwan live history preparation failed: %s", e)
+
+    def get_taiwan_live_enriched(self):
+        """The TaiwanLiveEnriched computing today's Taiwan rows from this data dir's stored history."""
+        return self._taiwan_live
 
     def _restore_missing_latest_rows(
         self,
@@ -1081,6 +1097,10 @@ class KlineRepository:
 
     def _refresh_instruments(self) -> None:
         """加载 instruments 到内存。"""
+        if not any((self.store.data_dir / "instruments").rglob("*.parquet")):
+            if self._instruments_cache is None:
+                self._instruments_cache = pl.DataFrame()
+            return
         try:
             df = pl.scan_parquet(self._inst_glob).collect()
             if not df.is_empty():
@@ -1627,6 +1647,13 @@ class KlineRepository:
         """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
         return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
 
+    @staticmethod
+    def _scan_minute(source: str | list[str]) -> pl.LazyFrame:
+        """Scan minute partitions, whether or not they carry the later unattributed_volume column."""
+        schema = dict(pl.scan_parquet(source).collect_schema())
+        schema.setdefault("unattributed_volume", pl.Float64)
+        return pl.scan_parquet(source, schema=schema, missing_columns="insert", extra_columns="ignore")
+
     def get_minute(
         self,
         symbol: str,
@@ -1635,7 +1662,7 @@ class KlineRepository:
     ) -> pl.DataFrame:
         """分钟K查询 — Polars scan_parquet + predicate pushdown。"""
         try:
-            return pl.scan_parquet(self._minute_glob_for(asset_type)).filter(
+            return self._scan_minute(self._minute_glob_for(asset_type)).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort("datetime").collect()
@@ -1657,7 +1684,7 @@ class KlineRepository:
         if not symbols:
             return pl.DataFrame()
         try:
-            return pl.scan_parquet(self._minute_glob_for(asset_type)).filter(
+            return self._scan_minute(self._minute_glob_for(asset_type)).filter(
                 pl.col("symbol").is_in(symbols)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort(["symbol", "datetime"]).collect()
@@ -1680,7 +1707,7 @@ class KlineRepository:
         if not symbols:
             return pl.DataFrame()
         try:
-            lf = pl.scan_parquet(self._minute_glob_for(asset_type))
+            lf = self._scan_minute(self._minute_glob_for(asset_type))
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             return (
@@ -1715,17 +1742,17 @@ class KlineRepository:
         """
         if not symbols or not dates:
             return pl.DataFrame()
-        base = self._etf_minute_glob.rsplit("/", 2)[0] if asset_type == "etf" else self._minute_glob.rsplit("/", 2)[0]
+        base = Path(self.store.data_dir) / ("kline_etf_minute" if asset_type == "etf" else "kline_minute")
         # 收集存在的分区文件路径, 避免对不存在的文件 scan 报错
         parts: list[str] = []
         for d in dates:
-            p = f"{base}/date={d.isoformat()}/part.parquet"
-            if Path(p).exists():
-                parts.append(p)
+            p = base / f"date={d.isoformat()}" / "part.parquet"
+            if p.exists():
+                parts.append(str(p))
         if not parts:
             return pl.DataFrame()
         try:
-            lf = pl.scan_parquet(parts)
+            lf = self._scan_minute(parts)
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             return (
@@ -2263,7 +2290,7 @@ class KlineRepository:
         When the exchange has not published *dt* yet the merge stays in memory:
         the live readers still need today, but a partition for that day would
         make a watchlist-sized slice look like a full trading session to anything
-        scanning the market.
+        scanning the market. Taiwan stock rows always stay in memory unless *force*.
         """
         if df.is_empty() or "date" not in df.columns:
             return
@@ -2292,6 +2319,14 @@ class KlineRepository:
         from app.indicators.pipeline import ENRICHED_STORAGE_COLS
         storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
         df_storage = df.select(storage_cols).sort(["symbol"])
+        if asset_type == "stock" and not force:
+            from app.volume_units import TAIWAN_SUFFIXES
+
+            # The evening publish owns these partitions; a live row would replace its full row.
+            df_storage = df_storage.filter(
+                ~pl.any_horizontal([pl.col("symbol").str.ends_with(s) for s in TAIWAN_SUFFIXES])
+            )
+            write_to_disk = write_to_disk and not df_storage.is_empty()
         base = self.store.data_dir / table
         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
         out = base / f"date={ds}" / "part.parquet"

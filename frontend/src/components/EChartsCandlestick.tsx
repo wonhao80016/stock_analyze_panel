@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
+import { BOARD_LOT_VOLUME_NOTE } from '@/lib/api'
 
 export interface OHLC {
   date: string
@@ -10,6 +11,10 @@ export interface OHLC {
   low: number
   close: number
   volume?: number
+  /** Scales a live bar's partial-session volume to a full session; above 1 its volume ratio is an estimate. */
+  volume_time_factor?: number | null
+  /** The bar's volume counts intraday board-lot trades only. */
+  board_lot_volume?: boolean
   prev_close?: number | null
   raw_close?: number | null
   ma5?: number | null
@@ -142,7 +147,13 @@ function fmtVol(v: number | null | undefined): string {
   return v.toFixed(0)
 }
 
-function volumeRatioAt(data: OHLC[], index: number, days: number): number | null {
+export function isVolumeEstimate(bar: OHLC | null | undefined): boolean {
+  const factor = bar?.volume_time_factor
+  return factor != null && Number.isFinite(factor) && factor > 1
+}
+
+/** Bar volume over the previous `days` bars' average; a live bar's volume is first scaled to a full session. */
+export function volumeRatioAt(data: OHLC[], index: number, days: number): number | null {
   const window = Math.max(1, Math.min(20, Math.round(days)))
   if (index < window) return null
   let sum = 0
@@ -154,11 +165,27 @@ function volumeRatioAt(data: OHLC[], index: number, days: number): number | null
   const average = sum / window
   const current = data[index]?.volume
   if (current == null || !Number.isFinite(current) || average <= 0) return null
-  return current / average
+  const factor = isVolumeEstimate(data[index]) ? data[index].volume_time_factor! : 1
+  return current * factor / average
 }
 
-function fmtVolumeRatio(value: number | null, digits = 2): string {
-  return value == null ? '—' : `${value.toFixed(digits)}x`
+function fmtVolumeRatio(value: number | null, digits = 2, estimate = false): string {
+  if (value == null) return '—'
+  return `${value.toFixed(digits)}x${estimate ? ' 推估' : ''}`
+}
+
+export function volumeRatioInfo(data: OHLC[], index: number, days: number): { label: string; color: string; value: string } {
+  const ratio = volumeRatioAt(data, index, days)
+  return {
+    label: `量比${days}`,
+    color: ratio != null && ratio >= 1 ? '#C74040' : '#2D9B65',
+    value: fmtVolumeRatio(ratio, 2, ratio != null && isVolumeEstimate(data[index])),
+  }
+}
+
+export function volumeInfo(bar: OHLC): { label: string; color: string; value: string } {
+  const note = bar.board_lot_volume ? ` ${BOARD_LOT_VOLUME_NOTE}` : ''
+  return { label: '量', color: bar.close >= bar.open ? '#C74040' : '#2D9B65', value: fmtVol(bar.volume) + note }
 }
 
 export const SUB_CHARTS: SubChartDef[] = [
@@ -179,7 +206,7 @@ export const SUB_CHARTS: SubChartDef[] = [
             const ratio = volumeRatioAt(data, index, compareDays)
             return {
               value: d.volume ?? 0,
-              volumeRatioLabel: ratio == null ? '' : fmtVolumeRatio(ratio, 1),
+              volumeRatioLabel: ratio == null ? '' : fmtVolumeRatio(ratio, 1, isVolumeEstimate(d)),
               itemStyle: {
                 color: d.close >= d.open ? 'rgba(240,68,56,0.6)' : 'rgba(18,183,106,0.6)',
               },
@@ -218,9 +245,7 @@ export const SUB_CHARTS: SubChartDef[] = [
     },
     buildInfo: (d) => {
       if (!d) return []
-      return [
-        { label: '量', color: d.close >= d.open ? '#C74040' : '#2D9B65', value: fmtVol(d.volume) },
-      ]
+      return [volumeInfo(d)]
     },
   },
   {
@@ -432,12 +457,7 @@ function buildSubInfoGraphics(
       items.push({ label: 'VOL5', color: '#FACC15', value: fmtVol(vol5) })
       items.push({ label: 'VOL10', color: '#8B5CF6', value: fmtVol(vol10) })
       if (volumeCompare.enabled) {
-        const ratio = volumeRatioAt(data, infoIdx, volumeCompare.days)
-        items.push({
-          label: `量比${volumeCompare.days}`,
-          color: ratio != null && ratio >= 1 ? '#C74040' : '#2D9B65',
-          value: fmtVolumeRatio(ratio),
-        })
+        items.push(volumeRatioInfo(data, infoIdx, volumeCompare.days))
       }
     }
 

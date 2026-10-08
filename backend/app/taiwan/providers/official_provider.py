@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
+import threading
 import urllib.parse
+from collections.abc import Callable
+from concurrent.futures import Future
 from datetime import datetime, timedelta
+from time import monotonic
 
 import httpx
 import polars as pl
@@ -30,6 +34,39 @@ OFFICIAL_METADATA = SourceMetadata(
     amount_unit=AmountUnit.TWD, price_semantics=PriceSemantics.RAW,
 )
 
+QUOTE_PAYLOAD_TTL_SECONDS = 600.0
+QUOTE_FAILURE_TTL_SECONDS = 30.0
+
+_quote_payloads: dict[str, tuple[float | None, Future]] = {}
+_quote_payloads_lock = threading.Lock()
+
+
+def _shared_quote_payload(url: str, load: Callable[[], object]) -> object:
+    """Process-wide TTL cache of whole-market quote payloads, keyed by URL.
+
+    Concurrent callers wait on the one request in flight; a failure is re-raised to
+    callers for QUOTE_FAILURE_TTL_SECONDS before the next attempt.
+    """
+    with _quote_payloads_lock:
+        entry = _quote_payloads.get(url)
+        shared = entry is not None and (entry[0] is None or monotonic() < entry[0])
+        future: Future = entry[1] if shared else Future()
+        if not shared:
+            _quote_payloads[url] = (None, future)
+    if shared:
+        return future.result()
+    try:
+        payload = load()
+    except BaseException as exc:
+        with _quote_payloads_lock:
+            _quote_payloads[url] = (monotonic() + QUOTE_FAILURE_TTL_SECONDS, future)
+        future.set_exception(exc)
+        raise
+    with _quote_payloads_lock:
+        _quote_payloads[url] = (monotonic() + QUOTE_PAYLOAD_TTL_SECONDS, future)
+    future.set_result(payload)
+    return payload
+
 
 class OfficialTaiwanAdapter:
     metadata = OFFICIAL_METADATA
@@ -46,6 +83,9 @@ class OfficialTaiwanAdapter:
         response.raise_for_status()
         return json.loads(response.content.decode("utf-8-sig"))
 
+    def _quote_payload(self, url: str) -> object:
+        return _shared_quote_payload(url, lambda: self._json(url))
+
     def fetch_quote(self, symbols: list[str | TaiwanSymbol]) -> pl.DataFrame:
         wanted = [parse_symbol(s) if isinstance(s, str) else s for s in symbols]
         grouped = {Exchange.TWSE: [], Exchange.TPEX: []}
@@ -53,9 +93,9 @@ class OfficialTaiwanAdapter:
             grouped[symbol.exchange].append(symbol)
         frames: list[pl.DataFrame] = []
         if grouped[Exchange.TWSE]:
-            frames.append(self._quote_rows(grouped[Exchange.TWSE], TWSE_QUOTE_URL, self._json(TWSE_QUOTE_URL)))
+            frames.append(self._quote_rows(grouped[Exchange.TWSE], TWSE_QUOTE_URL, self._quote_payload(TWSE_QUOTE_URL)))
         if grouped[Exchange.TPEX]:
-            frames.append(self._quote_rows(grouped[Exchange.TPEX], TPEX_QUOTE_URL, self._json(TPEX_QUOTE_URL)))
+            frames.append(self._quote_rows(grouped[Exchange.TPEX], TPEX_QUOTE_URL, self._quote_payload(TPEX_QUOTE_URL)))
         return pl.concat([f for f in frames if not f.is_empty()], how="diagonal_relaxed") if any(not f.is_empty() for f in frames) else pl.DataFrame()
 
     def _quote_rows(self, symbols: list[TaiwanSymbol], url: str, payload: object) -> pl.DataFrame:

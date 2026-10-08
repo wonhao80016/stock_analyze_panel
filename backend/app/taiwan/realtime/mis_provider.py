@@ -23,7 +23,7 @@ import urllib.request
 
 
 from app.taiwan.enrichment.models import SourceMeta
-from app.taiwan.realtime.calendar import get_market_status, taipei_now
+from app.taiwan.realtime.calendar import REGULAR_OPEN_END, get_market_status, taipei_now
 from app.taiwan.realtime.models import MarketStatus, RealtimeStatus, TaiwanRealtimeQuote
 from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 
@@ -57,6 +57,31 @@ def _safe_float(val: Any) -> float | None:
         return float(str(val).replace(",", "").strip())
     except ValueError:
         return None
+
+
+_SESSION_STATUSES = (MarketStatus.PRE_OPEN, MarketStatus.OPEN, MarketStatus.CLOSING_AUCTION)
+_LIVE_STATUSES = (RealtimeStatus.REALTIME.value, RealtimeStatus.CLOSE_FINAL.value)
+
+
+def _classify(
+    item: dict,
+    quote_time: datetime,
+    now_tpe: datetime,
+    market_status: MarketStatus,
+) -> str:
+    """Status of a well-dated MIS quote, judged by its own time and trade date.
+
+    ts=1 marks a call-auction trial match: z is "-" and pz/ps are only an indicative price and
+    volume. The closing auction's result is the first ts=0 quote stamped 13:30:00 or later.
+    """
+    if str(item.get("ts") or "").strip() == "1":
+        return RealtimeStatus.TRIAL_MATCH.value
+    if quote_time.date() == now_tpe.date():
+        if quote_time.time() >= REGULAR_OPEN_END:
+            return RealtimeStatus.CLOSE_FINAL.value
+        if market_status in (MarketStatus.OPEN, MarketStatus.CLOSING_AUCTION):
+            return RealtimeStatus.REALTIME.value
+    return RealtimeStatus.OFFICIAL_SNAPSHOT.value
 
 
 def _parse_depth_tier(
@@ -192,7 +217,7 @@ class TwseMisRealtimeProvider:
 
             # Date mismatch detection: session open but quote still on prior trading date
             date_mismatch = (
-                current_market_status in (MarketStatus.OPEN, MarketStatus.PRE_OPEN)
+                current_market_status in _SESSION_STATUSES
                 and trade_date is not None
                 and trade_date != now_tpe.date()
             )
@@ -206,11 +231,7 @@ class TwseMisRealtimeProvider:
                 fallback_reason = f"Quote trade date {trade_date} does not match current session date {now_tpe.date()}"
                 status = RealtimeStatus.STALE.value
             else:
-                status = (
-                    RealtimeStatus.REALTIME.value
-                    if current_market_status == MarketStatus.OPEN
-                    else RealtimeStatus.OFFICIAL_SNAPSHOT.value
-                )
+                status = _classify(item, quote_time, now_tpe, current_market_status)
 
             # Available fields metadata
             avail = ["prev_close"]
@@ -235,7 +256,7 @@ class TwseMisRealtimeProvider:
                 fetched_at=fetched_at_iso,
                 trade_date=trade_date,
                 status=status,
-                is_realtime=(current_market_status == MarketStatus.OPEN and not is_stale),
+                is_realtime=status in _LIVE_STATUSES,
                 fallback_reason=fallback_reason,
                 available_fields=tuple(avail),
                 is_stale=is_stale,

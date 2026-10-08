@@ -4,14 +4,16 @@
 風格仿同花順/東方財富分時圖：
 - 價格折線：漲（收盤 ≥ 昨收）紅色，跌綠色 — 以昨收價(prevClose)為基準, 不是當日開盤價
 - 昨收基準線：淺灰實線（從開到右），比虛線更明顯
-- 分時均線：黃色細線（成交均價，這裡用 close 的累計均值近似）
+- Average line: cumulative VWAP (amount/volume, or volume-weighted close without amounts)
+- X axis is session time, so a recording gap shows as a straight segment, not compressed away
 - 價格線下方漸變填充: 頂部半透明實色 → 底部全透明(與個股對話框 EChartsIntraday 一致)
 空數據返回等尺寸佔位 SVG，保證加載前後尺寸一致（同 MiniCandlestick 模式）。
 */
 import { useId } from 'react'
 import type { MinuteKlineRow } from '@/lib/api'
+import { computeIntradayAverage, SESSION_MINUTES, sessionMinute } from '@/lib/intraday-chart'
 
-export function MiniIntraday({ rows, prevClose, changePct, width = 100, height = 56 }: {
+export function MiniIntraday({ rows: allRows, prevClose, changePct, width = 100, height = 56 }: {
   rows: MinuteKlineRow[]
   /** 昨收價 (前收), 用於基準線。無則用 close/changePct 反算 */
   prevClose?: number | null
@@ -21,8 +23,9 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   height?: number
 }) {
   const rawId = useId()
+  const rows = allRows?.filter(row => sessionMinute(row.datetime) != null) ?? []
   // 空數據：返回等尺寸佔位
-  if (!rows || rows.length < 2) {
+  if (rows.length < 2) {
     return <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block" aria-label="尚無分時" />
   }
 
@@ -59,14 +62,10 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
 
   // 價格區間: close + 昨收 + 均線 全部納入, 確保都在可視範圍
   let hi = -Infinity, lo = Infinity
-  // 累計均價 (分時均線的近似: close 的累計平均)
-  const avgLine: number[] = []
-  let cumSum = 0
+  const avgLine = computeIntradayAverage(rows)
   for (let i = 0; i < n; i++) {
     const c = rows[i].close
-    cumSum += c
-    const avg = cumSum / (i + 1)
-    avgLine.push(avg)
+    const avg = avgLine[i]
     if (c > hi) hi = c
     if (c < lo) lo = c
     if (avg > hi) hi = avg
@@ -78,7 +77,7 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   const range = hi - lo || 1
 
   const yScale = (v: number) => padY + (1 - (v - lo) / range) * (H - padY * 2)
-  const xScale = (i: number) => (i / (n - 1)) * W
+  const xScale = (i: number) => ((sessionMinute(rows[i].datetime) ?? 0) / SESSION_MINUTES) * W
 
   // 價格折線 points
   const pricePoints = rows.map((r, i) => `${xScale(i).toFixed(1)},${yScale(r.close).toFixed(1)}`).join(' ')

@@ -2,7 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
-import { computeIntradayAverage, formatMinuteTime, FULL_DAY_TIMES } from '@/lib/intraday-chart'
+import {
+  computeIntradayAverage,
+  computeVolumeCoverage,
+  formatCoverage,
+  formatMinuteTime,
+  FULL_DAY_TIMES,
+  markIsolatedPoints,
+  MIN_AVERAGE_COVERAGE,
+} from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
 
 type YMode = 'adaptive' | 'limit'
@@ -347,24 +355,24 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
       {
         name: '價格',
         type: 'line',
-        data: closes,
+        data: markIsolatedPoints(closes),
         smooth: false,
         symbol: 'none',
         cursor: 'crosshair',
         lineStyle: { width: 1.2, color: lineColor },
         areaStyle,
-        connectNulls: true,
+        connectNulls: false,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
       },
       ...(showAvgLine ? [{
         name: '均價',
         type: 'line' as const,
-        data: avgData,
+        data: markIsolatedPoints(avgData),
         smooth: false,
         symbol: 'none',
         cursor: 'crosshair',
         lineStyle: { width: 1, color: THEME.avgLine },
-        connectNulls: true,
+        connectNulls: false,
       }] : []),
       {
         name: '成交量',
@@ -414,6 +422,8 @@ export function EChartsIntraday({
   const limitMode = yMode === 'limit' && hasLimitPrices
   const limitLabel = limitStatusLabel(priceLimit)
   const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
+  const coverage = useMemo(() => computeVolumeCoverage(data), [data])
+  const avgVisible = showAvgLine && (coverage == null || coverage >= MIN_AVERAGE_COVERAGE)
 
   // 分時線顏色：基於最新價 vs 昨收
   const lastClose = data.length > 0 ? data[data.length - 1].close : null
@@ -500,11 +510,11 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, showAvgLine, priceLines])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines])
 
   useEffect(() => {
     return () => {
@@ -587,10 +597,11 @@ export function EChartsIntraday({
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: priceClr }} />
                 <span style={{ color: priceClr }}>{d.close.toFixed(2)}</span>
               </span>
-              {showAvgLine && <span className="flex items-center gap-x-1">
+              {avgVisible && <span className="flex items-center gap-x-1">
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
                 <span style={{ color: THEME.avgLine }}>{avg?.toFixed(2)}</span>
               </span>}
+              {showAvgLine && coverage != null && <span className="text-muted">{formatCoverage(coverage)}</span>}
               <span className="text-muted">量</span>
               <span className="text-secondary">{d.volume.toFixed(0)}</span>
               <span className="text-muted">額</span>

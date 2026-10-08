@@ -86,7 +86,7 @@ class SourceMeta:
     trade_date: date | None          # Applicable trading date
     status: str                      # "realtime", "official_snapshot", "fallback", "stale", etc.
     provider: str = ""              # Supplying organization/adapter (twse, tpex, ...)
-    is_realtime: bool = False        # True only during live regular trading hours
+    is_realtime: bool = False        # Today's live or closing-auction quote, true until midnight
     fallback_reason: str | None = None  # Non-empty if fallback was triggered
     available_fields: tuple[str, ...] = ()
     is_stale: bool = False
