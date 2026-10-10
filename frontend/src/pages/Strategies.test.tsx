@@ -952,6 +952,30 @@ describe('策略庫 — 分級與大盤濾鏡', () => {
     expect(watch).toHaveAttribute('title', '排名在前 5 名之外')
   })
 
+  it('無法評分的列標出評分資料不足, 分數顯示為 —', async () => {
+    mockGraded('passed', [
+      GRADED_ROWS[0],
+      { symbol: '2454.TWSE', name: '聯發科', close: 1500, change_pct: 0, score: null, grade: 'watch', grade_reason: 'score_unavailable' },
+    ])
+    renderPage()
+    await expandBoll()
+
+    const badge = screen.getByText('觀察・資料不足')
+    expect(badge.closest('button')).toHaveTextContent('聯發科')
+    expect(badge).toHaveAttribute('title', '評分資料不足（分數 —）')
+    expect(screen.getByText('買進').closest('button')).toHaveTextContent('台積電')
+  })
+
+  it('漲停鎖死的選股另加標籤, 分級不變', async () => {
+    mockGraded('passed', [{ ...GRADED_ROWS[0], change_pct: 0.1, limit_up_locked: true }, GRADED_ROWS[1]])
+    renderPage()
+    await expandBoll()
+
+    const tag = screen.getByText('漲停鎖死')
+    expect(tag.closest('button')).toBe(screen.getByText('買進').closest('button'))
+    expect(tag.closest('button')).toHaveTextContent('台積電')
+  })
+
   it('選股基準日旁的大盤狀態列附上投資風險提示', async () => {
     mockGraded('passed', GRADED_ROWS)
     renderPage()

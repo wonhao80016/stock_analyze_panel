@@ -1,15 +1,16 @@
-"""策略结果缓存 — 写入本地文件，供策略页面秒加载。
+"""Strategy result cache, written to a local file so the strategy page loads instantly.
 
-缓存结构:
+Cache layout:
   {
     "as_of": "2024-01-15",
     "results": { strategy_id: { total, as_of, rows } },
-    "today_ever_matched": { strategy_id: [symbol, ...] },    // 今日曾命中 symbol 并集
-    "today_ever_rows": { strategy_id: { symbol: row_data } },// 今日曾命中的完整行数据
+    "today_ever_matched": { strategy_id: [symbol, ...] },    // union of symbols matched today
+    "today_ever_rows": { strategy_id: { symbol: row_data } },// full rows of symbols matched today
+    "failures": { strategy_id: { "error": message } },      // absent in caches written before it existed
     "updated_at": 1705324800000  # Unix ms
   }
 
-文件路径: data/user_data/strategy_cache.json
+File path: data/user_data/strategy_cache.json
 """
 from __future__ import annotations
 
@@ -112,18 +113,21 @@ def write_cache(
     data_dir: Path,
     as_of: str,
     results: dict[str, Any],
+    failures: dict[str, dict[str, str]] | None = None,
 ) -> None:
-    """将策略结果写入缓存文件，同时更新今日曾命中集合。
+    """Write strategy results to the cache file and update today's ever-matched sets.
 
-    - 日期变更时重置 today_ever_matched 和 today_ever_rows
-    - 同一天内合并 (并集) 之前曾命中的 symbol，并用最新行数据更新
+    - A date change resets today_ever_matched and today_ever_rows
+    - Within a day, earlier matched symbols are kept (union) and updated with the latest rows
+    - A strategy in ``failures`` loses any earlier result of the day; one in ``results``
+      loses any earlier failure.
     """
     path = _cache_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # 整个 read-modify-write 持锁: 避免并发 write 丢更新, 也避免与 read_cache 撕裂
     with _file_lock:
-        _write_cache_locked(path, data_dir, as_of, results)
+        _write_cache_locked(path, data_dir, as_of, results, failures or {})
 
 
 def _write_cache_locked(
@@ -131,6 +135,7 @@ def _write_cache_locked(
     data_dir: Path,
     as_of: str,
     results: dict[str, Any],
+    failures: dict[str, dict[str, str]],
 ) -> None:
     """持 _file_lock 后的实际写入逻辑 (read-merge-write + 原子替换)。"""
     # 读取旧缓存 (已持锁, 走不重入的 _read_cache_unlocked)
@@ -140,8 +145,12 @@ def _write_cache_locked(
 
     if old_as_of == as_of:
         merged_results = {**(old.get("results") or {}), **results}
+        merged_failures = {**(old.get("failures") or {}), **failures}
     else:
-        merged_results = results
+        merged_results = dict(results)
+        merged_failures = dict(failures)
+    merged_failures = {sid: f for sid, f in merged_failures.items() if sid not in results}
+    merged_results = {sid: r for sid, r in merged_results.items() if sid not in merged_failures}
 
     # 当前命中的行数据 → symbol 映射
     current_row_maps: dict[str, dict[str, dict]] = {}
@@ -175,6 +184,7 @@ def _write_cache_locked(
         "results": merged_results,
         "today_ever_matched": today_ever_matched,
         "today_ever_rows": today_ever_rows,
+        "failures": merged_failures,
         "enriched_mtime": enriched_mtime,
         "updated_at": int(time.time() * 1000),
     }

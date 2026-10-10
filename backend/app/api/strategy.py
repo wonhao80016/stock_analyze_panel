@@ -12,7 +12,7 @@ import re
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -168,7 +168,9 @@ def _strategy_detail(
     """策略详情（含用户覆盖）"""
     bf = {**s.basic_filter}
     scoring = effective_scoring(s.meta.get("scoring"), overrides)
-    scoring_directions = effective_scoring_directions(overrides)
+    scoring_directions = effective_scoring_directions(
+        overrides, defaults=s.meta.get("scoring_directions")
+    )
     params_defaults = {p["id"]: p["default"] for p in s.meta.get("params", [])}
 
     if overrides:
@@ -328,16 +330,15 @@ def list_strategies(
     all_overrides = strategy_config.list_overrides(data_dir)
 
     result = []
-    for meta in engine.list_strategies():
+    for s in engine.strategy_definitions():
+        meta = s.meta
         if meta.get("research_only"):
             continue
         if asset_type and asset_type not in meta.get("asset_types", ["stock"]):
             continue
         if timeframe and timeframe not in meta.get("timeframes", ["1d"]):
             continue
-        sid = meta["id"]
-        s = engine.get(sid)
-        overrides = all_overrides.get(sid)
+        overrides = all_overrides.get(meta["id"])
         result.append(_strategy_detail(s, overrides, engine))
     return {"strategies": result, "load_errors": engine.load_errors()}
 
@@ -396,7 +397,7 @@ def run_strategy(req: RunRequest, request: Request):
             overrides=overrides or None,
         )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     return _safe(asdict(result))
 
@@ -428,6 +429,9 @@ def run_all(req: RunAllRequest, request: Request):
         sid: dict((all_overrides.get(sid) or {}).get("params") or {})
         for sid in strategy_ids
     }
+    from app.api.screener import _FAILURE_MESSAGE_LIMIT
+
+    skipped: dict[str, str] = {}
     try:
         context = svc.build_strategy_context(
             engine,
@@ -437,19 +441,27 @@ def run_all(req: RunAllRequest, request: Request):
             params_map=params_map,
             overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
         )
+        if context.symbol_asset_types is not None:
+            # Every Taiwan strategy needs the master, so its outage is a 503 rather than one failure each.
+            len(context.symbol_asset_types)
         engine_results = engine.run_all(
             context,
             params_map=params_map,
             overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
             strategy_ids=strategy_ids,
+            skip_failed=True,
+            failures=skipped,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     results: dict[str, dict] = {}
     for sid, result in engine_results.items():
         results[sid] = {"total": result.total, "as_of": str(as_of)}
+    failures = {
+        sid: {"error": message[:_FAILURE_MESSAGE_LIMIT]} for sid, message in skipped.items()
+    }
 
-    return {"as_of": str(as_of), "results": results}
+    return {"as_of": str(as_of), "results": results, "failures": failures}
 
 
 # ── 配置持久化 ───────────────────────────────────────────────────────
@@ -705,6 +717,53 @@ def _restore_strategy_file(path: Path, previous_code: str | None) -> None:
         path.write_text(previous_code, encoding="utf-8")
 
 
+def _restore_after_failed_save(
+    request: Request,
+    engine: StrategyEngine,
+    path: Path,
+    previous_code: str | None,
+    registered_before: dict[str, Path | None],
+) -> None:
+    """Put the file back and reload; invalidate as a save does when that reload changed the registry.
+
+    The reload also picks up files edited by hand since the last one.
+    """
+    _restore_strategy_file(path, previous_code)
+    engine.reload()
+    if _registered_files(engine) == registered_before:
+        return
+    try:
+        _invalidate_strategy_runtime(request)
+    except Exception as exc:
+        logger.warning("failed save of %s: runtime invalidation failed: %s", path.name, exc)
+
+
+def _load_error_files(engine: StrategyEngine) -> set[Path]:
+    return {Path(item["file"]).resolve() for item in engine.load_errors()}
+
+
+def _registered_files(engine: StrategyEngine) -> dict[str, Path | None]:
+    return {str(s.meta["id"]): s.file_path for s in engine.strategy_definitions()}
+
+
+def _raise_new_load_errors(errors: list[dict], path: Path, failing_before: set[Path]) -> None:
+    """Fail a save whose own file does not load or that makes another file fail to load.
+
+    ``errors`` are the save's own reload's; ``failing_before`` holds the files that already failed
+    before the save, which never block it.
+    """
+    target = path.resolve()
+    failed = [
+        item
+        for item in errors
+        if (file := Path(item["file"]).resolve()) == target or file not in failing_before
+    ]
+    if failed:
+        raise ValueError(
+            "; ".join(f"{Path(item['file']).name}: {item['error']}" for item in failed)
+        )
+
+
 def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legacy_ai_path: bool = False) -> dict:
     sid = _validate_strategy_id(req.strategy_id)
     if legacy_ai_path:
@@ -752,10 +811,12 @@ def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legac
 
     prepared = _prepare_strategy_code(req)
     previous_code = path.read_text(encoding="utf-8") if path.exists() else None
+    failing_before = _load_error_files(engine)
+    registered_before = _registered_files(engine)
     path.write_text(prepared["code"], encoding="utf-8")
 
     try:
-        engine.reload()
+        _raise_new_load_errors(engine.reload(), path, failing_before)
         loaded = engine.get(sid)
         if loaded.file_path is None or loaded.file_path.resolve() != path.resolve():
             raise ValueError("策略加载到了非预期文件，请检查是否存在重复 strategy_id")
@@ -770,8 +831,7 @@ def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legac
                 + " — 请先在「自定义信号」管理中创建对应信号后再保存"
             )
     except Exception as e:
-        _restore_strategy_file(path, previous_code)
-        engine.reload()
+        _restore_after_failed_save(request, engine, path, previous_code, registered_before)
         raise ValueError(f"策略保存失败: {e}") from e
 
     _invalidate_strategy_runtime(request)
@@ -804,17 +864,43 @@ def ai_status(request: Request):
 
 @router.get("/{strategy_id}/source")
 def get_strategy_source(strategy_id: str, request: Request):
-    """获取策略源文件内容（用于 AI 修改）"""
+    """Return a strategy's source file content for AI-assisted editing.
+
+    A user file that failed to load is served with ``load_failed`` and its error so it can be fixed.
+    """
 
     # 先查 StrategyEngine 获取文件路径
     engine = _get_engine(request)
-    s = _get_public_strategy(engine, strategy_id)
+    try:
+        s = _get_public_strategy(engine, strategy_id)
+    except HTTPException:
+        unloaded = _unloaded_user_file(engine, _data_dir(request), strategy_id)
+        if unloaded is None:
+            raise
+        try:
+            code = unloaded.path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            raise HTTPException(
+                status_code=409,
+                detail=f"无法读取策略文件 {unloaded.path.name}: {e.strerror or e}",
+            ) from e
+        return {
+            "code": code,
+            "source": unloaded.source,
+            "load_failed": True,
+            "load_error": unloaded.error,
+        }
 
     path = s.file_path
     if not path or not path.exists():
         raise HTTPException(status_code=404, detail="策略源文件不存在")
 
-    return {"code": path.read_text(encoding="utf-8"), "source": s.source}
+    return {
+        "code": path.read_text(encoding="utf-8"),
+        "source": s.source,
+        "load_failed": False,
+        "load_error": None,
+    }
 
 
 @router.post("/ai/test")
@@ -1035,10 +1121,12 @@ def _save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{sid}.py"
     previous_code = path.read_text(encoding="utf-8") if path.exists() else None
+    failing_before = _load_error_files(engine)
+    registered_before = _registered_files(engine)
     path.write_text(code, encoding="utf-8")
 
     try:
-        engine.reload()
+        _raise_new_load_errors(engine.reload(), path, failing_before)
         loaded = engine.get(sid)
         if loaded.file_path is None or loaded.file_path.resolve() != path.resolve():
             raise ValueError("策略加载到了非预期文件，请检查是否存在重复 strategy_id")
@@ -1047,8 +1135,7 @@ def _save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request
         if loaded.execution_backend != "composite":
             raise ValueError("策略后端异常: 期望 composite")
     except Exception as e:
-        _restore_strategy_file(path, previous_code)
-        engine.reload()
+        _restore_after_failed_save(request, engine, path, previous_code, registered_before)
         raise ValueError(f"叠加策略保存失败: {e}") from e
 
     _invalidate_strategy_runtime(request)
@@ -1095,10 +1182,21 @@ def delete_strategy(strategy_id: str, request: Request):
     try:
         s = engine.get(strategy_id)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=f"策略 {strategy_id} 不存在") from e
+        unloaded = _unloaded_user_file(engine, _data_dir(request), strategy_id)
+        if unloaded is None:
+            raise HTTPException(status_code=404, detail=f"策略 {strategy_id} 不存在") from e
+        _unlink_strategy_file(unloaded.path)
+        engine.reload()
+        return {"ok": True, "warnings": _cleanup_deleted_strategy(request, strategy_id)}
 
     if s.source == "builtin":
-        raise HTTPException(status_code=403, detail="内置策略不可删除")
+        # A user file named after a builtin id never loads; its overrides and rules are the builtin's.
+        shadow = _unloaded_user_file(engine, _data_dir(request), strategy_id)
+        if shadow is None:
+            raise HTTPException(status_code=403, detail="内置策略不可删除")
+        _unlink_strategy_file(shadow.path)
+        engine.reload()
+        return {"ok": True, "warnings": []}
 
     # 删除被引用的子策略会令叠加策略加载失败; 删除前 fail-closed 阻止。
     dependents = engine.find_dependents(strategy_id)
@@ -1121,6 +1219,55 @@ def delete_strategy(strategy_id: str, request: Request):
     if not resolved_path.is_relative_to(allowed_dir):
         raise HTTPException(status_code=400, detail="策略源文件不在用户策略目录, 拒绝删除")
 
+    _unlink_strategy_file(resolved_path)
+
+    engine.unregister(strategy_id)
+    warnings = _cleanup_deleted_strategy(request, strategy_id)
+    return {"ok": True, "warnings": warnings}
+
+
+class _UnloadedFile(NamedTuple):
+    path: Path
+    source: str
+    error: str
+
+
+def _unloaded_user_file(
+    engine: StrategyEngine, data_dir: Path, strategy_id: str
+) -> _UnloadedFile | None:
+    """The user strategy file ``<strategy_id>.py`` that failed to load, if exactly one exists.
+
+    Saves name every user file after its id, so the name is all a file that cannot load offers.
+    """
+    user_dirs: dict[Path, str] = {}
+    for source in ("custom", "ai", "composite"):
+        try:
+            user_dirs[(data_dir / "strategies" / source).resolve()] = source
+        except (OSError, RuntimeError):
+            continue
+    matches: dict[Path, list[str]] = {}
+    for item in engine.load_errors():
+        path = Path(item["file"])
+        if path.stem != strategy_id:
+            continue
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved.parent in user_dirs:
+            matches.setdefault(resolved, []).append(str(item["error"]))
+    if len(matches) > 1:
+        names = ", ".join(sorted(str(path) for path in matches))
+        raise HTTPException(
+            status_code=409, detail=f"多个同名策略文件加载失败: {names}, 请手动处理"
+        )
+    if not matches:
+        return None
+    [(path, errors)] = matches.items()
+    return _UnloadedFile(path, user_dirs[path.parent], "; ".join(errors))
+
+
+def _unlink_strategy_file(resolved_path: Path) -> None:
     try:
         resolved_path.unlink(missing_ok=True)
     except OSError as e:
@@ -1132,11 +1279,6 @@ def delete_strategy(strategy_id: str, request: Request):
                 "请确认数据目录可写; Docker 部署请检查数据卷不是只读挂载。"
             ),
         ) from e
-
-    # 删除只影响当前策略, 全量 reload 会让其他损坏或重复 ID 的文件阻塞本次删除。
-    engine.unregister(strategy_id)
-    warnings = _cleanup_deleted_strategy(request, strategy_id)
-    return {"ok": True, "warnings": warnings}
 
 
 # ── 监控 ─────────────────────────────────────────────────────────────
@@ -1155,4 +1297,8 @@ def reload_strategies(request: Request):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     _invalidate_strategy_runtime(request)
-    return {"ok": True, "count": len(engine.list_strategies())}
+    return {
+        "ok": True,
+        "count": len(engine.list_strategies()),
+        "load_errors": engine.load_errors(),
+    }

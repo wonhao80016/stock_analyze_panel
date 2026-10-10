@@ -3,14 +3,8 @@ interface TurnoverRateInput {
   turnover_rate?: number | null
 }
 
-/**
- * The float-shares formula assumes A-share volume in lots, so it applies only when
- * floatShares is known; otherwise the backend's market-aware turnover_rate is used.
- */
-export function resolveTurnoverRate(latest: TurnoverRateInput, floatShares?: number | null): number | null {
-  if (floatShares) {
-    return latest.volume ? Number(latest.volume) * 100 / floatShares * 100 : null
-  }
-  const fallback = latest.turnover_rate
-  return fallback != null && Number.isFinite(Number(fallback)) ? Number(fallback) : null
+/** The backend's turnover_rate, a percentage (1.23 means 1.23%), or null when missing or not finite. */
+export function resolveTurnoverRate(latest: TurnoverRateInput): number | null {
+  const value = latest.turnover_rate
+  return value != null && Number.isFinite(Number(value)) ? Number(value) : null
 }

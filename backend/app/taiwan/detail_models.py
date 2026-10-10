@@ -83,6 +83,13 @@ class TaiwanDailyRow(BaseModel):
         None, description="Change base on the row's scale; the exchange reference price on a corporate-action session"
     )
     raw_close: float | None = Field(None, description="Traded close before forward adjustment")
+    turnover_rate: float | None = Field(
+        None,
+        description=(
+            "Published turnover in percent (1.5 means 1.5%) on issued shares less private placements; "
+            "null for ETFs, indices and sessions published before turnover was kept"
+        ),
+    )
 
 
 class TaiwanHistoricalDaily(BaseModel):

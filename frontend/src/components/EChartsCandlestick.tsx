@@ -3,6 +3,7 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import { BOARD_LOT_VOLUME_NOTE } from '@/lib/api'
+import { resolveTurnoverRate } from '@/lib/turnoverRate'
 
 export interface OHLC {
   date: string
@@ -17,6 +18,7 @@ export interface OHLC {
   board_lot_volume?: boolean
   prev_close?: number | null
   raw_close?: number | null
+  turnover_rate?: number | null
   ma5?: number | null
   ma10?: number | null
   ma20?: number | null
@@ -69,6 +71,11 @@ export function unadjustedClose(bar: OHLC): number | null {
 export function unadjustedCloseHTML(bar: OHLC, color: string): string {
   const raw = unadjustedClose(bar)
   return raw == null ? '' : `<span style="color:${color}">原始收盤</span><span style="color:${color}">${raw.toFixed(2)}</span>`
+}
+
+export function turnoverRateHTML(bar: OHLC, color: string): string {
+  const rate = resolveTurnoverRate(bar)
+  return rate == null ? '' : `<span style="color:${color}">換手</span><span style="color:${color}">${rate.toFixed(2)}%</span>`
 }
 
 export interface ChartMarker {
@@ -392,7 +399,6 @@ interface Props {
   showInfoBar?: boolean
   showMarkers?: boolean
   onToggleMarkers?: () => void
-  stockInfo?: StockInfo
   symbol?: string
   linkedPrice?: number | null
   onDateClick?: (date: string) => void
@@ -867,7 +873,6 @@ export function EChartsCandlestick({
   showInfoBar = true,
   showMarkers: showMarkersProp = true,
   onToggleMarkers: _onToggleMarkers,
-  stockInfo,
   symbol: _symbol,
   linkedPrice,
   onDateClick,
@@ -967,8 +972,6 @@ export function EChartsCandlestick({
     const chg = base != null ? d.close - base : 0
     const isUp = chg >= 0
     const clr = isUp ? THEME.bull : THEME.bear
-    const floatShares = stockInfo?.float_shares
-    const turnoverRate = floatShares && d.volume ? (d.volume * 100 / floatShares * 100) : null
 
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;height:20px;flex-wrap:wrap">`
     html += `<span style="color:${CT().text}">${d.date}</span>`
@@ -986,10 +989,7 @@ export function EChartsCandlestick({
       html += `<span style="color:${clr};margin-left:8px">${isUp ? '+' : ''}${chgPct.toFixed(2)}%</span>`
     }
     html += unadjustedCloseHTML(d, CT().text)
-    if (turnoverRate != null) {
-      html += `<span style="color:${CT().text}">換手</span>`
-      html += `<span style="color:${CT().text}">${turnoverRate.toFixed(2)}%</span>`
-    }
+    html += turnoverRateHTML(d, CT().text)
     html += `</div>`
 
     // 第二行: MA + BOLL
@@ -1006,7 +1006,7 @@ export function EChartsCandlestick({
     }
 
     return html
-  }, [data, stockInfo, showMA, activeIndicators])
+  }, [data, showMA, activeIndicators])
   getInfoBarHTMLRef.current = getInfoBarHTML
 
   // data 變化時重置 infoIdx
@@ -1217,8 +1217,6 @@ export function EChartsCandlestick({
     const idx = data.length - 1
     const d = idx >= 0 && idx < data.length ? data[idx] : null
     if (!d) return ''
-    const floatShares = stockInfo?.float_shares
-    const turnoverRate = floatShares && d.volume ? (d.volume * 100 / floatShares * 100) : null
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
     html += `<span style="color:${CT().text}">${d.date}</span>`
     html += `<span style="color:${CT().text}">開</span>`
@@ -1238,10 +1236,7 @@ export function EChartsCandlestick({
       html += `<span style="color:${clr0};margin-left:8px">${chgPct0 >= 0 ? '+' : ''}${chgPct0.toFixed(2)}%</span>`
     }
     html += unadjustedCloseHTML(d, CT().text)
-    if (turnoverRate != null) {
-      html += `<span style="color:${CT().text}">換手</span>`
-      html += `<span style="color:${CT().text}">${turnoverRate.toFixed(2)}%</span>`
-    }
+    html += turnoverRateHTML(d, CT().text)
     html += `</div>`
     if (showMA) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`

@@ -74,6 +74,7 @@ export function toOHLC(rows: KlineRow[]): OHLC[] {
       board_lot_volume: r.board_lot_volume === true,
       prev_close: r.prev_close != null ? Number(r.prev_close) : null,
       raw_close: r.raw_close != null ? Number(r.raw_close) : null,
+      turnover_rate: r.turnover_rate != null ? Number(r.turnover_rate) : null,
       ma5: r.ma5 != null ? Number(r.ma5) : null,
       ma10: r.ma10 != null ? Number(r.ma10) : null,
       ma20: r.ma20 != null ? Number(r.ma20) : null,
@@ -293,7 +294,6 @@ export function StockDailyKChart({
           showMA={showMA}
           showInfoBar={showInfoBar}
           showMarkers={showMarkers}
-          stockInfo={stockInfo}
           symbol={symbol}
           linkedPrice={linkedPrice}
           onDateClick={onDateClick}

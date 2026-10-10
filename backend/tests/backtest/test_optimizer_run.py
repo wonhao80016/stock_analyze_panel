@@ -379,7 +379,7 @@ def test_all_failed_trials_report_an_explicit_reason():
     out = _optimizer(score).optimize(_cfg())
 
     assert out["best_params"] is None
-    assert out["error"] == "every parameter combination failed"
+    assert out["error"] == "every parameter combination failed: no data"
 
 
 def test_successful_optimization_has_no_error():

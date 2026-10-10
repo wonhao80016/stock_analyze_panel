@@ -120,12 +120,63 @@ describe('MONITOR_INTRADAY_SIGNAL_LABELS and cnSignal — Traditional Chinese', 
     expect(cnSignal('consecutive_limit_downs')).toBe('連續跌停')
   })
 
+  it('cnSignal labels every builtin scoring field (e.g. distance_from_low_60d)', () => {
+    expect(cnSignal('distance_from_low_60d')).toBe('距60日低點')
+  })
+
   it('cnSignal falls back to the raw id for unknown names (no fabricated translation)', () => {
     expect(cnSignal('csg_some_custom_signal')).toBe('csg_some_custom_signal')
   })
 
   it('cnSignal prefers an explicitly supplied custom-name map over the built-in tables', () => {
     expect(cnSignal('csg_1', { csg_1: '自訂訊號A' })).toBe('自訂訊號A')
+  })
+})
+
+// Mirrors FIELD_LABELS in backend/app/strategy/field_labels.py.
+const EXPECTED_STRATEGY_SIGNAL_LABELS: Record<string, string> = {
+  signal_bullish_alignment_entry: '均線多頭排列',
+  signal_pullback_ma20_bounce_entry: '回踩MA20反彈',
+  signal_pullback_to_support_entry: '縮量回踩MA20',
+  signal_boll_squeeze_breakout: '布林收斂突破',
+  signal_boll_mid_break: '收盤低於布林中軌',
+  signal_capitulation_reversal: '爆量止跌反轉',
+  signal_close_20d_low: '收盤創20日新低',
+  signal_consolidation_breakout: '整理區間突破',
+  signal_ma20_break: '收盤低於MA20',
+  signal_factor_rank_entry: '因子排名進場',
+  signal_factor_rank_exit: '因子排名出場',
+  signal_lorentzian_bullish: 'Lorentzian看多',
+  signal_lorentzian_exit: 'Lorentzian出場',
+  signal_pullback_resume: '回檔再起漲',
+  signal_swing_structure_bullish: '波段結構轉多',
+  signal_swing_structure_exit: '波段結構轉弱',
+  signal_n_day_low_reclaim: '跌破60日低點後收回',
+  signal_low_volatility_leader_entry: '低波動多頭',
+}
+
+describe('strategy-specific signal labels', () => {
+  it('cnSignal resolves each builtin strategy signal id to its Traditional Chinese label', () => {
+    for (const [id, label] of Object.entries(EXPECTED_STRATEGY_SIGNAL_LABELS)) {
+      expect(cnSignal(id), id).toBe(label)
+    }
+  })
+
+  it('does not label a strategy entry condition as a MA5/MA20 golden cross', () => {
+    for (const id of [
+      'signal_bullish_alignment_entry',
+      'signal_pullback_ma20_bounce_entry',
+      'signal_pullback_to_support_entry',
+    ]) {
+      expect(cnSignal(id), id).not.toBe(cnSignal('signal_ma_golden_5_20'))
+    }
+  })
+
+  it('keeps strategy ids out of the pickable built-in signal list', () => {
+    for (const id of Object.keys(EXPECTED_STRATEGY_SIGNAL_LABELS)) {
+      expect(SIGNAL_OPTIONS, id).not.toContain(id)
+      expect(SIGNAL_LABELS[id], id).toBeUndefined()
+    }
   })
 })
 

@@ -1,17 +1,16 @@
-"""enriched 表计算流水线(§7.5 / §7.7 Step 2)。
+"""Enriched table computation pipeline.
 
-存储层 (enriched parquet):
-  仅存储基础行情窄表 (14 列), 指标和信号由各服务即时计算。
+Storage (enriched parquet):
+  The Taiwan publish (app.taiwan.enriched_refresh) stores the whole compute_enriched output,
+  indicators and signals included, and rewrites it when INDICATOR_DEFINITION_VERSION changes.
+  run_pipeline (the kline_daily source) stores only ENRICHED_STORAGE_COLS. Backtests and rows
+  without indicators (app.parquet.storage_only_rows) are recomputed with the functions here.
 
-  存储列: symbol, date, OHLCV(前复权), volume, amount,
-          raw_close, raw_high, raw_low, turnover_rate,
-          consecutive_limit_ups, consecutive_limit_downs
-
-设计:
-  - 100% Polars 表达式(SQL 窗口无法表达递归 EMA)
-  - 每只标的独立计算(`.over("symbol")`)
-  - 有 adj_factor 时先应用前复权再算指标;无因子时直接用 raw
-  - streaming collect 控制内存
+Design:
+  - Polars expressions, except the recursive smoothing of EMA, MACD, RSI, ATR and KD (seeded_ewm)
+  - each symbol is computed independently (`.over("symbol")`)
+  - with an adj_factor, prices are forward-adjusted before the indicators; without one, raw is used
+  - streaming collect bounds memory
 """
 from __future__ import annotations
 
@@ -21,6 +20,7 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import polars as pl
 
 from app.config import settings
@@ -42,7 +42,23 @@ if TYPE_CHECKING:
     from app.taiwan.market_rules import ListingSessions
     from app.taiwan.universe.models import TaiwanInstrument
 
+try:
+    from numba import njit
+except ImportError:
+    def njit(*args, **kwargs):
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return args[0]
+
+        def decorator(func):
+            return func
+
+        return decorator
+
 logger = logging.getLogger(__name__)
+
+# Bump whenever a published indicator's definition changes: the Taiwan enriched publish
+# records it and rewrites every partition once when the recorded version differs.
+INDICATOR_DEFINITION_VERSION = 2
 
 
 # ── 自定义信号缓存 ─────────────────────────────────────
@@ -94,7 +110,7 @@ def invalidate_custom_signals() -> None:
     _custom_signal_exprs_today = None
 
 
-# enriched parquet 仅存储的列 (14 列)
+# Columns run_pipeline stores; the Taiwan publish also stores the indicators.
 ENRICHED_STORAGE_COLS = [
     "symbol", "date",
     "open", "high", "low", "close",          # 前复权
@@ -129,7 +145,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "raw_close":               "原始收盘价(未复权)",
     "raw_high":                "原始最高价(未复权)",
     "raw_low":                 "原始最低价(未复权)",
-    "turnover_rate":           "换手率(台股分母為已發行普通股數, 非流通股數)",
+    "turnover_rate":           "换手率(台股分母为已发行普通股数扣除私募股数, 非流通股数; 只保留自每日发布当天起)",
     "consecutive_limit_ups":   "连板数",
     "consecutive_limit_downs": "连跌数",
     # ── 基础指标 ─────────────────────────────────────────
@@ -232,6 +248,103 @@ ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
 
 def _ema_alpha(span: int) -> float:
     return 2.0 / (span + 1)
+
+
+# Taiwan KD convention: K and D start from 50 before the first RSV.
+KD_PRIOR = 50.0
+
+
+@njit(cache=True, nogil=True)
+def _seeded_ewm_kernel(
+    values: np.ndarray, offsets: np.ndarray, alpha: float, seed: int, prior: float
+) -> np.ndarray:
+    out = np.full(values.shape[0], np.nan)
+    decay = 1.0 - alpha
+    for group in range(offsets.shape[0] - 1):
+        seeded = np.isfinite(prior)
+        state = prior
+        total = 0.0
+        seen = 0
+        for i in range(offsets[group], offsets[group + 1]):
+            value = values[i]
+            if not np.isfinite(value):
+                continue
+            if seeded:
+                state = decay * state + alpha * value
+            else:
+                seen += 1
+                total += value
+                if seen < seed:
+                    continue
+                state = total / seed
+                seeded = True
+            out[i] = state
+    return out
+
+
+def seeded_ewm(
+    values: np.ndarray,
+    offsets: np.ndarray,
+    alpha: float,
+    *,
+    seed: int = 1,
+    prior: float | None = None,
+) -> np.ndarray:
+    """adjust=False EWM of each group ``values[offsets[g]:offsets[g + 1]]`` over its finite values.
+
+    The state starts at *prior* when given, otherwise at the mean of the group's first *seed*
+    finite values, with NaN before it. Non-finite values are skipped and give NaN.
+    """
+    return _seeded_ewm_kernel(
+        np.ascontiguousarray(values, dtype=np.float64),
+        np.ascontiguousarray(offsets, dtype=np.int64),
+        float(alpha),
+        int(seed),
+        np.nan if prior is None else float(prior),
+    )
+
+
+def ema_values(values: np.ndarray, offsets: np.ndarray, span: int) -> np.ndarray:
+    """EMA seeded with the SMA of its first *span* values (StockCharts)."""
+    return seeded_ewm(values, offsets, _ema_alpha(span), seed=span)
+
+
+def wilder_values(values: np.ndarray, offsets: np.ndarray, n: int) -> np.ndarray:
+    """Wilder's average: the mean of the first *n* values, then (prev * (n - 1) + value) / n."""
+    return seeded_ewm(values, offsets, 1.0 / n, seed=n)
+
+
+def macd_values(close: np.ndarray, offsets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """MACD 12/26/9: DIF = EMA12 - EMA26 and DEA, the EMA9 of DIF."""
+    dif = ema_values(close, offsets, 12) - ema_values(close, offsets, 26)
+    return dif, ema_values(dif, offsets, 9)
+
+
+def kd_values(rsv: np.ndarray, offsets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """KD 9/3/3: K = 2/3 K + 1/3 RSV and D = 2/3 D + 1/3 K, both from KD_PRIOR."""
+    k = seeded_ewm(rsv, offsets, 1.0 / 3.0, prior=KD_PRIOR)
+    return k, seeded_ewm(k, offsets, 1.0 / 3.0, prior=KD_PRIOR)
+
+
+def rsi_values(gains: np.ndarray, losses: np.ndarray, offsets: np.ndarray, n: int) -> np.ndarray:
+    """Wilder RSI from per-bar gains and losses, NaN where the change is missing."""
+    average_gain = wilder_values(gains, offsets, n)
+    average_loss = wilder_values(losses, offsets, n)
+    return 100.0 - 100.0 / (1.0 + average_gain / np.where(average_loss == 0, 1e-12, average_loss))
+
+
+def _symbol_offsets(df: pl.DataFrame) -> np.ndarray:
+    """Row offsets of each symbol's run in *df*, which is sorted by symbol."""
+    starts = np.flatnonzero((df["symbol"] != df["symbol"].shift(1)).fill_null(True).to_numpy())
+    return np.append(starts, df.height).astype(np.int64)
+
+
+def _float_values(df: pl.DataFrame, name: str) -> np.ndarray:
+    return df[name].cast(pl.Float64).to_numpy()
+
+
+def _series(name: str, values: np.ndarray) -> pl.Series:
+    return pl.Series(name, values, dtype=pl.Float64, nan_to_null=True)
 
 
 def _math_half_up(expr: pl.Expr, decimals: int = 2) -> pl.Expr:
@@ -343,7 +456,6 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
 # ── compute_indicators 的列依赖关系 (供 needed 裁剪时求闭包) ────────────
 # target -> 其计算所依赖的中间/指标列 (仅列出依赖非原始 OHLCV 的项)
 _INDICATOR_DEPS: dict[str, set[str]] = {
-    "macd_dif": {"_ema12", "_ema26"},
     "boll_upper": {"ma20", "_boll_std"},
     "boll_lower": {"ma20", "_boll_std"},
     "macd_dea": {"macd_dif"},
@@ -354,15 +466,12 @@ _INDICATOR_DEPS: dict[str, set[str]] = {
     "atr_14": {"_tr"},
     "vol_ratio_5d": {"_vol_ma5"},
     "annual_vol_20d": {"_daily_pct"},
-    "rsi_6": {"_delta", "_gain", "_loss"},
-    "rsi_14": {"_delta", "_gain", "_loss"},
-    "rsi_24": {"_delta", "_gain", "_loss"},
 }
 
 # compute_indicators 可产出的全部指标/临时列 (needed=None 时即为此全集, 行为不变)
 _ALL_INDICATOR_COLS: frozenset[str] = frozenset({
     "prev_close", "ma5", "ma10", "ma20", "ma30", "ma60",
-    "ema5", "ema10", "ema20", "ema30", "ema60", "_ema12", "_ema26",
+    "ema5", "ema10", "ema20", "ema30", "ema60",
     "_boll_std", "_kdj_ln", "_kdj_hn", "_tr", "vol_ma5", "vol_ma10",
     "_vol_ma5", "high_60d", "low_60d",
     "macd_dif", "boll_upper", "boll_lower", "macd_dea", "macd_hist",
@@ -432,11 +541,12 @@ def compute_indicators(
     want = _resolve_needed(needed)
 
     df = df if assume_sorted else df.sort(["symbol", "date"])
+    offsets = _symbol_offsets(df)
 
     # Pass 1: 均线 + EMA + MACD 基础 + BOLL 基础 + KDJ 基础 + ATR 基础 + 量价 + 极值
     prev_close = pl.col("close").shift(1).over("symbol")
     reference_prev_close = _reference_prev_close(df, prev_close)
-    _p1: list[pl.Expr] = []
+    _p1: list[pl.Expr | pl.Series] = []
     if "prev_close" in want:
         _p1.append(reference_prev_close.alias("prev_close"))
     if "ma5" in want:
@@ -449,20 +559,14 @@ def compute_indicators(
         _p1.append(pl.col("close").rolling_mean(30).over("symbol").alias("ma30"))
     if "ma60" in want:
         _p1.append(pl.col("close").rolling_mean(60).over("symbol").alias("ma60"))
-    if "ema5" in want:
-        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(5), adjust=False).over("symbol").alias("ema5"))
-    if "ema10" in want:
-        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(10), adjust=False).over("symbol").alias("ema10"))
-    if "ema20" in want:
-        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(20), adjust=False).over("symbol").alias("ema20"))
-    if "ema30" in want:
-        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(30), adjust=False).over("symbol").alias("ema30"))
-    if "ema60" in want:
-        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(60), adjust=False).over("symbol").alias("ema60"))
-    if "_ema12" in want:
-        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"))
-    if "_ema26" in want:
-        _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"))
+    close = (
+        _float_values(df, "close")
+        if want & {"ema5", "ema10", "ema20", "ema30", "ema60", "macd_dif"}
+        else None
+    )
+    for span in (5, 10, 20, 30, 60):
+        if f"ema{span}" in want:
+            _p1.append(_series(f"ema{span}", ema_values(close, offsets, span)))
     if "_boll_std" in want:
         _p1.append(pl.col("close").rolling_std(20).over("symbol").alias("_boll_std"))
     if "_kdj_ln" in want:
@@ -470,11 +574,17 @@ def compute_indicators(
     if "_kdj_hn" in want:
         _p1.append(pl.col("high").rolling_max(9).over("symbol").alias("_kdj_hn"))
     if "_tr" in want:
-        _p1.append(pl.max_horizontal(
-            pl.col("high") - pl.col("low"),
-            (pl.col("high") - prev_close).abs(),
-            (pl.col("low") - prev_close).abs(),
-        ).alias("_tr"))
+        _p1.append(
+            pl.when(prev_close.is_not_null())
+            .then(
+                pl.max_horizontal(
+                    pl.col("high") - pl.col("low"),
+                    (pl.col("high") - prev_close).abs(),
+                    (pl.col("low") - prev_close).abs(),
+                )
+            )
+            .alias("_tr")
+        )
     if "vol_ma5" in want:
         _p1.append(pl.col("volume").rolling_mean(5).over("symbol").alias("vol_ma5"))
     if "vol_ma10" in want:
@@ -492,9 +602,10 @@ def compute_indicators(
         df = df.with_columns(_p1)
 
     # Pass 2: MACD + BOLL (基于 Pass 1 基础列)
-    _p2: list[pl.Expr] = []
+    _p2: list[pl.Expr | pl.Series] = []
     if "macd_dif" in want:
-        _p2.append((pl.col("_ema12") - pl.col("_ema26")).alias("macd_dif"))
+        macd_dif, macd_dea = macd_values(close, offsets)
+        _p2.append(_series("macd_dif", macd_dif))
     if "boll_upper" in want:
         _p2.append((pl.col("ma20") + 2 * pl.col("_boll_std")).alias("boll_upper"))
     if "boll_lower" in want:
@@ -502,9 +613,7 @@ def compute_indicators(
     if _p2:
         df = df.with_columns(_p2)
     if "macd_dea" in want:
-        df = df.with_columns(
-            pl.col("macd_dif").ewm_mean(alpha=_ema_alpha(9), adjust=False).over("symbol").alias("macd_dea"),
-        )
+        df = df.with_columns(_series("macd_dea", macd_dea))
     if "macd_hist" in want:
         df = df.with_columns(
             ((pl.col("macd_dif") - pl.col("macd_dea")) * 2).alias("macd_hist"),
@@ -516,13 +625,12 @@ def compute_indicators(
             100 * (pl.col("close") - pl.col("_kdj_ln"))
             / (pl.col("_kdj_hn") - pl.col("_kdj_ln")).fill_null(1e-12)
         )
-        df = df.with_columns([
-            _kdj_rsv.ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_k"),
-        ])
+        kdj_k, kdj_d = kd_values(
+            df.select(_kdj_rsv.cast(pl.Float64)).to_series().to_numpy(), offsets
+        )
+        df = df.with_columns(_series("kdj_k", kdj_k))
     if "kdj_d" in want:
-        df = df.with_columns([
-            pl.col("kdj_k").ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_d"),
-        ])
+        df = df.with_columns(_series("kdj_d", kdj_d))
     if "kdj_j" in want:
         df = df.with_columns([
             (3 * pl.col("kdj_k") - 2 * pl.col("kdj_d")).alias("kdj_j"),
@@ -531,7 +639,7 @@ def compute_indicators(
     # Pass 4: ATR + 量比 + 动量 + 波动 + 涨跌幅 + 涨跌额 + 振幅
     if "atr_14" in want:
         df = df.with_columns(
-            pl.col("_tr").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol").alias("atr_14"),
+            _series("atr_14", wilder_values(_float_values(df, "_tr"), offsets, 14))
         )
     if "vol_ratio_5d" in want:
         # 标准量比(同花顺/东财): 今日成交量 / 前5日均量(不含当天)
@@ -577,39 +685,25 @@ def compute_indicators(
 
     # Pass 5: RSI
     if want & {"rsi_6", "rsi_14", "rsi_24"}:
+        delta = (
+            df.select(pl.col("close").diff().over("symbol").cast(pl.Float64)).to_series().to_numpy()
+        )
+        gains, losses = np.fmax(delta, 0.0), np.fmax(-delta, 0.0)
+        gains[np.isnan(delta)] = np.nan
+        losses[np.isnan(delta)] = np.nan
         df = df.with_columns(
-            pl.col("close").diff().over("symbol").alias("_delta"),
-        ).with_columns([
-            pl.when(pl.col("_delta") > 0).then(pl.col("_delta")).otherwise(0.0).alias("_gain"),
-            pl.when(pl.col("_delta") < 0).then(-pl.col("_delta")).otherwise(0.0).alias("_loss"),
-        ])
-        for n in (6, 14, 24):
-            if f"rsi_{n}" not in want:
-                continue
-            a = 1.0 / n
-            df = df.with_columns([
-                pl.col("_gain").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_gain_{n}"),
-                pl.col("_loss").ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"),
-            ]).with_columns(
-                pl.when(pl.col("_delta").is_not_null().cast(pl.UInt32).cum_sum().over("symbol") >= n)
-                  .then(100 - 100 / (1 + pl.col(f"_rsi_avg_gain_{n}") /
-                                     pl.when(pl.col(f"_rsi_avg_loss_{n}") == 0)
-                                       .then(1e-12)
-                                       .otherwise(pl.col(f"_rsi_avg_loss_{n}"))
-                                     ))
-                  .otherwise(None)
-                  .alias(f"rsi_{n}"),
-            )
+            [
+                _series(f"rsi_{n}", rsi_values(gains, losses, offsets, n))
+                for n in (6, 14, 24)
+                if f"rsi_{n}" in want
+            ]
+        )
 
     # Pass 6: 换手率 (需要 float_shares, 后续在 compute_all 中 JOIN instruments 后补充)
 
     # 清理临时列 (只丢弃实际存在的临时列)
-    _temp_cols = ["_boll_std", "_tr", "_ema12", "_ema26",
-                  "_kdj_ln", "_kdj_hn", "_vol_ma5", "_vol_ma5_prev", "_daily_pct",
-                  "_delta", "_gain", "_loss",
-                  "_rsi_avg_gain_6", "_rsi_avg_loss_6",
-                  "_rsi_avg_gain_14", "_rsi_avg_loss_14",
-                  "_rsi_avg_gain_24", "_rsi_avg_loss_24"]
+    _temp_cols = ["_boll_std", "_tr",
+                  "_kdj_ln", "_kdj_hn", "_vol_ma5", "_vol_ma5_prev", "_daily_pct"]
     df = df.drop([c for c in _temp_cols if c in df.columns])
 
     _elapsed = (_time.perf_counter() - _t0) * 1000
@@ -1120,7 +1214,7 @@ def compute_enriched(
 
 
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
-    """写入 parquet 前裁剪到存储列 (14 列)。"""
+    """Trim to ENRICHED_STORAGE_COLS before writing."""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
     return df.select(cols)
 
@@ -1129,23 +1223,19 @@ def run_pipeline(data_dir: Path | None = None,
                  symbols: list[str] | None = None,
                  new_dates_only: bool = False,
                  on_batch_done: Callable[[int, int], None] | None = None) -> int:
-    """运行盘后管道:读 kline_daily + adj_factor → 前复权 + 计算存储列 → 写 enriched。
+    """Publish kline_daily into enriched: forward-adjust with adj_factor, compute, then write.
 
-    enriched 表仅存储 14 列基础行情窄表 (OHLCV + raw_close/high/low + turnover_rate + 连板数)。
+    Only ENRICHED_STORAGE_COLS are written. An unfinished earlier publication forces a full run.
 
-    模式:
-      - 全量 (symbols=None, new_dates_only=False):
-          读全部 kline_daily, 全部重写 enriched 分区。
-          用于首次同步、往前扩展历史。
-      - 向后增量 (new_dates_only=True):
-          只读 enriched 中尚不存在的日期分区对应的 daily 数据,
-          为所有标的生成新的 enriched 分区;
-          若同时传 symbols, 还会对这些个股的全部已有日期做重算
-          (因为除权因子链变了,历史数据的复权比例也要更新)。
-      - 除权因子增量 (symbols 指定, new_dates_only=False):
-          只对指定 symbol 做局部重算并合并回已有 enriched。
-          用于无新日K数据、仅除权因子变更的场景。
-    返回写入的行数。
+    Modes:
+      - full (symbols=None, new_dates_only=False): rewrites every enriched partition from all of
+        kline_daily; used for the first sync and for extending history backwards.
+      - forward (new_dates_only=True): writes partitions for dates kline_daily has and enriched
+        lacks; with symbols, also recomputes every stored date of those symbols, because a changed
+        adjustment-factor chain rescales their history.
+      - factor (symbols given, new_dates_only=False): recomputes those symbols only and merges them
+        into the stored partitions, for factor changes without new bars.
+    Returns the number of rows written.
     """
     import time as _t
     t0 = _t.perf_counter()

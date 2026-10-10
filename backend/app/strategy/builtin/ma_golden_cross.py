@@ -57,7 +57,9 @@ class MAGoldenCrossMatrixStrategy:
 
     def required_warmup_bars(self, params: dict) -> int:
         del params
-        return 60
+        # Own bars read (MA60) plus 40 that absorb sessions the symbol missed inside the loaded
+        # window of shared sessions.
+        return 60 + 40
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         ma5 = matrix_feature(market, "ma5")

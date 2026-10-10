@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import math
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
@@ -20,11 +21,15 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from app.strategy.field_labels import field_label, whole_percent
+from app.strategy.listing_age import eligible_from, exclude_new_days
 from app.strategy.scoring import (
+    AMOUNT_ESTIMATED,
     SCORING_DIRECTION_LOW,
     effective_scoring,
     effective_scoring_directions,
     materialize_scoring_columns,
+    meta_scoring_directions,
     scoring_dependencies,
     scoring_value_expr,
     scoring_warmup_bars,
@@ -33,10 +38,9 @@ from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
-# 引擎级默认基础过滤 — 策略未定义 BASIC_FILTER 时兜底
+# Engine-wide basic filter defaults; a strategy's BASIC_FILTER is merged on top of them.
 # Taiwan instruments never populate total_shares (see app/taiwan/universe), so a
-# non-None market_cap_min makes close*null resolve to null; polars treats a null
-# filter predicate as false, silently dropping every Taiwan symbol — keep None.
+# market_cap_min is ignored for them (without_unavailable_share_bounds) — keep None.
 # exclude_st's "ST|*ST|退" name match is an A-share convention with no Taiwan
 # equivalent data source, so it is disabled rather than left as a no-op default.
 DEFAULT_BASIC_FILTER: dict = {
@@ -54,7 +58,21 @@ DEFAULT_BASIC_FILTER: dict = {
     "boards": ["TWSE", "TPEX"],
 }
 
+_SHARE_CAP_BOUNDS: tuple[tuple[str, str], ...] = (
+    ("market_cap", "total_shares"),
+    ("float_cap", "float_shares"),
+)
+_BOUNDED_FIELDS: tuple[tuple[str, str], ...] = (
+    *_SHARE_CAP_BOUNDS,
+    ("amount", "amount"),
+    ("turnover", "turnover_rate"),
+)
+
 STRATEGY_ASSET_TYPES = frozenset({"stock", "etf", "index"})
+
+# Result-row keys set only on a row whose weighted score is missing.
+MISSING_SCORING_FIELDS = "missing_scoring_fields"
+MISSING_SCORING_CHILDREN = "missing_scoring_children"
 
 # 叠加策略硬上限：子策略数量。控制信号计算成本与字段并集膨胀，避免 OOM。
 MAX_COMPOSITE_CHILDREN = 8
@@ -169,6 +187,8 @@ class StrategyDataContext:
     input_status: dict[str, Any] | None = None
     # Taiwan symbol -> asset type; restricts picks of Taiwan symbols to the strategy's asset_types.
     symbol_asset_types: Mapping[str, str] | None = None
+    # Symbol -> values published for as_of; they replace the same keys on that symbol's result rows.
+    published_row_fields: Mapping[str, Mapping[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -221,7 +241,7 @@ class StrategyResult:
     rows: list[dict] = field(default_factory=list)
     total: int = 0
     elapsed_ms: float = 0.0
-    scores: dict[str, float] = field(default_factory=dict)
+    scores: dict[str, float | None] = field(default_factory=dict)
     entry_signal_hits: list[dict] = field(default_factory=list)
     exit_signal_hits: list[dict] = field(default_factory=list)
 
@@ -230,6 +250,29 @@ class StrategyResult:
 class _RealtimeMatrixEntry:
     fingerprint: tuple[Any, ...]
     buffer: Any
+
+
+class _AssetScope(Mapping[str, str]):
+    """The asset types of ``types`` that are in ``allowed``; other symbols are absent.
+
+    Lookups go through to ``types``, so a lazily resolved mapping stays lazy.
+    """
+
+    def __init__(self, types: Mapping[str, str], allowed: Iterable[str]) -> None:
+        self._types = types
+        self._allowed = frozenset(allowed)
+
+    def __getitem__(self, symbol: str) -> str:
+        asset_type = self._types[symbol]
+        if asset_type not in self._allowed:
+            raise KeyError(symbol)
+        return asset_type
+
+    def __iter__(self) -> Iterator[str]:
+        return (symbol for symbol, asset_type in self._types.items() if asset_type in self._allowed)
+
+    def __len__(self) -> int:
+        return sum(1 for _ in self)
 
 
 class StrategyEngine:
@@ -245,6 +288,8 @@ class StrategyEngine:
     ):
         self._strategies: dict[str, StrategyDef] = {}
         self._load_errors: list[dict] = []  # 加载失败的策略 [{file, error}]
+        # Serializes reloads so a slower earlier scan never replaces a newer registry.
+        self._reload_lock = threading.Lock()
         self._strategy_dirs = strategy_dirs or []
         self._realtime_matrices: dict[str, _RealtimeMatrixEntry] = {}
         self._realtime_matrix_lock = threading.RLock()
@@ -252,17 +297,20 @@ class StrategyEngine:
         # 保证 composite 内跑子策略与单独跑子策略使用同一口径(CONTRIBUTING §5.1)。
         # None 时(测试/无 data_dir) 子策略用默认参数, 不报错。
         self._override_loader = override_loader
-        self._load_all(retain_previous_on_error=False)
+        self._load_all()
 
     # ================================================================
     # 加载
     # ================================================================
 
-    def _load_all(self, *, retain_previous_on_error: bool) -> bool:
-        candidates: dict[str, StrategyDef] = {}
-        candidate_paths: dict[str, Path] = {}
+    def _load_all(self) -> None:
+        """Register every loadable strategy file; the others are listed in load_errors().
+
+        Files sharing an id all drop out, except that a builtin keeps its id and the others are
+        listed.
+        """
+        loaded: dict[str, list[tuple[Path, StrategyDef]]] = {}
         errors: list[dict] = []
-        duplicate_ids: set[str] = set()
         for d in self._strategy_dirs:
             if not d.exists():
                 continue
@@ -271,28 +319,28 @@ class StrategyEngine:
                     continue
                 try:
                     s = self._load_file(f)
-                    strategy_id = str(s.meta["id"])
-                    if strategy_id in duplicate_ids:
-                        errors.append({
-                            "file": str(f),
-                            "error": f"duplicate strategy id {strategy_id!r}",
-                        })
-                        continue
-                    if strategy_id in candidates:
-                        previous_path = candidate_paths.pop(strategy_id)
-                        candidates.pop(strategy_id)
-                        duplicate_ids.add(strategy_id)
-                        message = f"duplicate strategy id {strategy_id!r}"
-                        errors.extend([
-                            {"file": str(previous_path), "error": message},
-                            {"file": str(f), "error": message},
-                        ])
-                        continue
-                    candidates[strategy_id] = s
-                    candidate_paths[strategy_id] = f
+                    loaded.setdefault(str(s.meta["id"]), []).append((f, s))
                 except Exception as e:
                     logger.warning("load strategy %s failed: %s", f.name, e)
                     errors.append({"file": str(f), "error": str(e)})
+
+        candidates: dict[str, StrategyDef] = {}
+        for strategy_id, files in loaded.items():
+            builtins = [(f, s) for f, s in files if s.source == "builtin"]
+            if len(files) == 1:
+                candidates[strategy_id] = files[0][1]
+            elif len(builtins) == 1:
+                builtin_path, candidates[strategy_id] = builtins[0]
+                message = (
+                    f"strategy id {strategy_id!r} is already used by the builtin strategy "
+                    f"{builtin_path.name}; give this file another id"
+                )
+                errors.extend(
+                    {"file": str(f), "error": message} for f, s in files if s.source != "builtin"
+                )
+            else:
+                message = f"duplicate strategy id {strategy_id!r}"
+                errors.extend({"file": str(f), "error": message} for f, _ in files)
 
         # 第二阶段: 校验 composite 引用合法性。
         # _load_file 是 staticmethod, 加载单个文件时无法判断 child 是否存在;
@@ -305,21 +353,17 @@ class StrategyEngine:
                 continue
             error = self._validate_composite_references(sid, strategy, candidates)
             if error is not None:
+                logger.warning("load strategy %s failed: %s", sid, error)
                 errors.append({
                     "file": str(strategy.file_path) if strategy.file_path else sid,
                     "error": error,
                 })
                 candidates.pop(sid, None)
-                candidate_paths.pop(sid, None)
 
         self._load_errors = errors
-        if errors and retain_previous_on_error:
-            return False
-
         self._strategies = candidates
         for strategy_id, strategy in candidates.items():
             logger.debug("loaded strategy: %s (%s)", strategy_id, strategy.source)
-        return not errors
 
     def load_errors(self) -> list[dict]:
         """返回最近一次 _load_all 中加载失败的策略 [{file, error}]。"""
@@ -329,19 +373,23 @@ class StrategyEngine:
     def _validate_composite_references(
         sid: str,
         strategy: StrategyDef,
-        candidates: dict[str, StrategyDef],
+        candidates: Mapping[str, StrategyDef],
+        children: tuple[CompositeChild, ...] | None = None,
     ) -> str | None:
-        """校验 composite 策略的引用合法性。返回错误描述或 None。
+        """Validate a composite strategy's references; return an error description or None.
 
-        规则(首版硬约束):
-        - 每个 child 必须已加载(candidates 中存在)
-        - 禁止 composite 嵌套 composite(子策略必须是叶子)
-        - child 的 asset_types / timeframes 必须与父 composite 完全一致
-        - 数量 <= MAX_COMPOSITE_CHILDREN
-        任一不满足返回错误描述, 由 _load_all 移除该孤儿策略(不波及无辜)。
+        Hard constraints:
+        - every child is loaded (present in candidates)
+        - no composite nests a composite (children must be leaves)
+        - a child supports every asset_type / timeframe of the parent composite
+        - child ranks higher scores first, as the merge does
+        - at most MAX_COMPOSITE_CHILDREN children
+        On any violation _load_all drops only this orphaned composite, sparing other strategies.
+        ``children`` defaults to the META children.
         """
         assert strategy.composite is not None
-        children = strategy.composite.children
+        if children is None:
+            children = strategy.composite.children
         if len(children) > MAX_COMPOSITE_CHILDREN:
             return (
                 f"composite strategy {sid} children count {len(children)} "
@@ -369,6 +417,12 @@ class StrategyEngine:
                 return (
                     f"composite strategy {sid} 的 timeframes {parent_timeframes} "
                     f"未被子策略 {child.strategy_id!r} 完全支持(支持 {child_timeframes})"
+                )
+            if not bool(child_def.meta.get("descending", True)):
+                return (
+                    f"composite strategy {sid}: child {child.strategy_id!r} ranks lower scores "
+                    "first (descending=False), but composites rank every child's scores "
+                    "higher-first; give the child scoring_directions 'low' for those fields instead"
                 )
         return None
 
@@ -470,6 +524,8 @@ class StrategyEngine:
                 f"META['asset_types'] has unsupported values {unknown_asset_types}; "
                 f"expected values from {sorted(STRATEGY_ASSET_TYPES)}"
             )
+        if "scoring_directions" in meta:
+            meta["scoring_directions"] = meta_scoring_directions(meta["scoring_directions"])
 
         # 归一化 params 为标准 list[dict]: custom/AI 策略的 META["params"] 可能是
         # dict / list[str] 等非标准格式 (LLM 偶发漂移 / 用户手改), 不归一化的话会在
@@ -558,15 +614,18 @@ class StrategyEngine:
             composite=composite_spec,
         )
 
-    def reload(self) -> None:
-        """原子热重载；任一策略失败时保留上一版注册表。"""
-        if not self._load_all(retain_previous_on_error=True):
-            details = "; ".join(
-                f"{item['file']}: {item['error']}" for item in self._load_errors
-            )
-            raise ValueError(f"strategy reload failed: {details}")
+    def reload(self) -> list[dict]:
+        """Replace the registry with every file that loads now, as at startup; returns its load errors.
+
+        A file that fails is left out and listed, so it never blocks the others. Callers that wrote
+        a file check its entry in the returned list, which a concurrent reload cannot replace.
+        """
+        with self._reload_lock:
+            self._load_all()
+            errors = list(self._load_errors)
         with self._realtime_matrix_lock:
             self._realtime_matrices.clear()
+        return errors
 
     # ================================================================
     # 查询
@@ -600,11 +659,12 @@ class StrategyEngine:
 
     def unregister(self, strategy_id: str) -> bool:
         """从运行时注册表移除单个策略, 不重新加载其他策略文件。"""
-        if strategy_id not in self._strategies:
-            return False
-        strategies = dict(self._strategies)
-        strategies.pop(strategy_id)
-        self._strategies = strategies
+        with self._reload_lock:
+            if strategy_id not in self._strategies:
+                return False
+            strategies = dict(self._strategies)
+            strategies.pop(strategy_id)
+            self._strategies = strategies
         with self._realtime_matrix_lock:
             self._realtime_matrices.clear()
         return True
@@ -623,6 +683,36 @@ class StrategyEngine:
             if any(c.strategy_id == strategy_id for c in strategy.composite.children):
                 dependents.append(sid)
         return dependents
+
+    def composite_children(
+        self, strategy: StrategyDef, overrides: dict | None
+    ) -> tuple[CompositeChild, ...]:
+        """The children a composite runs: saved override children first, else META.
+
+        Both are held to the load-time reference rules; a violation raises ValueError.
+        """
+        assert strategy.composite is not None
+        override_children = (overrides or {}).get("children")
+        if isinstance(override_children, list) and override_children:
+            children = _parse_composite_children(override_children).children
+        else:
+            children = strategy.composite.children
+        error = self._validate_composite_references(
+            str(strategy.meta.get("id")), strategy, self._strategies, children
+        )
+        if error is not None:
+            raise ValueError(error)
+        return children
+
+    def _saved_overrides(self, strategy_id: str) -> dict:
+        """The user's saved overrides of a composite child; {} without a loader or on a read error."""
+        if self._override_loader is None:
+            return {}
+        try:
+            loaded = self._override_loader(strategy_id)
+        except Exception:  # noqa: BLE001
+            return {}
+        return dict(loaded) if isinstance(loaded, dict) else {}
 
     @staticmethod
     def validate_context(strategy: StrategyDef, context: StrategyDataContext) -> None:
@@ -728,16 +818,25 @@ class StrategyEngine:
                 required = max(
                     required,
                     int(strategy.matrix_strategy.required_warmup_bars(params)) + 1,
+                    scoring_warmup_bars(_parameter_scoring(strategy, params)),
                 )
             elif strategy.execution_backend == "composite":
                 # composite 预热 = 各子策略预热的 max。
                 # 子策略已通过加载期校验(非嵌套叶子), 这里展开一层即可。
                 if strategy.composite is None:
                     continue
-                child_ids = [c.strategy_id for c in strategy.composite.children]
+                try:
+                    children = self.composite_children(strategy, overrides)
+                except ValueError:
+                    # The composite's own run reports invalid saved children; a batch still loads.
+                    children = strategy.composite.children
+                child_ids = [c.strategy_id for c in children]
                 required = max(
                     required,
-                    self.required_history_bars(child_ids, params_map=params_map),
+                    self.required_history_bars(
+                        child_ids,
+                        overrides_map={cid: self._saved_overrides(cid) for cid in child_ids},
+                    ),
                 )
             elif strategy.filter_history_fn:
                 # lookback_days 优先取自解析后的参数(默认值/保存覆盖/本次调用),
@@ -749,11 +848,7 @@ class StrategyEngine:
                     params_map.get(strategy_id),
                     overrides_map.get(strategy_id),
                 )
-                lookback = int(strategy.lookback_days)
-                param_lookback = params.get("lookback_days")
-                if isinstance(param_lookback, (int, float)) and param_lookback > 0:
-                    lookback = max(lookback, int(param_lookback))
-                required = max(required, lookback)
+                required = max(required, _history_lookback(strategy, params))
         return required
 
     def prepare_realtime_matrix(
@@ -797,6 +892,7 @@ class StrategyEngine:
                         overrides_map.get(strategy_id),
                     )
                 ),
+                scoring_warmup_bars(_parameter_scoring(strategy, params)),
             )
             field_columns.update(
                 self._matrix_field_columns(
@@ -807,6 +903,9 @@ class StrategyEngine:
             )
         if not matrix_ids:
             return None
+        # Not in _matrix_field_columns: pick backfill checks each of those on flagless history.
+        if "amount" in field_columns:
+            field_columns.add(AMOUNT_ESTIMATED)
 
         timestamp_col = "datetime" if "datetime" in current.columns else "date"
         if timestamp_col not in current.columns:
@@ -920,7 +1019,9 @@ class StrategyEngine:
             )
 
         scoring = effective_scoring(s.meta.get("scoring"), overrides)
-        scoring_directions = effective_scoring_directions(overrides)
+        scoring_directions = effective_scoring_directions(
+            overrides, defaults=s.meta.get("scoring_directions")
+        )
         current, history = self._materialize_scoring_frames(
             context.current,
             context.history,
@@ -960,6 +1061,8 @@ class StrategyEngine:
                     + ", ".join(sorted(missing_csg))
                     + " — 请先在「自定义信号」管理中创建对应信号后再运行"
                 )
+            # Callers load different history lengths (alone, batch, monitor); the strategy sees its own.
+            df = _lookback_window(df, as_of, _history_lookback(s, params))
             df = s.filter_history_fn(df, params)
             if "date" in df.columns:
                 df = df.filter(pl.col("date") == as_of)
@@ -983,6 +1086,7 @@ class StrategyEngine:
 
         # Stage 1: 基础过滤（enabled 默认开启; 显式 enabled=false 才跳过）
         if bf and bf.get("enabled", True):
+            bf = without_unavailable_share_bounds(bf, lambda name: frame_has_values(df, name))
             df = self._apply_basic_filter(df, bf)
 
         # Pool 过滤
@@ -1006,24 +1110,30 @@ class StrategyEngine:
 
         # 排序 + 限制
         limit = self._result_limit(s, overrides)
-        order_desc = s.meta.get("descending", True)
+        order_desc = bool(s.meta.get("descending", True))
         if "score" in df.columns:
-            df = df.sort("score", descending=order_desc)
+            df = self._sort_ranked(df, "score", order_desc)
         elif s.meta.get("order_by") and s.meta["order_by"] != "score":
             ob = s.meta["order_by"]
             if ob in df.columns:
-                df = df.sort(ob, descending=order_desc)
+                df = self._sort_ranked(df, ob, order_desc)
         if limit is not None:
             df = df.head(limit)
 
         # 输出
-        rows = _sanitize(df.to_dicts())
+        rows = _with_published_fields(_sanitize(df.to_dicts()), context.published_row_fields)
+        if "score" in df.columns:
+            # Scoring columns are materialized above, and _sanitize turned NaN into None.
+            fields = _weighted_scoring_fields(scoring)
+            _flag_missing_scoring_fields(
+                rows, fields, lambda row: [name for name in fields if row.get(name) is None]
+            )
         elapsed = (time.perf_counter() - t0) * 1000
 
-        scores: dict[str, float] = {}
+        scores: dict[str, float | None] = {}
         if "score" in df.columns:
-            for r in df.iter_rows(named=True):
-                scores[r["symbol"]] = float(r.get("score") or 0)
+            for r in rows:
+                scores[r["symbol"]] = _score_or_none(r.get("score"))
 
         return StrategyResult(
             as_of=as_of,
@@ -1075,13 +1185,16 @@ class StrategyEngine:
         *,
         strategy_ids: list[str] | None = None,
         skip_failed: bool = False,
+        failures: dict[str, str] | None = None,
+        pool: list[str] | None = None,
     ) -> dict[str, StrategyResult]:
-        """批量执行策略；当前数据、历史和矩阵均来自同一个调用上下文。
+        """Run strategies in a batch whose current data, history and matrices share one context.
 
         skip_failed: log and drop a strategy that raises instead of failing the
-        batch. Opt-in because a composite strategy needs its children to fail
-        loudly, while the page cache is better off holding the strategies that
+        batch, and record its message in ``failures`` when given. Opt-in because
+        callers such as the page cache are better off holding the strategies that
         did run than nothing at all.
+        pool: the symbols every strategy may pick from, as in run().
         """
         if context.current is None:
             raise ValueError("strategy run_all context requires current data")
@@ -1142,13 +1255,16 @@ class StrategyEngine:
                         history=shared_history,
                         market=shared_matrix,
                     ),
+                    pool=pool,
                     params=params_map.get(sid),
                     overrides=overrides_map.get(sid),
                 )
-            except Exception:
+            except Exception as exc:
                 if not skip_failed:
                     raise
                 logger.exception("run_all: strategy %s failed, skipped", sid)
+                if failures is not None:
+                    failures[sid] = str(exc) or type(exc).__name__
 
         return results
 
@@ -1162,17 +1278,7 @@ class StrategyEngine:
         # 参数评分字段 (如挖掘策略的因子组合) 需展开为实际数据依赖,
         # 与 backtest._resolve_matrix_native 保持同一语义, 否则虚拟因子
         # (limit_up_count_* -> consecutive_limit_ups) 在矩阵里缺字段。
-        parameter_fields = getattr(
-            strategy.matrix_strategy,
-            "required_fields_for_params",
-            None,
-        )
-        if callable(parameter_fields):
-            fields.update(
-                scoring_dependencies(
-                    {str(name): 1.0 for name in parameter_fields(params or {})}
-                )
-            )
+        fields.update(scoring_dependencies(_parameter_scoring(strategy, params)))
         basic_filter = dict(strategy.basic_filter or {})
         if (overrides or {}).get("basic_filter"):
             basic_filter.update(overrides["basic_filter"])
@@ -1223,6 +1329,8 @@ class StrategyEngine:
                 source_panel,
                 field_columns=self._matrix_field_columns(strategy, overrides, params),
             )
+        # A run alone, run_all and the realtime monitor load different history lengths.
+        market = self._own_history_window(strategy_id, market, params, overrides, as_of)
 
         if source_panel is None or source_panel.is_empty():
             source_panel = context.current
@@ -1232,6 +1340,10 @@ class StrategyEngine:
         basic_filter = dict(strategy.basic_filter or {})
         if overrides.get("basic_filter"):
             basic_filter.update(overrides["basic_filter"])
+        basic_filter = without_unavailable_share_bounds(
+            basic_filter,
+            lambda name: name in market.fields and bool(np.isfinite(market.fields[name]).any()),
+        )
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         asset_mask = None
         if pool:
@@ -1251,6 +1363,17 @@ class StrategyEngine:
             )
             entry_mask = supported_mask if asset_mask is None else asset_mask & supported_mask
 
+        target_ids = [
+            time_id
+            for time_id, label in enumerate(market.timestamp_labels)
+            if label[:10] == str(as_of)
+        ]
+        if target_ids:
+            refusal = _uncovered_entry_session(
+                strategy.matrix_strategy, params, market, target_ids[-1], entry_mask
+            )
+            if refusal:
+                raise ValueError(refusal)
         signals = MatrixStrategyPipeline().run(
             strategy.matrix_strategy,
             market,
@@ -1258,17 +1381,14 @@ class StrategyEngine:
             MatrixPipelineConfig(
                 basic_filter=basic_filter,
                 scoring=scoring,
-                scoring_directions=effective_scoring_directions(overrides),
+                scoring_directions=effective_scoring_directions(
+                    overrides, defaults=strategy.meta.get("scoring_directions")
+                ),
                 order_by=strategy.meta.get("order_by"),
                 descending=bool(strategy.meta.get("descending", True)),
                 asset_mask=entry_mask,
             ),
         )
-        target_ids = [
-            time_id
-            for time_id, label in enumerate(market.timestamp_labels)
-            if label[:10] == str(as_of)
-        ]
         if not target_ids:
             return StrategyResult(as_of=as_of, strategy_id=strategy_id)
         target_time = target_ids[-1]
@@ -1305,22 +1425,37 @@ class StrategyEngine:
             str(row["symbol"]): row
             for row in target_frame.iter_rows(named=True)
         }
-        ranked: list[tuple[float, dict]] = []
+        descending = ranks_higher_first(strategy.meta, scoring)
+        ranked: list[tuple[tuple[bool, float, str], dict]] = []
         for asset_id in selected_assets:
             symbol = market.symbols[int(asset_id)]
             row = row_by_symbol.get(symbol)
             if row is None:
                 continue
             score = float(signals.score[target_time, int(asset_id)])
-            ranked.append((score, {**row, "score": score}))
-        ranked.sort(
-            key=lambda item: item[0],
-            reverse=bool(strategy.meta.get("descending", True)),
-        )
+            ranked.append((_rank_key(score, symbol, descending), {**row, "score": score}))
+        ranked.sort(key=lambda item: item[0])
         limit = self._result_limit(strategy, overrides)
         selected_rows = ranked if limit is None else ranked[:limit]
-        rows = _sanitize([row for _, row in selected_rows])
-        scores = {str(row["symbol"]): float(row.get("score") or 0.0) for row in rows}
+        rows = _with_published_fields(
+            _sanitize([row for _, row in selected_rows]), context.published_row_fields
+        )
+        if any(row.get("score") is None for row in rows):
+            from app.backtest.matrix import matrix_feature
+
+            fields = _weighted_scoring_fields(scoring)
+            asset_ids = {symbol: asset_id for asset_id, symbol in enumerate(market.symbols)}
+            values = {name: matrix_feature(market, name)[target_time] for name in fields}
+            _flag_missing_scoring_fields(
+                rows,
+                fields,
+                lambda row: [
+                    name
+                    for name in fields
+                    if not np.isfinite(values[name][asset_ids[str(row["symbol"])]])
+                ],
+            )
+        scores = {str(row["symbol"]): _score_or_none(row.get("score")) for row in rows}
         return StrategyResult(
             as_of=as_of,
             strategy_id=strategy_id,
@@ -1331,6 +1466,29 @@ class StrategyEngine:
             entry_signal_hits=entry_signal_hits,
             exit_signal_hits=exit_signal_hits,
         )
+
+    def _own_history_window(
+        self, strategy_id: str, market, params: dict, overrides: dict, as_of: date
+    ):
+        """The sessions of ``market`` through as_of that this strategy computes on.
+
+        Its own required bars plus the history loader's warm-up margin, so neither a longer
+        strategy sharing the market nor a longer loaded history changes its window.
+        """
+        from app.backtest.matrix import slice_market_data_matrix
+        from app.repository import HISTORY_WARMUP_SESSIONS
+
+        through = str(as_of)
+        stop = sum(1 for label in market.timestamp_labels if label[:10] <= through)
+        required = self.required_history_bars(
+            [strategy_id],
+            params_map={strategy_id: params},
+            overrides_map={strategy_id: overrides},
+        )
+        start = max(0, stop - (1 + HISTORY_WARMUP_SESSIONS + required))
+        if stop == 0 or (start == 0 and stop == market.shape[0]):
+            return market
+        return slice_market_data_matrix(market, start, stop)
 
     def _run_composite_strategy(
         self,
@@ -1343,55 +1501,63 @@ class StrategyEngine:
         overrides: dict | None = None,
         started_at: float,
     ) -> StrategyResult:
-        """叠加策略选股: 调度各子策略(共享 context)→ 合并结果。
+        """Composite selection: run the children on a shared context, then merge their results.
 
-        复用 run_all 共享 current/history/market, 避免各子策略重复加载数据。
-        子策略必须已在加载期通过两阶段引用校验(存在/非嵌套/asset_types 一致)。
+        Children reuse run_all's shared current/history/market so none reloads the data.
+        Children rank the candidates the composite backtest ranks: the pool within the composite's
+        asset types and basic filter, and every candidate rather than the child's display limit.
         """
         from app.strategy import composite as composite_mod
 
         assert strategy.composite is not None
         overrides = overrides or {}
-
-        # 权重: override.children 优先(META 固化值的轻量覆盖), 否则用 META 声明。
-        override_children = overrides.get("children")
-        if isinstance(override_children, list) and override_children:
-            spec = _parse_composite_children(override_children)
-            children = spec.children
-        else:
-            children = strategy.composite.children
+        children = self.composite_children(strategy, overrides)
 
         child_ids = [c.strategy_id for c in children]
         child_weights = [c.weight for c in children]
         merge_mode = str(params.get("merge_mode") or "union")
         min_confirm = int(params.get("min_confirm") or 0)
 
-        # 子策略 override: 先加载各自保存的用户配置(参数/评分/信号等),
-        # 再叠加 composite 统一的 basic_filter(计划 §3.3, 保证候选池一致)。
-        # 这样 composite 内跑子策略与单独跑子策略使用同一口径。
-        shared_basic_filter = overrides.get("basic_filter")
+        # Each child override starts from that child's saved user config (params, scoring, signals),
+        # then the composite's basic_filter replaces each child's, so all children screen one pool.
+        composite_filter = dict(strategy.basic_filter or {})
+        composite_filter.update(overrides.get("basic_filter") or {})
         overrides_map: dict[str, dict] = {}
         for cid in child_ids:
-            child_override: dict = {}
-            if self._override_loader is not None:
-                try:
-                    loaded = self._override_loader(cid)
-                    if isinstance(loaded, dict):
-                        child_override = dict(loaded)
-                except Exception:  # noqa: BLE001
-                    pass
-            if shared_basic_filter:
-                child_override["basic_filter"] = shared_basic_filter
+            child_override = self._saved_overrides(cid)
+            # Keys only the child sets are cleared, since run() merges this onto the child's filter.
+            child_override["basic_filter"] = {
+                **dict.fromkeys(self.get(cid).basic_filter or {}),
+                "enabled": True,
+                **composite_filter,
+            }
+            child_override["display_limit"] = 0
             overrides_map[cid] = child_override
 
+        child_context = context
+        if context.symbol_asset_types is not None:
+            child_context = replace(
+                context,
+                symbol_asset_types=_AssetScope(
+                    context.symbol_asset_types, strategy.meta.get("asset_types", ["stock"])
+                ),
+            )
         # 共享 context 跑所有子策略。run_all 内部对 matrix_native 子策略会
         # 合并 field_columns 构建超集矩阵, 一次加载。
+        child_failures: dict[str, str] = {}
         child_results = self.run_all(
-            context,
+            child_context,
             params_map={},
             overrides_map=overrides_map,
             strategy_ids=child_ids,
+            skip_failed=True,
+            failures=child_failures,
+            pool=pool,
         )
+        for cid in child_ids:
+            if cid in child_failures:
+                child_name = self.get(cid).meta.get("name") or cid
+                raise ValueError(f"子策略「{child_name}」無法執行：{child_failures[cid]}")  # noqa: RUF001
         ordered_results = [child_results[cid] for cid in child_ids]
 
         merged = composite_mod.merge_results(
@@ -1413,12 +1579,9 @@ class StrategyEngine:
                     row_by_symbol[sym] = row
 
         order_desc = bool(strategy.meta.get("descending", True))
-        # Children may support more asset types than the composite; the composite's own types bound its picks.
-        supported = self._supported_symbols(strategy, context, merged.scores)
         ranked_symbols = sorted(
-            (symbol for symbol in merged.scores if supported is None or symbol in supported),
-            key=lambda s: merged.scores[s],
-            reverse=order_desc,
+            merged.scores,
+            key=lambda s: _rank_key(merged.scores[s], s, order_desc),
         )
         limit = self._result_limit(strategy, overrides)
         if limit is not None:
@@ -1429,7 +1592,14 @@ class StrategyEngine:
             for sym in ranked_symbols
             if sym in row_by_symbol
         ])
-        scores = {str(row["symbol"]): float(row.get("score") or 0.0) for row in rows}
+        _flag_unscored_composite_rows(
+            rows,
+            [
+                (cid, self.get(cid).meta.get("name") or cid, result)
+                for cid, result in zip(child_ids, ordered_results, strict=True)
+            ],
+        )
+        scores = {str(row["symbol"]): _score_or_none(row.get("score")) for row in rows}
 
         return StrategyResult(
             as_of=context.as_of,
@@ -1474,38 +1644,32 @@ class StrategyEngine:
 
     @staticmethod
     def _basic_filter_expr(df: pl.DataFrame, bf: dict) -> pl.Expr | None:
-        """构建基础过滤表达式。回测可复用为买入候选 mask，不删除行情行。"""
+        """Build the basic-filter expression.
+
+        A backtest reuses it as a buy-candidate mask instead of dropping quote rows.
+        A bound excludes rows whose value is missing and raises when its column is absent.
+        """
         exprs: list[pl.Expr] = []
         if bf.get("price_min") is not None:
             exprs.append(pl.col("close") >= bf["price_min"])
         if bf.get("price_max") is not None:
             exprs.append(pl.col("close") <= bf["price_max"])
-        if bf.get("market_cap_min") is not None and "total_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("total_shares") >= bf["market_cap_min"]
-            )
-        if bf.get("market_cap_max") is not None and "total_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("total_shares") <= bf["market_cap_max"]
-            )
-        # 流通市值
-        if bf.get("float_cap_min") is not None and "float_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("float_shares") >= bf["float_cap_min"]
-            )
-        if bf.get("float_cap_max") is not None and "float_shares" in df.columns:
-            exprs.append(
-                pl.col("close") * pl.col("float_shares") <= bf["float_cap_max"]
-            )
-        if bf.get("amount_min") is not None:
-            exprs.append(pl.col("amount") >= bf["amount_min"])
-        if bf.get("amount_max") is not None:
-            exprs.append(pl.col("amount") <= bf["amount_max"])
-        # 换手率
-        if bf.get("turnover_min") is not None and "turnover_rate" in df.columns:
-            exprs.append(pl.col("turnover_rate") >= bf["turnover_min"])
-        if bf.get("turnover_max") is not None and "turnover_rate" in df.columns:
-            exprs.append(pl.col("turnover_rate") <= bf["turnover_max"])
+        for prefix, field_name in _BOUNDED_FIELDS:
+            minimum = bf.get(f"{prefix}_min")
+            maximum = bf.get(f"{prefix}_max")
+            if minimum is None and maximum is None:
+                continue
+            if field_name not in df.columns:
+                raise ValueError(
+                    f"basic filter {prefix} bound needs column {field_name}, which the data lacks"
+                )
+            value = finite_or_null(pl.col(field_name))
+            if field_name in {"total_shares", "float_shares"}:
+                value = pl.col("close") * value
+            if minimum is not None:
+                exprs.append((value >= minimum).fill_null(False))
+            if maximum is not None:
+                exprs.append((value <= maximum).fill_null(False))
         if bf.get("exclude_st") and "name" in df.columns:
             exprs.append(~pl.col("name").str.contains("(?i)ST|\\*ST|退"))
         # 板块过滤
@@ -1535,6 +1699,13 @@ class StrategyEngine:
                     board_exprs.append(pl.col("symbol").str.contains(r"\.BJ$"))
             if board_exprs:
                 exprs.append(pl.any_horizontal(board_exprs))
+        min_sessions = exclude_new_days(bf)
+        if min_sessions and {"symbol", "date"} <= set(df.columns):
+            symbol = pl.col("symbol").cast(pl.Utf8)
+            eligible = eligible_from(df.select(symbol.unique()).to_series().to_list(), min_sessions)
+            if eligible:
+                first = symbol.replace_strict(eligible, default=None, return_dtype=pl.Date)
+                exprs.append(first.is_null() | (pl.col("date").cast(pl.Date) >= first))
         if exprs:
             return pl.all_horizontal(exprs)
         return None
@@ -1557,38 +1728,38 @@ class StrategyEngine:
         weights: dict,
         directions: Mapping[str, str] | None = None,
     ) -> pl.DataFrame:
-        """通用评分: min-max 归一化 → 加权求和 → 0~100 分"""
-        if not weights:
+        """Generic scoring: min-max normalize each input, then weight and sum into a 0-100 score.
+
+        A row missing any scoring input gets a null score.
+        """
+        active = {str(name): weight for name, weight in (weights or {}).items() if weight}
+        total_weight = sum(active.values())
+        if not active or total_weight <= 0:
             return df
 
-        executable = [
-            (str(col), value, weight)
-            for col, weight in weights.items()
-            if weight and (value := scoring_value_expr(df.columns, str(col))) is not None
-        ]
-        total_weight = sum(weight for _, _, weight in executable)
-        if total_weight <= 0:
-            return df
-
-        score_parts: list[pl.Expr] = []
-        for name, value, weight in executable:
-            w = weight / total_weight
-            col_min = value.min()
-            col_range = value.max() - col_min
-            normalized = pl.when(col_range > 0).then(
-                (value - col_min) / col_range
-            ).otherwise(pl.lit(0.5))
-            if (directions or {}).get(name) == SCORING_DIRECTION_LOW:
-                normalized = 1.0 - normalized
-            score_parts.append(normalized * w)
-
-        if not score_parts:
-            return df
-
-        score_expr = score_parts[0]
-        for part in score_parts[1:]:
-            score_expr = score_expr + part
+        score_expr: pl.Expr | None = None
+        for name, value, weight in resolve_scoring_values(df.columns, active):
+            part = normalized_scoring_part(
+                value,
+                value.min(),
+                value.max(),
+                low_first=(directions or {}).get(name) == SCORING_DIRECTION_LOW,
+            ) * (weight / total_weight)
+            score_expr = part if score_expr is None else score_expr + part
         return df.with_columns((score_expr * 100).alias("score"))
+
+    @staticmethod
+    def _sort_ranked(df: pl.DataFrame, column: str, descending: bool) -> pl.DataFrame:
+        """Sort by ``column`` with missing values last and ties broken by symbol."""
+        key = pl.col(column)
+        if df.schema[column].is_float():
+            key = finite_or_null(key)
+        by = [key]
+        order = [descending]
+        if "symbol" in df.columns and column != "symbol":
+            by.append(pl.col("symbol"))
+            order.append(False)
+        return df.sort(by, descending=order, nulls_last=True)
 
     @staticmethod
     def _materialize_scoring_frames(
@@ -1616,9 +1787,268 @@ class StrategyEngine:
         return current.join(values, on=join_keys, how="left"), scored_history
 
 
+def without_unavailable_share_bounds(
+    basic_filter: dict,
+    has_values: Callable[[str], bool],
+) -> dict:
+    """Drop market-cap and float-cap bounds whose share field holds no value at all.
+
+    Assets without share capital (ETFs, indices, Taiwan listings without published shares)
+    cannot satisfy these bounds, so they are ignored rather than excluding every row.
+    """
+    unavailable = [
+        prefix
+        for prefix, field_name in _SHARE_CAP_BOUNDS
+        if (
+            basic_filter.get(f"{prefix}_min") is not None
+            or basic_filter.get(f"{prefix}_max") is not None
+        )
+        and not has_values(field_name)
+    ]
+    if not unavailable:
+        return basic_filter
+    sanitized = dict(basic_filter)
+    for prefix in unavailable:
+        sanitized[f"{prefix}_min"] = None
+        sanitized[f"{prefix}_max"] = None
+    return sanitized
+
+
+def frame_has_values(df: pl.DataFrame, name: str) -> bool:
+    if name not in df.columns:
+        return False
+    values = df.get_column(name)
+    if values.dtype.is_float():
+        values = values.fill_nan(None)
+    return values.null_count() < values.len()
+
+
+def finite_or_null(value: pl.Expr) -> pl.Expr:
+    """``value`` as Float64 with NaN and infinities replaced by null."""
+    value = value.cast(pl.Float64)
+    return pl.when(value.is_finite()).then(value)
+
+
+def resolve_scoring_values(
+    columns: Iterable[str],
+    weights: Mapping[str, Any],
+) -> list[tuple[str, pl.Expr, Any]]:
+    """Value expression per weighted scoring field; raises when a field cannot be computed."""
+    available = list(columns)
+    resolved: list[tuple[str, pl.Expr, Any]] = []
+    missing: list[str] = []
+    for name, weight in weights.items():
+        value = scoring_value_expr(available, str(name))
+        if value is None:
+            missing.append(str(name))
+        else:
+            resolved.append((str(name), finite_or_null(value), weight))
+    if missing:
+        raise ValueError(f"scoring fields unavailable in the data: {', '.join(sorted(missing))}")
+    return resolved
+
+
+def normalized_scoring_part(
+    value: pl.Expr,
+    minimum: pl.Expr,
+    maximum: pl.Expr,
+    *,
+    low_first: bool,
+) -> pl.Expr:
+    """Min-max position of a scoring value in [0, 1], 0.5 for a constant input, null when missing."""
+    spread = maximum - minimum
+    normalized = (
+        pl.when(value.is_not_null() & (spread > 0))
+        .then((value - minimum) / spread)
+        .when(value.is_not_null())
+        .then(pl.lit(0.5))
+    )
+    return 1.0 - normalized if low_first else normalized
+
+
+def ranks_higher_first(meta: Mapping[str, Any], scoring: Mapping[str, float]) -> bool:
+    """Whether the pipeline score ranks higher first: the list order and the backtest buy order.
+
+    A score taken from the order_by field already carries META descending as its sign.
+    """
+    from app.backtest.matrix import scores_by_order_field
+
+    return bool(meta.get("descending", True)) or scores_by_order_field(
+        scoring, meta.get("order_by")
+    )
+
+
+_NO_ELIGIBLE_SESSION = "{day} 所選範圍內沒有可計算{label}的股票"
+_NO_ELIGIBLE_TURNOVER = "（ETF、TDR 沒有{label}，停牌股當日沒有收盤價），請改選含普通股的標的"  # noqa: RUF001
+_UNCOVERED_SESSION = (
+    "{day} 只有 {coverage} 的股票有{label}資料（至少需 {minimum}），"  # noqa: RUF001
+    "無法依{label}選股，請改選有{label}資料的交易日"  # noqa: RUF001
+)
+
+
+def _uncovered_entry_session(
+    matrix_strategy: Any, params: dict, market, row: int, assets: np.ndarray | None
+) -> str | None:
+    """The refusal when session ``row`` cannot screen required_coverage_fields(params), else None.
+
+    The backtest's rule (backtest.strategy._entry_coverage_check) on one session, counting only
+    ``assets``: the pool within the strategy's asset scope.
+    """
+    hook = getattr(matrix_strategy, "required_coverage_fields", None)
+    if not callable(hook):
+        return None
+    from app.taiwan.share_capital_store import (
+        MIN_SESSION_COVERAGE,
+        coverage_eligible,
+        eligible_coverage,
+    )
+
+    day = market.timestamp_labels[row][:10]
+    close = market.close[row : row + 1]
+    for name in sorted(str(name) for name in hook(params)):
+        eligible = coverage_eligible(name, market.symbols)
+        if assets is not None:
+            eligible = eligible & assets
+        label = field_label(name)
+        if not (np.isfinite(close) & eligible).any():
+            refusal = _NO_ELIGIBLE_SESSION.format(day=day, label=label)
+            if name == "turnover_rate":
+                refusal += _NO_ELIGIBLE_TURNOVER.format(label=label)
+            return refusal
+        values = market.fields.get(name)
+        coverage = (
+            0.0
+            if values is None
+            else float(eligible_coverage(close, values[row : row + 1], eligible)[0])
+        )
+        if coverage < MIN_SESSION_COVERAGE:
+            return _UNCOVERED_SESSION.format(
+                label=label,
+                day=day,
+                coverage=whole_percent(coverage),
+                minimum=whole_percent(MIN_SESSION_COVERAGE),
+            )
+    return None
+
+
+def _history_lookback(strategy: StrategyDef, params: dict) -> int:
+    """LOOKBACK_DAYS, or the resolved lookback_days parameter when that is longer."""
+    lookback = int(strategy.lookback_days)
+    param_lookback = params.get("lookback_days")
+    if isinstance(param_lookback, (int, float)) and param_lookback > 0:
+        lookback = max(lookback, int(param_lookback))
+    return lookback
+
+
+def _lookback_window(history: pl.DataFrame, as_of: date, lookback: int) -> pl.DataFrame:
+    """The as_of session and the ``lookback`` sessions before it: the filter_history contract.
+
+    A datetime or ISO-string date column is read as dates; any other date column raises ValueError.
+    """
+    dtype = history.schema.get("date")
+    try:
+        if dtype == pl.Datetime:
+            history = history.with_columns(pl.col("date").cast(pl.Date))
+        elif dtype == pl.Utf8:
+            history = history.with_columns(pl.col("date").str.to_date("%Y-%m-%d"))
+        elif dtype != pl.Date:
+            raise ValueError(f"strategy history needs a date column, got {dtype}")
+    except pl.exceptions.PolarsError as exc:
+        raise ValueError(f"strategy history date column is not ISO dates: {exc}") from exc
+    through = history.filter(pl.col("date") <= as_of)
+    sessions = through.get_column("date").unique().sort()
+    if sessions.len() <= lookback + 1:
+        return through
+    return through.filter(pl.col("date") >= sessions[-(lookback + 1)])
+
+
+def _rank_key(score: float | None, symbol: str, descending: bool) -> tuple[bool, float, str]:
+    missing = score is None or not math.isfinite(score)
+    value = 0.0 if missing else (-score if descending else score)
+    return (missing, value, symbol)
+
+
+def _score_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    score = float(value)
+    return score if math.isfinite(score) else None
+
+
+def _weighted_scoring_fields(scoring: Mapping[str, Any]) -> list[str]:
+    """The fields a weighted score reads, in scoring order; none when the weights give no score."""
+    active = {str(name): weight for name, weight in (scoring or {}).items() if weight}
+    return list(active) if active and sum(active.values()) > 0 else []
+
+
+def _flag_missing_scoring_fields(
+    rows: list[dict], fields: list[str], missing: Callable[[dict], list[str]]
+) -> None:
+    """Set MISSING_SCORING_FIELDS to ``missing(row)`` on each row without a score."""
+    if not fields:
+        return
+    for row in rows:
+        if row.get("score") is None:
+            row[MISSING_SCORING_FIELDS] = missing(row)
+
+
+def _flag_unscored_composite_rows(
+    rows: list[dict], children: list[tuple[str, str, StrategyResult]]
+) -> None:
+    """Name, on each merged row without a score, every child that could not score it.
+
+    The merged rows start as copies of a child's row, so a child's own flags are dropped first.
+    """
+    by_symbol: list[dict[str, dict]] | None = None
+    for row in rows:
+        row.pop(MISSING_SCORING_FIELDS, None)
+        row.pop(MISSING_SCORING_CHILDREN, None)
+        if row.get("score") is not None:
+            continue
+        if by_symbol is None:
+            by_symbol = [
+                {str(child_row.get("symbol")): child_row for child_row in result.rows}
+                for _, _, result in children
+            ]
+        symbol = str(row.get("symbol"))
+        unscored = [
+            {
+                "strategy_id": child_id,
+                "name": name,
+                "fields": list(child_rows[symbol][MISSING_SCORING_FIELDS]),
+            }
+            for (child_id, name, _), child_rows in zip(children, by_symbol, strict=True)
+            if MISSING_SCORING_FIELDS in child_rows.get(symbol, {})
+        ]
+        if unscored:
+            row[MISSING_SCORING_CHILDREN] = unscored
+            row[MISSING_SCORING_FIELDS] = list(
+                dict.fromkeys(name for child in unscored for name in child["fields"])
+            )
+
+
 def _sanitize(rows: list[dict]) -> list[dict]:
     for r in rows:
         for k, v in list(r.items()):
             if isinstance(v, float) and (v != v or abs(v) == float("inf")):
                 r[k] = None
     return rows
+
+
+def _with_published_fields(
+    rows: list[dict], published: Mapping[str, Mapping[str, Any]] | None
+) -> list[dict]:
+    if published:
+        for row in rows:
+            values = published.get(str(row.get("symbol")))
+            if values:
+                row.update(values)
+    return rows
+
+
+def _parameter_scoring(strategy: StrategyDef, params: dict | None) -> dict[str, float]:
+    """Scoring fields a matrix strategy takes from its parameters, such as a mined factor set."""
+    parameter_fields = getattr(strategy.matrix_strategy, "required_fields_for_params", None)
+    if not callable(parameter_fields):
+        return {}
+    return {str(name): 1.0 for name in parameter_fields(params or {})}

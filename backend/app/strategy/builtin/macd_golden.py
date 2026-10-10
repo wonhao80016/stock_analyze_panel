@@ -7,9 +7,7 @@ from app.backtest.matrix import (
     SignalMatrix,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_ewm_adjust_false as ewm_adjust_false,
+    recursive_warmup_bars,
 )
 from app.backtest.matrix import (
     valid_shift as shift,
@@ -54,19 +52,17 @@ class MACDGoldenMatrixStrategy:
 
     def required_warmup_bars(self, params: dict) -> int:
         del params
-        return 60
+        # The cross compares with the previous bar, which needs the same warm-up.
+        return recursive_warmup_bars("macd_dea") + 1
 
     def compute_signals(
         self,
         market: MarketDataMatrix,
         params: dict,
     ) -> SignalMatrix:
-        valid = np.isfinite(market.close)
-        ema12 = ewm_adjust_false(market.close, valid, span=12)
-        ema26 = ewm_adjust_false(market.close, valid, span=26)
-        dif = ema12 - ema26
+        dif = matrix_feature(market, "macd_dif")
+        dea = matrix_feature(market, "macd_dea")
         dif_valid = np.isfinite(dif)
-        dea = ewm_adjust_false(dif, dif_valid, span=9)
         previous_dif = shift(dif, 1, dif_valid)
         previous_dea = shift(dea, 1, np.isfinite(dea))
         golden = (dif > dea) & (previous_dif <= previous_dea)

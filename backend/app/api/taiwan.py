@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from app.taiwan.current_data import (
     TaiwanCurrentDataResponse,
     TaiwanDatasetCapability,
@@ -285,6 +285,7 @@ def get_taiwan_current_data(
 @router.get("/stocks/{symbol}", response_model=TaiwanStockDetailResponse)
 def get_taiwan_stock_detail(
     symbol: str,
+    request: Request,
     days: int = Query(120, ge=10, le=1000, description="歷史日 K 線根數"),
 ):
     """獲取單一台股標的完整研究工作台資料 (一站式聚合，不因單一來源失敗中斷)。"""
@@ -299,7 +300,7 @@ def get_taiwan_stock_detail(
             detail=f"無效的台股代碼格式: {symbol}。請使用標準規範代碼，例如 2330.TWSE, 8069.TPEX",
         ) from e
 
-    svc = get_taiwan_stock_detail_service()
+    svc = get_taiwan_stock_detail_service(getattr(request.app.state, "repo", None))
     try:
         return svc.get_stock_detail(symbol, days=days)
     except SecurityMasterUnavailableError:

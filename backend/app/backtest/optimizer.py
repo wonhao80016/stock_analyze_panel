@@ -160,6 +160,9 @@ def _no_best_reason(ranked: list[dict], objective: str) -> str:
     from app.backtest.engine import ANNUALIZED_STATS, MIN_ANNUALIZED_SESSIONS
 
     if all(row.get("error") for row in ranked):
+        errors = {str(row["error"]) for row in ranked}
+        if len(errors) == 1:
+            return f"every parameter combination failed: {errors.pop()}"
         return "every parameter combination failed"
     reason = f"objective '{objective}' is null for every parameter combination"
     if objective in ANNUALIZED_STATS:

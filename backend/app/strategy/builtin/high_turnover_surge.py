@@ -1,4 +1,4 @@
-"""高换手拉升 — 换手率 > 5% 且涨幅 > 3%, 资金活跃"""
+"""High turnover surge: turnover above 2% of issued shares net of private placements and a gain above 3%."""
 
 import numpy as np
 
@@ -12,10 +12,12 @@ from app.backtest.matrix import (
     valid_shift as shift,
 )
 
+DEFAULT_MIN_TURNOVER = 2.0
+
 META = {
     "id": "high_turnover_surge",
     "name": "高換手拉升",
-    "description": "換手率 > 5% 且漲幅 > 3%, 資金活躍",
+    "description": "換手率(成交股數÷已發行普通股扣除私募股) > 2% 且漲幅 > 3%, 資金活躍; 換手率自每日發布起保留, 不能用於更早的日期或回測",
     "tags": ["換手率", "放量", "資金"],
     "asset_types": ["stock"],
     "timeframes": ["1d"],
@@ -25,7 +27,7 @@ META = {
             "id": "min_turnover",
             "label": "最低換手率%",
             "type": "float",
-            "default": 5.0,
+            "default": DEFAULT_MIN_TURNOVER,
             "min": 1.0,
             "max": 20.0,
             "step": 0.5,
@@ -58,6 +60,12 @@ class HighTurnoverSurgeMatrixStrategy:
     def required_fields(self) -> frozenset[str]:
         return frozenset({"close", "turnover_rate"})
 
+    def required_coverage_fields(self, params: dict) -> frozenset[str]:
+        """Fields an entry needs; a screened or backtested session failing session_coverage is refused."""
+        return (
+            frozenset({"turnover_rate"}) if params.get("use_turnover_filter", True) else frozenset()
+        )
+
     def required_warmup_bars(self, params: dict) -> int:
         del params
         return 60
@@ -66,7 +74,7 @@ class HighTurnoverSurgeMatrixStrategy:
         entry = np.ones(market.shape, dtype=bool)
         if params.get("use_turnover_filter", True):
             entry &= matrix_feature(market, "turnover_rate") > float(
-                params.get("min_turnover", 5.0)
+                params.get("min_turnover", DEFAULT_MIN_TURNOVER)
             )
         if params.get("use_change_filter", True):
             entry &= (

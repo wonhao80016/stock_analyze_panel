@@ -865,6 +865,91 @@ describe('策略回測工作區', () => {
     expect(screen.queryByText(/未納入回測/)).not.toBeInTheDocument()
   })
 
+  it('欄位資料覆蓋率不足 100% 時顯示警示', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        field_coverage: { amount: 1, turnover_rate: 0.7299 },
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('以下欄位資料不完整（資料覆蓋率）：換手率 72%。缺少評分資料的候選排在最後，缺少過濾資料的列不會進場。')).toBeInTheDocument()
+    expect(screen.queryByText(/amount|成交額/)).not.toBeInTheDocument()
+  })
+
+  it('欄位資料完整時不顯示覆蓋率警示', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: { total_return: 0.125, n_trades: 0, field_coverage: { turnover_rate: 1 } },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('+12.50%')).toBeInTheDocument()
+    expect(screen.queryByText(/資料覆蓋率/)).not.toBeInTheDocument()
+  })
+
+  it('單一交易所覆蓋率不足的交易日顯示交易所與日期', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.125,
+        n_trades: 0,
+        exchange_coverage_warnings: [
+          { field: 'turnover_rate', exchange: 'TPEX', threshold: 0.5, sessions: ['2026-10-08'], session_count: 1 },
+          {
+            field: 'turnover_rate',
+            exchange: 'TWSE',
+            threshold: 0.5,
+            sessions: ['2026-10-01', '2026-10-02', '2026-10-05', '2026-10-06', '2026-10-07'],
+            session_count: 8,
+          },
+        ],
+      },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('上櫃股票的換手率資料覆蓋率低於 50%：2026-10-08。這些交易日的上櫃股票缺少該欄位，多半不會進場。')).toBeInTheDocument()
+    expect(screen.getByText('上市股票的換手率資料覆蓋率低於 50%：2026-10-01、2026-10-02、2026-10-05、2026-10-06、2026-10-07 等 8 個交易日。這些交易日的上市股票缺少該欄位，多半不會進場。')).toBeInTheDocument()
+  })
+
+  it('沒有交易所覆蓋率警示時不顯示', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: { total_return: 0.125, n_trades: 0, exchange_coverage_warnings: [] },
+      trades: [],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByText('+12.50%')).toBeInTheDocument()
+    expect(screen.queryByText(/資料覆蓋率低於/)).not.toBeInTheDocument()
+  })
+
   it('表單變更後隱藏舊結果並要求重新執行', async () => {
     mockStrategies()
     vi.mocked(api.strategyBacktestRun).mockResolvedValue({

@@ -28,6 +28,13 @@ import pyarrow.dataset as pads
 
 from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
+from app.indicators.pipeline import (
+    ema_values,
+    kd_values,
+    macd_values,
+    rsi_values,
+    wilder_values,
+)
 from app.price_limits import (
     MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
     TAIWAN_SYMBOL_SUFFIXES,
@@ -35,7 +42,11 @@ from app.price_limits import (
     numpy_limit_price,
     write_numpy_price_limit_matrix,
 )
-from app.strategy.scoring import SCORING_DIRECTION_LOW
+from app.strategy.listing_age import eligible_from, exclude_new_days
+from app.strategy.scoring import AMOUNT_ESTIMATED, SCORING_DIRECTION_LOW
+from app.strategy.scoring import recursive_warmup_bars as recursive_warmup_bars
+from app.taiwan.share_capital_store import MIN_SESSION_COVERAGE as MIN_SESSION_COVERAGE
+from app.taiwan.share_capital_store import session_coverage as _symbols_session_coverage
 from app.volume_units import volume_unit_for_symbols
 
 try:
@@ -53,7 +64,7 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 2
-_DIRECT_MATRIX_LOADER_VERSION = 8
+_DIRECT_MATRIX_LOADER_VERSION = 9
 _MATRIX_AXIS_INDEX_VERSION = 1
 _PUBLISHED_LIMIT_SIGNALS = (
     ("signal_limit_up", "limit_up_locked"),
@@ -624,7 +635,10 @@ def build_market_data_matrix(
     for column in sorted(wanted_fields):
         if column == "price_limit_pct":
             continue
-        if column in panel.columns and panel[column].dtype.is_numeric():
+        if column in panel.columns and (
+            panel[column].dtype.is_numeric()
+            or (column == AMOUNT_ESTIMATED and panel[column].dtype == pl.Boolean)
+        ):
             fields[column] = float_matrix(column)
         elif column == "raw_close":
             # A live quote is already an unadjusted price when no separate raw
@@ -1039,7 +1053,10 @@ def _build_market_data_matrix_from_dataset(
         out_down=arrays["limit_down_locked"],
         apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
     )
-    timestamps, session_ids = _matrix_time_axes(actual_dates)
+    timestamps, session_ids = _matrix_time_axes(
+        actual_dates,
+        _partition_dates(root, start, end),
+    )
     _make_read_only(
         timestamps,
         session_ids,
@@ -1136,7 +1153,10 @@ def _build_market_data_matrix_cache_from_dataset(
             name: _open_matrix_memmap(data_path, spec, mapped)
             for name, spec in field_specs.items()
         }
-        timestamps, session_ids = _matrix_time_axes(actual_dates)
+        timestamps, session_ids = _matrix_time_axes(
+            actual_dates,
+            sorted(date.fromisoformat(value) for value in source_partitions),
+        )
         arrays["timestamps"][:] = timestamps
         arrays["session_ids"][:] = session_ids
         timing_ms["layout"] = round((time.perf_counter() - stage_started) * 1000, 1)
@@ -1580,13 +1600,31 @@ def _write_tradable_matrix(
         target[start:stop] = values.astype(np.uint8, copy=False)
 
 
-def _matrix_time_axes(actual_dates: list[date]) -> tuple[np.ndarray, np.ndarray]:
+def _matrix_time_axes(
+    actual_dates: list[date],
+    session_dates: list[date],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Session ids index the market's partition dates, so a few-symbol load keeps its gaps."""
     epoch = date(1970, 1, 1)
     timestamps = np.asarray(
         [(value - epoch).days * 86_400_000 for value in actual_dates],
         dtype=np.int64,
     )
-    return timestamps, np.arange(len(actual_dates), dtype=np.int32)
+    sessions = np.asarray([value.toordinal() for value in session_dates], dtype=np.int64)
+    days = np.asarray([value.toordinal() for value in actual_dates], dtype=np.int64)
+    return timestamps, np.searchsorted(sessions, days).astype(np.int32)
+
+
+def _partition_dates(root: Path, start: date, end: date) -> list[date]:
+    dates: list[date] = []
+    for partition in root.glob("date=*"):
+        try:
+            partition_date = date.fromisoformat(partition.name.removeprefix("date="))
+        except ValueError:
+            continue
+        if start <= partition_date <= end and next(partition.rglob("*.parquet"), None) is not None:
+            dates.append(partition_date)
+    return sorted(dates)
 
 
 def _matrix_disk_cache_path(
@@ -2405,8 +2443,9 @@ def validate_signal_matrix(signals: SignalMatrix, shape: tuple[int, int]) -> Non
             raise TypeError(f"SignalMatrix.{name} must use {dtype}, got {array.dtype}")
         if array.flags.writeable:
             raise ValueError(f"SignalMatrix.{name} must be read-only")
-    if not np.isfinite(signals.score).all():
-        raise ValueError("SignalMatrix.score must contain only finite values")
+    # NaN marks a score that cannot be computed; infinities are never valid scores.
+    if np.isinf(signals.score).any():
+        raise ValueError("SignalMatrix.score must not contain infinite values")
 
 
 def _raw_scale_matrix(market: MarketDataMatrix) -> np.ndarray:
@@ -2570,12 +2609,11 @@ def build_market_matrix(
         time_id,
         asset_id,
     )
-    score = market.fields.get("score")
     signals = make_signal_matrix(
         shape,
         entry=raw_entry,
         exit=raw_exit,
-        score=np.nan_to_num(score, nan=0.0) if score is not None else None,
+        score=market.fields.get("score"),
         entry_signal_code=entry_codes,
         exit_signal_code=exit_codes,
         entry_signal_ids=normalized_entry_ids,
@@ -3427,6 +3465,102 @@ def rolling_quantile(values: np.ndarray, window: int, quantile: float) -> np.nda
     )
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def _valid_rolling_quantile_kernel(
+    source: np.ndarray,
+    valid: np.ndarray,
+    offsets: np.ndarray,
+    rows: np.ndarray,
+    window: int,
+    lower: int,
+    upper: int,
+    gamma: float,
+) -> np.ndarray:
+    out = np.full(source.shape, np.nan, dtype=np.float32)
+    for asset_id in prange(source.shape[1]):
+        start = int(offsets[asset_id])
+        stop = int(offsets[asset_id + 1])
+        ring = np.empty(window, dtype=np.float32)
+        ordered = np.empty(window, dtype=np.float32)
+        seen = 0
+        for position in range(start, stop):
+            row = int(rows[position])
+            value = source[row, asset_id]
+            if not valid[row, asset_id] or not np.isfinite(value):
+                continue
+            slot = seen % window
+            count = seen
+            if seen >= window:
+                count = window - 1
+                evicted = ring[slot]
+                index = 0
+                while ordered[index] != evicted:
+                    index += 1
+                for moved in range(index, count):
+                    ordered[moved] = ordered[moved + 1]
+            index = count
+            while index > 0 and ordered[index - 1] > value:
+                ordered[index] = ordered[index - 1]
+                index -= 1
+            ordered[index] = value
+            ring[slot] = value
+            seen += 1
+            if seen < window:
+                continue
+            below = np.float64(ordered[lower])
+            above = np.float64(ordered[upper])
+            difference = above - below
+            if gamma >= 0.5:
+                out[row, asset_id] = above - difference * (1.0 - gamma)
+            else:
+                out[row, asset_id] = below + difference * gamma
+    return out
+
+
+def valid_rolling_quantile(
+    values: np.ndarray,
+    valid_mask: np.ndarray,
+    window: int,
+    quantile: float,
+    *,
+    bar_index: ValidBarIndex | None = None,
+) -> np.ndarray:
+    """``np.quantile`` (linear method) over each asset's last ``window`` valid bars."""
+    source = np.asarray(values, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
+    if source.ndim != 2 or valid.shape != source.shape:
+        raise ValueError("valid rolling inputs must be matching 2D arrays")
+    if window <= 0:
+        raise ValueError("valid rolling window must be positive")
+    q = float(quantile)
+    if not 0.0 <= q <= 1.0:
+        raise ValueError("rolling quantile must be in [0, 1]")
+    size = int(window)
+    # numpy's linear method: index (n - 1) * q and its two-sided lerp, evaluated in float64.
+    virtual = (size - 1) * q
+    lower = min(max(int(np.floor(virtual)), 0), size - 1)
+    upper = min(lower + 1, size - 1)
+    gamma = virtual - lower
+    index = _resolve_valid_bar_index(source, valid, bar_index)
+    return _cached_matrix_operation(
+        "valid_rolling_quantile",
+        (source, valid, index.offsets, index.rows),
+        {"window": size, "quantile": q},
+        lambda: run_numba_parallel(
+            lambda: _valid_rolling_quantile_kernel(
+                source,
+                valid,
+                index.offsets,
+                index.rows,
+                size,
+                lower,
+                upper,
+                gamma,
+            )
+        ),
+    )
+
+
 def ewm_adjust_false(
     values: np.ndarray,
     *,
@@ -3596,6 +3730,110 @@ def _rolling_reduce(
     return out
 
 
+@njit(cache=True, nogil=True, parallel=True)
+def knn_direction_votes(
+    raw_features: np.ndarray,
+    close: np.ndarray,
+    session_ids: np.ndarray,
+    bar_offsets: np.ndarray,
+    bar_rows: np.ndarray,
+    candidate_offsets: np.ndarray,
+    take: int,
+    horizon: int,
+    norm_window: int,
+    own_span: int,
+    session_span: int,
+) -> np.ndarray:
+    """Lorentzian-distance k-NN vote per valid bar of each asset; NaN where a bar is not classified.
+
+    Bars are an asset's valid bars (a ValidBarIndex's offsets and rows). Each feature of
+    raw_features[time, asset, feature] is min-max scaled over the last norm_window bars. Bar p sums
+    the labels sign(close[j + horizon] - close[j]) of the take nearest j = p - candidate_offsets
+    (ascending, each >= horizon) under sum(log1p(|a - b|)); equal distances keep the more recent j.
+    p is classified only with own_span earlier bars, the oldest at most session_span sessions back,
+    and take usable candidates; a bar whose scaled features are not all finite is never used.
+    """
+    prediction = np.full(close.shape, np.nan, dtype=np.float32)
+    feature_count = raw_features.shape[2]
+    first_read = own_span - candidate_offsets[-1]
+    for asset in prange(close.shape[1]):
+        start = bar_offsets[asset]
+        count = bar_offsets[asset + 1] - start
+        if count <= own_span:
+            continue
+        # Min-max position over the last norm_window own bars, for the bars a classification reads.
+        scaled = np.full((count - first_read, feature_count), np.nan, dtype=np.float32)
+        for position in range(first_read, count):
+            for feature in range(feature_count):
+                low = np.float32(np.inf)
+                high = np.float32(-np.inf)
+                complete = True
+                for earlier in range(position - norm_window + 1, position + 1):
+                    value = raw_features[bar_rows[start + earlier], asset, feature]
+                    if not np.isfinite(value):
+                        complete = False
+                        break
+                    low = min(low, value)
+                    high = max(high, value)
+                if complete and high > low:
+                    current = raw_features[bar_rows[start + position], asset, feature]
+                    scaled[position - first_read, feature] = (current - low) / (high - low)
+
+        best_distance = np.empty(take, dtype=np.float64)
+        best_position = np.empty(take, dtype=np.int64)
+        for position in range(own_span, count):
+            row = bar_rows[start + position]
+            oldest_row = bar_rows[start + position - own_span]
+            if session_ids[row] - session_ids[oldest_row] > session_span:
+                continue
+            query = position - first_read
+            usable = True
+            for feature in range(feature_count):
+                if not np.isfinite(scaled[query, feature]):
+                    usable = False
+                    break
+            if not usable:
+                continue
+            found = 0
+            for offset in candidate_offsets:
+                candidate = position - offset
+                distance = 0.0
+                for feature in range(feature_count):
+                    value = scaled[candidate - first_read, feature]
+                    if not np.isfinite(value):
+                        distance = np.inf
+                        break
+                    distance += np.log1p(abs(float(scaled[query, feature]) - float(value)))
+                if not np.isfinite(distance):
+                    continue
+                if found < take:
+                    slot = found
+                    found += 1
+                elif distance < best_distance[take - 1]:
+                    slot = take - 1
+                else:
+                    continue
+                # Only strictly nearer neighbours move ahead, so ties keep the more recent one.
+                while slot > 0 and best_distance[slot - 1] > distance:
+                    best_distance[slot] = best_distance[slot - 1]
+                    best_position[slot] = best_position[slot - 1]
+                    slot -= 1
+                best_distance[slot] = distance
+                best_position[slot] = candidate
+            if found < take:
+                continue
+            votes = 0.0
+            for slot in range(take):
+                then = close[bar_rows[start + best_position[slot]], asset]
+                later = close[bar_rows[start + best_position[slot] + horizon], asset]
+                if later > then:
+                    votes += 1.0
+                elif later < then:
+                    votes -= 1.0
+            prediction[row, asset] = votes
+    return prediction
+
+
 # ============================================================================
 # Matrix-native strategy protocol and framework-owned pipeline
 # ============================================================================
@@ -3603,6 +3841,11 @@ def _rolling_reduce(
 
 @runtime_checkable
 class MatrixStrategy(Protocol):
+    """Optional hook ``limit_entries(entry, score, params)``: called with a copy of the entries left
+    after the framework's basic filter and asset mask and the strategy's own score; returns a mask
+    of the market's shape selecting those to keep, such as a per-bar top-N cut. It cannot add entries.
+    """
+
     def required_fields(self) -> frozenset[str]: ...
 
     def required_warmup_bars(self, params: dict) -> int: ...
@@ -3678,7 +3921,17 @@ class MatrixStrategyPipeline:
         )
         with cache_scope:
             basic_mask = build_pipeline_filter_mask(market, config)
-            entry = (signals.entry.astype(bool) & basic_mask).astype(np.uint8)
+            entry = signals.entry.astype(bool) & basic_mask
+            limit_entries = getattr(strategy, "limit_entries", None)
+            if callable(limit_entries):
+                kept = np.asarray(limit_entries(entry.copy(), signals.score, params), dtype=bool)
+                if kept.shape != market.shape:
+                    raise ValueError(
+                        f"matrix strategy limit_entries must return a mask of shape {market.shape}, "
+                        f"got {kept.shape}"
+                    )
+                entry &= kept
+            entry = entry.astype(np.uint8)
             score = build_matrix_score(
                 market,
                 entry.astype(bool),
@@ -3774,10 +4027,10 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
     if config.get("price_max") is not None:
         mask &= close <= float(config["price_max"])
 
-    _apply_bound(mask, close * _optional_field(market, "total_shares"), config, "market_cap")
-    _apply_bound(mask, close * _optional_field(market, "float_shares"), config, "float_cap")
-    _apply_bound(mask, _required_field_for_bound(market, config, "amount"), config, "amount")
-    _apply_bound(mask, _optional_field(market, "turnover_rate"), config, "turnover")
+    _apply_bound(mask, market, config, "market_cap", "total_shares", scale=close)
+    _apply_bound(mask, market, config, "float_cap", "float_shares", scale=close)
+    _apply_bound(mask, market, config, "amount", "amount")
+    _apply_bound(mask, market, config, "turnover", "turnover_rate")
 
     if config.get("exclude_st"):
         asset_mask = np.array(
@@ -3795,7 +4048,21 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
         for asset_id, symbol in enumerate(market.symbols):
             board_mask[asset_id] = _symbol_in_boards(symbol, boards)
         mask &= board_mask[None, :]
+
+    eligible = eligible_from(market.symbols, exclude_new_days(config))
+    if eligible:
+        days = np.array([label[:10] for label in market.timestamp_labels], dtype="datetime64[D]")
+        for asset_id, symbol in enumerate(market.symbols):
+            first = eligible.get(symbol)
+            if first is not None:
+                mask[:, asset_id] &= days >= np.datetime64(first, "D")
     return mask
+
+
+def scores_by_order_field(scoring: Mapping[str, float], order_by: str | None) -> bool:
+    """Whether build_matrix_score scores by the order_by field, signed so that higher ranks first."""
+    weights = [float(weight) for weight in scoring.values() if float(weight) != 0.0]
+    return not (weights and sum(weights) > 0) and bool(order_by) and order_by != "score"
 
 
 def build_matrix_score(
@@ -3808,6 +4075,7 @@ def build_matrix_score(
     fallback: np.ndarray,
     directions: Mapping[str, str] | None = None,
 ) -> np.ndarray:
+    """Score candidates in ``universe``; a candidate missing any scoring input scores NaN, others 0."""
     weights = {name: float(weight) for name, weight in scoring.items() if float(weight) != 0.0}
     total_weight = sum(weights.values())
     if weights and total_weight > 0:
@@ -3863,23 +4131,26 @@ def build_matrix_score(
                 scratch *= normalized_weight
                 score[:, start:stop] += scratch
         score *= np.float32(100.0)
-        score[~universe | ~all_finite] = 0.0
+        score[~universe] = 0.0
+        score[universe & ~all_finite] = np.nan
         return score
 
-    if order_by and order_by != "score":
+    if scores_by_order_field(scoring, order_by):
         values = matrix_feature(market, order_by)
         result = np.zeros(market.shape, dtype=np.float32)
         direction = np.float32(1.0 if descending else -1.0)
         for start in range(0, market.shape[1], _SCORE_ASSET_CHUNK_SIZE):
             stop = min(start + _SCORE_ASSET_CHUNK_SIZE, market.shape[1])
             values_chunk = values[:, start:stop]
-            valid = universe[:, start:stop] & np.isfinite(values_chunk)
+            candidates = universe[:, start:stop]
+            finite = np.isfinite(values_chunk)
             np.multiply(
                 values_chunk,
                 direction,
                 out=result[:, start:stop],
-                where=valid,
+                where=candidates & finite,
             )
+            result[:, start:stop][candidates & ~finite] = np.nan
         return result
     result = np.zeros(market.shape, dtype=np.float32)
     np.copyto(result, fallback, where=universe)
@@ -3925,6 +4196,29 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             {"name": name},
             lambda: _compute_matrix_feature(market, name),
         )
+
+
+def session_coverage(
+    market: MarketDataMatrix,
+    name: str,
+    rows: slice = slice(None),
+) -> np.ndarray:
+    """app.taiwan.share_capital_store.session_coverage of feature *name* on each session in *rows*.
+
+    Strategies reach the rule here because their imports are limited to this module.
+    """
+    return _symbols_session_coverage(
+        name, market.symbols, market.close[rows], matrix_feature(market, name)[rows]
+    )
+
+
+def _traded_amount(market: MarketDataMatrix) -> np.ndarray:
+    """``amount`` with live estimates as NaN; only liquidity filters may use an estimate."""
+    amount = market.field("amount")
+    estimated = market.fields.get(AMOUNT_ESTIMATED)
+    if estimated is None:
+        return amount
+    return np.where(estimated > 0.5, np.float32(np.nan), amount).astype(np.float32, copy=False)
 
 
 def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
@@ -4008,7 +4302,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         np.log(amount + np.float32(1.0), out=out, where=valid)
         return out
     if name == "amount_ratio_5d":
-        amount = market.field("amount")
+        amount = _traded_amount(market)
         valid = close_valid & np.isfinite(amount)
         previous = valid_shift(amount, 1, valid)
         return _matrix_relative(
@@ -4048,13 +4342,10 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         low_9 = valid_rolling_min(market.low, low_valid, 9)
         high_9 = valid_rolling_max(market.high, high_valid, 9)
         rsv = _matrix_ratio(market.close - low_9, high_9 - low_9) * np.float32(100.0)
-        k = valid_ewm_adjust_false(rsv, np.isfinite(rsv), alpha=1.0 / 3.0)
-        if name == "kdj_k":
-            return k
-        d = valid_ewm_adjust_false(k, np.isfinite(k), alpha=1.0 / 3.0)
-        if name == "kdj_d":
-            return d
-        return (np.float32(3.0) * k - np.float32(2.0) * d).astype(np.float32, copy=False)
+        offsets, cells = _valid_bar_runs(market.close, close_valid)
+        k, d = kd_values(_gather(rsv, np.isfinite(rsv), cells), offsets)
+        kdj = {"kdj_k": k, "kdj_d": d, "kdj_j": 3.0 * k - 2.0 * d}
+        return _scatter(market.shape, cells, kdj[name])
     if name in {"atr_14", "atr_pct"}:
         previous = valid_shift(market.close, 1, close_valid)
         true_range = np.fmax.reduce([
@@ -4062,33 +4353,22 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             np.abs(market.high - previous),
             np.abs(market.low - previous),
         ]).astype(np.float32, copy=False)
-        true_range[~close_valid] = np.nan
-        atr = valid_ewm_adjust_false(true_range, np.isfinite(true_range), alpha=1.0 / 14.0)
+        true_range[~close_valid | ~np.isfinite(previous)] = np.nan
+        offsets, cells = _valid_bar_runs(market.close, close_valid)
+        atr = _scatter(
+            market.shape,
+            cells,
+            wilder_values(_gather(true_range, np.isfinite(true_range), cells), offsets, 14),
+        )
         return atr if name == "atr_14" else _matrix_ratio(atr, market.close)
     if name.startswith("rsi_") and name[4:].isdigit():
         window = int(name[4:])
         delta = market.close - valid_shift(market.close, 1, close_valid)
-        delta_valid = close_valid
-        gain = np.where(delta > 0, delta, 0.0).astype(np.float32, copy=False)
-        loss = np.where(delta < 0, -delta, 0.0).astype(np.float32, copy=False)
-        gain[~delta_valid] = np.nan
-        loss[~delta_valid] = np.nan
-        average_gain = valid_ewm_adjust_false(
-            gain,
-            delta_valid,
-            alpha=1.0 / window,
-        )
-        average_loss = valid_ewm_adjust_false(
-            loss,
-            delta_valid,
-            alpha=1.0 / window,
-        )
-        denominator = np.where(average_loss == 0, np.float32(1e-12), average_loss)
-        out = np.full(market.shape, np.nan, dtype=np.float32)
-        np.divide(average_gain, denominator, out=out, where=np.isfinite(denominator))
-        out = np.float32(100.0) - np.float32(100.0) / (np.float32(1.0) + out)
-        out[np.cumsum(np.isfinite(delta), axis=0) < window] = np.nan
-        return out
+        changed = np.isfinite(delta)
+        offsets, cells = _valid_bar_runs(market.close, close_valid)
+        gains = _gather(np.fmax(delta, np.float32(0.0)), changed, cells)
+        losses = _gather(np.fmax(-delta, np.float32(0.0)), changed, cells)
+        return _scatter(market.shape, cells, rsi_values(gains, losses, offsets, window))
     if name == "gap_return":
         return _matrix_relative(market.open, valid_shift(market.close, 1, close_valid))
     if name == "intraday_return":
@@ -4111,7 +4391,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         return valid_rolling_sum(up, np.isfinite(up), 20)
     if name == "amihud_20d":
         daily = matrix_feature(market, "change_pct")
-        amount = market.field("amount")
+        amount = _traded_amount(market)
         amount_yi = amount / np.float32(1e8)
         illiquidity = _matrix_ratio(np.abs(daily), amount_yi)
         return valid_rolling_mean(
@@ -4133,7 +4413,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         daily = matrix_feature(market, "change_pct")
         return _matrix_rolling_corr(daily, market.volume, close_valid, 20)
     if name == "vwap_bias":
-        amount = market.field("amount")
+        amount = _traded_amount(market)
         vol_unit = getattr(market, "volume_unit", "lots")
         if vol_unit == "shares" or (hasattr(market, "symbols") and any(s.endswith(TAIWAN_SYMBOL_SUFFIXES) for s in market.symbols)):
             shares = market.volume
@@ -4204,15 +4484,41 @@ def _matrix_rolling_corr(
     return out
 
 
+def _valid_bar_runs(
+    values: np.ndarray, valid: np.ndarray
+) -> tuple[np.ndarray, tuple[np.ndarray, np.ndarray]]:
+    """Run offsets and (row, asset) cells of every asset's valid bars, one run per asset.
+
+    The runs are the layout the shared indicator definitions of app.indicators.pipeline take.
+    """
+    index = _resolve_valid_bar_index(values, valid, None)
+    assets = np.repeat(np.arange(values.shape[1]), np.diff(index.offsets))
+    return index.offsets, (index.rows, assets)
+
+
+def _gather(
+    values: np.ndarray, valid: np.ndarray, cells: tuple[np.ndarray, np.ndarray]
+) -> np.ndarray:
+    return np.where(valid[cells], values[cells], np.nan).astype(np.float64)
+
+
+def _scatter(
+    shape: tuple[int, int], cells: tuple[np.ndarray, np.ndarray], values: np.ndarray
+) -> np.ndarray:
+    out = np.full(shape, np.nan, dtype=np.float32)
+    out[cells] = values
+    return out
+
+
 def _matrix_ema(values: np.ndarray, valid: np.ndarray, period: int) -> np.ndarray:
-    return valid_ewm_adjust_false(values, valid, alpha=2.0 / (period + 1.0))
+    offsets, cells = _valid_bar_runs(values, valid)
+    return _scatter(values.shape, cells, ema_values(_gather(values, valid, cells), offsets, period))
 
 
 def _matrix_macd(values: np.ndarray, valid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    dif = _matrix_ema(values, valid, 12) - _matrix_ema(values, valid, 26)
-    dif = dif.astype(np.float32, copy=False)
-    dea = valid_ewm_adjust_false(dif, np.isfinite(dif), alpha=2.0 / 10.0)
-    return dif, dea
+    offsets, cells = _valid_bar_runs(values, valid)
+    dif, dea = macd_values(_gather(values, valid, cells), offsets)
+    return _scatter(values.shape, cells, dif), _scatter(values.shape, cells, dea)
 
 
 def _matrix_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
@@ -4317,29 +4623,30 @@ def _valid_return_over_bars(
     return out
 
 
-def _optional_field(market: MarketDataMatrix, name: str) -> np.ndarray:
-    values = market.fields.get(name)
-    if values is None:
-        return np.full(market.shape, np.nan, dtype=np.float32)
-    return values
-
-
-def _required_field_for_bound(
+def _apply_bound(
+    mask: np.ndarray,
     market: MarketDataMatrix,
     config: dict,
-    name: str,
-) -> np.ndarray:
-    if config.get(f"{name}_min") is None and config.get(f"{name}_max") is None:
-        return np.full(market.shape, np.nan, dtype=np.float32)
-    return market.field(name)
-
-
-def _apply_bound(mask: np.ndarray, values: np.ndarray, config: dict, prefix: str) -> None:
+    prefix: str,
+    field_name: str,
+    *,
+    scale: np.ndarray | None = None,
+) -> None:
+    """Keep rows whose value lies inside the configured bound; a missing value fails the bound."""
     minimum = config.get(f"{prefix}_min")
     maximum = config.get(f"{prefix}_max")
-    if minimum is not None and np.isfinite(values).any():
+    if minimum is None and maximum is None:
+        return
+    values = market.fields.get(field_name)
+    if values is None:
+        raise ValueError(
+            f"basic filter {prefix} bound needs field {field_name}, which the market data lacks"
+        )
+    if scale is not None:
+        values = scale * values
+    if minimum is not None:
         mask &= values >= float(minimum)
-    if maximum is not None and np.isfinite(values).any():
+    if maximum is not None:
         mask &= values <= float(maximum)
 
 

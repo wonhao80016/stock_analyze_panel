@@ -61,7 +61,9 @@ class TrendBreakoutMatrixStrategy:
 
     def required_warmup_bars(self, params: dict) -> int:
         del params
-        return 60
+        # Own bars read (MA60, the 60-day high and the scored 60-day momentum) plus 40 that
+        # absorb sessions the symbol missed inside the loaded window of shared sessions.
+        return 61 + 40
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         entry = np.ones(market.shape, dtype=bool)

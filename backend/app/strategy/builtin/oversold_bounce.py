@@ -7,6 +7,7 @@ from app.backtest.matrix import (
     SignalMatrix,
     make_signal_matrix,
     matrix_feature,
+    recursive_warmup_bars,
 )
 from app.backtest.matrix import (
     valid_shift as shift,
@@ -43,6 +44,7 @@ META = {
         },
     ],
     "scoring": {"change_pct": 0.3, "vol_ratio_5d": 0.3, "momentum_5d": 0.2, "rsi_14": 0.2},
+    "scoring_directions": {"rsi_14": "low", "momentum_5d": "low"},
     "order_by": "score",
     "descending": True,
     "limit": 500,
@@ -60,7 +62,8 @@ class OversoldBounceMatrixStrategy:
         return frozenset({"open", "close", "volume"})
 
     def required_warmup_bars(self, params: dict) -> int:
-        del params
+        if params.get("use_rsi_filter", True):
+            return max(60, recursive_warmup_bars("rsi_14"))
         return 60
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:

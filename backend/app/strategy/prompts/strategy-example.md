@@ -31,7 +31,6 @@ META = {
     "basic_filter": {
         "price_min": 3,
         "price_max": 200,
-        "market_cap_min": 10e8,
         "amount_min": 0.5e8,
         "exclude_st": True,
         "exclude_new_days": 30,
@@ -78,7 +77,7 @@ META = {
 EXECUTION_BACKEND = "python_history_legacy"
 LOOKBACK_DAYS = 2
 
-ENTRY_SIGNALS = ["signal_broken_board_recovery"]
+ENTRY_SIGNALS = ["signal_volume_surge"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 10
@@ -97,7 +96,6 @@ def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
     down_pct = float(params.get("prev_down_pct", -0.02))
     vol_ratio = float(params.get("volume_ratio", 1.2))
     tolerance = float(params.get("reversal_tolerance", 0.005))
-    latest = df["date"].max()
     hist = (
         df.sort(["symbol", "date"])
         .with_columns([
@@ -108,7 +106,7 @@ def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
             pl.col("change_pct").shift(1).over("symbol").alias("_prev_change_pct"),
         ])
     )
-    return hist.filter(pl.col("date") == latest).filter(
+    return hist.filter(
         (pl.col("_prev_close") < pl.col("_prev_open"))
         & (pl.col("_prev_change_pct") <= down_pct)
         & (pl.col("close") > pl.col("open"))
@@ -118,6 +116,8 @@ def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
         & ((pl.col("close") > pl.col("ma5")) | (pl.col("close") > pl.col("ma10")))
     )
 ```
+
+`filter_history()` 返回所有匹配行，不按最新日期过滤：选股引擎会自己取目标日，回测时 df 是整个回测区间，需要每一天的命中。
 
 ---
 

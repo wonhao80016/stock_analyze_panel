@@ -17,7 +17,8 @@ from __future__ import annotations
 import asyncio
 from datetime import date, datetime, timedelta
 import logging
-from typing import Any, Optional
+import math
+from typing import TYPE_CHECKING, Any, Optional
 
 from app.taiwan.detail_models import (
     SectionMeta,
@@ -48,6 +49,9 @@ from app.taiwan.realtime.service import get_realtime_service
 from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 from app.taiwan.universe import get_security_master
 
+if TYPE_CHECKING:
+    from app.repository import KlineRepository
+
 logger = logging.getLogger(__name__)
 
 _STORE_LOOKBACK_DAYS = 20
@@ -65,7 +69,9 @@ class TaiwanStockDetailService:
         index_provider: TaiwanIndexProvider | None = None,
         daily_store: TaiwanDailyStore | None = None,
         corporate_actions: TaiwanCorporateActionStore | None = None,
+        repository: KlineRepository | None = None,
     ) -> None:
+        self.repository = repository
         self.daily_store = daily_store or TaiwanDailyStore()
         self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
         self.hybrid_provider = hybrid_provider or TaiwanHybridProvider()
@@ -332,6 +338,7 @@ class TaiwanStockDetailService:
                 # Sort ascending by date
                 sorted_df = df.sort("date")
                 tail_df = sorted_df.tail(days)
+                turnover = self._published_turnover(symbol_str, tail_df)
                 for item in tail_df.iter_rows(named=True):
                     dt_str = str(item.get("date", ""))
                     if len(dt_str) > 10:
@@ -347,6 +354,7 @@ class TaiwanStockDetailService:
                             amount=float(item.get("amount")) if item.get("amount") is not None else None,
                             prev_close=item.get("prev_close"),
                             raw_close=item.get("raw_close"),
+                            turnover_rate=turnover.get(dt_str),
                         )
                     )
                 latest_date = rows[-1].date if rows else None
@@ -365,6 +373,32 @@ class TaiwanStockDetailService:
             rows=[],
             meta=SectionMeta(source="hybrid_daily", status="unavailable", is_stale=False),
         )
+
+    def _published_turnover(self, symbol_str: str, bars) -> dict[str, float]:
+        """The published enriched turnover_rate of *bars*' sessions, keyed by ISO date.
+
+        Empty without a repository, for an index, or when the read fails: the bars are kept either way.
+        """
+        if self.repository is None or bars.is_empty() or is_benchmark(symbol_str):
+            return {}
+        try:
+            sessions = [str(value)[:10] for value in bars.get_column("date").to_list()]
+            published = self.repository.get_daily(
+                symbol_str,
+                date.fromisoformat(min(sessions)),
+                date.fromisoformat(max(sessions)),
+                columns=["date", "turnover_rate"],
+            )
+        except Exception as e:
+            logger.warning("Published turnover read failed for %s: %s", symbol_str, e)
+            return {}
+        if published.is_empty() or "turnover_rate" not in published.columns:
+            return {}
+        return {
+            str(day)[:10]: float(value)
+            for day, value in published.select("date", "turnover_rate").iter_rows()
+            if value is not None and math.isfinite(value)
+        }
 
     def _aggregate_institutional(self, sym: TaiwanSymbol) -> TaiwanInstitutionalData:
         """Fetch institutional data for latest trading day, with safe timeout."""
@@ -759,8 +793,13 @@ class TaiwanStockDetailService:
 _detail_service: TaiwanStockDetailService | None = None
 
 
-def get_taiwan_stock_detail_service() -> TaiwanStockDetailService:
+def get_taiwan_stock_detail_service(
+    repository: KlineRepository | None = None,
+) -> TaiwanStockDetailService:
+    """The shared service; a given repository is kept and serves the daily rows' published turnover."""
     global _detail_service
     if _detail_service is None:
         _detail_service = TaiwanStockDetailService()
+    if repository is not None:
+        _detail_service.repository = repository
     return _detail_service

@@ -254,7 +254,7 @@ export interface ScreenerResultSummary {
 }
 
 export type PickGrade = 'buy' | 'watch'
-export type PickGradeReason = 'outside_top_n' | 'zero_score' | 'market_below_ma20'
+export type PickGradeReason = 'outside_top_n' | 'score_unavailable' | 'market_below_ma20'
 export type MarketFilter = 'applied' | 'passed' | 'unavailable'
 
 /** TAIEX close against its 20-day average on the post-close basis date. */
@@ -277,8 +277,16 @@ export interface PickGrading {
 export interface ScreenerCachedRow {
   symbol: string
   name?: string
+  /** null when the strategy could not score the pick; such picks rank last. */
+  score?: number | null
   grade?: PickGrade
   grade_reason?: PickGradeReason | null
+  /** The price sits at the limit-up price; shown beside the grade, which it never changes. */
+  limit_up_locked?: boolean
+  /** Scoring field ids without a value, set only when score is null. */
+  missing_scoring_fields?: string[]
+  /** On a composite pick no child could score: each child and the scoring fields it lacked. */
+  missing_scoring_children?: { strategy_id: string; name: string; fields: string[] }[]
   [field: string]: any
 }
 
@@ -290,6 +298,8 @@ export interface ScreenerCached {
   updated_at: number | null
   market_state?: MarketState | null
   grading?: PickGrading
+  /** Strategies whose latest cached run raised; absent in caches written before failures were recorded. */
+  failures?: Record<string, { error: string }>
 }
 
 export interface ScreenerCachedSummary {
@@ -952,6 +962,8 @@ export interface TaiwanDailyItem {
   amount?: number | null
   prev_close?: number | null
   raw_close?: number | null
+  /** Published turnover in percent (1.5 means 1.5%); null for ETFs and sessions without one. */
+  turnover_rate?: number | null
 }
 
 export interface TaiwanHistoricalDailyDetail {
@@ -2049,6 +2061,16 @@ export interface StrategyBacktestBenchmark {
   missing_sessions: number
 }
 
+/** A field an entry needs whose coverage on one exchange stays below threshold on some formal sessions. */
+export interface StrategyBacktestExchangeCoverageWarning {
+  field: string
+  exchange: 'TWSE' | 'TPEX'
+  threshold: number
+  // The first few such sessions; session_count counts them all.
+  sessions: string[]
+  session_count: number
+}
+
 export interface StrategyBacktestResult {
   run_id: string
   config: Record<string, any>
@@ -2062,6 +2084,8 @@ export interface StrategyBacktestResult {
     // Null when benchmark_return is null or in full mode, where total_return is not an account return.
     excess?: number | null
     excluded_symbols?: { symbol: string; reason: string }[]
+    // Absent when the run is refused before matching.
+    exchange_coverage_warnings?: StrategyBacktestExchangeCoverageWarning[]
   }
   equity_curve: { date: string; value: number; cash?: number; positions?: number; exposure?: number }[]
   drawdown_curve: { date: string; value: number }[]
@@ -2960,7 +2984,11 @@ export const api = {
     }),
 
   strategyRunAll: (asOf?: string) =>
-    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string }> }>(
+    request<{
+      as_of: string | null
+      results: Record<string, { total: number; as_of: string }>
+      failures?: Record<string, { error: string }>
+    }>(
       '/api/strategies/run-all',
       { method: 'POST', body: JSON.stringify({ as_of: asOf ?? null }) },
     ),
@@ -2985,7 +3013,7 @@ export const api = {
     request<{ ok: boolean }>(`/api/strategies/${strategyId}`, { method: 'DELETE' }),
 
   strategyReload: () =>
-    request<{ ok: boolean; count: number }>('/api/strategies/reload', { method: 'POST' }),
+    request<{ ok: boolean; count: number; load_errors: StrategyLoadError[] }>('/api/strategies/reload', { method: 'POST' }),
 
   // ===== Custom Signals (自定義訊號) =====
   customSignalsList: () =>
@@ -3166,7 +3194,7 @@ export const api = {
 
   /** 獲取策略源文件內容 */
   strategyGetSource: (id: string) =>
-    request<{ code: string; source: string }>(`/api/strategies/${id}/source`),
+    request<{ code: string; source: string; load_failed?: boolean; load_error?: string | null }>(`/api/strategies/${id}/source`),
   strategyBuild: (step: number, payload: Record<string, any>) =>
     request<StrategyBuildResult>(
       '/api/strategies/build',

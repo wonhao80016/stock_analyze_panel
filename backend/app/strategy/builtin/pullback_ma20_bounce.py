@@ -45,7 +45,7 @@ META = {
 }
 
 EXECUTION_BACKEND = "matrix_native"
-ENTRY_SIGNALS = ["signal_ma_golden_5_20"]
+ENTRY_SIGNALS = ["signal_pullback_ma20_bounce_entry"]
 EXIT_SIGNALS = ["signal_ma20_breakdown", "signal_ma_dead_5_20"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 15
@@ -57,7 +57,9 @@ class PullbackMA20BounceMatrixStrategy:
 
     def required_warmup_bars(self, params: dict) -> int:
         del params
-        return 60
+        # Own bars read (MA60 and the scored 60-day momentum) plus 40 that absorb sessions the
+        # symbol missed inside the loaded window of shared sessions.
+        return 61 + 40
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         ma5 = matrix_feature(market, "ma5")
@@ -82,7 +84,7 @@ class PullbackMA20BounceMatrixStrategy:
             exit=exit_.astype(np.uint8),
             entry_signal_code=np.where(entry, 0, -1).astype(np.int16),
             exit_signal_code=np.where(ma20_breakdown, 0, np.where(ma_dead, 1, -1)).astype(np.int16),
-            entry_signal_ids=("signal_ma_golden_5_20",),
+            entry_signal_ids=("signal_pullback_ma20_bounce_entry",),
             exit_signal_ids=("signal_ma20_breakdown", "signal_ma_dead_5_20"),
         )
 

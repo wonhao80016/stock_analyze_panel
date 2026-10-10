@@ -33,14 +33,14 @@ META = {
             "default": True,
         },
     ],
-    "scoring": {"momentum_60d": 0.4, "momentum_20d": 0.3, "turnover_rate": 0.3},
+    "scoring": {"momentum_60d": 0.4, "momentum_20d": 0.3, "vol_ratio_5d": 0.3},
     "order_by": "score",
     "descending": True,
     "limit": 500,
 }
 
 EXECUTION_BACKEND = "matrix_native"
-ENTRY_SIGNALS = ["signal_ma_golden_5_20", "signal_ma_golden_20_60"]
+ENTRY_SIGNALS = ["signal_bullish_alignment_entry"]
 EXIT_SIGNALS = ["signal_ma_dead_5_20", "signal_ma20_breakdown"]
 STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 20
@@ -52,7 +52,9 @@ class BullishAlignmentMatrixStrategy:
 
     def required_warmup_bars(self, params: dict) -> int:
         del params
-        return 60
+        # Own bars read (MA60 and the scored 60-day momentum) plus 40 that absorb sessions the
+        # symbol missed inside the loaded window of shared sessions.
+        return 61 + 40
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         ma5 = matrix_feature(market, "ma5")
@@ -73,7 +75,7 @@ class BullishAlignmentMatrixStrategy:
             exit=exit_.astype(np.uint8),
             entry_signal_code=np.where(entry, 0, -1).astype(np.int16),
             exit_signal_code=np.where(ma_dead, 0, np.where(ma20_breakdown, 1, -1)).astype(np.int16),
-            entry_signal_ids=("signal_ma_golden_5_20", "signal_ma_golden_20_60"),
+            entry_signal_ids=("signal_bullish_alignment_entry",),
             exit_signal_ids=("signal_ma_dead_5_20", "signal_ma20_breakdown"),
         )
 

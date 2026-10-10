@@ -12,8 +12,9 @@ raw_close, raw_high and raw_low keep the stored prices. A new factor rescales al
 history, so whenever the factor set differs from the one last published every
 partition is rewritten under an EnrichedPublication, which makes readers fail
 instead of mixing scales until the rewrite commits. A changed price-limit rule of a symbol
-with rows outside the refreshed window, or a historical partition whose schema differs
-from the current output, rewrites every partition the same way.
+with rows outside the refreshed window, a historical partition whose schema differs
+from the current output, or indicators published under another INDICATOR_DEFINITION_VERSION
+rewrite every partition the same way.
 """
 from __future__ import annotations
 
@@ -34,7 +35,12 @@ from app.enriched_generation import (
     _exclusive_generation_lock,
     enriched_publication_incomplete,
 )
-from app.indicators.pipeline import compute_enriched, filter_halt_days, with_limit_streak
+from app.indicators.pipeline import (
+    INDICATOR_DEFINITION_VERSION,
+    compute_enriched,
+    filter_halt_days,
+    with_limit_streak,
+)
 from app.taiwan.corporate_actions import (
     REF_LIMIT_DOWN,
     REF_LIMIT_UP,
@@ -53,9 +59,11 @@ logger = logging.getLogger(__name__)
 ENRICHED_DIR_NAME = "kline_daily_enriched"
 FACTOR_SET_FILE = ".taiwan_enriched_factors.json"
 LIMIT_RULES_KEY = "limit_rules"
+INDICATOR_VERSION_KEY = "indicator_version"
 NO_LIMIT_RULE = "none"
 OPEN_WINDOW = "open"
 LOGGED_SYMBOLS = 10
+PUBLISHED_TURNOVER = "_published_turnover_rate"
 
 
 def _enriched_root() -> Path:
@@ -103,11 +111,14 @@ class TaiwanEnrichedRefreshService:
         rebuild, which is enough to flip a borderline cross. The full market costs
         about a second, so there is nothing to save by truncating.
 
-        When the factor set through *end* differs from the last full publish, a symbol with rows
-        outside the window changed its price-limit rule, the last full publication never
-        committed, or a partition outside the window has another schema than this run's output,
-        the window widens to every stored day: partitions outside it would keep the old scale,
-        limits or columns, and only a full publication can commit.
+        When the factor set through *end* or the indicator definitions differ from the last full
+        publish, a symbol with rows outside the window changed its price-limit rule, the last full
+        publication never committed, or a partition outside the window has another schema than this
+        run's output, the window widens to every stored day: partitions outside it would keep the
+        old scale, values, limits or columns, and only a full publication can commit.
+
+        Turnover needs the share count of its own day, which only the newest session has, so
+        every earlier day keeps the turnover_rate it was published with.
         """
         available = self.daily_store.available_dates()
         if not available:
@@ -126,13 +137,14 @@ class TaiwanEnrichedRefreshService:
         if (start > min(available) or end < max(available)) and (
             self.factors_changed(events, end)
             or self.publication_incomplete()
+            or self.indicator_definitions_changed()
             or self.limit_rules_changed(
                 limit_rules, sessions.first_sessions, rewritten_since, unlisted
             )
         ):
             logger.info(
-                "taiwan enriched: factors or limit rules changed, or last publication incomplete, "
-                "republishing every partition"
+                "taiwan enriched: factors, indicator definitions or limit rules changed, or last "
+                "publication incomplete, republishing every partition"
             )
             start, end = min(available), max(available)
         full = start <= min(available) and end >= max(available)
@@ -169,6 +181,7 @@ class TaiwanEnrichedRefreshService:
         enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if enriched.is_empty():
             return 0
+        enriched = self._with_published_turnover(enriched, newest=max(available))
 
         if full:
             published_rules = {**limit_rules, **dict.fromkeys(unlisted, NO_LIMIT_RULE)}
@@ -181,6 +194,39 @@ class TaiwanEnrichedRefreshService:
             written, start.isoformat(), end.isoformat(), " (every partition)" if full else "",
         )
         return written
+
+    def _with_published_turnover(self, enriched: pl.DataFrame, newest: date) -> pl.DataFrame:
+        """*enriched* with each row dated before *newest* taking the turnover_rate its partition holds."""
+        days = enriched.filter(pl.col("date") < newest)["date"].unique().sort().to_list()
+        published = self._published_turnover(days)
+        if published.is_empty():
+            return enriched
+        return (
+            enriched.join(published, on=["symbol", "date"], how="left", maintain_order="left")
+            .with_columns(pl.coalesce("turnover_rate", PUBLISHED_TURNOVER).alias("turnover_rate"))
+            .drop(PUBLISHED_TURNOVER)
+        )
+
+    def _published_turnover(self, days: list[date]) -> pl.DataFrame:
+        """Finite turnover_rate published for *days*, by symbol and date; an unreadable partition adds none."""
+        paths = [self._root / f"date={d.isoformat()}" / "part.parquet" for d in days]
+        paths = [path for path in paths if path.exists()]
+        if not paths:
+            return pl.DataFrame()
+        try:
+            return _read_published_turnover(paths)
+        except (OSError, pl.exceptions.PolarsError):
+            frames = []
+            for path in paths:
+                try:
+                    frames.append(_read_published_turnover([path]))
+                except (OSError, pl.exceptions.PolarsError) as exc:
+                    logger.warning(
+                        "taiwan enriched partition %s unreadable, its turnover_rate is not kept: %s",
+                        path.parent.name,
+                        exc,
+                    )
+            return pl.concat(frames) if frames else pl.DataFrame()
 
     def _publish_partitions(self, enriched: pl.DataFrame, publication: EnrichedPublication | None = None) -> int:
         written = 0
@@ -201,7 +247,8 @@ class TaiwanEnrichedRefreshService:
         through: date,
         limit_rules: dict[str, str],
     ) -> int:
-        """Rewrite every partition as one publication and record its factor set and limit rules before committing.
+        """Rewrite every partition as one publication and record its factor set, indicator definition
+        version and limit rules before committing.
 
         A record that cannot be saved leaves the publication incomplete, so readers never pair
         the new prices with the previous record and apply pending factors twice.
@@ -251,12 +298,22 @@ class TaiwanEnrichedRefreshService:
         """Whether the factors dated on or before *through* differ from the last full publish."""
         return self._fingerprint(adjustment_factors(events, through)) != self._published_fingerprint()
 
+    def indicator_definitions_changed(self) -> bool:
+        """Whether the last full publish computed indicators under another definition version.
+
+        No record, an unreadable one or one without a version counts as changed: those rows were
+        published by an unknown or earlier release.
+        """
+        payload = self._read_record()
+        return payload is None or payload.get(INDICATOR_VERSION_KEY) != INDICATOR_DEFINITION_VERSION
+
     def _record_factor_set(self, factors: pl.DataFrame, through: date) -> None:
         self._write_record(
             {
                 "fingerprint": self._fingerprint(factors),
                 "factors": factors.height,
                 "through": through.isoformat(),
+                INDICATOR_VERSION_KEY: INDICATOR_DEFINITION_VERSION,
                 "published_at": datetime.now(TAIPEI).isoformat(),
             }
         )
@@ -530,6 +587,23 @@ def compute_taiwan_enriched(
         enriched = enriched.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
     enriched = add_taiwan_limit_signals(enriched, limits)
     return add_volume_patterns(enriched, trading_days)
+
+
+def _read_published_turnover(paths: list[Path]) -> pl.DataFrame:
+    """symbol, date and the finite turnover_rate of the enriched partitions at *paths*."""
+    return (
+        pl.scan_parquet(
+            paths,
+            schema={"symbol": pl.Utf8, "date": pl.Date, "turnover_rate": pl.Float64},
+            missing_columns="insert",
+            extra_columns="ignore",
+            cast_options=pl.ScanCastOptions(integer_cast="allow-float", float_cast="upcast"),
+        )
+        .filter(pl.col("turnover_rate").is_finite())
+        .unique(subset=["symbol", "date"], keep="last")
+        .rename({"turnover_rate": PUBLISHED_TURNOVER})
+        .collect()
+    )
 
 
 def limit_profile(symbols: list[str], sessions: ListingSessions) -> pl.DataFrame:

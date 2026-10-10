@@ -451,6 +451,7 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
     .sort((a, b) => (b[1].total ?? 0) - (a[1].total ?? 0))
   const shown = hits.slice(0, STRATEGY_CARD_LIMIT)
   const totalPicks = hits.reduce((sum, [, r]) => sum + (r.total ?? 0), 0)
+  const failedNames = Object.keys(cached.data?.failures ?? {}).map(sid => nameById.get(sid) ?? sid)
 
   return (
     <section className="mb-1.5 rounded-card border border-border bg-surface/80 p-2.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm">
@@ -473,6 +474,13 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
         </div>
       ) : cached.isError ? (
         <p className="py-4 text-xs text-muted">目前無法讀取策略選股結果,不影響其他功能使用。</p>
+      ) : hits.length === 0 && failedNames.length > 0 ? (
+        <div className="py-4 text-center">
+          <p className="text-xs text-red-400">{failedNames.length} 支策略本次計算失敗，沒有選股結果</p>
+          <p className="mt-1 break-words text-[10px] text-muted">
+            {failedNames.join('、')}。失敗原因見策略庫。
+          </p>
+        </div>
       ) : hits.length === 0 ? (
         <div className="py-4 text-center">
           <p className="text-xs text-secondary">今日尚無策略選股結果</p>

@@ -3,8 +3,9 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Activity, AlertCircle, Loader2, Play, TrendingUp } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { BacktestEquityChart } from '@/components/backtest/BacktestEquityChart'
-import { api, type StrategyBacktestBenchmark, type StrategyBacktestResult, type StrategyBacktestRunPayload } from '@/lib/api'
+import { api, type StrategyBacktestBenchmark, type StrategyBacktestExchangeCoverageWarning, type StrategyBacktestResult, type StrategyBacktestRunPayload } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { cnSignal } from '@/lib/signals'
 import { cn } from '@/lib/cn'
 
 type AssetType = 'stock' | 'etf'
@@ -117,6 +118,37 @@ function exclusionNote(excluded: { symbol: string; reason: string }[]): string {
   return `以下標的未納入回測：${items.join('、')}`
 }
 
+/** Rounded down as the backend's coverage refusals print it, so a share below a threshold never shows as it. */
+function wholePercent(share: number): string {
+  return `${Math.floor(Math.round(share * 100 * 1e6) / 1e6)}%`
+}
+
+function coverageNote(coverage: unknown): string | null {
+  if (!coverage || typeof coverage !== 'object') return null
+  const partial = Object.entries(coverage as Record<string, unknown>)
+    .map(([field, value]) => [field, finiteNumber(value)] as const)
+    .filter((entry): entry is readonly [string, number] => entry[1] != null && entry[1] < 1)
+  if (partial.length === 0) return null
+  const items = partial.map(([field, share]) => `${cnSignal(field)} ${wholePercent(share)}`)
+  return `以下欄位資料不完整（資料覆蓋率）：${items.join('、')}。缺少評分資料的候選排在最後，缺少過濾資料的列不會進場。`
+}
+
+const EXCHANGE_LABELS: Record<string, string> = { TWSE: '上市', TPEX: '上櫃' }
+
+function exchangeCoverageNotes(warnings: StrategyBacktestExchangeCoverageWarning[] | undefined): string[] {
+  if (!Array.isArray(warnings)) return []
+  return warnings.flatMap((warning) => {
+    if (!warning || typeof warning !== 'object') return []
+    const { field, exchange, threshold, sessions, session_count: sessionCount } = warning
+    if (typeof field !== 'string' || typeof exchange !== 'string' || !Array.isArray(sessions) || sessions.length === 0) return []
+    const label = EXCHANGE_LABELS[exchange] ?? exchange
+    const count = finiteNumber(sessionCount) ?? sessions.length
+    const more = count > sessions.length ? ` 等 ${count} 個交易日` : ''
+    const minimum = finiteNumber(threshold)
+    return [`${label}股票的${cnSignal(field)}資料覆蓋率低於 ${minimum == null ? '—' : wholePercent(minimum)}：${sessions.join('、')}${more}。這些交易日的${label}股票缺少該欄位，多半不會進場。`]
+  })
+}
+
 function MetricCard({ label, value, tone }: { label: string; value: string; tone?: 'positive' | 'negative' }) {
   return (
     <div className="rounded-md border border-border/70 bg-base/50 px-3 py-2">
@@ -149,6 +181,8 @@ function Results({ result, lotMode }: { result: StrategyBacktestResult; lotMode:
   const benchmarkReturn = finiteNumber(result.stats.benchmark_return)
   const excessReturn = finiteNumber(result.stats.excess)
   const excludedSymbols = result.stats.excluded_symbols ?? []
+  const fieldCoverageNote = coverageNote(result.stats.field_coverage)
+  const exchangeNotes = exchangeCoverageNotes(result.stats.exchange_coverage_warnings)
 
   return (
     <div className="space-y-3">
@@ -165,6 +199,16 @@ function Results({ result, lotMode }: { result: StrategyBacktestResult; lotMode:
             {exclusionNote(excludedSymbols)}
           </div>
         )}
+        {fieldCoverageNote && (
+          <div role="status" className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-warning">
+            {fieldCoverageNote}
+          </div>
+        )}
+        {exchangeNotes.map(note => (
+          <div key={note} role="status" className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-warning">
+            {note}
+          </div>
+        ))}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
           <MetricCard label="總報酬" value={formatPercent(totalReturn)} tone={totalReturn == null ? undefined : totalReturn >= 0 ? 'positive' : 'negative'} />
           <MetricCard label="年化報酬" value={formatPercent(annualReturn)} tone={annualReturn == null ? undefined : annualReturn >= 0 ? 'positive' : 'negative'} />

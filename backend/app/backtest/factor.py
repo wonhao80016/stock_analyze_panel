@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 
@@ -9,10 +10,12 @@ import polars as pl
 
 from app.backtest.engine import BacktestEngine
 from app.strategy.scoring import (
-    VIRTUAL_SCORING_DEPENDENCIES as DERIVED_FACTOR_DEPENDENCIES,
+    CALENDAR_DAYS_PER_SESSION,
+    materialize_scoring_columns,
+    scoring_field_warmup_bars,
 )
 from app.strategy.scoring import (
-    materialize_scoring_columns,
+    VIRTUAL_SCORING_DEPENDENCIES as DERIVED_FACTOR_DEPENDENCIES,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,7 +62,7 @@ FACTOR_COLUMNS: list[dict] = [
     {"id": "vol_ratio_5d", "label": "5日量比", "group": "量价", "desc": "当日成交量 / 前5日平均成交量"},
     {"id": "vol_ratio_10d", "label": "10日量比", "group": "量价", "desc": "当日成交量 / 前10日平均成交量"},
     {"id": "vol_trend_5_10", "label": "成交量趋势", "group": "量价", "desc": "5日平均成交量 / 10日平均成交量 - 1"},
-    {"id": "turnover_rate", "label": "换手率", "group": "量价", "desc": "使用历史时点流通股本计算的当日换手率"},
+    {"id": "turnover_rate", "label": "换手率", "group": "量价", "desc": "当日成交股数 / 当日已发行普通股扣除私募股数(%), 自每日发布当天起保留; ETF 无换手率"},
     {"id": "turnover_ratio_5d", "label": "换手率放大", "group": "量价", "desc": "当日换手率 / 前5日平均换手率 - 1"},
     {"id": "log_amount", "label": "成交额对数", "group": "量价", "desc": "ln(成交额 + 1), 降低极端规模影响"},
     {"id": "amount_ratio_5d", "label": "成交额放大", "group": "量价", "desc": "当日成交额 / 前5日平均成交额 - 1"},
@@ -95,6 +98,15 @@ FACTOR_COLUMNS: list[dict] = [
 
 FACTOR_WARMUP_DAYS = 120
 FACTOR_METHODOLOGY_VERSION = "factor_v2"
+
+
+def factor_warmup_days(factor_names: Iterable[str]) -> int:
+    """Calendar days of history loaded before a mining window for the factors in *factor_names*.
+
+    At least FACTOR_WARMUP_DAYS, which covers the 60-session rolling factors.
+    """
+    bars = max((scoring_field_warmup_bars(name) for name in factor_names), default=1)
+    return max(FACTOR_WARMUP_DAYS, int(bars * CALENDAR_DAYS_PER_SESSION))
 
 
 @dataclass

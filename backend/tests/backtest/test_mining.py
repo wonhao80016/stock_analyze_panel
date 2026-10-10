@@ -868,7 +868,10 @@ def test_benchmarks_run_even_when_factor_track_fails_on_a_fold():
 
     assert len(result.folds) == 1
     fold = result.folds[0]
-    assert fold.error == "no candidate completed inner validation within budget"
+    assert fold.error == (
+        "no candidate completed inner validation within budget; "
+        "every candidate failed: backtest exploded"
+    )
     assert fold.selected_candidate_id is None
     assert [candidate_id for candidate_id, _ in fold.benchmark_evaluations] == [
         "strategy:alpha"

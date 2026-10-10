@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
+from app.repository import HISTORY_WARMUP_SESSIONS
 from app.services.screener import ScreenerService
 from app.strategy.engine import StrategyDef, StrategyEngine
 
@@ -111,7 +112,7 @@ def test_build_strategy_context_loads_history_for_param_lookback(tmp_path, monke
         ["custom_window"],
         current=pl.DataFrame({"symbol": ["A"], "date": [target]}),
     )
-    assert captured["lookback_days"] == 22
+    assert captured["lookback_days"] == 22 + HISTORY_WARMUP_SESSIONS
     assert context.history is not None
 
 

@@ -731,7 +731,8 @@ class _StubRunEngine:
     def list_strategies(self):
         return [{"id": "s1"}, {"id": "s2"}]
 
-    def run_all(self, context, *, params_map=None, overrides_map=None, strategy_ids=None, skip_failed=False):
+    def run_all(self, context, *, params_map=None, overrides_map=None, strategy_ids=None, skip_failed=False,
+                failures=None):
         rows = {
             "s1": [
                 {"symbol": "2330.TWSE", "date": context.as_of, "raw_close": 1000.0, "score": 2.0},

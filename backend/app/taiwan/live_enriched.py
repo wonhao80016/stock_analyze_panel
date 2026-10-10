@@ -10,7 +10,8 @@ a stand-in above SPLIT_FACTOR takes the publish's official_ratio; any other par-
 uses pre_close / reference and can differ from the published row by the tick rounding of the
 reference price.
 Intraday the volume ratio, and every signal reading it, is scaled to a full session by the time
-elapsed at the quote.
+elapsed at the quote. A row without a quoted amount gets close * board-lot volume so far, flagged
+in AMOUNT_ESTIMATED, which keeps it out of VWAP and ratios to full-session amounts.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.strategy.scoring import AMOUNT_ESTIMATED
 from app.taiwan.corporate_actions import corporate_action_schema
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TAIWAN_DAILY_COLUMNS, TaiwanDailyStore
 from app.taiwan.enriched_refresh import FACTOR_SET_FILE, compute_taiwan_enriched, limit_profile
@@ -393,6 +395,13 @@ class TaiwanLiveEnriched:
         out = enriched.filter(pl.col("date") == today)
         if "ex_rights" not in out.columns:
             out = out.with_columns(pl.lit(False).alias("ex_rights"))
+        # MIS quotes carry no traded value; strategy amount minimums read this board-lot estimate,
+        # while the live K-line candle keeps showing none.
+        estimate = pl.col("close") * pl.col("volume")
+        out = out.with_columns(
+            (pl.col("amount").is_null() & estimate.is_not_null()).alias(AMOUNT_ESTIMATED),
+            pl.coalesce(pl.col("amount"), estimate).alias("amount"),
+        )
         return add_limit_distance_columns(out)
 
 

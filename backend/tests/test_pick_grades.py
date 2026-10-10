@@ -14,6 +14,8 @@ from app.services.pick_grades import (
     scored_strategy_ids,
 )
 
+pytestmark = pytest.mark.usefixtures("deny_network")
+
 BELOW = {"as_of": "2026-09-30", "status": "ok", "below_ma": True, "close": 90.0, "ma": 100.0}
 ABOVE = {"as_of": "2026-09-30", "status": "ok", "below_ma": False, "close": 110.0, "ma": 100.0}
 UNKNOWN = {"as_of": "2026-09-30", "status": "unavailable", "below_ma": None, "reason": "index_gap"}
@@ -36,7 +38,7 @@ def _grades(results, sid="s", market_state=None, scored=("s",)) -> list[tuple]:
 
 BUY = ("buy", None)
 OUT = ("watch", "outside_top_n")
-ZERO = ("watch", "zero_score")
+UNAVAILABLE = ("watch", "score_unavailable")
 MARKET = ("watch", "market_below_ma20")
 
 
@@ -60,24 +62,30 @@ def test_ties_keep_the_cached_order_across_the_cut():
     assert [(r["grade"], r["grade_reason"]) for r in graded] == [BUY] * 5 + [OUT] * 2
 
 
-def test_zero_score_in_the_top_five_is_watch_for_a_scored_strategy():
-    results = {"s": {"total": 6, "rows": _rows(90, 80, 70, 0, 0, 0)}}
+@pytest.mark.parametrize("low", [0, 0.0, -1.5])
+def test_a_literal_zero_or_negative_score_is_a_valid_low_score(low):
+    results = {"s": {"total": 6, "rows": _rows(90, 80, 70, low, low, low)}}
 
-    assert _grades(results) == [BUY, BUY, BUY, ZERO, ZERO, OUT]
+    assert _grades(results) == [BUY] * 5 + [OUT]
 
 
-@pytest.mark.parametrize("missing", [None, ..., float("nan"), "12", True])
+@pytest.mark.parametrize("missing", [None, ..., float("nan"), float("inf"), "12", True])
 def test_scored_strategy_with_an_unusable_score_is_watch_without_raising(missing):
     results = {"s": {"total": 2, "rows": _rows(90, missing)}}
 
-    assert _grades(results) == [BUY, ZERO]
+    assert _grades(results) == [BUY, UNAVAILABLE]
 
 
-def test_null_scores_ranked_first_are_not_moved():
-    """polars sorts nulls first when descending; grading must not assume they sink."""
-    results = {"s": {"total": 7, "rows": _rows(None, None, 90, 80, 70, 60, 50)}}
+def test_null_scores_ranked_last_are_watch_as_score_unavailable():
+    results = {"s": {"total": 8, "rows": _rows(90, 80, 70, 60, 50, 0, None, None)}}
 
-    assert _grades(results) == [ZERO, ZERO, BUY, BUY, BUY, OUT, OUT]
+    assert _grades(results) == [BUY] * 5 + [OUT] + [UNAVAILABLE] * 2
+
+
+def test_null_scores_inside_the_top_five_never_become_buy():
+    results = {"s": {"total": 3, "rows": _rows(90, 0, None)}}
+
+    assert _grades(results) == [BUY, BUY, UNAVAILABLE]
 
 
 @pytest.mark.parametrize(
@@ -98,13 +106,13 @@ def test_strategy_without_scoring_is_graded_by_rank_only(rows):
 
 def test_market_below_ma_downgrades_every_buy_and_keeps_other_reasons():
     results = {
-        "s": {"total": 7, "rows": _rows(90, 0, 70, 60, 50, 40, 30)},
+        "s": {"total": 7, "rows": _rows(90, None, 70, 0, 50, 40, 30)},
         "t": {"total": 2, "rows": _rows(-1, -2)},
     }
     graded = assign_grades(results, BELOW, {"s"})
 
     assert [(r["grade"], r["grade_reason"]) for r in graded["s"]["rows"]] == (
-        [MARKET, ZERO, MARKET, MARKET, MARKET, OUT, OUT]
+        [MARKET, UNAVAILABLE, MARKET, MARKET, MARKET, OUT, OUT]
     )
     assert [(r["grade"], r["grade_reason"]) for r in graded["t"]["rows"]] == [MARKET, MARKET]
 

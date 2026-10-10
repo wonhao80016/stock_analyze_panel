@@ -12,9 +12,10 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from typing import Any
 
 import polars as pl
 
@@ -22,15 +23,28 @@ from app.enriched_generation import (
     EnrichedGenerationUnavailableError,
     enriched_publication_incomplete,
 )
-from app.parquet import scan_enriched_parquet
+from app.parquet import storage_only_rows
+from app.repository import HISTORY_WARMUP_SESSIONS, read_enriched_window
 from app.services.strategy_inputs import CURRENT, HISTORY, InputStatus
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
+_INSTRUMENT_COLUMNS = ("symbol", "name", "total_shares", "float_shares")
+# Published limit flags of the target day, attached to every strategy result row of that day.
+_PUBLISHED_LIMIT_FLAGS = (
+    "signal_limit_up",
+    "signal_limit_down",
+    "signal_broken_limit_up",
+    "signal_limit_down_recovery",
+)
+
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
 _history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
 _HISTORY_CACHE_TTL = 120.0  # 秒
+# One market-wide window is a few hundred MB; a backfill over many dates must not keep them all.
+_HISTORY_CACHE_MAX_ENTRIES = 4
+_HISTORY_CACHE_MAX_BYTES = 512 * 1024 * 1024
 # Every _history_cache access goes through this lock: refreshes clear it from other threads.
 _history_cache_lock = threading.Lock()
 
@@ -48,12 +62,25 @@ def _history_cache_get(key: tuple[str, date, int], now: float) -> pl.DataFrame |
 
 
 def _history_cache_put(key: tuple[str, date, int], now: float, df: pl.DataFrame) -> None:
+    """Store ``df``, then drop expired entries and the oldest others beyond the entry and byte caps."""
     with _history_cache_lock:
         _history_cache[key] = (now, df)
-        if len(_history_cache) > 10:
-            expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
-            for k in expired:
-                del _history_cache[k]
+        for k in [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]:
+            del _history_cache[k]
+        older = sorted((k for k in _history_cache if k != key), key=lambda k: _history_cache[k][0])
+        while older and (
+            len(_history_cache) > _HISTORY_CACHE_MAX_ENTRIES
+            or _history_cache_bytes() > _HISTORY_CACHE_MAX_BYTES
+        ):
+            del _history_cache[older.pop(0)]
+
+
+def _history_cache_bytes() -> int:
+    return sum(
+        frame.estimated_size()
+        for _, frame in _history_cache.values()
+        if isinstance(frame, pl.DataFrame)
+    )
 
 # Loader outcomes collected by build_strategy_context; None outside that call.
 _input_sink: contextvars.ContextVar[dict[str, InputStatus] | None] = contextvars.ContextVar(
@@ -211,11 +238,20 @@ class ScreenerService:
             _history_cache.clear()
 
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
-        """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
+        """The full enriched rows of target_date: indicators, signals and limit flags.
 
-        enriched parquet 仅存 14 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
-        对于最新日, 优先使用内存缓存 (已包含完整指标)。
+        A published partition holding every indicator is served as stored. Otherwise the
+        in-memory caches serve the day, and a stored day is recomputed from its warm-up history.
         """
+        published = self._published_day(target_date)
+        if published is not None:
+            df_i = self.repo.get_instruments_asset(self.asset_type)
+            if not df_i.is_empty() and "name" not in published.columns:
+                inst_cols = [c for c in _INSTRUMENT_COLUMNS if c in df_i.columns]
+                published = published.join(df_i.select(inst_cols), on="symbol", how="left")
+            _report_input(CURRENT, "ok", published, target_date)
+            return published
+
         # 优先使用 repo 最新日缓存
         cache, cache_date = self.repo.get_enriched_latest_asset(self.asset_type)
         if cache is not None and not cache.is_empty() and cache_date == target_date:
@@ -273,17 +309,16 @@ class ScreenerService:
         return df_full
 
     def load_prior_consecutive(self, as_of: date, consec_col: str) -> pl.DataFrame:
-        """窄读: 仅取前一交易日的 [symbol, consec_col] 两列 (谓词下推到单日 parquet)。
+        """Read only [symbol, consec_col] of the previous session, pushed down to one day's parquet.
 
-        consecutive_limit_ups / consecutive_limit_downs 是 enriched 的存储列,
-        可直接从 parquet 读取, 无需 _load_enriched_for_date 的全量指标重算
-        (历史日期该慢路径最坏会触发 9 次全市场 compute_enriched_full)。
+        consecutive_limit_ups / consecutive_limit_downs are stored enriched columns, read straight
+        from parquet instead of through _load_enriched_for_date's full indicator recompute, which
+        for a historical date can run a market-wide compute_enriched_full up to 9 times.
 
-        选取逻辑与旧循环等价: 在 as_of 前 1~9 天内找到第一个存在的日分区
-        (即前一交易日), 读取其 symbol + consec_col。存储列的值与重算值逐位一致
-        (连板计数为 run-length, 150 天 warmup 完全覆盖 A 股最长连板, 二者相等)。
+        The previous session is the first partition stored within the 9 days before as_of; its
+        published symbol + consec_col are read as stored.
 
-        返回列: symbol, prev_consec。找不到前一交易日时返回空 DataFrame。
+        Returns columns symbol, prev_consec; an empty DataFrame when no previous session is found.
         """
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         for delta in range(1, 10):
@@ -310,63 +345,101 @@ class ScreenerService:
                 return pl.DataFrame()
         return pl.DataFrame()
 
-    def _compute_enriched_full(self, df_target: pl.DataFrame, target_date: date) -> pl.DataFrame:
-        """从 14 列基础数据即时计算完整 enriched (含全部指标和信号)。
-
-        读取历史数据作为指标计算的 warmup, 计算完成后只返回目标日期的行。
-        """
-        from app.indicators.pipeline import (
-            compute_indicators,
-            compute_limit_signals,
-            compute_signals,
-        )
-
-        # 加载 warmup 历史 (目标日期前 ~120 天)
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        start = target_date - timedelta(days=150)
-        # turnover_rate is stored, not derivable from OHLCV: it needs the share
-        # count that only the enriched publish had. Leaving it out of this list
-        # makes matrix_feature reject it and takes down every strategy that
-        # scores on it.
-        read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate",
-                     "ref_prev_close", "ref_limit_up", "ref_limit_down"]
+    def _published_day(self, target_date: date) -> pl.DataFrame | None:
+        """The partition of target_date when it has every indicator column and no storage-only row, else None."""
+        from app.indicators.pipeline import INDICATOR_COLUMNS
 
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter(
-                    (pl.col("date") >= start)
-                    & (pl.col("date") <= target_date)
-                )
-                .sort(["symbol", "date"])
+            data_dir = self.repo.store.data_dir
+            if self.asset_type in ("stock", "etf") and enriched_publication_incomplete(
+                data_dir, self.asset_type
+            ):
+                return None
+            partition = data_dir / self._enriched_dirname / f"date={target_date.isoformat()}"
+            path = partition / "part.parquet"
+            if not path.exists() or not INDICATOR_COLUMNS.issubset(pl.read_parquet_schema(path)):
+                return None
+            df = pl.read_parquet(path)
+        except Exception as e:
+            logger.warning("published enriched day %s unreadable: %s", target_date, e)
+            return None
+        if df.is_empty() or df.select(storage_only_rows(df.columns).any()).item():
+            return None
+        return df
+
+    def _first_of_last_sessions(self, target_date: date, sessions: int) -> date | None:
+        """First of the last ``sessions`` stored sessions through target_date; None if fewer are stored."""
+        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        stored: list[date] = []
+        for path in enriched_dir.glob("date=*/part.parquet"):
+            try:
+                day = date.fromisoformat(path.parent.name.removeprefix("date="))
+            except ValueError:
+                continue
+            if day <= target_date:
+                stored.append(day)
+        if len(stored) < sessions:
+            return None
+        stored.sort()
+        return stored[-sessions]
+
+    def _published_limit_flags(self, as_of: date) -> dict[str, dict[str, Any]] | None:
+        """Limit flags of each symbol in the published partition of as_of; None without one."""
+        try:
+            enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+            path = enriched_dir / f"date={as_of.isoformat()}" / "part.parquet"
+            if not path.exists():
+                return None
+            names = pl.read_parquet_schema(path)
+            flags = [name for name in _PUBLISHED_LIMIT_FLAGS if name in names]
+            if "symbol" not in names or not flags:
+                return None
+            frame = pl.read_parquet(path, columns=["symbol", *flags]).unique("symbol", keep="last")
+        except Exception as e:
+            logger.warning("published limit flags for %s unavailable: %s", as_of, e)
+            return None
+        return {str(row.pop("symbol")): row for row in frame.iter_rows(named=True)}
+
+    def _limit_signals(
+        self, instruments: pl.DataFrame
+    ) -> Callable[[pl.DataFrame], pl.DataFrame] | None:
+        """Limit flags for the rows read_enriched_window recomputes; None without stock instruments."""
+        if self.asset_type != "stock" or instruments is None or instruments.is_empty():
+            return None
+        from app.indicators.pipeline import compute_limit_signals
+
+        def compute(frame: pl.DataFrame) -> pl.DataFrame:
+            return compute_limit_signals(
+                frame, instruments, historical_shares=self.repo.get_historical_shares()
             )
-            available = [c for c in read_cols if c in lf.schema]
-            df_hist = lf.select(available).collect()
+
+        return compute
+
+    def _compute_enriched_full(self, df_target: pl.DataFrame, target_date: date) -> pl.DataFrame:
+        """The enriched rows of target_date: published rows as stored, the others recomputed."""
+        from app.indicators.pipeline import compute_indicators, compute_signals
+
+        instruments = self.repo.get_instruments_asset(self.asset_type)
+        limit_signals = self._limit_signals(instruments)
+        try:
+            df_result = read_enriched_window(
+                self.repo.store.data_dir,
+                self._enriched_dirname,
+                target_date,
+                target_date,
+                limit_signals=limit_signals,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("warmup history load failed: %s", e)
-            df_hist = pl.DataFrame()
+            df_result = pl.DataFrame()
 
-        if df_hist.is_empty():
-            df_hist = df_target
+        if df_result.is_empty():
             # Indicators from this single day differ from warmed-up ones, so the result is not ok.
             _report_input(CURRENT, "error", df_target, target_date)
-
-        # 计算指标
-        df_full = compute_indicators(df_hist)
-        df_full = compute_signals(df_full)
-
-        # 计算涨跌停信号 (需要 instruments; 涨停为股票专有, ETF 跳过)
-        instruments = self.repo.get_instruments_asset(self.asset_type)
-        if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
-            df_full = compute_limit_signals(
-                df_full,
-                instruments,
-                historical_shares=self.repo.get_historical_shares(),
-            )
-
-        # 只保留目标日期
-        df_result = df_full.filter(pl.col("date") == target_date)
+            df_result = compute_signals(compute_indicators(df_target))
+            if limit_signals is not None:
+                df_result = limit_signals(df_result)
+            df_result = df_result.filter(pl.col("date") == target_date)
 
         # JOIN instruments (name, total_shares, float_shares)
         if not instruments.is_empty():
@@ -377,10 +450,9 @@ class ScreenerService:
         return df_result
 
     def _load_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame:
-        """读取目标日期之前的基础行情数据, 供历史窗口策略使用。
+        """The enriched rows of the last lookback_days + 1 sessions through target_date.
 
-        优先从 repo 内存缓存获取 (启动时已预计算), 命中时 0ms。
-        缓存 miss 时走 scan_parquet + compute_indicators 慢路径。
+        Served from the repository cache when it covers them, else read with read_enriched_window.
         """
         # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 stock)
         t0 = time.perf_counter()
@@ -410,75 +482,36 @@ class ScreenerService:
 
         self._raise_if_publishing()
 
-        # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
-        logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
+        # Priority 3 (slow path): read the window's enriched partitions.
+        logger.warning("_load_enriched_history cache miss, reading partitions (%s, %d)...",
                        target_date, lookback_days)
-        from app.indicators.pipeline import (
-            compute_indicators,
-            compute_limit_signals,
-            compute_signals,
-        )
-
-        warmup = 60
-        start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
-
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        # turnover_rate is stored, not derivable from OHLCV: it needs the share
-        # count that only the enriched publish had. Leaving it out of this list
-        # makes matrix_feature reject it and takes down every strategy that
-        # scores on it.
-        read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low", "turnover_rate",
-                     "ref_prev_close", "ref_limit_up", "ref_limit_down"]
-
+        instruments = self.repo.get_instruments_asset(self.asset_type)
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
-                .sort(["symbol", "date"])
+            df_full = read_enriched_window(
+                self.repo.store.data_dir,
+                self._enriched_dirname,
+                self._first_of_last_sessions(target_date, lookback_days + 1),
+                target_date,
+                limit_signals=self._limit_signals(instruments),
             )
-            available = [c for c in read_cols if c in lf.collect_schema().names()]
-            df_hist = lf.select(available).collect()
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_history failed: %s", e)
             _report_input(HISTORY, "error", None, target_date)
             return pl.DataFrame()
 
-        if df_hist.is_empty():
+        if df_full.is_empty():
             _report_input(HISTORY, "empty", None, target_date)
             return pl.DataFrame()
-
-        df_full = compute_indicators(df_hist)
-        df_full = compute_signals(df_full)
-
-        instruments = self.repo.get_instruments_asset(self.asset_type)
-        if self.asset_type == "stock" and instruments is not None and not instruments.is_empty():
-            df_full = compute_limit_signals(
-                df_full,
-                instruments,
-                historical_shares=self.repo.get_historical_shares(),
-            )
 
         if instruments is not None and not instruments.is_empty():
             inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in instruments.columns]
             if "name" not in df_full.columns:
                 df_full = df_full.join(instruments.select(inst_cols), on="symbol", how="left")
 
-        # 裁剪掉 warmup 部分, 只保留 lookback 范围 (减少 group_by 开销)。
-        # 按交易日计数: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日,
-        # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口偏少, 与回测不一致。
-        if "date" in df_full.columns:
-            trading_dates = df_full["date"].unique().sort()
-            if len(trading_dates) > lookback_days:
-                lookback_start = trading_dates[-(lookback_days + 1)]
-            else:
-                lookback_start = trading_dates[0]
-            df_full = df_full.filter(pl.col("date") >= lookback_start)
-
         df_full = df_full.sort(["symbol", "date"])
 
         elapsed = (time.perf_counter() - t0) * 1000
-        logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
+        logger.info("_load_enriched_history(%s, %d): read in %.1fms, %d rows",
                     target_date, lookback_days, elapsed, len(df_full))
 
         _history_cache_put(cache_key, now, df_full)
@@ -580,7 +613,9 @@ class ScreenerService:
             )
             history = None
             if history_bars > 1:
-                history = self._load_enriched_history(as_of, history_bars)
+                # Each matrix strategy computes on its required bars plus this margin, sliced from
+                # whatever is loaded, so a run alone and a batch run see the same sessions.
+                history = self._load_enriched_history(as_of, history_bars + HISTORY_WARMUP_SESSIONS)
         finally:
             _input_sink.reset(token)
         return StrategyDataContext(
@@ -597,6 +632,7 @@ class ScreenerService:
             },
             # Taiwan daily enriched data holds stocks and ETFs together; only the master tells them apart.
             symbol_asset_types=taiwan_symbol_asset_types(self.asset_type, current, history),
+            published_row_fields=self._published_limit_flags(as_of),
         )
 
     def latest_date(self) -> date | None:

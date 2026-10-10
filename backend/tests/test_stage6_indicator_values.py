@@ -538,36 +538,15 @@ WARMUP_NULLS = {
     "kdj_j": 8,
     "atr_14": 14,
 }
-A02_6 = "A02#6: EMA/MACD have no warm-up threshold and seed at the first close"
-A03_2 = "A03#2: RSI and KD seed at the first bar instead of Wilder's average and KD's 50"
-A04_7 = "A04#7: ATR seeds at the first high - low instead of the 14-session average TR"
-WARMUP_NULL_FINDINGS = {
-    **dict.fromkeys([f"ema{n}" for n in (5, 10, 20, 30, 60)], A02_6),
-    "macd_dif": A02_6,
-    "macd_dea": A02_6,
-    "atr_14": A04_7,
-}
-WARMUP_VALUE_FINDINGS = {
-    **dict.fromkeys([f"ema{n}" for n in (5, 10, 20, 30, 60)] + ["macd_dif", "macd_dea"], A02_6),
-    **dict.fromkeys([f"rsi_{n}" for n in (6, 14, 24)] + ["kdj_k", "kdj_d", "kdj_j"], A03_2),
-    "atr_14": A04_7,
-}
+RECURSIVE_WARMUP = sorted(
+    [f"ema{n}" for n in (5, 10, 20, 30, 60)]
+    + ["macd_dif", "macd_dea"]
+    + [f"rsi_{n}" for n in (6, 14, 24)]
+    + ["kdj_k", "kdj_d", "kdj_j", "atr_14"]
+)
 
 
-def _warmup_params(columns, findings: dict[str, str]) -> list:
-    return [
-        pytest.param(
-            name,
-            marks=[pytest.mark.xfail(strict=True, raises=AssertionError, reason=findings[name])]
-            if name in findings
-            else [],
-            id=name,
-        )
-        for name in columns
-    ]
-
-
-@pytest.mark.parametrize("name", _warmup_params(WARMUP_NULLS, WARMUP_NULL_FINDINGS))
+@pytest.mark.parametrize("name", list(WARMUP_NULLS))
 def test_warmup_sessions_are_null_until_the_definition_has_enough_bars(published, name):
     for symbol in (SPLIT, DIVIDEND):
         values = _column(published, symbol, name)
@@ -576,84 +555,13 @@ def test_warmup_sessions_are_null_until_the_definition_has_enough_bars(published
         assert values[nulls] is not None, symbol
 
 
-@pytest.mark.parametrize(
-    "name",
-    _warmup_params(
-        [f"ma{n}" for n in (5, 10, 20, 30, 60)] + sorted(WARMUP_VALUE_FINDINGS),
-        WARMUP_VALUE_FINDINGS,
-    ),
-)
+@pytest.mark.parametrize("name", [f"ma{n}" for n in (5, 10, 20, 30, 60)] + RECURSIVE_WARMUP)
 def test_warmup_values_follow_the_published_definition(published, name):
     for symbol in (SPLIT, DIVIDEND):
         got = _column(published, symbol, name)[:WARMUP]
         expected = REFERENCE[symbol][name][:WARMUP]
         first = next(t for t, value in enumerate(expected) if value is not None)
         assert got[first:] == pytest.approx(expected[first:], abs=TOLERANCE[name]), symbol
-
-
-def _seeded_ewm(xs: list, alpha: float) -> list:
-    """EWM seeded at the first non-null input, null before it, as the pipeline computes today."""
-    out, prev = [], None
-    for x in xs:
-        if x is not None:
-            prev = x if prev is None else alpha * x + (1 - alpha) * prev
-        out.append(prev)
-    return out
-
-
-def _current_warmup(bars: list[dict]) -> dict[str, list]:
-    closes = [b["close"] for b in bars]
-    out: dict[str, list] = {
-        f"ema{n}": _seeded_ewm(closes, 2 / (n + 1)) for n in (5, 10, 20, 30, 60)
-    }
-    dif = [
-        a - b for a, b in zip(_seeded_ewm(closes, 2 / 13), _seeded_ewm(closes, 2 / 27), strict=True)
-    ]
-    out["macd_dif"], out["macd_dea"] = dif, _seeded_ewm(dif, 2 / 10)
-    deltas = [0.0] + [closes[t] - closes[t - 1] for t in range(1, len(closes))]
-    for n in (6, 14, 24):
-        gain = _seeded_ewm([max(d, 0.0) for d in deltas], 1 / n)
-        loss = _seeded_ewm([max(-d, 0.0) for d in deltas], 1 / n)
-        out[f"rsi_{n}"] = [
-            None if t < n else 100 - 100 / (1 + g / (lo if lo != 0 else 1e-12))
-            for t, (g, lo) in enumerate(zip(gain, loss, strict=True))
-        ]
-    lows = [min(b["low"] for b in bars[t - 8 : t + 1]) for t in range(8, len(bars))]
-    highs = [max(b["high"] for b in bars[t - 8 : t + 1]) for t in range(8, len(bars))]
-    rsv = [None] * 8 + [
-        100 * (bars[t]["close"] - lo) / (hi - lo)
-        for t, lo, hi in zip(range(8, len(bars)), lows, highs, strict=True)
-    ]
-    k = _seeded_ewm(rsv, 1 / 3)
-    d = _seeded_ewm(k, 1 / 3)
-    out["kdj_k"], out["kdj_d"] = k, d
-    out["kdj_j"] = [None if a is None else 3 * a - 2 * b for a, b in zip(k, d, strict=True)]
-    tr = [bars[0]["high"] - bars[0]["low"]] + [
-        max(
-            bars[t]["high"] - bars[t]["low"],
-            abs(bars[t]["high"] - closes[t - 1]),
-            abs(bars[t]["low"] - closes[t - 1]),
-        )
-        for t in range(1, len(bars))
-    ]
-    out["atr_14"] = _seeded_ewm(tr, 1 / 14)
-    return out
-
-
-CURRENT_WARMUP = {symbol: _current_warmup(bars[:WARMUP]) for symbol, bars in ADJUSTED.items()}
-
-
-@pytest.mark.parametrize("name", sorted(WARMUP_VALUE_FINDINGS))
-def test_warmup_values_keep_their_known_seeding(published, name):
-    # Pins today's seeding of A02#6 / A03#2 / A04#7 (open), the xfails above.
-    for symbol in (SPLIT, DIVIDEND):
-        got = _column(published, symbol, name)[:WARMUP]
-        expected = CURRENT_WARMUP[symbol][name]
-        for t, (g, e) in enumerate(zip(got, expected, strict=True)):
-            if e is None:
-                assert g is None, (symbol, t)
-            else:
-                assert g == pytest.approx(e, rel=1e-9, abs=1e-9), (symbol, t)
 
 
 SIGNALS = {

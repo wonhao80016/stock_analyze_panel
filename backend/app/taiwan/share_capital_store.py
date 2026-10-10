@@ -12,23 +12,23 @@ volume involves no look-ahead. Historical turnover stays fail-closed through
 ``share_capital.apply_historical_float_shares``, which nulls the denominator for
 any Taiwan row that is not today.
 
-The number is issued shares, not free float. Every Taiwan turnover figure is
-therefore a share of issued capital: it reads lower than a float-based figure,
-and the more of a company its insiders hold, the larger that gap. Taiwan market
-data conventionally uses issued shares for the same reason — there is nothing
-else published — so figures stay comparable between listings even though none of
-them is a true float turnover.
+The denominator is issued shares minus the privately placed shares the same
+reports list (TWSE ``私募股數``, TPEx ``PrivateStock.shares``), which cannot trade
+freely; a row without that field uses its issued shares. It is still not free
+float: insiders' holdings stay in, so turnover reads lower than a float-based figure.
 """
 from __future__ import annotations
 
 import logging
 import os
 import threading
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
+import numpy as np
 import polars as pl
 
 from app.taiwan.providers.snapshot_provider import get_with_retry
@@ -46,6 +46,9 @@ SCHEMA = {
     "report_date": pl.Utf8,
     "retrieved_at": pl.Utf8,
 }
+# Null when the report lacks the field; files written before it existed lack the column.
+PRIVATE_SHARES = "private_shares"
+STORED_SCHEMA = {**SCHEMA, PRIVATE_SHARES: pl.Int64}
 
 # Keyed by path and mtime, so a fresh store instance reuses an unchanged file's frame.
 _load_cache: dict[str, tuple[float, pl.DataFrame]] = {}
@@ -60,6 +63,16 @@ def _whole_shares(raw: Any) -> int | None:
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+def _share_count(raw: Any) -> int | None:
+    """A whole share count that may be zero; None when blank, unparsable or negative."""
+    text = str(raw if raw is not None else "").replace(",", "").strip()
+    try:
+        value = int(float(text))
+    except ValueError:
+        return None
+    return value if value >= 0 else None
 
 
 # Keyed by the master cache file's (path, mtime_ns, size): realtime polls call as_instruments()
@@ -119,8 +132,15 @@ class TaiwanShareCapitalStore:
             self._client = httpx.Client(timeout=30.0)
         return self._client
 
-    def _fetch(self, url: str, suffix: str, code_keys: tuple[str, ...], share_keys: tuple[str, ...],
-               date_keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    def _fetch(
+        self,
+        url: str,
+        suffix: str,
+        code_keys: tuple[str, ...],
+        share_keys: tuple[str, ...],
+        private_keys: tuple[str, ...],
+        date_keys: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
         rows = get_with_retry(self.client, url).json()
         if not isinstance(rows, list):
             raise ValueError(f"official share capital schema changed: {url}")
@@ -136,12 +156,22 @@ class TaiwanShareCapitalStore:
                 report_date = parse_taiwan_date(str(raw_date)).isoformat() if raw_date else ""
             except Exception:  # noqa: BLE001
                 report_date = ""
+            private = next((_share_count(row[k]) for k in private_keys if k in row), None)
             out.append({
                 "symbol": f"{code}.{suffix}",
                 "issued_shares": shares,
                 "report_date": report_date,
                 "retrieved_at": retrieved,
+                PRIVATE_SHARES: private,
             })
+        unknown = sum(row[PRIVATE_SHARES] is None for row in out)
+        if unknown:
+            logger.warning(
+                "taiwan share capital: %d %s rows have no usable private placement count, "
+                "their turnover divides by issued shares",
+                unknown,
+                suffix,
+            )
         return out
 
     def refresh(self) -> int:
@@ -153,13 +183,26 @@ class TaiwanShareCapitalStore:
         """
         rows: list[dict[str, Any]] = []
         failed: list[str] = []
-        for url, suffix, code_keys, share_keys, date_keys in (
-            (TWSE_URL, "TWSE", ("公司代號",), ("已發行普通股數或TDR原股發行股數",), ("出表日期",)),
-            (TPEX_URL, "TPEX", ("SecuritiesCompanyCode", "公司代號"),
-             ("IssueShares", "已發行普通股數或TDR原股發行股數"), ("Date", "出表日期")),
+        for url, suffix, code_keys, share_keys, private_keys, date_keys in (
+            (
+                TWSE_URL,
+                "TWSE",
+                ("公司代號",),
+                ("已發行普通股數或TDR原股發行股數",),
+                ("私募股數",),
+                ("出表日期",),
+            ),
+            (
+                TPEX_URL,
+                "TPEX",
+                ("SecuritiesCompanyCode", "公司代號"),
+                ("IssueShares", "已發行普通股數或TDR原股發行股數"),
+                ("PrivateStock.shares", "私募股數"),
+                ("Date", "出表日期"),
+            ),
         ):
             try:
-                fetched = self._fetch(url, suffix, code_keys, share_keys, date_keys)
+                fetched = self._fetch(url, suffix, code_keys, share_keys, private_keys, date_keys)
                 logger.info("taiwan share capital: %s returned %d rows", suffix, len(fetched))
                 rows.extend(fetched)
             except Exception as e:  # noqa: BLE001
@@ -170,13 +213,15 @@ class TaiwanShareCapitalStore:
             logger.warning("taiwan share capital refresh wrote nothing: both exchanges failed")
             return 0
 
-        df = pl.DataFrame(rows, schema=SCHEMA)
+        df = pl.DataFrame(rows, schema=STORED_SCHEMA)
         if failed:
             previous = self.load()
             if set(SCHEMA) <= set(previous.columns):
+                if PRIVATE_SHARES not in previous.columns:
+                    previous = previous.with_columns(pl.lit(None).alias(PRIVATE_SHARES))
                 kept = previous.filter(
                     pl.any_horizontal([pl.col("symbol").str.ends_with(f".{s}") for s in failed])
-                ).select(list(SCHEMA)).cast(SCHEMA)
+                ).select(list(STORED_SCHEMA)).cast(STORED_SCHEMA)
                 logger.info("taiwan share capital: kept %d previous rows for %s", kept.height, failed)
                 df = pl.concat([df, kept])
         df = df.unique(subset=["symbol"], keep="last").sort("symbol")
@@ -209,21 +254,82 @@ class TaiwanShareCapitalStore:
         return df
 
     def as_instruments(self) -> pl.DataFrame:
-        """The frame compute_enriched expects, with issued shares as the denominator.
+        """The frame compute_enriched expects, with turnover_denominators as float_shares.
 
         The column is named float_shares because that is the pipeline's name for
         the turnover denominator; see this module's docstring for what the number
         actually counts. TDRs are left out: their official count is the underlying
         company's shares, not receipts, so their turnover stays null.
         """
-        df = self.load()
-        # A file whose columns have drifted must read as "no denominator", not raise:
-        # the caller publishes the whole Taiwan enriched table and would otherwise
-        # stop over a cosmetic field, losing indicators and signals too.
-        if df.is_empty() or not {"symbol", "issued_shares"} <= set(df.columns):
-            return pl.DataFrame(schema={"symbol": pl.Utf8, "float_shares": pl.Float64})
-        tdrs = _tdr_symbols(df["symbol"].to_list())
-        return df.filter(~pl.col("symbol").is_in(list(tdrs))).select(
-            pl.col("symbol"),
-            pl.col("issued_shares").cast(pl.Float64).alias("float_shares"),
-        )
+        denominators = turnover_denominators(self.load())
+        if denominators.is_empty():
+            return denominators
+        tdrs = _tdr_symbols(denominators["symbol"].to_list())
+        return denominators.filter(~pl.col("symbol").is_in(list(tdrs)))
+
+
+def turnover_denominators(frame: pl.DataFrame) -> pl.DataFrame:
+    """symbol and float_shares: issued minus privately placed shares of a share-capital *frame*.
+
+    Null unless positive; a row without a private placement count uses its issued shares.
+    """
+    # A file whose columns have drifted must read as "no denominator", not raise:
+    # the publish would otherwise stop over a cosmetic field, losing indicators and signals too.
+    if frame.is_empty() or not {"symbol", "issued_shares"} <= set(frame.columns):
+        return pl.DataFrame(schema={"symbol": pl.Utf8, "float_shares": pl.Float64})
+    private = pl.col(PRIVATE_SHARES) if PRIVATE_SHARES in frame.columns else pl.lit(None)
+    private = private.cast(pl.Float64).fill_null(0.0)
+    tradable = pl.col("issued_shares").cast(pl.Float64) - private
+    return frame.select(
+        pl.col("symbol"),
+        pl.when(tradable > 0).then(tradable).otherwise(None).alias("float_shares"),
+    )
+
+
+# Below this share a session counts as lacking the field: turnover exists only from each
+# session's own publish onward.
+MIN_SESSION_COVERAGE = 0.5
+
+
+def session_coverage(
+    field: str,
+    symbols: Sequence[str],
+    close: np.ndarray,
+    values: np.ndarray,
+    store: TaiwanShareCapitalStore | None = None,
+) -> np.ndarray:
+    """Per session (row), the share of instruments able to hold *field* with a close and a value.
+
+    NaN marks a session where none of them has a close.
+    """
+    return eligible_coverage(close, values, coverage_eligible(field, symbols, store))
+
+
+def coverage_eligible(
+    field: str,
+    symbols: Sequence[str],
+    store: TaiwanShareCapitalStore | None = None,
+) -> np.ndarray:
+    """Which of *symbols* can hold *field*.
+
+    Only instruments with a turnover denominator in the current share-capital file can hold
+    turnover_rate; without any denominator on file every instrument counts, as for any other field.
+    """
+    eligible = np.ones(len(symbols), dtype=bool)
+    if field == "turnover_rate":
+        denominators = (store or TaiwanShareCapitalStore()).as_instruments()
+        known = set(denominators.filter(pl.col("float_shares").is_not_null())["symbol"].to_list())
+        if known:
+            eligible = np.fromiter((s in known for s in symbols), dtype=bool, count=len(symbols))
+    return eligible
+
+
+def eligible_coverage(close: np.ndarray, values: np.ndarray, eligible: np.ndarray) -> np.ndarray:
+    """Per session (row), the share of *eligible* instruments with a close that have a value.
+
+    NaN marks a session where none of them has a close.
+    """
+    listed = np.isfinite(close) & eligible
+    counts = listed.sum(axis=1)
+    held = (listed & np.isfinite(values)).sum(axis=1)
+    return np.divide(held, counts, out=np.full(counts.shape, np.nan), where=counts > 0)

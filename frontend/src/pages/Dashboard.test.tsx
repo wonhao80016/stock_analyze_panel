@@ -527,7 +527,7 @@ describe('Dashboard — 策略分級與大盤濾鏡', () => {
           as_of: resultAsOf,
           rows: rows ?? [
             { symbol: '2377.TWSE', name: '微星', close: 210.5, change_pct: 0.031, grade: 'buy', grade_reason: null },
-            { symbol: '3231.TWSE', name: '緯創', close: 118.0, change_pct: -0.012, grade: 'watch', grade_reason: 'zero_score' },
+            { symbol: '3231.TWSE', name: '緯創', close: 118.0, change_pct: -0.012, score: null, grade: 'watch', grade_reason: 'score_unavailable' },
           ],
         },
       },
@@ -550,9 +550,21 @@ describe('Dashboard — 策略分級與大盤濾鏡', () => {
 
     const buy = await screen.findByText('買進')
     expect(buy.closest('button')).toHaveTextContent('微星')
-    const watch = screen.getByText('觀察')
+    const watch = screen.getByText('觀察・資料不足')
     expect(watch.closest('button')).toHaveTextContent('緯創')
-    expect(watch).toHaveAttribute('title', '評分為 0 或無法計算')
+    expect(watch).toHaveAttribute('title', '評分資料不足（分數 —）')
+  })
+
+  it('漲停鎖死的選股另加標籤, 分級不變', async () => {
+    mockGraded({}, [
+      { symbol: '2377.TWSE', name: '微星', close: 210.5, change_pct: 0.099, grade: 'buy', grade_reason: null, limit_up_locked: true },
+    ])
+    renderDashboard()
+
+    const buy = await screen.findByText('買進')
+    const tag = screen.getByText('漲停鎖死')
+    expect(tag.closest('button')).toBe(buy.closest('button'))
+    expect(tag.closest('button')).toHaveTextContent('微星')
   })
 
   it('跌破 20 日均線時徽章標出大盤降級, 並寫出指數收盤與均線', async () => {

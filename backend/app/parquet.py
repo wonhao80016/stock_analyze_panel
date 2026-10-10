@@ -1,6 +1,7 @@
 """Polars parquet helpers."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import polars as pl
@@ -56,3 +57,15 @@ def scan_enriched_parquet(source: Any, **kwargs: Any) -> pl.LazyFrame:
     kwargs.setdefault("schema", ENRICHED_STORAGE_SCHEMA)
     kwargs.setdefault("cast_options", pl.ScanCastOptions(integer_cast="allow-float"))
     return scan_parquet_compat(source, **kwargs)
+
+
+def storage_only_rows(columns: Iterable[str]) -> pl.Expr:
+    """True on enriched rows with no value in any of *columns* outside ENRICHED_STORAGE_SCHEMA.
+
+    Such rows were written without the publish, e.g. by a storage-only live merge. The Taiwan publish
+    fills its limit flags on every row, so even a listing's first session, with no indicator, has one.
+    """
+    derived = [name for name in columns if name not in ENRICHED_STORAGE_SCHEMA]
+    if not derived:
+        return pl.lit(True)
+    return pl.all_horizontal(pl.col(name).is_null() for name in derived)

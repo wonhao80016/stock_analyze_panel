@@ -13,9 +13,9 @@ from app.backtest.matrix import (
     SignalMatrix,
     make_signal_matrix,
     matrix_feature,
-    rolling_min,
-    rolling_sum,
     valid_rolling_mean,
+    valid_rolling_min,
+    valid_rolling_sum,
 )
 from app.backtest.matrix import (
     valid_shift as shift,
@@ -54,10 +54,19 @@ META = {
             "default": True,
         },
         {
+            "id": "min_amount",
+            "label": "最低成交金額(元)",
+            "type": "float",
+            "default": 100000000.0,
+            "min": 0.0,
+            "max": 5000000000.0,
+            "step": 10000000.0,
+        },
+        {
             "id": "min_volume",
             "label": "最低成交量(股)",
             "type": "float",
-            "default": 2000000.0,
+            "default": 0.0,
             "min": 0.0,
             "max": 50000000.0,
             "step": 500000.0,
@@ -76,12 +85,26 @@ STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 15
 
 
+def _liquid(market: MarketDataMatrix, params: dict) -> np.ndarray:
+    liquid = np.ones(market.shape, dtype=bool)
+    min_amount = float(params.get("min_amount", 100_000_000.0))
+    if min_amount > 0:
+        liquid &= market.field("amount") >= min_amount
+    # A share-count minimum saved before the traded-value rule still applies on top of it.
+    min_volume = float(params.get("min_volume", 0.0))
+    if min_volume > 0:
+        liquid &= market.volume >= min_volume
+    return liquid
+
+
 class PullbackResumeMatrixStrategy:
     def required_fields(self) -> frozenset[str]:
-        return frozenset({"open", "high", "low", "close", "volume"})
+        return frozenset({"open", "high", "low", "close", "volume", "amount"})
 
     def required_warmup_bars(self, params: dict) -> int:
-        return 60 + 2 * int(params.get("pullback_window", 10))
+        # Own bars read (MA60, or two stacked pullback windows) plus 40 that absorb sessions the
+        # symbol missed inside the loaded window of shared sessions.
+        return max(60, 2 * int(params.get("pullback_window", 10)) + 1) + 40
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         window = int(params.get("pullback_window", 10))
@@ -91,10 +114,11 @@ class PullbackResumeMatrixStrategy:
         ma20 = matrix_feature(market, "ma20")
         ma60 = matrix_feature(market, "ma60")
 
-        below_ma5 = shift((market.close < ma5).astype(np.float32), 1)
-        had_pullback = rolling_sum(below_ma5, window) > 0.0
+        close_valid = np.isfinite(market.close)
+        below_ma5 = shift((market.close < ma5).astype(np.float32), 1, close_valid)
+        had_pullback = valid_rolling_sum(below_ma5, close_valid, window) > 0.0
 
-        held_ma20 = shift(rolling_min(market.close - ma20, window), 1) >= 0.0
+        held_ma20 = shift(valid_rolling_min(market.close - ma20, close_valid, window), 1) >= 0.0
 
         volume_valid = np.isfinite(market.close) & np.isfinite(market.volume)
         pullback_volume = shift(valid_rolling_mean(market.volume, volume_valid, window), 1)
@@ -115,7 +139,7 @@ class PullbackResumeMatrixStrategy:
             & (ma20 > ma60)
             & (ma10 > ma20)
             & (market.close > market.open)
-            & (market.volume >= float(params.get("min_volume", 2000000.0)))
+            & _liquid(market, params)
         )
         if params.get("require_break_prev_high", True):
             entry &= market.close > shift(market.high, 1)

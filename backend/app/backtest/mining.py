@@ -981,6 +981,7 @@ class MiningService:
                 continue
 
             winners: list[tuple[float, MiningCandidate]] = []
+            inner_errors: list[str | None] = []
             all_candidates: dict[str, MiningCandidate] = {}
             selected_factor_union: set[str] = set()
             for inner in nested.inner:
@@ -1062,6 +1063,7 @@ class MiningService:
                         )
                     )
                     trials_used += 1
+                    inner_errors.append(evaluation.error)
                     if evaluation.error is None and evaluation.score is not None:
                         evaluated.append((evaluation.score, candidate))
                 evaluation_phases_remaining -= 1
@@ -1081,7 +1083,7 @@ class MiningService:
                     selected_candidate_id=None,
                     inner_score=None,
                     outer_evaluation=None,
-                    error="no candidate completed inner validation within budget",
+                    error=_inner_failure_reason(inner_errors),
                     benchmark_evaluations=run_benchmarks(nested),
                 ))
                 break
@@ -1599,6 +1601,14 @@ def _cancelled(cancel_check: CancelCheck | None) -> bool:
         return bool(cancel_check())
     is_set = getattr(cancel_check, "is_set", None)
     return bool(is_set()) if callable(is_set) else False
+
+
+def _inner_failure_reason(errors: Sequence[str | None]) -> str:
+    reason = "no candidate completed inner validation within budget"
+    distinct = set(errors)
+    if len(distinct) == 1 and None not in distinct:
+        return f"{reason}; every candidate failed: {distinct.pop()}"
+    return reason
 
 
 def _evaluate_labels(

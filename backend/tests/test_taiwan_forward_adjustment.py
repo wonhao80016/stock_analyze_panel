@@ -876,7 +876,7 @@ def test_the_screener_slow_paths_refuse_to_read_mid_rewrite(tmp_path, monkeypatc
     partition = tmp_path / "kline_daily_enriched" / f"date={D[2].isoformat()}"
     partition.mkdir(parents=True)
     _bars("2379.TWSE", [729.0, 692.0, 700.0]).write_parquet(partition / "part.parquet")
-    monkeypatch.setattr(screener, "scan_enriched_parquet", lambda *a, **k: pytest.fail("scanned mid-rewrite"))
+    monkeypatch.setattr(screener, "read_enriched_window", lambda *a, **k: pytest.fail("scanned mid-rewrite"))
     service = screener.ScreenerService(repo)
     monkeypatch.setattr(service, "_compute_enriched_full", lambda *a, **k: pytest.fail("read mid-rewrite"))
     EnrichedPublication(tmp_path, "stock", recover=True).begin()

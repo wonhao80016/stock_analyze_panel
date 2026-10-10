@@ -795,6 +795,9 @@ def test_a_failed_publish_is_logged_and_noted(tmp_path, quiet_publish, monkeypat
 def test_nothing_is_fetched_when_the_update_button_finds_the_table_current(tmp_path, quiet_publish, monkeypatch):
     store = _daily_store(tmp_path / "daily")
     monkeypatch.setattr(TaiwanEnrichedRefreshService, "stale_since", lambda self, available=None: None)
+    monkeypatch.setattr(
+        TaiwanEnrichedRefreshService, "indicator_definitions_changed", lambda self: False
+    )
     svc = _corporate_service(quiet_publish)
 
     assert publish_enriched(store, only_if_behind=True, corporate_actions=svc) is False

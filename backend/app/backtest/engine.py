@@ -28,12 +28,91 @@ from app.backtest.matrix import (
 )
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
-from app.parquet import scan_enriched_parquet
+from app.parquet import ENRICHED_STORAGE_SCHEMA, scan_enriched_parquet
+from app.repository import taiwan_limit_signals
 from app.tickflow.repository import KlineRepository
+from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
 _REFERENCE_LIMIT_COLUMNS = frozenset({"ref_prev_close", "ref_limit_up", "ref_limit_down"})
+# The Taiwan publish writes these on every enriched row; rows written without it lack them.
+_PUBLISHED_LIMIT_FLAGS = frozenset(
+    {"signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"}
+)
+_TAIWAN_LIMIT_INPUTS = (
+    "symbol",
+    "date",
+    "close",
+    "raw_close",
+    "raw_high",
+    "raw_low",
+    "ref_prev_close",
+    "ref_limit_up",
+    "ref_limit_down",
+)
+
+
+def _published_or_computed(
+    df: pl.DataFrame, flags: list[str], published: str, computed: str
+) -> pl.DataFrame:
+    """Each of *flags* from column ``published + flag`` where set, else ``computed + flag``."""
+    exprs: list[pl.Expr] = []
+    helpers: set[str] = set()
+    for flag in flags:
+        sources = [name for name in (published + flag, computed + flag) if name in df.columns]
+        exprs.append(pl.coalesce(sources).alias(flag))
+        helpers.update(name for name in sources if name != flag)
+    return df.with_columns(exprs).drop(sorted(helpers))
+
+
+def _with_taiwan_limit_flags(df: pl.DataFrame, flags: list[str]) -> pl.DataFrame:
+    """*df* with *flags* computed by the Taiwan publish's rule on the rows that lack them."""
+    from app.indicators.pipeline import compute_indicators
+
+    stored = [flag for flag in flags if flag in df.columns]
+    lacking = (
+        pl.any_horizontal(pl.col(flag).is_null() for flag in stored)
+        if len(stored) == len(flags)
+        else pl.lit(True)
+    )
+    symbols = df.filter(lacking).get_column("symbol").unique()
+    inputs = df.filter(pl.col("symbol").is_in(symbols)).select(
+        [name for name in _TAIWAN_LIMIT_INPUTS if name in df.columns]
+    )
+    flagged = taiwan_limit_signals(compute_indicators(inputs, needed={"prev_close"}))
+    computed = [flag for flag in flags if flag in flagged.columns]
+    if not computed:
+        return df
+    df = df.join(
+        flagged.select(["symbol", "date", *computed]).rename(
+            {flag: f"_computed_{flag}" for flag in computed}
+        ),
+        on=["symbol", "date"],
+        how="left",
+        maintain_order="left",
+    )
+    return _published_or_computed(df, computed, "", "_computed_")
+
+
+def _security_master_names(symbols: list[str]) -> pl.DataFrame:
+    """symbol and security-master name of each Taiwan symbol in *symbols* the master holds."""
+    taiwan = sorted(str(symbol) for symbol in symbols if str(symbol).endswith(TAIWAN_SUFFIXES))
+    names: dict[str, str] = {}
+    if taiwan:
+        from app.taiwan.universe import get_security_master
+
+        try:
+            master = get_security_master()
+            instruments = {symbol: master.get_instrument(symbol) for symbol in taiwan}
+        except Exception as exc:
+            raise ValueError(f"Taiwan Security Master unavailable: {exc}") from exc
+        names = {symbol: inst.name for symbol, inst in instruments.items() if inst is not None}
+    return pl.DataFrame(
+        {"symbol": list(names), "name": list(names.values())},
+        schema={"symbol": pl.Utf8, "name": pl.Utf8},
+    )
+
 
 STATS_METHODOLOGY_VERSION = "stats_v3"
 # Annual return, Sharpe, Sortino and Calmar are null for shorter series.
@@ -62,6 +141,37 @@ def _matrix_entry_score(matrix: MarketMatrix, time_id: int, asset_id: int) -> fl
     if source_time < 0:
         return 0.0
     return float(matrix.score[source_time, asset_id])
+
+
+def _score_in_range(config: MatcherConfig, score: float) -> bool:
+    """A score that could not be computed (NaN) never satisfies a score bound."""
+    if config.score_min is None and config.score_max is None:
+        return True
+    if not math.isfinite(score):
+        return False
+    if config.score_min is not None and score < config.score_min:
+        return False
+    return config.score_max is None or score <= config.score_max
+
+
+def _score_weights(scores: list[float], higher_first: bool) -> np.ndarray:
+    """score_weight sizing of the buys' *scores* before normalising; 0 for a missing score.
+
+    Lower-first scores share no sign or scale, so each scored buy weighs the number of scored
+    buys ranked no better than it: the lowest score weighs most and ties weigh the same.
+    """
+    values = np.array(scores, dtype=float)
+    finite = np.isfinite(values)
+    if higher_first:
+        return np.where(finite & (values > 0), values, 0.0)
+    scored = values[finite]
+    weights = np.zeros(len(values))
+    weights[finite] = (scored[None, :] >= scored[:, None]).sum(axis=1)
+    return weights
+
+
+def _recorded_score(score: float) -> float | None:
+    return round(score, 2) if math.isfinite(score) else None
 
 
 def _traded_price(matrix: MarketMatrix, time_id: int, asset_id: int, adjusted: float) -> float:
@@ -139,6 +249,8 @@ class MatcherConfig:
     max_exposure_pct: float = 1.0
     score_min: float | None = None
     score_max: float | None = None
+    # False buys the lowest entry score first, the order of a list ranking lower scores first.
+    score_higher_first: bool = True
     initial_capital: float = 1_000_000.0
     position_sizing: Literal["equal", "score_weight"] = "equal"
     # 分钟K精确成交: 开启后, 信号触发日的成交价用当日分钟K优化
@@ -660,14 +772,25 @@ class BacktestEngine:
         feature_plan,
         asset_type: str = "stock",
     ) -> pl.DataFrame:
-        """按解析后的依赖加载窄基础列并计算回测所需特征。"""
+        """Load the narrow base columns the resolved dependencies need and compute the features.
+
+        Limit flags the partitions carry are kept as published and computed only where missing:
+        from the instruments when there are any, else by the Taiwan publish's own rule.
+        """
         from app.indicators.pipeline import (
             compute_indicators,
             compute_limit_signals,
             compute_signals,
         )
 
-        columns = set(feature_plan.base_columns)
+        matrix_native = feature_plan.execution_backend == "matrix_native"
+        limit_outputs = (
+            {"signal_limit_up", "signal_limit_down"}
+            if matrix_native
+            else set(feature_plan.signal_columns)
+        )
+        published_flags = sorted(limit_outputs & _PUBLISHED_LIMIT_FLAGS)
+        columns = set(feature_plan.base_columns) | set(published_flags)
         if "raw_close" in columns:
             # Optional: only Taiwan partitions carry the exchange's own corporate-action limits.
             columns |= _REFERENCE_LIMIT_COLUMNS
@@ -705,23 +828,25 @@ class BacktestEngine:
             if self.repo is not None
             else pl.DataFrame()
         )
-        matrix_native = feature_plan.execution_backend == "matrix_native"
         if not matrix_native:
             df = compute_indicators(df, needed=set(feature_plan.indicator_columns))
             df = compute_signals(df, needed=set(feature_plan.signal_columns))
+        unpublished = [
+            flag for flag in published_flags if flag not in df.columns or df[flag].null_count() > 0
+        ]
         if not instruments.is_empty():
+            stored = [flag for flag in published_flags if flag in df.columns]
             df = compute_limit_signals(
-                df,
+                df.rename({flag: f"_published_{flag}" for flag in stored}),
                 instruments,
-                needed={"signal_limit_up", "signal_limit_down"}
-                if matrix_native
-                else set(feature_plan.signal_columns),
+                needed=limit_outputs - (set(published_flags) - set(unpublished)),
                 historical_shares=(
                     self.repo.get_historical_shares()
                     if asset_type == "stock" and self.repo is not None
                     else None
                 ),
             )
+            df = _published_or_computed(df, stored, "_published_", "")
             join_cols = ["symbol"] if "symbol" in instruments.columns else []
             join_cols.extend(
                 col for col in sorted(feature_plan.instrument_columns)
@@ -733,6 +858,12 @@ class BacktestEngine:
                     on="symbol",
                     how="left",
                 )
+        elif unpublished:
+            df = _with_taiwan_limit_flags(df, unpublished)
+        if "name" in feature_plan.instrument_columns and "name" not in df.columns:
+            df = df.join(
+                _security_master_names(df["symbol"].unique().to_list()), on="symbol", how="left"
+            )
 
         required_columns = set(feature_plan.base_columns) | set(feature_plan.instrument_columns)
         required_columns |= set(feature_plan.signal_columns)
@@ -882,7 +1013,11 @@ class BacktestEngine:
         enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
 
         try:
-            lf = scan_enriched_parquet(enriched_glob)
+            published_flags = sorted(_PUBLISHED_LIMIT_FLAGS.intersection(columns or ()))
+            lf = scan_enriched_parquet(
+                enriched_glob,
+                schema={**ENRICHED_STORAGE_SCHEMA, **dict.fromkeys(published_flags, pl.Boolean)},
+            )
             if symbols is not None:
                 lf = lf.filter(pl.col("symbol").is_in(symbols))
             if columns is not None:
@@ -1221,7 +1356,7 @@ class BacktestEngine:
                 entry_value=round(float(entry_value), 2),
                 exit_value=round(float(exit_value), 2),
                 pnl_amount=round(float(pnl_amount), 2),
-                entry_score=round(float(pos["entry_score"]), 2),
+                entry_score=_recorded_score(float(pos["entry_score"])),
                 entry_signal_date=pos["entry_signal_date"],
                 exit_signal_date=signal_date,
                 blocked_exit_days=int(pos["blocked_exit_days"]),
@@ -1252,10 +1387,7 @@ class BacktestEngine:
                 _count(blocked)
                 continue
             score = _matrix_entry_score(matrix, time_id, asset_id)
-            if config.score_min is not None and score < config.score_min:
-                _count("buy_score_filter")
-                continue
-            if config.score_max is not None and score > config.score_max:
+            if not _score_in_range(config, score):
                 _count("buy_score_filter")
                 continue
             entry_price = _refill(time_id, asset_id, "buy", float(entry_prices[time_id, asset_id]))
@@ -1758,7 +1890,7 @@ class BacktestEngine:
                 entry_value=round(float(pos["entry_value"]), 2),
                 exit_value=round(float(exit_value), 2),
                 pnl_amount=round(float(pnl_amount), 2),
-                entry_score=round(float(pos["entry_score"]), 2),
+                entry_score=_recorded_score(float(pos["entry_score"])),
                 entry_signal_date=pos["entry_signal_date"],
                 exit_signal_date=signal_date,
                 blocked_exit_days=int(pos["blocked_exit_days"]),
@@ -1912,14 +2044,19 @@ class BacktestEngine:
                         _count(blocked)
                         continue
                     score = _matrix_entry_score(matrix, time_id, asset)
-                    if config.score_min is not None and score < config.score_min:
-                        _count("buy_score_filter")
-                        continue
-                    if config.score_max is not None and score > config.score_max:
+                    if not _score_in_range(config, score):
                         _count("buy_score_filter")
                         continue
                     candidates.append((asset, score))
-                candidates.sort(key=lambda item: item[1], reverse=True)
+                candidates.sort(
+                    key=lambda item: (
+                        not math.isfinite(item[1]),
+                        (-item[1] if config.score_higher_first else item[1])
+                        if math.isfinite(item[1])
+                        else 0.0,
+                        matrix.symbols[item[0]],
+                    )
+                )
                 slots = max_positions - len(positions)
                 if slots <= 0:
                     execution_stats["buy_no_slot"] += len(candidates)
@@ -1934,7 +2071,9 @@ class BacktestEngine:
                     else:
                         weights = np.repeat(1 / len(selected), len(selected))
                         if config.position_sizing == "score_weight":
-                            raw_weights = np.array([max(item[1], 0.0) for item in selected])
+                            raw_weights = _score_weights(
+                                [item[1] for item in selected], config.score_higher_first
+                            )
                             if raw_weights.sum() > 0:
                                 weights = raw_weights / raw_weights.sum()
                         total_budget = min(cash, exposure_capacity, target_value * len(selected))

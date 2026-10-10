@@ -23,7 +23,7 @@
 - 增/删/改参数 → 更新 META["params"]，同步修改当前执行后端对应的 `filter()`、`filter_history()` 或 `MATRIX_STRATEGY`
 - 调整信号 → 更新 ENTRY_SIGNALS / EXIT_SIGNALS
 - 修改止损/持有 → 更新 STOP_LOSS / MAX_HOLD_DAYS
-- 调整评分 → 更新 META["scoring"]；只使用真实数值字段或受控虚拟字段 `ma20_bias`，权重总和保持 1.0
+- 调整评分 → 更新 META["scoring"]；只使用真实数值字段或受控虚拟字段 `ma20_bias`，权重总和保持 1.0；某字段要低值优先时写 META["scoring_directions"] = {"字段": "low"}，不要改 `descending`
 - 修改筛选逻辑 → 更新唯一公式；新增历史回溯时切换为 `python_history_legacy` + `filter_history()`，移除回溯时切回 `polars_expr` + `filter()`，不得同时保留两套公式
 
 ## 规则

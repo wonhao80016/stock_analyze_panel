@@ -104,6 +104,47 @@ git pull
 >
 > 若 `git pull` 報衝突,通常是本地誤改了被跟蹤的文件,請先 `git stash` 暫存再 pull,或單獨聯繫作者,不要直接執行上面的命令。
 
+### 2026-10 策略與選股更新（第 4 階段）的升級須知
+
+這次更新改了指標定義與多支策略的規則。已部署的環境升級前，請先讀完本節。
+
+**升級前先備份**（先停掉後端，或確定備份完成前不會觸發台股資料更新）：
+
+- `data/kline_daily_enriched/`（全部分區）
+- `data/.taiwan_enriched_factors.json`、`data/.matrix_generation_stock.json`
+- `data/user_data/strategy_cache.json`、`data/user_data/strategy_picks/`
+- `data/taiwan/share_capital.parquet`
+
+`data/.backtest_matrix_cache/` 可以重建，不必備份。
+
+**升級後第一次資料更新會全量重寫 enriched**：發佈紀錄裡沒有新的指標定義版本（`INDICATOR_DEFINITION_VERSION` = 2），所以升級後第一次台股資料更新（盤後排程 16:30／21:40、設定頁「更新到最新」或匯入歷史資料包）會重寫全部 enriched 分區一次，已發佈的換手率會保留。2026-10-10 在 670 個分區的資料複本上實測約 73 秒。
+
+- 重寫完成前，矩陣即時計算的指標（新慣例）與已發佈的指標（舊慣例）不一致。
+- 完成後確認 `data/.taiwan_enriched_factors.json` 有 `"indicator_version": 2`，並等策略快取重算（盤後排程更新完會自動重算）。
+
+**行為變更（其他安裝請特別注意）**：
+
+- 評分缺值：有評分設定的策略，缺評分資料的候選分數為空、排在最後，標「觀察・資料不足」；0 分是正常分數。`/api/screener/cached` 的 `grade_reason` 由 `zero_score` 改為 `score_unavailable`，每列另有 `limit_up_locked`。
+- 疊加策略：子策略的 META 寫了 `descending=False` 時，這個疊加策略不再載入。錯誤列在策略重新載入回應的 `load_errors`，其他策略照常載入；保存的子策略設定裡含這種策略時，執行會報錯。請先移除子策略 META 裡的 `descending=False`（載入檢查只看 META，改設定無法解除），再用 META 或設定裡的 `scoring_directions` 指定低值優先的欄位。
+- 已保存的策略設定，`scoring` 若還有 `turnover_rate`（`bullish_alignment`、`low_volatility_leader`、`pullback_to_support` 在本次更新前的預設評分），會與新的預設評分合併：沒有換手率的日子分數都是空值，回測也會因覆蓋率不足被拒絕。請在策略設定裡移除這個評分欄位。
+- `pullback_resume`、`swing_trend_confirmation` 的流動性門檻改為成交額 ≥ 1 億元，取代 200 萬股；已保存的 `min_volume` 仍會疊加套用，比新預設更嚴。
+- `high_turnover_surge` 的預設門檻由 5% 改為 2%，已保存的 `min_turnover` 保留原值。換手率分母改為已發行普通股扣除私募股；沒有換手率資料的日期與回測區間會被拒絕。
+- `market_cap_*`、`float_cap_*` 上下限：台股資料沒有股本欄位，這類上下限在選股與回測中都會被忽略。
+- 新股排除 `exclude_new_days` 開始生效，以交易日計，預設 30。
+- 訊號 ID 改名：進場訊號有 `bullish_alignment`、`low_volatility_leader`、`n_day_low_reversal`、`pullback_ma20_bounce`、`pullback_to_support`；出場訊號有 `bottom_reversal`（改為 `signal_ma20_breakdown` 與 `signal_close_20d_low`）與 `swing_trend_confirmation`（新增 `signal_swing_structure_exit`）。監控規則命中的訊號名稱跟著變，買進訊號的去重狀態可能讓同一檔再提醒一次。
+- 已記錄的選股快照不回改。請記下升級後第一次重算策略的日期作為策略邏輯變更日，變更日前後的事後統計不可直接合併。
+
+**已知限制**：
+
+- 換手率：一天的換手率固定在它最後一次以最新交易日身分發佈時的值，事後修正成交量不會更新；其他情況見 [`taiwan-share-capital-phase-6h.md`](taiwan-share-capital-phase-6h.md) 的「已知限制」。
+- 只有儲存欄、沒有發佈指標的 enriched 列（例如強制寫入的即時列）若是某檔在載入區間的第一列，回測補算的漲跌停旗標會是 False，因為缺前一日收盤。只在發生過強制即時寫入時出現。
+- 有這類只有儲存欄的列時，回測與快取重建要為受影響的股票重算漲跌停旗標：實測 140 萬列多約 4.5 秒，Polars 回測從約 6 秒變成約 13 秒。
+- 加權指數的長區間 K 線（例如 1 年）會在請求中同步回補本機缺少的較早月份，每個月份 20 秒逾時，失敗的月份 600 秒後才重試；網路不通時，最壞約每 10 分鐘卡住約 80 秒。
+- `exclude_st`：台股選股時沒有名稱欄位，這個條件不生效；Polars 回測則用證券主檔的名稱比對，兩邊可能不一致（目前沒有台股名稱會命中）。
+- 手動放進策略目錄、檔名與 Python 模組同名的策略檔（例如 `json.py`），會在整個後端行程中取代該模組；透過界面保存的策略不會。
+- 自訂歷史窗口策略（`filter_history`）在回測時收到整段資料，只能用按股票的時序運算，寫法見 `backend/app/strategy/prompts/strategy-guide.md`。
+- 因子挖掘的工作管理器先寫入完成狀態、再寫入最後一筆事件，讀取端可能短暫看到「已完成」但事件還沒到齊。這是本次更新之前就有的問題，相關測試偶爾失敗。
+
 ---
 
 ## 訪問密碼設置(公網部署必讀)

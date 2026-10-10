@@ -39,19 +39,18 @@ def test_duplicate_strategy_id_reports_both_paths(tmp_path):
     assert all("duplicate strategy id" in item["error"] for item in errors)
 
 
-def test_failed_reload_keeps_previous_registry(tmp_path):
+def test_reload_drops_a_file_that_no_longer_loads_and_keeps_the_others(tmp_path):
     path = tmp_path / "stable.py"
     path.write_text(_strategy_code("stable"), encoding="utf-8")
+    (tmp_path / "other.py").write_text(_strategy_code("other"), encoding="utf-8")
     engine = StrategyEngine(strategy_dirs=[tmp_path])
-    previous = engine.get("stable")
 
     path.write_text("this is not valid python", encoding="utf-8")
+    engine.reload()
 
-    with pytest.raises(ValueError, match="strategy reload failed"):
-        engine.reload()
-
-    assert engine.get("stable") is previous
-    assert engine.load_errors()
+    assert not engine.has("stable")
+    assert engine.has("other")
+    assert [item["file"] for item in engine.load_errors()] == [str(path)]
 
 
 def test_context_rejects_unsupported_timeframe(tmp_path):

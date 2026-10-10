@@ -1,7 +1,8 @@
 """策略评分字段解析。"""
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+import math
+from collections.abc import Collection, Iterable, Mapping
 from typing import Any
 
 import polars as pl
@@ -49,6 +50,11 @@ VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = {
     "limit_up_count_60d": frozenset({"consecutive_limit_ups"}),
 }
 
+# Boolean column, true on a live row whose amount is close * board-lot volume, not the traded value.
+AMOUNT_ESTIMATED = "amount_estimated"
+# A VWAP or a ratio to full-session amounts is not computable from that partial estimate.
+TRADED_AMOUNT_FIELDS = frozenset({"vwap_bias", "amount_ratio_5d", "amihud_20d"})
+
 _ROLLING_SCORING_WARMUP: dict[str, int] = {
     "vol_ratio_10d": 11,
     "turnover_ratio_5d": 6,
@@ -63,6 +69,58 @@ _ROLLING_SCORING_WARMUP: dict[str, int] = {
     "limit_up_count_20d": 21,
     "limit_up_count_60d": 61,
 }
+
+# A recursive feature is independent of where its history starts once its seed weighs less than this.
+_SEED_WEIGHT_LIMIT = 1e-4
+# Calendar days loaded per warm-up session; the Taiwan calendar averages about 1.5 with its holidays.
+CALENDAR_DAYS_PER_SESSION = 1.6
+
+
+def _ewm_seed_bars(alpha: float) -> int:
+    """Bars after the seed until an adjust=False EWM with ``alpha`` weighs the seed below the limit."""
+    return math.ceil(math.log(_SEED_WEIGHT_LIMIT) / math.log(1.0 - alpha))
+
+
+_MACD_DIF_BARS = 26 + _ewm_seed_bars(2.0 / 27.0)
+_MACD_DEA_BARS = _MACD_DIF_BARS + _ewm_seed_bars(2.0 / 10.0)
+_KDJ_K_BARS = 9 + _ewm_seed_bars(1.0 / 3.0)
+_KDJ_D_BARS = _KDJ_K_BARS + _ewm_seed_bars(1.0 / 3.0)
+
+
+def recursive_warmup_bars(name: str) -> int:
+    """Bars, the current one included, before a recursive feature stops depending on where its data starts.
+
+    Covers EMA, MACD, RSI, ATR and KDJ values and the scoring fields derived from them; 1 for others.
+    The seed is the first value of the definitions in app.indicators.pipeline, e.g. bar n of an EMA n.
+    """
+    name = str(name)
+    if name.startswith("ema"):
+        period = name[3:].removesuffix("_bias")
+        if period.isdigit() and int(period) > 0:
+            return int(period) + _ewm_seed_bars(2.0 / (int(period) + 1.0))
+    if name.startswith("rsi_") and name[4:].isdigit() and int(name[4:]) > 1:
+        return int(name[4:]) + 1 + _ewm_seed_bars(1.0 / int(name[4:]))
+    if name in {"atr_14", "atr_pct"}:
+        return 15 + _ewm_seed_bars(1.0 / 14.0)
+    if name in {"macd_dif", "macd_dif_pct"}:
+        return _MACD_DIF_BARS
+    if name in {"macd_dea", "macd_dea_pct", "macd_hist", "macd_hist_pct"}:
+        return _MACD_DEA_BARS
+    if name == "kdj_k":
+        return _KDJ_K_BARS
+    if name in {"kdj_d", "kdj_j"}:
+        return _KDJ_D_BARS
+    return 1
+
+
+def indicators_warmup_bars(names: Iterable[str]) -> int:
+    """The largest recursive_warmup_bars of the indicators in *names*."""
+    return max((recursive_warmup_bars(name) for name in names), default=1)
+
+
+def scoring_field_warmup_bars(name: str) -> int:
+    """Bars, the scored one included, a scoring field needs from the loaded history."""
+    return max(_ROLLING_SCORING_WARMUP.get(str(name), 1), recursive_warmup_bars(name))
 
 
 def effective_scoring(
@@ -79,20 +137,47 @@ def effective_scoring(
     return scoring
 
 
-def effective_scoring_directions(overrides: Mapping[str, Any] | None) -> dict[str, str]:
-    values = (overrides or {}).get("scoring_directions")
-    if not isinstance(values, Mapping):
-        return {}
-    return {
+def meta_scoring_directions(value: Any) -> dict[str, str]:
+    """Validated META["scoring_directions"]; raises on anything but a field-to-high/low mapping."""
+    if not isinstance(value, Mapping):
+        raise ValueError("META['scoring_directions'] must map scoring fields to 'high' or 'low'")
+    invalid = sorted(
+        str(name) for name, direction in value.items() if direction not in SCORING_DIRECTIONS
+    )
+    if invalid:
+        raise ValueError(
+            f"META['scoring_directions'] has invalid directions for {invalid}; expected 'high' or 'low'"
+        )
+    return {str(name): str(direction) for name, direction in value.items()}
+
+
+def effective_scoring_directions(
+    overrides: Mapping[str, Any] | None,
+    *,
+    defaults: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Direction per scoring field: the strategy's META defaults, replaced field by field by the user's.
+
+    A field named in neither ranks high values first.
+    """
+    directions = {
         str(name): str(direction)
-        for name, direction in values.items()
+        for name, direction in (defaults or {}).items()
         if direction in SCORING_DIRECTIONS
     }
+    values = (overrides or {}).get("scoring_directions")
+    if isinstance(values, Mapping):
+        directions.update(
+            (str(name), str(direction))
+            for name, direction in values.items()
+            if direction in SCORING_DIRECTIONS
+        )
+    return directions
 
 
 def scoring_warmup_bars(scoring: Mapping[str, Any]) -> int:
     return max(
-        (_ROLLING_SCORING_WARMUP.get(str(name), 1) for name, weight in scoring.items() if weight),
+        (scoring_field_warmup_bars(name) for name, weight in scoring.items() if weight),
         default=1,
     )
 
@@ -115,6 +200,9 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
     dependencies = VIRTUAL_SCORING_DEPENDENCIES.get(name)
     if dependencies is None or not dependencies.issubset(available):
         return None
+    if name in TRADED_AMOUNT_FIELDS and AMOUNT_ESTIMATED in available:
+        value = scoring_value_expr(available - {AMOUNT_ESTIMATED}, name)
+        return pl.when(pl.col(AMOUNT_ESTIMATED).fill_null(False)).then(None).otherwise(value)
     if name.startswith("ma") and name.endswith("_bias"):
         period = name.removeprefix("ma").removesuffix("_bias")
         if period.isdigit():

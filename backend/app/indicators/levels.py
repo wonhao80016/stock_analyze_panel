@@ -60,31 +60,35 @@ LEVEL_TYPES = {
 # ================================================================
 
 def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
-    """筹码分布(换手率衰减模型) —— 国内主流 A 股支撑/压力位算法。
+    """Chip distribution (turnover-decay model), the mainstream A-share support/resistance method.
 
-    算法依据:大智慧/同花顺/通达信"筹码分布"专利模型(CN109711994A),物理含义是
-    "当前各价位还剩多少筹码(持仓成本分布)",而非海外 Volume Profile 的"历史成交
-    堆积"。两者关键区别在于衰减方式:
-      - 海外 VP: 无衰减, 历史成交永远累加(反映"曾经在哪换过手")
-      - 国内筹码分布: 按换手率衰减, 反映"现在谁还拿着"(物理正确的持仓成本)
+    Based on the "chip distribution" patent model of Dazhihui / Tonghuashun / Tongdaxin
+    (CN109711994A), it estimates how many shares are still held at each price (the holding-cost
+    distribution), unlike an overseas Volume Profile, which piles up historical volume. The two
+    differ in decay:
+      - Volume Profile: no decay; volume accumulates forever (where shares once changed hands)
+      - Chip distribution: decays by turnover (who still holds now, the true holding cost)
 
-    核心迭代公式(逐日, 从老到新):
-        当日收盘后各价位筹码 = 前一日各价位筹码 × (1 - 当日换手率)
-                            + 当日新增成交(按 high~low 区间分摊到对应价位桶)
+    Daily recurrence, oldest to newest:
+        chips at each price after today's close = yesterday's chips at that price * (1 - turnover)
+                                                  + today's volume spread over its high~low buckets
 
-    物理解释: 今天市场换了 turnover_rate 比例的手, 意味着昨天所有价位的筹码中有
-    这么比例被换走了(被卖掉), 同时今天新成交的筹码按当天价格区间分布在各价位。
-    这样:
-      - 低换手股票的老筹码衰减慢(长期横盘低换手 → 历史套牢盘长期保留, 符合真实)
-      - 高换手股票的老筹码快速消失(近期高换手 → 老筹码被消化, 近期成本占主导)
-    比固定时间衰减更聪明: 停牌期间换手率为 0, 筹码不动; 固定时间衰减会错误地衰减。
+    A turnover_rate of x% today means x% of yesterday's chips at every price was sold,
+    while today's new chips spread over today's price range. Hence:
+      - low-turnover stocks shed old chips slowly (a long quiet range keeps its trapped holders)
+      - high-turnover stocks shed old chips quickly (recent costs dominate)
+    Unlike a fixed time decay, a suspended stock has zero turnover and keeps its chips, which a
+    time decay would wrongly erode.
 
-    成交量按 high~low 价格区间分摊到桶(而非全归 (high+low)/2 中点), 振幅大的 K 线
-    不再污染中点价, 更接近真实成交分布。
+    Volume is spread over each bar's high~low buckets rather than placed at the (high+low)/2
+    midpoint, so a wide-range bar does not distort the midpoint price.
 
-    密集区输出:
-      - POC(控制点):当前筹码量最大的桶(=最多人持仓的成本区), strong
-      - 其他高筹码区:高于均值, medium, 最多 2 个
+    Dense-zone output:
+      - POC (point of control): the bucket holding the most chips (the most common cost), strong
+      - other high-chip zones: above the mean, medium, at most 2
+
+    Without a finite turnover on every bar no decay is applied, and the levels are labelled as an
+    undecayed volume profile over the whole window instead of a chip distribution.
     """
     if df.is_empty() or "volume" not in df.columns or df.height < 20:
         return []
@@ -100,9 +104,13 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
     step = (hi - lo) / bins
     edges = [lo + i * step for i in range(bins + 1)]
 
-    # 取换手率序列(百分数, 如 1.23 表示 1.23%)。无该字段则退化为纯累加(无衰减)。
-    has_turnover = "turnover_rate" in df.columns
-    turnovers = df["turnover_rate"].to_list() if has_turnover else [0.0] * n
+    # turnover_rate is a percentage: 1.23 means 1.23%.
+    turnovers: list[float | None] = (
+        df["turnover_rate"].cast(pl.Float64, strict=False).fill_nan(None).to_list()
+        if "turnover_rate" in df.columns
+        else [None] * n
+    )
+    chip_model = all(t is not None for t in turnovers)
 
     highs = df["high"].to_list()
     lows = df["low"].to_list()
@@ -112,9 +120,8 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
     # 顺序: 从老(i=0)到新(i=n-1)。每日先把存量按 (1 - turnover) 衰减, 再叠加当日新增。
     chips = [0.0] * bins
     for i in range(n):
-        t = float(turnovers[i] or 0)
         # 换手率正常 0~100, 异常值(负/超大)钳制到 [0, 1] 区间比例
-        decay_ratio = 1.0 - max(0.0, min(t, 100.0)) / 100.0
+        decay_ratio = 1.0 - max(0.0, min(turnovers[i], 100.0)) / 100.0 if chip_model else 1.0
 
         # 1) 存量筹码按今日换手率衰减(被卖掉的部分移除)
         if decay_ratio < 1.0:
@@ -147,12 +154,16 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
         return (edges[bin_id] + edges[bin_id + 1]) / 2
 
     close = float(df.tail(1)["close"][0])
+    if chip_model:
+        poc_label, zone_label = "成交密集区(POC)", "成交密集区"
+    else:
+        poc_label, zone_label = "量能POC", "量能密集區"
 
     out: list[dict] = []
     # POC: 当前筹码量最大的桶(最多人持仓的成本区)
     poc_pos = max(range(len(vals)), key=lambda i: vals[i])
     poc_mid = bin_mid(bin_ids[poc_pos])
-    out.append({"value": round(poc_mid, 2), "label": "成交密集区(POC)",
+    out.append({"value": round(poc_mid, 2), "label": poc_label,
                 "type": "sr", "side": _side(poc_mid, close), "strength": "strong"})
 
     # 其他高筹码区(高于均值, 排除 POC), 按筹码量降序取 2 个
@@ -160,7 +171,7 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
     candidates.sort(key=lambda x: x[1], reverse=True)
     for i, _v in candidates[:2]:
         mid = bin_mid(bin_ids[i])
-        out.append({"value": round(mid, 2), "label": "成交密集区",
+        out.append({"value": round(mid, 2), "label": zone_label,
                     "type": "sr", "side": _side(mid, close), "strength": "medium"})
     return out
 

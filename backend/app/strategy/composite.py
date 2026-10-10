@@ -1,23 +1,25 @@
-"""叠加策略合并器 — 选股与回测共用的纯函数。
+"""Composite strategy merger: pure functions shared by selection and backtest.
 
-为什么单独成模块: 选股(StrategyEngine._run_composite_strategy)和回测
-(StrategyBacktestService)都要合并子策略结果, 必须共享同一套口径, 否则会出现
-"选股与回测使用不同逻辑"的金融错误(CONTRIBUTING §5.1)。
+Selection (StrategyEngine._run_composite_strategy) and backtest (StrategyBacktestService) both
+merge child results and must share one definition; otherwise selection and backtest would follow
+different logic, a financial error (CONTRIBUTING §5.1).
 
-两种合并入口:
-- merge_results: 选股合并。输入各子 StrategyResult, 输出合并后的 StrategyResult。
-- merge_signal_matrices: 回测合并。输入各子 SignalMatrix, 输出合并后的 SignalMatrix。
+Two merge entry points:
+- merge_results: selection. Merges the children's StrategyResult into one StrategyResult.
+- merge_signal_matrices: backtest. Merges the children's SignalMatrix into one SignalMatrix.
 
-合并语义(首版):
+Merge semantics:
 - entry: union=OR(entries); intersect=Σ(entries) >= min_confirm
-- score: 各子内部按 score 降序排名归一到 [0,1], 命中子策略间按权重加权。
-         排名是相对位置, 跨子策略天然可比, 不依赖各子 per-strategy 的 min-max 量纲。
-- exit(回测): 来源投影。每个子策略 i 的 exit 仅在它自己 entry 后的持仓窗口内生效,
-              避免"B 的退出信号平掉 A 的仓位"。窗口由全局 max_hold 封顶。
+- score: both paths use rank_normalize per child (average rank for ties, 0.5 for a single
+         candidate, missing scores unranked), weighted and divided by the weight of all children.
+         A candidate no child could score keeps a missing score and ranks last.
+- exit (backtest): source projection. Child i's exit applies only within the holding window
+                   after its own entry, so B's exit never closes A's position; the global
+                   max_hold caps the window.
 
-退出投影的金融正确性: 现有撮合引擎(engine.py:993)读全局 matrix.exit, 不区分来源。
-若直接 OR(exit) 会产生"幽灵平仓"(B 把 A 选的仓位卖掉)。来源投影在合并器(撮合前)
-解决, 撮合层零改动。
+The matching engine reads the global matrix.exit without regard to source, so a plain OR(exit)
+would cause phantom exits (B selling a position A picked). Projecting sources in the merger,
+before matching, keeps the matching engine source-agnostic.
 """
 from __future__ import annotations
 
@@ -29,18 +31,69 @@ import numpy as np
 if TYPE_CHECKING:
     from app.strategy.engine import StrategyResult
 
-# 中性分: 子策略无 score 或单候选(无法排名)时的占位, 不污染融合结果。
 _NEUTRAL_NORM = 0.5
 
 
-def _effective_weights(
-    children_weights: list[float],
-    hits_mask: list[bool],
-) -> tuple[list[float], float]:
-    """从权重列表中筛出命中子策略的权重, 返回(命中权重列表, 命中权重总和)。"""
-    effective = [w for w, hit in zip(children_weights, hits_mask, strict=True) if hit]
-    total = sum(effective)
-    return effective, total
+def rank_normalize(values: np.ndarray) -> np.ndarray:
+    """Average-rank position of each finite value in [0, 1], highest = 1.
+
+    A single finite value maps to 0.5; non-finite values stay NaN (unranked).
+    """
+    values = np.asarray(values, dtype=np.float64)
+    normalized = np.full(values.shape, np.nan, dtype=np.float64)
+    finite = np.isfinite(values)
+    count = int(finite.sum())
+    if count == 0:
+        return normalized
+    if count == 1:
+        normalized[finite] = _NEUTRAL_NORM
+        return normalized
+    ranked = values[finite]
+    order = np.argsort(ranked, kind="stable")
+    ordered = ranked[order]
+    group_starts = np.flatnonzero(np.r_[True, ordered[1:] != ordered[:-1]])
+    group_ends = np.r_[group_starts[1:], count]
+    average_ranks = (group_starts + group_ends - 1) / 2.0
+    ranks = np.empty(count, dtype=np.float64)
+    ranks[order] = np.repeat(average_ranks, group_ends - group_starts)
+    normalized[finite] = ranks / (count - 1)
+    return normalized
+
+
+def _blend_weights(children_weights: list[float]) -> tuple[np.ndarray, float]:
+    """Child weights and the denominator of every merged score: the weight of all children.
+
+    A child that did not pick or could not score a symbol therefore counts as 0 for it.
+    """
+    weights = np.asarray(children_weights, dtype=np.float64)
+    total = float(weights.sum())
+    if total <= 0:
+        weights = np.ones_like(weights)
+        total = float(len(weights))
+    return weights, total
+
+
+def _effective_min_confirm(min_confirm: int, n_children: int) -> int:
+    return max(min_confirm, 1) if min_confirm and min_confirm > 0 else n_children
+
+
+def _child_rank_norms(result: StrategyResult) -> tuple[set[str], dict[str, float]]:
+    """A child's candidates and the rank position of each candidate it could score."""
+    row_symbols = {str(row["symbol"]) for row in result.rows if row.get("symbol")}
+    if result.scores:
+        candidates = sorted(set(result.scores) | row_symbols)
+        values = [result.scores.get(symbol) for symbol in candidates]
+    else:
+        # A child without scoring ranks all of its candidates equally.
+        candidates = sorted(row_symbols)
+        values = [0.0] * len(candidates)
+    raw = np.array([np.nan if value is None else value for value in values], dtype=np.float64)
+    norms = rank_normalize(raw)
+    return set(candidates), {
+        symbol: float(norm)
+        for symbol, norm in zip(candidates, norms, strict=True)
+        if np.isfinite(norm)
+    }
 
 
 def merge_results(
@@ -68,55 +121,26 @@ def merge_results(
     if n_children == 0:
         return StrategyResult(as_of=as_of, strategy_id=strategy_id, elapsed_ms=elapsed_ms)
 
-    # 各子的 symbol → 排名归一 score。排名基于子策略内部的原始 score 降序。
-    # norm∈[0,1], 最优标的=1。单候选或无 score 时用中性分。
-    per_child_norm: list[dict[str, float]] = []
-    per_child_symbols: list[set[str]] = []
+    child_candidates: list[set[str]] = []
+    child_norms: list[dict[str, float]] = []
     for res in results:
-        symbols = set(res.scores.keys())
-        per_child_symbols.append(symbols)
-        norm: dict[str, float] = {}
-        if symbols:
-            ordered = sorted(symbols, key=lambda s: res.scores[s], reverse=True)
-            count = len(ordered)
-            for rank, sym in enumerate(ordered, start=1):
-                norm[sym] = 1 - (rank - 1) / max(count - 1, 1)
-        else:
-            # 子策略未产出 score: 命中即中性分, 不奖励也不惩罚。
-            for row in res.rows:
-                sym = str(row.get("symbol"))
-                if sym and sym not in norm:
-                    norm[sym] = _NEUTRAL_NORM
-        per_child_norm.append(norm)
+        candidates, norms = _child_rank_norms(res)
+        child_candidates.append(candidates)
+        child_norms.append(norms)
 
-    # 确定入围标的集合 + 各标的的命中子策略索引。
-    universe: set[str] = set()
-    for syms in per_child_symbols:
-        universe.update(syms)
-    # 也纳入 rows 里有但 scores 里没有的标的(子策略无 score 但产出行)。
-    for res in results:
-        for row in res.rows:
-            sym = str(row.get("symbol"))
-            if sym:
-                universe.add(sym)
-
-    effective_min = max(min_confirm, 1) if min_confirm and min_confirm > 0 else n_children
-    scores: dict[str, float] = {}
-    for sym in universe:
-        hits = [i for i in range(n_children) if sym in per_child_norm[i]]
-        if not hits:
-            continue
+    weights, total_weight = _blend_weights(children_weights)
+    effective_min = _effective_min_confirm(min_confirm, n_children)
+    scores: dict[str, float | None] = {}
+    for sym in sorted(set().union(*child_candidates)):
+        hits = [i for i in range(n_children) if sym in child_candidates[i]]
         if merge_mode == "intersect" and len(hits) < effective_min:
             continue
-        weights, total_w = _effective_weights(
-            children_weights, [i in hits for i in range(n_children)]
-        )
-        if total_w <= 0:
-            # 全部权重为 0: 退化为均等。
-            total_w = float(len(hits))
-            weights = [1.0] * len(hits)
-        blended = sum(w * per_child_norm[i][sym] for i, w in zip(hits, weights, strict=True))
-        scores[sym] = round(blended / total_w * 100, 4)
+        scored = [i for i in hits if sym in child_norms[i]]
+        if not scored:
+            scores[sym] = None
+            continue
+        blended = sum(float(weights[i]) * child_norms[i][sym] for i in scored)
+        scores[sym] = round(blended / total_weight * 100, 4)
 
     total = len(scores)
     return StrategyResult(
@@ -184,7 +208,7 @@ def merge_signal_matrices(
     entries = [np.asarray(s.entry, dtype=bool) for s in sigs]
     entry_stack = np.stack(entries, axis=0)  # (n_children, n_times, n_assets)
     if merge_mode == "intersect":
-        effective_min = max(min_confirm, 1) if min_confirm and min_confirm > 0 else n_children
+        effective_min = _effective_min_confirm(min_confirm, n_children)
         confirm_count = entry_stack.sum(axis=0)  # (n_times, n_assets)
         merged_entry = confirm_count >= effective_min
     else:  # union
@@ -198,44 +222,23 @@ def merge_signal_matrices(
         child_exit = np.asarray(s.exit, dtype=bool)
         merged_exit |= child_exit & hold_masks[i]
 
-    # ── score 标准化排名加权 ──
-    # 对每个 (time, asset), 在命中的子策略间按权重加权各自的内部排名归一值。
-    weights = np.array([w for _, w in children], dtype=np.float64)
-    # 预计算每个子策略、每个 time 上 asset 的排名归一。
-    norm_scores = np.zeros((n_children, n_times, n_assets), dtype=np.float64)
+    # ── score: same rank normalisation and weighting as merge_results ──
+    weights, total_weight = _blend_weights([w for _, w in children])
+    norm_scores = np.full((n_children, n_times, n_assets), np.nan, dtype=np.float64)
     for i, s in enumerate(sigs):
         raw = np.asarray(s.score, dtype=np.float64)
         for t in range(n_times):
-            row = raw[t]
-            hit = entries[i][t]
-            if not hit.any():
-                continue
-            hit_idx = np.flatnonzero(hit)
-            hit_vals = row[hit_idx]
-            finite = np.isfinite(hit_vals)
-            if not finite.any():
-                norm_scores[i, t, hit_idx[finite]] = _NEUTRAL_NORM
-                continue
-            valid_idx = hit_idx[finite]
-            valid_vals = hit_vals[finite]
-            n = len(valid_idx)
-            if n <= 1:
-                norm_scores[i, t, valid_idx] = _NEUTRAL_NORM
-                continue
-            # 降序排名: 最优=1, 最差=0。
-            order = np.argsort(-valid_vals, kind="stable")
-            ranks = np.empty(n, dtype=np.float64)
-            ranks[order] = np.arange(1, n + 1, dtype=np.float64)
-            normalized = 1 - (ranks - 1) / (n - 1)
-            norm_scores[i, t, valid_idx] = normalized
+            hit_idx = np.flatnonzero(entries[i][t])
+            if hit_idx.size:
+                norm_scores[i, t, hit_idx] = rank_normalize(raw[t, hit_idx])
 
-    hit_mask = entry_stack  # (n_children, n_times, n_assets)
-    hit_weights = np.where(hit_mask, weights.reshape(-1, 1, 1), 0.0)
-    weight_sum = hit_weights.sum(axis=0)  # (n_times, n_assets)
-    blended = (norm_scores * hit_weights).sum(axis=0)
-    safe_sum = np.where(weight_sum > 0, weight_sum, 1.0)
-    merged_score = np.where(merged_entry, blended / safe_sum, 0.0) * 100
-    merged_score = np.nan_to_num(merged_score, nan=0.0, posinf=0.0, neginf=0.0)
+    ranked = np.isfinite(norm_scores)
+    blended = (np.where(ranked, norm_scores, 0.0) * weights.reshape(-1, 1, 1)).sum(axis=0)
+    merged_score = np.where(
+        merged_entry,
+        np.where(ranked.any(axis=0), blended / total_weight * 100, np.nan),
+        0.0,
+    )
 
     # ── entry_signal_code: 来源标记 ──
     # code = 命中的第一个子策略索引; -1 表示无命中。归因用。

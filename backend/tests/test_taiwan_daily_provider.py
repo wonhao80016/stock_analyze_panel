@@ -384,8 +384,9 @@ class TestParquetStorageAndIndicatorPipeline:
             assert last["ma10"] is not None
             assert last["rsi_6"] is not None
             assert last["macd_dif"] is not None
-            assert last["macd_dea"] is not None
-            assert last["macd_hist"] is not None
+            # DEA averages the first nine DIF values, so 30 bars are not enough for it.
+            assert last["macd_dea"] is None
+            assert last["macd_hist"] is None
 
 
 # ── Hybrid Provider Interface Contract ─────────────────────────

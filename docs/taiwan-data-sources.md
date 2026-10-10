@@ -423,6 +423,8 @@ Taiwan: volume(shares) / float_shares(shares) * 100
 CN:     volume(lots) * 100 / float_shares(shares) * 100
 ```
 
+台股的 `float_shares` 只是換手率分母的欄位名稱：由 `TaiwanShareCapitalStore.as_instruments()` 提供，值是已發行普通股扣除私募股（2026-10-10 第 4 階段起），不是自由流通股；ETF、TDR 沒有分母，換手率為空值。
+
 Relative-volume indicators are unit-invariant. VWAP first converts volume to
 shares; matrix cache metadata preserves the resolved unit across build, load,
 slice, copy, and live append paths. Mixed Taiwan/CN matrices fail closed because
@@ -573,6 +575,8 @@ revision chain suitable for historical ingest. Taiwan historical turnover now
 fails closed when no verified PIT float denominator exists. The source matrix and
 live samples are recorded in
 [`taiwan-share-capital-phase-6h.md`](taiwan-share-capital-phase-6h.md).
+
+第 4 階段（2026-10-10）起，每個交易日在自己的盤後發佈時算出的換手率會保留，之後的重新發佈沿用已發佈的值；重算更早的日子仍然 fail-closed，不用目前股本回推。細節見上述文件的「第 4 階段」小節。
 
 ## Official fundamentals availability investigation (Phase 6C.1)
 

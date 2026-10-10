@@ -387,6 +387,8 @@ class WalkForwardService:
                 progress_cb({"type": "walkforward_progress", "done": done, "total": n_total, "fold": f.index})
 
         summary = aggregate_oos(valid_records, cfg.objective, direction)
+        skip_reasons = {str(item.get("reason")) for item in skipped}
+        error = skip_reasons.pop() if not valid_records and len(skip_reasons) == 1 else None
 
         shared_matrix_bytes = (
             shared_prepared.market_data.nbytes if shared_prepared is not None else 0
@@ -422,6 +424,7 @@ class WalkForwardService:
             "n_folds": len(valid_records),
             "n_skipped": len(skipped),
             "n_planned_folds": n_total,
+            "error": error,
             "folds": valid_records,
             "skipped": skipped,
             "summary": summary,

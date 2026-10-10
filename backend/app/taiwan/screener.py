@@ -45,8 +45,7 @@ InstrumentFilter = Literal["stock", "etf", "ALL"]
 SortField = Literal[
     "symbol", "close", "change_pct", "volume", "amount",
     "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d",
-    "foreign_net", "foreign_net_5d", "investment_trust_net",
-    "investment_trust_net_5d", "dealer_net",
+    "foreign_net", "investment_trust_net", "dealer_net",
     "margin_balance_change", "short_balance", "short_margin_ratio",
 ]
 SortDir = Literal["asc", "desc"]
@@ -604,7 +603,7 @@ class TaiwanScreenerService:
         return df
 
     def _apply_sort(self, df: pl.DataFrame, sort_by: str, sort_order: str) -> pl.DataFrame:
-        """Sort with deterministic symbol ASC tie-breaker."""
+        """Sort with deterministic symbol ASC tie-breaker; null and NaN values go last either way."""
         descending = sort_order == "desc"
         if sort_by not in df.columns:
             sort_by = "symbol"
@@ -612,7 +611,10 @@ class TaiwanScreenerService:
 
         if sort_by == "symbol":
             return df.sort("symbol", descending=descending)
-        return df.sort([sort_by, "symbol"], descending=[descending, False])
+        key = pl.col(sort_by)
+        if df.schema[sort_by].is_float():
+            key = key.fill_nan(None)
+        return df.sort([key, pl.col("symbol")], descending=[descending, False], nulls_last=True)
 
     @staticmethod
     def _signal_columns(df: pl.DataFrame) -> list[str]:

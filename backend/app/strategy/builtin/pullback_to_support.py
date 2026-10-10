@@ -1,4 +1,5 @@
-"""缩量回踩 — 回踩MA20附近 + 缩量 + 中期趋势向上"""
+"""Quiet pullback to support: the close holds MA20 near the average, on contracting volume,
+in an intact medium-term uptrend."""
 
 import numpy as np
 
@@ -15,7 +16,7 @@ from app.backtest.matrix import (
 META = {
     "id": "pullback_to_support",
     "name": "縮量回踩",
-    "description": "回踩MA20附近 + 縮量 + 中期趨勢向上",
+    "description": "回踩MA20附近且收盤守住MA20 + 縮量 + 中期趨勢向上",
     "tags": ["回踩", "支撐"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
@@ -53,14 +54,15 @@ META = {
             "default": True,
         },
     ],
-    "scoring": {"momentum_60d": 0.4, "momentum_20d": 0.3, "turnover_rate": 0.3},
+    "scoring": {"momentum_60d": 0.4, "momentum_20d": 0.3, "vol_ratio_5d": 0.3},
+    "scoring_directions": {"vol_ratio_5d": "low"},
     "order_by": "score",
     "descending": True,
     "limit": 500,
 }
 
 EXECUTION_BACKEND = "matrix_native"
-ENTRY_SIGNALS = ["signal_ma_golden_5_20"]
+ENTRY_SIGNALS = ["signal_pullback_to_support_entry"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 20
@@ -72,11 +74,13 @@ class PullbackToSupportMatrixStrategy:
 
     def required_warmup_bars(self, params: dict) -> int:
         del params
-        return 60
+        # Own bars read (MA60 and the scored 60-day momentum) plus 40 that absorb sessions the
+        # symbol missed inside the loaded window of shared sessions.
+        return 61 + 40
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         ma20 = matrix_feature(market, "ma20")
-        entry = np.ones(market.shape, dtype=bool)
+        entry = market.close >= ma20
         if params.get("use_ma20_proximity", True):
             proximity = float(params.get("ma_proximity", 0.02))
             entry &= (market.close > ma20 * (1.0 - proximity)) & (
@@ -97,7 +101,7 @@ class PullbackToSupportMatrixStrategy:
             exit=exit_.astype(np.uint8),
             entry_signal_code=np.where(entry, 0, -1).astype(np.int16),
             exit_signal_code=np.where(exit_, 0, -1).astype(np.int16),
-            entry_signal_ids=("signal_ma_golden_5_20",),
+            entry_signal_ids=("signal_pullback_to_support_entry",),
             exit_signal_ids=("signal_ma20_breakdown",),
         )
 

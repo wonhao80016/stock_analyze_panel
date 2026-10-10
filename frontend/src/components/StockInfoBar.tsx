@@ -145,7 +145,7 @@ export function StockInfoBar({
   const floatShares = stockInfo?.float_shares
   const marketCap = totalShares ? close * totalShares : null
   const floatMarketCap = floatShares ? close * floatShares : null
-  const turnoverRate = resolveTurnoverRate(latest, floatShares)
+  const turnoverRate = resolveTurnoverRate(latest)
 
   const displayName = stockInfo?.name ?? name ?? ''
   const extData = stockInfo?.ext ?? {}

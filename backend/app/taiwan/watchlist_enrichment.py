@@ -108,14 +108,15 @@ def _is_board_lot_quote(q: Any, official: dict | None) -> bool:
 
 
 def _taiwan_turnover_rate(
-    q: Any, asset_type: str, issued_shares: Any, today: Any, inst: Any = None,
+    q: Any, asset_type: str, denominator: Any, today: Any, inst: Any = None,
     official: dict | None = None,
 ) -> float | None:
-    """Issued-share turnover for today's quote only, on the *official* row's volume when stored.
+    """Turnover for today's quote only, on the *official* row's volume when stored.
 
+    *denominator* is the publish's turnover denominator, issued minus privately placed shares.
     Taiwan has no historical share-count source (docs/taiwan-share-capital-phase-6h.md),
     so a fallback quote from a previous session (q.trade_date != today) must stay null
-    rather than being priced with today's issued-share count. A TDR stays null too: its
+    rather than being priced with today's share count. A TDR stays null too: its
     official count is the underlying company's shares, not receipts.
     """
     if q is None or asset_type != "stock":
@@ -125,9 +126,9 @@ def _taiwan_turnover_rate(
     if q.trade_date is None or q.trade_date != today:
         return None
     volume = official.get("volume") if official is not None else q.volume
-    if volume is None or issued_shares is None or issued_shares <= 0:
+    if volume is None or denominator is None or denominator <= 0:
         return None
-    return _sanitize_float(volume * 100.0 / issued_shares)
+    return _sanitize_float(volume * 100.0 / denominator)
 
 
 def _taiwan_daily_fallback_map(symbols: list[str], daily_store: Any, corporate_actions: Any = None) -> dict[str, dict]:
@@ -210,7 +211,7 @@ def enrich_taiwan_watchlist_rows(
     from app.taiwan.daily_store import TaiwanDailyStore
     from app.taiwan.realtime import get_realtime_service
     from app.taiwan.realtime.calendar import taipei_now
-    from app.taiwan.share_capital_store import TaiwanShareCapitalStore
+    from app.taiwan.share_capital_store import TaiwanShareCapitalStore, turnover_denominators
     from app.taiwan.universe import get_security_master
 
     sec_master = security_master or get_security_master()
@@ -220,12 +221,10 @@ def enrich_taiwan_watchlist_rows(
 
     today = taipei_now().date()
     try:
-        issued_shares_map = {
-            row["symbol"]: row["issued_shares"] for row in capital_store.load().to_dicts()
-        }
+        denominators = dict(turnover_denominators(capital_store.load()).iter_rows())
     except Exception as e:
         logger.warning("taiwan watchlist share capital read failed: %s", e)
-        issued_shares_map = {}
+        denominators = {}
 
     fallback_map = _taiwan_daily_fallback_map(symbols, store, corporate_actions)
 
@@ -291,7 +290,7 @@ def enrich_taiwan_watchlist_rows(
             "indicator_date": indicator_date if ind else None,
             **{f: _sanitize_float(ind.get(f)) for f in _TAIWAN_INDICATOR_FIELDS},
             "turnover_rate": _taiwan_turnover_rate(
-                q, asset_type, issued_shares_map.get(symbol), today, inst, official
+                q, asset_type, denominators.get(symbol), today, inst, official
             ),
         })
     return rows

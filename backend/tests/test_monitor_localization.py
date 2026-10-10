@@ -10,9 +10,35 @@
 """
 from __future__ import annotations
 
+import importlib
+import pkgutil
+
+import app.strategy.builtin as builtin_strategies
 from app.services import quote_service
+from app.strategy.field_labels import FIELD_LABELS
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
-from app.strategy.monitor import _SIGNAL_CN, MonitorRuleEngine
+from app.strategy.monitor import MonitorRuleEngine
+
+_STRATEGY_SIGNAL_LABELS = {
+    "signal_bullish_alignment_entry": "均線多頭排列",
+    "signal_pullback_ma20_bounce_entry": "回踩MA20反彈",
+    "signal_pullback_to_support_entry": "縮量回踩MA20",
+    "signal_boll_squeeze_breakout": "布林收斂突破",
+    "signal_boll_mid_break": "收盤低於布林中軌",
+    "signal_capitulation_reversal": "爆量止跌反轉",
+    "signal_close_20d_low": "收盤創20日新低",
+    "signal_consolidation_breakout": "整理區間突破",
+    "signal_ma20_break": "收盤低於MA20",
+    "signal_factor_rank_entry": "因子排名進場",
+    "signal_factor_rank_exit": "因子排名出場",
+    "signal_lorentzian_bullish": "Lorentzian看多",
+    "signal_lorentzian_exit": "Lorentzian出場",
+    "signal_pullback_resume": "回檔再起漲",
+    "signal_swing_structure_bullish": "波段結構轉多",
+    "signal_swing_structure_exit": "波段結構轉弱",
+    "signal_n_day_low_reclaim": "跌破60日低點後收回",
+    "signal_low_volatility_leader_entry": "低波動多頭",
+}
 
 # 常見簡體專用字 (與對應正體字不同形), 若出現在使用者可見文案中即代表殘留簡體。
 _SIMPLIFIED_MARKERS = (
@@ -26,7 +52,7 @@ def _assert_no_simplified(text: str) -> None:
     assert not hit, f"發現簡體殘留字 {hit} in {text!r}"
 
 
-# ── _SIGNAL_CN: key 不變, value 正體中文 ───────────────────────────────
+# ── FIELD_LABELS: key 不變, value 正體中文 ───────────────────────────────
 def test_signal_cn_internal_keys_unchanged():
     """rule.conditions 引用的 field id 是持久化資料, key 集合不得變動。"""
     expected_keys = {
@@ -43,21 +69,56 @@ def test_signal_cn_internal_keys_unchanged():
         "macd_dif", "macd_dea", "macd_hist", "boll_upper", "boll_lower",
         "kdj_k", "kdj_d", "kdj_j", "rsi_6", "rsi_14", "rsi_24",
         "vol_ratio_5d", "vol_ma5", "vol_ma10",
-        "high_60d", "low_60d", "momentum_5d", "momentum_20d", "momentum_60d",
+        "high_60d", "low_60d", "distance_from_low_60d",
+        "momentum_5d", "momentum_20d", "momentum_60d",
         "atr_14", "annual_vol_20d", "consecutive_limit_ups", "consecutive_limit_downs",
         "distance_to_upper_limit", "distance_to_lower_limit",
         *INTRADAY_SIGNAL_LABELS.keys(),
+        *_STRATEGY_SIGNAL_LABELS.keys(),
     }
-    assert set(_SIGNAL_CN.keys()) == expected_keys
+    assert set(FIELD_LABELS.keys()) == expected_keys
 
 
 def test_signal_cn_values_are_traditional():
-    for value in _SIGNAL_CN.values():
+    for value in FIELD_LABELS.values():
         _assert_no_simplified(value)
     # 抽查幾個代表性 value 確實已改成正體
-    assert _SIGNAL_CN["signal_boll_breakout_upper"] == "突破布林上軌"
-    assert _SIGNAL_CN["change_pct"] == "漲跌幅"
-    assert _SIGNAL_CN["consecutive_limit_ups"] == "連續漲停"
+    assert FIELD_LABELS["signal_boll_breakout_upper"] == "突破布林上軌"
+    assert FIELD_LABELS["change_pct"] == "漲跌幅"
+    assert FIELD_LABELS["consecutive_limit_ups"] == "連續漲停"
+
+
+def test_strategy_specific_signal_labels(deny_network):
+    for signal_id, label in _STRATEGY_SIGNAL_LABELS.items():
+        assert FIELD_LABELS.get(signal_id) == label, signal_id
+        _assert_no_simplified(label)
+
+
+def test_strategy_entry_labels_do_not_claim_a_ma5_ma20_cross(deny_network):
+    for signal_id in (
+        "signal_bullish_alignment_entry",
+        "signal_pullback_ma20_bounce_entry",
+        "signal_pullback_to_support_entry",
+    ):
+        assert FIELD_LABELS.get(signal_id, signal_id) != FIELD_LABELS["signal_ma_golden_5_20"]
+    text = MonitorRuleEngine._format_conditions_text(
+        {"logic": "and"},
+        [{"field": "signal_bullish_alignment_entry", "op": "truth"}],
+    )
+    assert text == "均線多頭排列"
+
+
+def test_every_builtin_strategy_signal_has_a_label(deny_network):
+    unlabelled: list[tuple[str, str]] = []
+    for module_info in pkgutil.iter_modules(builtin_strategies.__path__):
+        module = importlib.import_module(f"{builtin_strategies.__name__}.{module_info.name}")
+        for signal_id in (
+            *getattr(module, "ENTRY_SIGNALS", []),
+            *getattr(module, "EXIT_SIGNALS", []),
+        ):
+            if signal_id not in FIELD_LABELS:
+                unlabelled.append((module_info.name, signal_id))
+    assert not unlabelled
 
 
 def test_intraday_signal_labels_traditional_and_keys_unchanged():

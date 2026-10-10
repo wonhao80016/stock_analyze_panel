@@ -83,7 +83,7 @@
       - 另有 10 個檔直接建構 `StrategyDataContext`；新欄位有預設值，不受影響。
       - 以上都列入第 2、4 步的回歸測試。
   - 依執行後端分組判定（後端種類見 `backend/app/strategy/engine.py:482-489`）：
-    - history 組：`matrix_native`、`python_history_legacy`，以及帶 `filter_history_fn` 的 `polars_expr`（`backend/app/strategy/engine.py:893-895`）。條件是 history 的 `state=ok`，而且 `date==T` 有列，不檢查交易日數。磁碟路徑最多只讀 180 個日曆日（`backend/app/services/screener.py:267`），約有一半的交易日湊不滿 121 根；若以 `required_history_bars` 作為門檻，這些日子會整批不記錄。暖機不足時策略的實際行為見 R16。
+    - history 組：`matrix_native`、`python_history_legacy`，以及帶 `filter_history_fn` 的 `polars_expr`（`backend/app/strategy/engine.py:893-895`）。條件是 history 的 `state=ok`，而且 `date==T` 有列，不檢查交易日數。磁碟路徑最多只讀 180 個日曆日（`backend/app/services/screener.py:267`），約有一半的交易日湊不滿 121 根；若以 `required_history_bars` 作為門檻，這些日子會整批不記錄。暖機不足時策略的實際行為見 R16。（2026-10-10 第 4 階段起，歷史改以交易日計：載入所需根數再加 60 個交易日；矩陣策略只用自己的「所需根數 + 1 + 60」個交易日計算，`filter_history` 策略收到目標日加前 `LOOKBACK_DAYS` 個交易日，不再是 180 個日曆日。）
     - current 組：其餘的 `polars_expr`（`backend/app/strategy/engine.py:918-921`）。條件是 current 的 `state` 為 `ok` 或 `provided`，而且有列。這組的評分欄位在 history 可用時會從 history 補（`backend/app/strategy/engine.py:1534-1557`），history 不可用時退回只用 current；這時照常寫入，但在清單上標記 `history_degraded`（推測：評分可能與正常日不同）。
     - `composite`：子策略共用同一份 context（`backend/app/strategy/engine.py:1288`），所以依賴是全部子策略依賴的聯集。
   - 判定結果：可用性只看載入是否成功、T 日分區是否可讀；`state=unverified` 一律視為不可用。交易所是否齊全交給 `universe_complete` 處理。
@@ -130,7 +130,7 @@
   9. 21:40 的 history 掃描失敗：history 組不可用 → 該組不寫入，16:30 的選股保留；current 組照常寫入（標 `history_degraded`）。若改成 current 失敗，則只有 current 組保留舊值。
 - 殘餘缺口：情境 3 中若使用者週四改過策略，週三會停在不完整版本（照常寫入、預設不計入）；所有排程與按鈕都沒在 T+1 資料到來前跑過時，該日漏記（見 R2）。
 - 市場完整性：`universe_complete` 依該策略所屬組實際讀到的輸入判定：從載入狀態的 `exchanges_at_T` 看 `date==T` 的列是否兩個交易所都有。這和策略讀的是同一份資料，因此不受記憶體快取分層影響。
-  - 背景：內建策略暖機最多 121 根（`backend/app/strategy/builtin/lorentzian_knn.py:126-127`，加 1 見 `backend/app/strategy/engine.py:681-684`）。快取只有 300 個日曆日（`backend/app/repository.py:572,1182-1184`），所以 history 目前走磁碟掃描（`backend/app/services/screener.py:255-285`）；`data/backend.log.1` 有多筆 `cache miss ... 121` 為證。
+  - 背景：內建策略暖機最多 121 根（`backend/app/strategy/builtin/lorentzian_knn.py:126-127`，加 1 見 `backend/app/strategy/engine.py:681-684`）。第 4 階段改用新的指標暖機慣例後，`lorentzian_knn` 要載入 407 根（分類一根要有 366 根之前的有效 K 線）、`macd_golden` 190 根；2026-10-10 實測每個日期讀 468 個交易日。快取只有 300 個日曆日（`backend/app/repository.py:572,1182-1184`），所以 history 目前走磁碟掃描（`backend/app/services/screener.py:255-285`）；`data/backend.log.1` 有多筆 `cache miss ... 121` 為證。
   - 不完整時照常寫入，但預設不計入統計。實測 2026-10-01 的 enriched 有 TWSE 1,324 列、TPEx 981 列。
 
 ### 3.2 儲存
@@ -149,6 +149,7 @@
     - 複合策略的子策略指紋（`META["children"]`，`backend/app/strategy/engine.py:118-140`；任一子策略為 None 則父策略也為 None）。
   - 限制一：自訂策略檔若在磁碟上改了但沒 reload，指紋反映的是磁碟上的版本。會 reload 的地方：自訂與 AI 策略共用 `_save_strategy_code`（`backend/app/api/strategy.py:704`，reload 在 `backend/app/api/strategy.py:754`）、複合策略存檔（`backend/app/api/strategy.py:1037`）、reload 端點（`backend/app/api/strategy.py:1150`）；內建策略改檔則會觸發 uvicorn 重載。
   - 限制二：共用程式碼變動不會反映在指紋上，但會改變選股，例如 `backend/app/backtest/matrix.py` 的特徵計算。`DEFAULT_BASIC_FILTER`（`backend/app/strategy/engine.py:41`）的值已經透過 `basic_filter` 納入指紋。
+    - 實例：2026-10 第 4 階段的引擎層規則（`exclude_new_days` 實作、評分缺值改為 null、指標暖機慣例、歷史長度）改變了選股，沒改策略檔的內建策略指紋卻不變。依使用者決定（2026-10-09），已凍結的快照不回改；上線時記下策略邏輯變更日，變更日前後的統計不可直接合併。在事後統計畫面顯示變更日留到第 5 階段。
 - 一檔被多個策略選中時各一列；連續多日入選時每天各一列，畫面同時顯示訊號日數（去重版本是 O5）。
 
 ### 3.3 報酬計算
@@ -330,6 +331,7 @@
 - R15 漲停判定失準：T+1 的 `ref_limit_up` 缺失時，原本會退回用 T 日收盤乘以漲跌幅計算，可能誤判。對策見 3.3 (c)(i)，改標 `limit_check=unknown`，畫面顯示筆數。
 - R16 暖機不足（既有行為，不屬本功能範圍）：history 少於 121 根時，`lorentzian_knn` 不報錯也不跳過，而是用較少資料照算。引擎只用暖機根數決定讀取量，不比對實際根數（`backend/app/strategy/engine.py:681-684`）；滾動視窗不足時結果為 NaN（`backend/app/backtest/matrix.py:3449-3450`），正規化把 NaN 退回 0.5（`backend/app/strategy/builtin/lorentzian_knn.py:112-119`）；近鄰只從現有歷史取樣（`backend/app/strategy/builtin/lorentzian_knn.py:145-163`）。
   - 影響：這類日子的選股品質可能與資料充足時不同，本計畫照常記錄。
+  - 第 4 階段已處理（2026-10-10）：歷史不足的標的不分類，正規化窗口內缺值時不再退回 0.5，候選近鄰固定取 120 根有效 K 線，選股與回測結果一致。
 
 ## 6. 需要使用者拍板的問題
 
@@ -350,6 +352,7 @@
 - 前端：「樣本少」灰字門檻為 `signal_days < 20`；彙總表顯示缺席筆數。
 - O11（結果快取）暫緩：以一年份合成資料（25 萬筆選股、57.5 萬列日 K）量測，每次請求 1.4–2.0 秒，主要耗時在逐分區讀取快照；實際資料量超過再處理。
 - 尚未處理的建議：「樣本少」的訊號日數包含被排除的日子；從未選出標的的策略不會出現在彙總表。
+- 第 4 階段（2026-10-10）：快照照舊凍結，舊日期的 0 分與排名不回改；評分缺值的候選現在以空分數記錄。策略邏輯變更日見 3.2 限制二。
 
 ## 附錄：查證指令（唯讀）
 

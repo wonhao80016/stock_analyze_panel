@@ -142,7 +142,8 @@ this change is precisely what created the Taiwan share source it was missing.
 
 Two consequences that must not be papered over:
 
-- The denominator is **issued** shares, not free float. Every Taiwan turnover
+- （2026-10-10 第 4 階段起，分母改為已發行普通股扣除私募股，見文末新增的小節；
+  下面這段原文保留作紀錄。）The denominator is **issued** shares, not free float. Every Taiwan turnover
   figure is therefore a share of issued capital and reads lower than a
   float-based one, by more for a company whose insiders hold more of it.
   Taiwan market data conventionally uses issued shares because nothing else is
@@ -150,6 +151,38 @@ Two consequences that must not be papered over:
   true float turnover, and the field description says so.
 - Historical turnover remains unavailable, so a strategy that scores on
   `turnover_rate` still cannot be backtested. It can screen today.
+  （第 4 階段起，每天的換手率從該日自己的發佈起保留，換手率歷史會逐日累積；回測改依覆蓋率規則判斷，見文末。）
 
 Before this, four built-in strategies scored on `turnover_rate` and could not run
 at all; the field was absent from the Taiwan enriched table rather than null.
+（第 4 階段起，內建策略的預設評分只剩 `high_turnover_surge` 用 `turnover_rate`。）
+
+## 第 4 階段：分母扣除私募股，換手率逐日保留（2026-10-10）
+
+上面的發現仍然成立：官方來源沒有歷史股本快照，也沒有自由流通股。第 4 階段改了三件事。
+
+### 分母
+
+- 分母改為已發行普通股減去私募股。私募股數取自同一批官方公司資料：TWSE 的「私募股數」、TPEx 的 `PrivateStock.shares`；沒有這個欄位的列用已發行股數。實作在 `TaiwanShareCapitalStore.as_instruments()`（`backend/app/taiwan/share_capital_store.py`）。
+- 這仍然不是自由流通股：內部人與大股東的持股還在分母裡，所以換手率仍比以流通股計算的數字低。
+- TDR 排除：官方股數是原公司的股數，不是存託憑證的單位數。ETF 沒有公司股本資料。兩者的換手率都是空值。
+- 2026-10-09 稽核抽查 7 家，其中 4 家與第三方網站的分母相同（等於已發行減私募）。不同的例子如 2434：新口徑 31.6%，第三方 17.69%。
+- 2026-10-10 在 2026-10-08 的資料上比較：1,946 筆換手率中 266 筆因扣除私募而改變，中位數放大 1.24 倍，最大 14.36 倍（4419.TPEX）。
+
+### 逐日保留
+
+- 每天的換手率只在該日還是最新交易日時，於盤後發佈用當時的股本計算。之後的重新發佈（包括全量重寫）沿用分區裡已發佈的值，不重算、不回推（`backend/app/taiwan/enriched_refresh.py` 的 `_with_published_turnover`）。
+- 換手率開始逐日保存之前的日子沒有換手率，也不會補算。本機資料從 2026-10-08 起才有換手率，之後逐日累積。
+
+### 策略與回測
+
+- 內建策略的預設評分只剩 `high_turnover_surge` 用換手率。門檻改為 2%，依 2026-10-08 單日分布約第 90 百分位校準。`bullish_alignment`、`low_volatility_leader`、`pullback_to_support` 改用 `vol_ratio_5d`。
+- 覆蓋率規則（選股、監控與回測共用）：合格股票是股本檔中有分母的股票。選股看目標交易日，回測看每個正式交易日；合格股票中有換手率的比例低於 50% 就拒絕執行。回測整體通過、但某一交易所低於 50% 時，附上該交易所的警告。
+- 所以 `high_turnover_surge` 在換手率開始保存之前的日期，以及涵蓋這些日期的回測區間，都會被拒絕，要等換手率歷史累積。
+
+### 已知限制
+
+- 一天的換手率固定在它最後一次以「最新交易日」身分發佈時的值。例如錯過 21:40 那一班，D 日的換手率停在 16:30 用暫定成交量算出的值；下一次執行補正 D 日並存入 D+1 日後，D 日已不是最新交易日，沿用舊值，修正後的成交量不會反映到換手率。
+- 某檔在該日以最新交易日發佈時沒有資料列，該日換手率永遠為空。整個交易所缺席時，該日的覆蓋率可能低於 50%，涵蓋它的回測會一直被拒絕。
+- 重新發佈時某個分區暫時讀取失敗，該日的換手率會永久遺失（會記錄警告）。
+- 刪除最新的日 K 分區後，前一天重新成為最新交易日，會用目前的股本重算。

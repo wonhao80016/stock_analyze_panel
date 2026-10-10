@@ -75,6 +75,7 @@ export const dailyRowsToOHLC = (rows: TaiwanDailyItem[]): OHLC[] =>
     volume: r.volume,
     prev_close: r.prev_close ?? null,
     raw_close: r.raw_close ?? null,
+    turnover_rate: r.turnover_rate ?? null,
   }))
 
 /** The session the research figures belong to, when it is not the requested date. */

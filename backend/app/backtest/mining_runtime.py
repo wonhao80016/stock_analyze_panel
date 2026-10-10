@@ -20,9 +20,9 @@ from app.backtest.engine import STATS_METHODOLOGY_VERSION
 from app.backtest.factor import (
     FACTOR_COLUMNS,
     FACTOR_METHODOLOGY_VERSION,
-    FACTOR_WARMUP_DAYS,
     FactorBacktestService,
     FactorBatchConfig,
+    factor_warmup_days,
 )
 from app.backtest.fundamentals import (
     FUNDAMENTAL_FACTOR_NAMES,
@@ -52,8 +52,10 @@ from app.backtest.strategy import (
     StrategyBacktestConfig,
     StrategyBacktestService,
     StrategyDependencyResolver,
+    _basic_filter_for_data,
     _merge_resolved_feature_plans,
     build_matrix_cache_profile,
+    warmup_calendar_days,
 )
 from app.enriched_generation import (
     EnrichedGenerationUnavailableError,
@@ -344,7 +346,7 @@ def _load_compact_factor_panel(
     load_start = (
         config.start
         if all(name == "turnover_rate" for name in factor_names)
-        else config.start - timedelta(days=FACTOR_WARMUP_DAYS)
+        else config.start - timedelta(days=factor_warmup_days(factor_names))
     )
     raw = factor_service.engine.load_panel(
         config.symbols,
@@ -966,7 +968,11 @@ def _prepare_base_market(
         plans.append(resolver.resolve(
             research,
             params=research_params,
-            basic_filter=service._effective_basic_filter(research, {}),
+            basic_filter=_basic_filter_for_data(
+                service._effective_basic_filter(research, {}),
+                service.engine,
+                request.asset_type,
+            ),
             entry_signals=research.entry_signals,
             exit_signals=research.exit_signals,
             overrides={},
@@ -979,7 +985,11 @@ def _prepare_base_market(
         plans.append(resolver.resolve(
             strategy,
             params=params,
-            basic_filter=service._effective_basic_filter(strategy, overrides),
+            basic_filter=_basic_filter_for_data(
+                service._effective_basic_filter(strategy, overrides),
+                service.engine,
+                request.asset_type,
+            ),
             entry_signals=service._effective_signals(
                 overrides, "entry_signals", strategy.entry_signals
             ),
@@ -995,9 +1005,9 @@ def _prepare_base_market(
         request.asset_type,
         requested_plan=merged,
         requested_forward_bars=request.forward_horizon,
+        backtest_engine=service.engine,
     )
-    warmup_days = max(120, int(max(merged.warmup_bars, 1) * 1.6))
-    load_start = request.start - timedelta(days=warmup_days)
+    load_start = request.start - timedelta(days=warmup_calendar_days(merged.warmup_bars))
     return service.engine.load_market_data_matrix_for_backtest(
         request.symbols,
         load_start,

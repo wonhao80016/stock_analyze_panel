@@ -581,7 +581,13 @@ class _CompositeEngineStub:
     def get(self, strategy_id: str) -> StrategyDef:
         return self.strategies[strategy_id]
 
+    @property
+    def _strategies(self) -> dict[str, StrategyDef]:
+        return self.strategies
+
     resolve_params = staticmethod(StrategyEngine.resolve_params)
+    composite_children = StrategyEngine.composite_children
+    _validate_composite_references = staticmethod(StrategyEngine._validate_composite_references)
 
 
 def _composite_scores(panel: pl.DataFrame) -> tuple[dict, dict[str, list[float]]]:

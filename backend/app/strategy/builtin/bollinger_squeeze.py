@@ -8,9 +8,9 @@ from app.backtest.matrix import (
     SignalMatrix,
     make_signal_matrix,
     matrix_feature,
-    rolling_quantile,
-    rolling_sum,
     valid_rolling_mean,
+    valid_rolling_quantile,
+    valid_rolling_sum,
 )
 from app.backtest.matrix import (
     valid_shift as shift,
@@ -88,13 +88,16 @@ class BollingerSqueezeMatrixStrategy:
         return frozenset({"open", "high", "low", "close", "volume"})
 
     def required_warmup_bars(self, params: dict) -> int:
-        return int(params.get("squeeze_lookback", 80)) + 20
+        # The squeeze needs lookback + 20 of the symbol's own bars; the other 40 absorb sessions
+        # it missed inside the loaded window of shared sessions.
+        return int(params.get("squeeze_lookback", 80)) + 60
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
+        close_valid = np.isfinite(market.close)
         width = matrix_feature(market, "boll_width")
         lookback = int(params.get("squeeze_lookback", 80))
         percentile = float(params.get("squeeze_percentile", 0.20))
-        threshold = rolling_quantile(width, lookback, percentile)
+        threshold = valid_rolling_quantile(width, close_valid, lookback, percentile)
         squeezed = shift(width, 1) <= shift(threshold, 1)
 
         upper = matrix_feature(market, "boll_upper")
@@ -102,7 +105,11 @@ class BollingerSqueezeMatrixStrategy:
 
         # A squeeze releases once; later bars above the band are continuation, not entry.
         window = int(params.get("first_breakout_window", 5))
-        prior_breakouts = rolling_sum(shift(breakout.astype(np.float32), 1), window)
+        prior_breakouts = valid_rolling_sum(
+            shift(breakout.astype(np.float32), 1, close_valid),
+            close_valid,
+            window,
+        )
         first_breakout = prior_breakouts == 0.0
 
         volume_valid = np.isfinite(market.close) & np.isfinite(market.volume)

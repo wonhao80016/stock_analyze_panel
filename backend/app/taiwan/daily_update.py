@@ -326,8 +326,9 @@ def publish_enriched(
     """Refresh issued shares and corporate-action reference prices, then republish the enriched table.
 
     Returns whether a publish ran. With only_if_behind it runs only when a recent
-    day's enriched partition is missing or older than its bars, or the last full
-    publication never committed. A *since* before the recent window extends the republish back
+    day's enriched partition is missing or older than its bars, the last full
+    publication never committed, or the table was published under other indicator
+    definitions. A *since* before the recent window extends the republish back
     to that day, for bars written into older days. A failed reference-price
     fetch never stops the publish, and a failed publish never raises; both are logged and,
     when *notes* is given, appended to it.
@@ -337,7 +338,11 @@ def publish_enriched(
 
     if only_if_behind:
         service = TaiwanEnrichedRefreshService(daily_store=daily_store)
-        if service.stale_since() is None and not service.publication_incomplete():
+        if (
+            service.stale_since() is None
+            and not service.publication_incomplete()
+            and not service.indicator_definitions_changed()
+        ):
             return False
     # Issued shares first: the enriched publish reads them as the turnover
     # denominator, so refreshing afterwards would leave today's partition

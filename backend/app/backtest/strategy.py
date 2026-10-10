@@ -52,17 +52,35 @@ from app.indicators.pipeline import (
     get_signal_dependencies,
 )
 from app.price_limits import TAIWAN_SYMBOL_SUFFIXES
-from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
+from app.strategy.engine import (
+    StrategyDataContext,
+    StrategyDef,
+    StrategyEngine,
+    finite_or_null,
+    frame_has_values,
+    normalized_scoring_part,
+    ranks_higher_first,
+    resolve_scoring_values,
+    without_unavailable_share_bounds,
+)
+from app.strategy.field_labels import field_label, whole_percent
 from app.strategy.scoring import (
+    CALENDAR_DAYS_PER_SESSION,
     SCORING_DIRECTION_LOW,
     effective_scoring,
     effective_scoring_directions,
+    indicators_warmup_bars,
     materialize_scoring_columns,
     scoring_dependencies,
-    scoring_value_expr,
     scoring_warmup_bars,
 )
 from app.taiwan.benchmarks import TAIEX
+from app.taiwan.share_capital_store import (
+    MIN_SESSION_COVERAGE,
+    coverage_eligible,
+    eligible_coverage,
+)
+from app.taiwan.symbol import extract_exchange
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +93,11 @@ _EXECUTION_COLUMNS = frozenset({
 })
 _LIMIT_BASE_COLUMNS = frozenset({"raw_close", "raw_high", "raw_low"})
 _INSTRUMENT_COLUMNS = frozenset({"name", "total_shares", "float_shares"})
+
+
+def warmup_calendar_days(bars: int) -> int:
+    """Calendar days loaded before a backtest window for a warm-up of *bars* sessions."""
+    return max(120, int(max(bars, 1) * CALENDAR_DAYS_PER_SESSION))
 
 
 def _read_local_taiex(start: date, end: date) -> pl.DataFrame:
@@ -225,7 +248,13 @@ class StrategyDependencyResolver:
         plan = FeaturePlan(
             required_features=frozenset(required_features),
             required_signals=frozenset(required_signals),
-            warmup_bars=max(60, int(strategy.lookback_days or 1), scoring_warmup_bars(scoring)),
+            warmup_bars=max(
+                60,
+                int(strategy.lookback_days or 1),
+                scoring_warmup_bars(scoring),
+                # The panel recomputes these on the loaded window; signals also read the bar before.
+                indicators_warmup_bars(indicator_columns) + 1,
+            ),
         )
         return ResolvedFeaturePlan(
             base_columns=base_columns,
@@ -314,8 +343,13 @@ def build_matrix_cache_profile(
     requested_plan: ResolvedFeaturePlan | None = None,
     requested_forward_bars: int = 0,
     max_disk_bytes: int = 512 * 1024 * 1024,
+    backtest_engine: BacktestEngine | None = None,
 ) -> MatrixCacheProfile:
-    """Merge registered matrix dependencies into one strategy-agnostic cache profile."""
+    """Merge registered matrix dependencies into one strategy-agnostic cache profile.
+
+    With ``backtest_engine``, a registered strategy's share-cap bound adds no share field the
+    market lacks, so it cannot make every other strategy's matrix load fail.
+    """
     resolver = StrategyDependencyResolver()
     plans: list[ResolvedFeaturePlan] = []
     if requested_plan is not None:
@@ -348,7 +382,11 @@ def build_matrix_cache_profile(
         plans.append(resolver.resolve(
             strategy,
             params=params,
-            basic_filter={**dict(strategy.basic_filter or {}), **common_filter},
+            basic_filter=_basic_filter_for_data(
+                {**dict(strategy.basic_filter or {}), **common_filter},
+                backtest_engine,
+                asset_type,
+            ),
             entry_signals=strategy.entry_signals,
             exit_signals=strategy.exit_signals,
             overrides={},
@@ -406,10 +444,10 @@ def prewarm_matrix_cache(
         strategy_engine,
         asset_type,
         max_disk_bytes=settings.backtest_matrix_cache_max_mb * 1024 * 1024,
+        backtest_engine=engine,
     )
     formal_start = date(max(1, latest_date.year - years + 1), 1, 1)
-    warmup_days = max(120, int(max(profile.warmup_bars, 1) * 1.6))
-    coverage_start = formal_start - timedelta(days=warmup_days)
+    coverage_start = formal_start - timedelta(days=warmup_calendar_days(profile.warmup_bars))
     prewarm_columns = frozenset({
         "symbol",
         "date",
@@ -504,13 +542,14 @@ _SHARE_CAP_FILTER_KEYS = (
 
 
 def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
-    """非股票资产没有股本数据 (etf/index 维表只有 symbol/name), 市值与流通
-    市值界对它们既无意义也不可满足: 依赖解析前先置 None, 避免解析出
-    total_shares/float_shares 字段需求导致矩阵加载直接失败。
+    """Clear the share-cap bounds for non-stock assets, which carry no share counts.
 
-    运行期过滤无需同步修改 —— polars 侧有列守卫 (engine._basic_filter_expr),
-    矩阵侧 _optional_field 对缺失字段返回全 NaN 且 _apply_bound 跳过全 NaN
-    界, 二者对缺失股本列本就降级为 no-op。
+    The etf/index tables hold only symbol/name, so market-cap and float-cap bounds are meaningless
+    and unsatisfiable there. Clearing them before dependency resolution keeps total_shares and
+    float_shares out of the requirements, which would otherwise fail the matrix load.
+
+    Runtime filtering must use the sanitized filter too: a bound on a field the
+    data lacks raises in both the polars and the matrix filter.
     """
     if asset_type == "stock" or not basic_filter:
         return basic_filter
@@ -518,6 +557,166 @@ def _basic_filter_for_asset(basic_filter: dict, asset_type: str) -> dict:
     for key in _SHARE_CAP_FILTER_KEYS:
         sanitized[key] = None
     return sanitized
+
+
+def _basic_filter_for_data(basic_filter: dict, engine: object, asset_type: str) -> dict:
+    """``basic_filter`` without the share-cap bounds the market's share counts cannot apply.
+
+    A backtest reads share counts only from the asset type's instruments; selection drops the
+    same bounds when its data holds none (without_unavailable_share_bounds).
+    """
+    basic_filter = _basic_filter_for_asset(basic_filter, asset_type)
+    instruments = getattr(getattr(engine, "repo", None), "get_instruments_asset", None)
+    if not callable(instruments):
+        return basic_filter
+    return without_unavailable_share_bounds(
+        basic_filter, lambda name: frame_has_values(instruments(asset_type), name)
+    )
+
+
+_ALWAYS_PRESENT_FIELDS = frozenset({"symbol", "name", "open", "high", "low", "close", "volume"})
+# Below this share of rows with data, a ranking mostly orders missing scores by symbol.
+_MIN_SCORING_COVERAGE = 0.5
+
+
+def _filter_fields(basic_filter: dict) -> set[str]:
+    return set(_basic_filter_dependencies(basic_filter)) - _ALWAYS_PRESENT_FIELDS
+
+
+def _scoring_fields(scorings: list[Mapping]) -> set[str]:
+    fields: set[str] = set()
+    for scoring in scorings:
+        fields.update(scoring_dependencies(scoring))
+    return fields - _ALWAYS_PRESENT_FIELDS
+
+
+def _parameter_scoring_fields(strategies: list[tuple[StrategyDef, dict]]) -> set[str]:
+    """Scoring fields a matrix strategy takes from its parameters, such as factor_rank_research."""
+    names: set[str] = set()
+    for strategy, params in strategies:
+        parameter_fields = getattr(strategy.matrix_strategy, "required_fields_for_params", None)
+        if callable(parameter_fields):
+            names.update(str(name) for name in parameter_fields(params))
+    return _scoring_fields([{name: 1.0 for name in names}])
+
+
+def _required_coverage_fields(strategies: list[tuple[StrategyDef, dict]]) -> set[str]:
+    """Fields a matrix strategy cannot decide an entry without (required_coverage_fields hook)."""
+    names: set[str] = set()
+    for strategy, params in strategies:
+        hook = getattr(strategy.matrix_strategy, "required_coverage_fields", None)
+        if callable(hook):
+            names.update(str(name) for name in hook(params))
+    return names
+
+
+_WARNING_SESSIONS_LISTED = 5
+
+
+def _entry_coverage_check(
+    market: MarketDataMatrix,
+    fields: set[str],
+    sessions: np.ndarray,
+    scope: np.ndarray | None = None,
+) -> tuple[str | None, list[dict]]:
+    """The refusal for the first of *fields* that *sessions* cannot screen, else exchange warnings.
+
+    Counts only the instruments in *scope*, the strategy's asset scope. Refused: no instrument
+    able to hold the field has a close in *sessions*, or a session's coverage is below
+    MIN_SESSION_COVERAGE. A warning names the sessions that pass while one exchange's own
+    coverage is below it; turnover is never back-calculated.
+    """
+    exchanges = [
+        exchange.value if (exchange := extract_exchange(str(symbol))) else ""
+        for symbol in market.symbols
+    ]
+    warnings: list[dict] = []
+    for name in sorted(fields):
+        eligible = coverage_eligible(name, market.symbols)
+        if scope is not None:
+            eligible = eligible & scope
+        label = field_label(name)
+        if sessions.any() and not (np.isfinite(market.close[sessions]) & eligible).any():
+            refusal = f"回測區間內所選範圍沒有可計算{label}的股票"
+            if name == "turnover_rate":
+                refusal += (
+                    f"（ETF、TDR 沒有{label}，停牌股停牌期間沒有收盤價），請改選含普通股的標的"  # noqa: RUF001
+                )
+            return refusal, []
+        values = market.fields.get(name)
+        coverage = (
+            np.zeros(market.shape[0])
+            if values is None
+            else eligible_coverage(market.close, values, eligible)
+        )
+        failing = np.flatnonzero(sessions & (coverage < MIN_SESSION_COVERAGE))
+        if failing.size:
+            first = int(failing[0])
+            return (
+                f"{market.timestamp_labels[first][:10]} 只有 {whole_percent(coverage[first])} "
+                f"的股票有{label}資料（至少需 {whole_percent(MIN_SESSION_COVERAGE)}；"  # noqa: RUF001
+                f"回測區間內共 {failing.size} 個交易日不足），"  # noqa: RUF001
+                f"無法依{label}回測，請把回測區間設在有{label}資料的交易日",  # noqa: RUF001
+                [],
+            )
+        if values is None:
+            continue
+        for exchange in sorted(set(exchanges) - {""}):
+            on_exchange = np.array([value == exchange for value in exchanges], dtype=bool)
+            exchange_coverage = eligible_coverage(market.close, values, eligible & on_exchange)
+            short = np.flatnonzero(sessions & (exchange_coverage < MIN_SESSION_COVERAGE))
+            if short.size:
+                warnings.append(
+                    {
+                        "field": name,
+                        "exchange": exchange,
+                        "threshold": MIN_SESSION_COVERAGE,
+                        "sessions": [
+                            market.timestamp_labels[int(row)][:10]
+                            for row in short[:_WARNING_SESSIONS_LISTED]
+                        ],
+                        "session_count": int(short.size),
+                    }
+                )
+    return None, warnings
+
+
+def _matrix_field_coverage(
+    market: MarketDataMatrix,
+    fields: set[str],
+    rows: np.ndarray,
+) -> dict[str, float]:
+    """Share of the ``rows`` cells holding a finite value, per field stored in ``market``."""
+    total = int(np.count_nonzero(rows))
+    if total == 0:
+        return {}
+    coverage: dict[str, float] = {}
+    for name in sorted(fields):
+        values = market.fields.get(name)
+        if values is not None:
+            coverage[name] = int(np.count_nonzero(np.isfinite(values[rows]))) / total
+    return coverage
+
+
+def _panel_field_coverage(rows: pl.DataFrame, fields: set[str]) -> dict[str, float]:
+    """Share of ``rows`` holding a finite value, per column."""
+    names = sorted(name for name in fields if name in rows.columns)
+    if not names or rows.is_empty():
+        return {}
+    expressions = []
+    for name in names:
+        value = finite_or_null(pl.col(name)) if rows.schema[name].is_numeric() else pl.col(name)
+        expressions.append(value.is_not_null().sum().alias(name))
+    counts = rows.select(expressions).row(0, named=True)
+    return {name: int(counts[name]) / rows.height for name in names}
+
+
+def _low_scoring_coverage_error(coverage: Mapping[str, float]) -> str | None:
+    low = sorted((name, ratio) for name, ratio in coverage.items() if ratio < _MIN_SCORING_COVERAGE)
+    if not low:
+        return None
+    listed = "、".join(f"{field_label(name)} {whole_percent(ratio)}" for name, ratio in low)
+    return f"以下評分欄位的資料覆蓋率低於 {whole_percent(_MIN_SCORING_COVERAGE)}：{listed}"  # noqa: RUF001
 
 
 def _resolve_base_columns(features: set[str]) -> frozenset[str]:
@@ -640,6 +839,30 @@ def _configure_taiwan_matcher(
         symbol: symbol in eligible_symbols
         for symbol in taiwan_symbols
     }
+
+
+def _asset_scope_mask(symbols: tuple[str, ...] | list[str], asset_types: list[str]) -> np.ndarray:
+    """Which of *symbols* the strategy may pick, by the rule of StrategyEngine._supported_symbols.
+
+    A Taiwan symbol counts only when the security master types it in *asset_types*.
+    """
+    taiwan = [str(symbol) for symbol in symbols if str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES)]
+    instruments = {}
+    if taiwan:
+        from app.taiwan.universe import get_security_master
+
+        try:
+            master = get_security_master()
+            instruments = {symbol: master.get_instrument(symbol) for symbol in taiwan}
+        except Exception as exc:
+            raise ValueError(f"Taiwan Security Master unavailable: {exc}") from exc
+    supported = set(asset_types)
+    scope = np.ones(len(symbols), dtype=bool)
+    for asset_id, symbol in enumerate(symbols):
+        if str(symbol) in instruments:
+            instrument = instruments[str(symbol)]
+            scope[asset_id] = instrument is not None and instrument.instrument_type in supported
+    return scope
 
 
 def _unsupported_asset_type_symbols(
@@ -792,6 +1015,8 @@ class BacktestResultPolicy:
             "timing_ms",
             "execution",
             "selection",
+            "field_coverage",
+            "exchange_coverage_warnings",
             "execution_backend",
             "shared_market_data",
             "shared_market_data_bytes",
@@ -868,16 +1093,9 @@ class StrategyBacktestService:
         子策略必须全为 matrix_native, 否则 fail-closed(首版硬约束)。
         """
         from app.strategy import composite as composite_mod
-        from app.strategy.engine import _parse_composite_children
 
         assert strategy.composite is not None
-        # 权重: override.children 优先, 否则 META 声明。
-        override_children = overrides.get("children")
-        if isinstance(override_children, list) and override_children:
-            spec = _parse_composite_children(override_children)
-            children = spec.children
-        else:
-            children = strategy.composite.children
+        children = self.strategy_engine.composite_children(strategy, overrides)
 
         resolver = StrategyDependencyResolver()
         plans: list[ResolvedFeaturePlan] = []
@@ -918,7 +1136,9 @@ class StrategyBacktestService:
             child_pipeline_cfg = MatrixPipelineConfig(
                 basic_filter=basic_filter,
                 scoring=child_scoring,
-                scoring_directions=effective_scoring_directions(child_override),
+                scoring_directions=effective_scoring_directions(
+                    child_override, defaults=child_def.meta.get("scoring_directions")
+                ),
                 order_by=child_def.meta.get("order_by"),
                 descending=bool(child_def.meta.get("descending", True)),
                 protect_strategy_cache=False,
@@ -1014,7 +1234,7 @@ class StrategyBacktestService:
         )
 
         overrides = first.overrides or {}
-        basic_filter = self._effective_basic_filter(strategy, overrides)
+        basic_filter = self._backtest_basic_filter(strategy, overrides, first.asset_type)
         entry_signals = self._effective_signals(overrides, "entry_signals", strategy.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", strategy.exit_signals)
         resolver = StrategyDependencyResolver()
@@ -1041,11 +1261,12 @@ class StrategyBacktestService:
             requested_plan=feature_plan,
             requested_forward_bars=full_horizon_days,
             max_disk_bytes=settings.backtest_matrix_cache_max_mb * 1024 * 1024,
+            backtest_engine=self.engine,
         )
-        warmup_days = max(120, int(max(feature_plan.warmup_bars, 1) * 1.6))
-        load_start = first.start - timedelta(days=warmup_days)
-        cache_warmup_days = max(120, int(max(cache_profile.warmup_bars, 1) * 1.6))
-        coverage_start = first.start - timedelta(days=cache_warmup_days)
+        load_start = first.start - timedelta(days=warmup_calendar_days(feature_plan.warmup_bars))
+        coverage_start = first.start - timedelta(
+            days=warmup_calendar_days(cache_profile.warmup_bars)
+        )
         load_end = first.end
         coverage_end = first.end
         if first.mode == "full":
@@ -1197,7 +1418,7 @@ class StrategyBacktestService:
 
         params = self._normalize_params(config.params or {}, s)
         overrides = config.overrides or {}
-        basic_filter = self._effective_basic_filter(s, overrides)
+        basic_filter = self._backtest_basic_filter(s, overrides, config.asset_type)
         entry_signals = self._effective_signals(overrides, "entry_signals", s.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", s.exit_signals)
         if config.exit_fill == "signal_next_minute":
@@ -1269,8 +1490,7 @@ class StrategyBacktestService:
         matrix_data_cache_timing_ms: Mapping[str, float] = {}
 
         # 加载 warmup + 正式区间。矩阵策略的 warmup 由协议解析，不再依赖策略名称。
-        warmup_days = max(120, int(max(feature_plan.warmup_bars, 1) * 1.6))
-        load_start = config.start - timedelta(days=warmup_days)
+        load_start = config.start - timedelta(days=warmup_calendar_days(feature_plan.warmup_bars))
 
         # 全量模式: entries 只在正式区间触发, exits 需要 end 之后的尾部数据继续执行策略卖点。
         # 若策略有 max_hold_days, 用它决定尾部窗口；否则 holding_days 只作为兜底观察上限。
@@ -1318,12 +1538,11 @@ class StrategyBacktestService:
                 requested_plan=feature_plan,
                 requested_forward_bars=profile_forward,
                 max_disk_bytes=settings.backtest_matrix_cache_max_mb * 1024 * 1024,
+                backtest_engine=self.engine,
             )
-            cache_warmup_days = max(
-                120,
-                int(max(cache_profile.warmup_bars, 1) * 1.6),
+            coverage_start = config.start - timedelta(
+                days=warmup_calendar_days(cache_profile.warmup_bars)
             )
-            coverage_start = config.start - timedelta(days=cache_warmup_days)
             coverage_end = config.end
             if config.mode == "full":
                 coverage_end = config.end + timedelta(
@@ -1389,6 +1608,72 @@ class StrategyBacktestService:
                 return _err("正式回测区间内无数据")
             feature_width = int(panel.width)
 
+        if composite_children_resolved is not None:
+            scoring_fields = _scoring_fields(
+                [child_config.scoring for _, _, child_config in composite_children_resolved]
+            )
+            parameter_scoring_fields = _parameter_scoring_fields(
+                [(child_def, child_params) for child_def, child_params, _ in composite_children_resolved]
+            )
+            entry_coverage_fields = _required_coverage_fields(
+                [
+                    (child_def, child_params)
+                    for child_def, child_params, _ in composite_children_resolved
+                ]
+            )
+        else:
+            scoring_fields = _scoring_fields([effective_scoring(s.meta.get("scoring"), overrides)])
+            parameter_scoring_fields = _parameter_scoring_fields(
+                [(s, params)] if s.execution_backend == "matrix_native" else []
+            )
+            entry_coverage_fields = _required_coverage_fields(
+                [(s, params)] if s.execution_backend == "matrix_native" else []
+            )
+        filter_fields = _filter_fields(basic_filter)
+        coverage_market = prepared.market_data if prepared is not None else market_data
+        exchange_coverage_warnings: list[dict] = []
+        if coverage_market is not None:
+            formal_sessions = self._matrix_date_range_mask(
+                coverage_market.timestamp_labels, config.start, config.end
+            )
+            try:
+                scope = (
+                    _asset_scope_mask(coverage_market.symbols, s.meta.get("asset_types", ["stock"]))
+                    if entry_coverage_fields
+                    else None
+                )
+            except ValueError as e:
+                return _err(str(e))
+            uncovered_session, exchange_coverage_warnings = _entry_coverage_check(
+                coverage_market, entry_coverage_fields, formal_sessions, scope
+            )
+            if uncovered_session:
+                return _err(uncovered_session)
+            formal_rows = np.isfinite(coverage_market.close) & formal_sessions[:, None]
+            universe_coverage = _matrix_field_coverage(
+                coverage_market, filter_fields | parameter_scoring_fields, formal_rows
+            )
+        elif panel is not None and formal_range is not None:
+            universe_coverage = _panel_field_coverage(
+                panel.filter(formal_range).filter(finite_or_null(pl.col("close")).is_not_null()),
+                filter_fields | parameter_scoring_fields,
+            )
+        else:
+            universe_coverage = {}
+        uncovered = sorted(name for name in filter_fields if universe_coverage.get(name) == 0)
+        if uncovered:
+            listed = "、".join(field_label(name) for name in uncovered)
+            return _err(f"以下過濾欄位在回測區間內沒有資料：{listed}")  # noqa: RUF001
+        low_coverage = _low_scoring_coverage_error(
+            {
+                name: ratio
+                for name, ratio in universe_coverage.items()
+                if name in parameter_scoring_fields
+            }
+        )
+        if low_coverage:
+            return _err(low_coverage)
+
         matcher_config = MatcherConfig(
             matching=config.matching,
             entry_fill=config.entry_fill,
@@ -1411,6 +1696,11 @@ class StrategyBacktestService:
             max_exposure_pct=config.max_exposure_pct,
             score_min=score_min,
             score_max=score_max,
+            score_higher_first=(
+                bool(s.meta.get("descending", True))
+                if s.execution_backend == "composite"
+                else ranks_higher_first(s.meta, effective_scoring(s.meta.get("scoring"), overrides))
+            ),
             initial_capital=config.initial_capital,
             position_sizing=config.position_sizing,
             minute_fill=config.minute_fill,
@@ -1540,6 +1830,9 @@ class StrategyBacktestService:
                 "entry_trigger_filtered": 0,
                 "entry_trigger_enabled": False,
             }
+            scoring_coverage = _matrix_field_coverage(
+                sim_market_data, scoring_fields, sim_signal_matrix.entry != 0
+            )
             del market_data, signal_matrix
 
             t_matrix = time.perf_counter()
@@ -1628,7 +1921,9 @@ class StrategyBacktestService:
                 pipeline_config = MatrixPipelineConfig(
                     basic_filter=basic_filter,
                     scoring=scoring,
-                    scoring_directions=effective_scoring_directions(overrides),
+                    scoring_directions=effective_scoring_directions(
+                        overrides, defaults=s.meta.get("scoring_directions")
+                    ),
                     order_by=s.meta.get("order_by"),
                     descending=bool(s.meta.get("descending", True)),
                     asset_mask=asset_mask_without(market_data.symbols, excluded),
@@ -1672,6 +1967,9 @@ class StrategyBacktestService:
                 "entry_trigger_filtered": 0,
                 "entry_trigger_enabled": False,
             }
+            scoring_coverage = _matrix_field_coverage(
+                sim_market_data, scoring_fields, sim_signal_matrix.entry != 0
+            )
             del market_data, signal_matrix
 
             t_matrix = time.perf_counter()
@@ -1692,17 +1990,20 @@ class StrategyBacktestService:
             # basic_filter 只影响买入候选，不能删除持仓估值和卖出所需行情。
             basic_mask = pl.Series("_basic", [True] * len(panel), dtype=pl.Boolean)
             if basic_filter and basic_filter.get("enabled", True):
-                expr = StrategyEngine._basic_filter_expr(panel, basic_filter)
-                if expr is not None:
-                    try:
+                try:
+                    expr = StrategyEngine._basic_filter_expr(panel, basic_filter)
+                    if expr is not None:
                         basic_mask = panel.select(expr.alias("_basic"))["_basic"].fill_null(False).cast(pl.Boolean)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("basic_filter mask failed: %s", e)
-                        return _err(f"基础过滤计算失败: {e}")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("basic_filter mask failed: %s", e)
+                    return _err(f"基础过滤计算失败: {e}")
 
             candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
             candidate_mask = basic_mask & candidate_filter_mask & ~panel.get_column("symbol").is_in(sorted(excluded))
-            panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
+            try:
+                panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
+            except ValueError as e:
+                return _err(f"评分计算失败: {e}")
             formal_candidate_mask = candidate_mask & formal_range
             entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
             entry_mask = entry_mask & formal_range
@@ -1733,6 +2034,7 @@ class StrategyBacktestService:
             timing_ms["signals_score"] = round((time.perf_counter() - t_signal) * 1000, 1)
             if not entry_mask.any():
                 return _err("在指定区间内未产生买入信号")
+            scoring_coverage = _panel_field_coverage(panel.filter(entry_mask), scoring_fields)
 
             sim_range = self._date_range_mask(panel, config.start, sim_end)
             sim_columns = [column for column in feature_plan.matrix_columns if column in panel.columns]
@@ -1765,6 +2067,14 @@ class StrategyBacktestService:
             )
             timing_ms["matrix_build"] = round((time.perf_counter() - t_matrix) * 1000, 1)
             del panel, sim_panel, sim_entry_mask, sim_exit_mask
+
+        low_coverage = _low_scoring_coverage_error(scoring_coverage)
+        if low_coverage:
+            return _err(low_coverage)
+        field_coverage = {
+            name: round(ratio, 4)
+            for name, ratio in sorted({**universe_coverage, **scoring_coverage}.items())
+        }
 
         t_sim = time.perf_counter()
 
@@ -1810,6 +2120,8 @@ class StrategyBacktestService:
         result.stats["full_feature_fallback"] = feature_plan.full_feature_fallback
         result.stats["execution_backend"] = s.execution_backend
         result.stats["selection"] = selection_stats
+        result.stats["field_coverage"] = field_coverage
+        result.stats["exchange_coverage_warnings"] = exchange_coverage_warnings
         result.stats["excluded_symbols"] = excluded_symbols
         result.stats["minimum_commission"] = config.minimum_commission
         result.stats["shared_market_data"] = prepared is not None
@@ -2142,6 +2454,11 @@ class StrategyBacktestService:
             basic_filter.update(override_filter)
         return basic_filter
 
+    def _backtest_basic_filter(self, s: StrategyDef, overrides: dict, asset_type: str) -> dict:
+        return _basic_filter_for_data(
+            self._effective_basic_filter(s, overrides), self.engine, asset_type
+        )
+
     @staticmethod
     def _effective_signals(overrides: dict, key: str, default: list[str]) -> list[str]:
         value = overrides.get(key)
@@ -2312,8 +2629,11 @@ class StrategyBacktestService:
         overrides: dict | None,
         universe_mask: pl.Series | None = None,
     ) -> pl.DataFrame:
+        """Candidates missing a scoring input score null; rows outside the universe score 0."""
         scoring = effective_scoring(s.meta.get("scoring"), overrides)
-        directions = effective_scoring_directions(overrides)
+        directions = effective_scoring_directions(
+            overrides, defaults=s.meta.get("scoring_directions")
+        )
 
         work = materialize_scoring_columns(panel, scoring.keys())
         temporary_scoring_columns = [name for name in scoring if name not in panel.columns and name in work.columns]
@@ -2334,39 +2654,27 @@ class StrategyBacktestService:
             ]
             return df.drop(temporary) if temporary else df
 
-        if scoring:
-            executable = [
-                (str(col), value, weight)
-                for col, weight in scoring.items()
-                if weight and (value := scoring_value_expr(work.columns, str(col))) is not None
-            ]
-            total_weight = sum(weight for _, _, weight in executable)
-            if total_weight > 0:
-                score_parts: list[pl.Expr] = []
-                for name, score_value, weight in executable:
-                    w = weight / total_weight
-                    value = _value_in_universe(score_value)
-                    col_min = value.min().over("date")
-                    col_max = value.max().over("date")
-                    col_range = col_max - col_min
-                    normalized = pl.when(col_range > 0).then(
-                        (score_value - col_min) / col_range
-                    ).otherwise(pl.lit(0.5))
-                    if directions.get(name) == SCORING_DIRECTION_LOW:
-                        normalized = 1.0 - normalized
-                    if has_universe:
-                        normalized = pl.when(pl.col("_score_universe")).then(normalized).otherwise(0.0)
-                    score_parts.append(normalized * w)
-                if score_parts:
-                    score_expr = score_parts[0]
-                    for part in score_parts[1:]:
-                        score_expr = score_expr + part
-                    return _finish(work.with_columns((score_expr * 100).fill_null(0).alias("score")))
+        active = {str(name): weight for name, weight in scoring.items() if weight}
+        total_weight = sum(active.values())
+        if active and total_weight > 0:
+            score_expr: pl.Expr | None = None
+            for name, value, weight in resolve_scoring_values(work.columns, active):
+                candidate_value = _value_in_universe(value)
+                part = normalized_scoring_part(
+                    value,
+                    candidate_value.min().over("date"),
+                    candidate_value.max().over("date"),
+                    low_first=directions.get(name) == SCORING_DIRECTION_LOW,
+                ) * (weight / total_weight)
+                if has_universe:
+                    part = pl.when(pl.col("_score_universe")).then(part).otherwise(0.0)
+                score_expr = part if score_expr is None else score_expr + part
+            return _finish(work.with_columns((score_expr * 100).alias("score")))
 
         order_by = s.meta.get("order_by")
         if order_by and order_by != "score" and order_by in work.columns:
             direction = 1 if s.meta.get("descending", True) else -1
-            score_expr = pl.col(order_by).fill_null(0) * direction
+            score_expr = finite_or_null(pl.col(order_by)) * direction
             if has_universe:
                 score_expr = pl.when(pl.col("_score_universe")).then(score_expr).otherwise(0.0)
             return _finish(work.with_columns(score_expr.alias("score")))

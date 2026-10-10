@@ -38,14 +38,22 @@ function pctClass(v: number | null | undefined) {
   return x > 0 ? 'text-red-400' : x < 0 ? 'text-emerald-400' : 'text-secondary'
 }
 
-type Filter = 'all' | 'hits' | 'empty' | 'unrun'
+type RunState = 'hits' | 'empty' | 'failed' | 'unrun'
+type Filter = 'all' | RunState
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'hits', label: '今日有選股' },
   { key: 'empty', label: '今日零命中' },
+  { key: 'failed', label: '計算失敗' },
   { key: 'unrun', label: '未執行' },
 ]
+
+function runState(row: { ran: boolean; failure: string | null; total: number }): RunState {
+  if (row.failure != null) return 'failed'
+  if (!row.ran) return 'unrun'
+  return row.total > 0 ? 'hits' : 'empty'
+}
 
 const MIN_HITS_OPTIONS = [2, 3, 4, 5] as const
 
@@ -80,6 +88,7 @@ export function Strategies() {
   })
 
   const results = cached.data?.results ?? {}
+  const failures = cached.data?.failures
 
   const rows = useMemo(() => {
     const presets = (strategies.data?.presets ?? []) as StrategyDetail[]
@@ -92,12 +101,13 @@ export function Strategies() {
           // same as running and finding nothing; the card only ever showed hits,
           // so both cases were invisible.
           ran: result != null,
+          failure: failures?.[detail.id]?.error ?? null,
           total: result?.total ?? 0,
           picks: (result?.rows ?? []) as any[],
         }
       })
       .sort((a, b) => Number(b.ran) - Number(a.ran) || b.total - a.total)
-  }, [strategies.data, results])
+  }, [strategies.data, results, failures])
 
   // A stock several strategies agree on is the thing a per-strategy list cannot
   // show: each list holds it once, and nothing says the others hold it too.
@@ -148,19 +158,10 @@ export function Strategies() {
     .filter(r => r.ran && effectiveLimit(r.detail) != null && r.total === effectiveLimit(r.detail))
     .map(r => r.detail.name)
 
-  const shown = rows.filter(r =>
-    filter === 'all' ? true
-    : filter === 'hits' ? r.ran && r.total > 0
-    : filter === 'empty' ? r.ran && r.total === 0
-    : !r.ran,
-  )
+  const shown = rows.filter(r => filter === 'all' || runState(r) === filter)
 
-  const counts = {
-    all: rows.length,
-    hits: rows.filter(r => r.ran && r.total > 0).length,
-    empty: rows.filter(r => r.ran && r.total === 0).length,
-    unrun: rows.filter(r => !r.ran).length,
-  }
+  const counts: Record<Filter, number> = { all: rows.length, hits: 0, empty: 0, failed: 0, unrun: 0 }
+  for (const r of rows) counts[runState(r)] += 1
 
   return (
     <div className="mx-auto w-full max-w-5xl px-3 py-3">
@@ -385,7 +386,7 @@ export function Strategies() {
         <p className="py-6 text-center text-xs text-muted">此分類沒有策略。</p>
       ) : (
         <div className="space-y-2">
-          {shown.map(({ detail, ran, total, picks }) => {
+          {shown.map(({ detail, ran, failure, total, picks }) => {
             const open = expanded === detail.id
             return (
               <section key={detail.id} className="rounded-card border border-border bg-surface p-3">
@@ -401,7 +402,9 @@ export function Strategies() {
                     <span className="shrink-0 font-mono text-[10px] text-muted">{detail.id}</span>
                   </div>
                   <span className="shrink-0 font-mono text-[11px]">
-                    {!ran ? (
+                    {failure != null ? (
+                      <span className="text-red-400">計算失敗</span>
+                    ) : !ran ? (
                       <span className="text-amber-400/90">未執行</span>
                     ) : total > 0 ? (
                       <>
@@ -417,7 +420,11 @@ export function Strategies() {
                   </span>
                 </button>
 
-                {!ran && (
+                {failure != null ? (
+                  <p className="mt-1.5 break-words rounded border border-red-900/40 bg-red-950/20 px-2 py-1 text-[11px] leading-5 text-red-200/80">
+                    此策略本次計算失敗：{failure}
+                  </p>
+                ) : !ran && (
                   <p className="mt-1.5 rounded border border-amber-900/40 bg-amber-950/20 px-2 py-1 text-[11px] leading-5 text-amber-200/80">
                     這支策略本輪沒有執行，因此沒有結果可看 — 通常是它需要的欄位在台股沒有資料
                     （例如換手率需要流通股數，台灣官方不公布）。詳情記在後端日誌。

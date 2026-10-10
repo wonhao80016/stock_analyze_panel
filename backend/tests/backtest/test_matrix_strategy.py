@@ -758,7 +758,7 @@ def test_matrix_cache_prunes_by_bytes_and_leaves_no_staging_directory(tmp_path):
     del first
     gc.collect()
     assert second.close[0, 0] == pytest.approx(11.0)
-    assert len(list(cache_root.glob("v8-*"))) == 1
+    assert len(list(cache_root.glob(f"v{matrix_module._DIRECT_MATRIX_LOADER_VERSION}-*"))) == 1
     assert list(cache_root.glob(".*.tmp")) == []
     assert len(list(cache_root.glob(".axes-v1-*.json"))) == 1
 
@@ -811,7 +811,7 @@ def test_managed_source_generation_skips_file_walk_and_invalidates_explicitly(tm
     assert changed.cache_path != first.cache_path
     del first, repeated
     gc.collect()
-    assert len(list(cache_root.glob("v8-*"))) == 1
+    assert len(list(cache_root.glob(f"v{matrix_module._DIRECT_MATRIX_LOADER_VERSION}-*"))) == 1
 
 
 def test_registered_builtin_matrix_strategies_share_one_cache_profile():
@@ -844,7 +844,7 @@ def test_chunked_matrix_score_matches_previous_full_matrix_formula():
                 "low": 10.0,
                 "close": 10.0,
                 "volume": 1_000.0,
-                "feature_a": float(rng.normal()),
+                "feature_a": None if (time_id + asset_id) % 37 == 0 else float(rng.normal()),
                 "feature_b": float((asset_id % 7) - 3),
             })
     market = build_market_data_matrix(
@@ -852,6 +852,7 @@ def test_chunked_matrix_score_matches_previous_full_matrix_formula():
         field_columns={"feature_a", "feature_b"},
     )
     universe = rng.random(market.shape) > 0.2
+    assert (universe & ~np.isfinite(market.field("feature_a"))).any()
     weights = {"feature_a": 0.75, "feature_b": 0.25}
 
     expected = np.zeros(market.shape, dtype=np.float32)
@@ -876,7 +877,9 @@ def test_chunked_matrix_score_matches_previous_full_matrix_formula():
         normalized[equal] = np.float32(0.5)
         expected += normalized * np.float32(weight / total_weight)
     expected *= np.float32(100.0)
-    expected[~universe | ~all_finite] = 0.0
+    # A candidate missing any scoring input cannot be scored (NaN); non-candidates stay 0.
+    expected[~universe] = 0.0
+    expected[universe & ~all_finite] = np.nan
 
     actual = build_matrix_score(
         market,

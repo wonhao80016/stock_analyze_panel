@@ -1,4 +1,13 @@
-"""Fixed matrix-native strategy for controlled factor-rank research."""
+"""Fixed matrix-native strategy for controlled factor-rank research.
+
+The score is a cross-sectional percentile from 0 to 100: each bar ranks the weighted sum of every
+factor's average rank, signed by its direction, which is the rank composite the mining rank IC
+measures. Tied values share their mean rank and a lone scored asset sits at 50, so entry_score 70
+keeps the top 30% whatever the factor distribution. An asset missing any factor value is unscored
+(NaN) on that bar: it neither enters nor takes the factor exit, so a held position exits only
+on the normal rules (stop loss, holding limit) until its factors return.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -6,8 +15,8 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
-    build_matrix_score,
     make_signal_matrix,
+    matrix_feature,
 )
 
 META = {
@@ -115,18 +124,10 @@ class FactorRankResearchMatrixStrategy:
             raise ValueError("exit_score must not exceed entry_score")
 
         universe = np.isfinite(market.close)
-        score = build_matrix_score(
-            market,
-            universe,
-            scoring,
-            "score",
-            True,
-            fallback=np.zeros(market.shape, dtype=np.float32),
-            directions=directions,
-        )
-        entry = universe & (score >= np.float32(entry_score))
-        entry = _limit_top_rank(entry, score, top_rank)
-        exit_ = universe & (score <= np.float32(exit_score))
+        score = _rank_percentile_score(market, universe, scoring, directions)
+        scored = universe & np.isfinite(score)
+        entry = scored & (score >= np.float32(entry_score))
+        exit_ = scored & (score <= np.float32(exit_score))
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),
@@ -137,6 +138,10 @@ class FactorRankResearchMatrixStrategy:
             entry_signal_ids=("signal_factor_rank_entry",),
             exit_signal_ids=("signal_factor_rank_exit",),
         )
+
+    def limit_entries(self, entry: np.ndarray, score: np.ndarray, params: dict) -> np.ndarray:
+        """The ``top_rank`` best-scored entries of each bar among those the basic filter kept."""
+        return _limit_top_rank(entry, score, int(params.get("top_rank", 20)))
 
 
 def _validated_scoring(raw: object) -> dict[str, float]:
@@ -187,6 +192,49 @@ def _bounded_float(value: object, name: str) -> float:
     if not np.isfinite(number) or not 0.0 <= number <= 100.0:
         raise ValueError(f"{name} must be between 0 and 100")
     return number
+
+
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    """1-based ranks of a 1-D array; tied values share their mean rank."""
+    order = np.argsort(values, kind="stable")
+    ordered = values[order]
+    starts = np.flatnonzero(np.concatenate(([True], ordered[1:] != ordered[:-1])))
+    ends = np.append(starts[1:], ordered.size)
+    ranks = np.empty(values.size, dtype=np.float64)
+    ranks[order] = np.repeat((starts + 1 + ends) / 2.0, ends - starts)
+    return ranks
+
+
+def _rank_percentile_score(
+    market: MarketDataMatrix,
+    universe: np.ndarray,
+    scoring: dict[str, float],
+    directions: dict[str, str],
+) -> np.ndarray:
+    """Percentile of the direction-signed, weighted rank composite; NaN where it is not scored."""
+    factors = {name: matrix_feature(market, name) for name in scoring}
+    scored = universe.copy()
+    for values in factors.values():
+        scored &= np.isfinite(values)
+    # Unnormalised like mining's (ranks * directions) @ weights, so equal composites tie alike.
+    weights = {
+        name: -weight if directions.get(name) == "low" else weight
+        for name, weight in scoring.items()
+    }
+    score = np.full(market.shape, np.nan, dtype=np.float32)
+    for time_id in range(market.shape[0]):
+        asset_ids = np.flatnonzero(scored[time_id])
+        count = asset_ids.size
+        if count == 0:
+            continue
+        if count == 1:
+            score[time_id, asset_ids] = 50.0
+            continue
+        composite = np.zeros(count, dtype=np.float64)
+        for name, weight in weights.items():
+            composite += weight * _average_ranks(factors[name][time_id, asset_ids])
+        score[time_id, asset_ids] = (_average_ranks(composite) - 1.0) * 100.0 / (count - 1)
+    return score
 
 
 def _limit_top_rank(

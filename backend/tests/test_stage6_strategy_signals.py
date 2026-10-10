@@ -37,11 +37,13 @@ TREND = "2330.TWSE"
 MOMENTUM = "2454.TWSE"
 PULLBACK = "2412.TWSE"
 REVERSAL = "6669.TWSE"
+RECLAIM = "3008.TWSE"
 UNADJUSTED = {
     TREND: "2331.TWSE",
     MOMENTUM: "2455.TWSE",
     PULLBACK: "2413.TWSE",
     REVERSAL: "6670.TWSE",
+    RECLAIM: "3009.TWSE",
 }
 SESSIONS = 200
 DIVIDEND_AT = SESSIONS - 3
@@ -119,12 +121,33 @@ def _reversal() -> list[dict]:
     return _bars(closes, volumes)
 
 
-ADJUSTED = {TREND: _trend(), MOMENTUM: _momentum(), PULLBACK: _pullback(), REVERSAL: _reversal()}
+def _reclaim() -> list[dict]:
+    """The reversal wave; on the ex-rights session the low undercuts the 60-day low and the
+    close recovers above it on a bullish bar with three times the volume."""
+    closes = [300 + 6 * math.sin(t / 5) + 3 * math.sin(t / 11) for t in range(SESSIONS)]
+    volumes = [2_000_000.0 * (3.0 if t == EX_RIGHTS_AT else 1.0) for t in range(SESSIONS)]
+    prior_low = min(bar["low"] for bar in _bars(closes, volumes)[EX_RIGHTS_AT - 60 : EX_RIGHTS_AT])
+    closes[EX_RIGHTS_AT] = prior_low + 4.0
+    bars = _bars(closes, volumes)
+    bars[EX_RIGHTS_AT].update(
+        open=prior_low + 0.5, low=prior_low - 3.0, high=closes[EX_RIGHTS_AT] + 0.5
+    )
+    return bars
+
+
+ADJUSTED = {
+    TREND: _trend(),
+    MOMENTUM: _momentum(),
+    PULLBACK: _pullback(),
+    REVERSAL: _reversal(),
+    RECLAIM: _reclaim(),
+}
 EVENT = {
     TREND: (DIVIDEND_AT, DIVIDEND_FACTOR),
     MOMENTUM: (DIVIDEND_AT, DIVIDEND_FACTOR),
     PULLBACK: (DIVIDEND_AT, DIVIDEND_FACTOR),
     REVERSAL: (EX_RIGHTS_AT, EX_RIGHTS_FACTOR),
+    RECLAIM: (EX_RIGHTS_AT, EX_RIGHTS_FACTOR),
 }
 
 
@@ -380,17 +403,29 @@ def _support_entry(bars: list[dict], t: int) -> bool:
     c, v = _closes(bars), [b["volume"] for b in bars]
     ma20 = _sma(c, 20, t)
     return (
-        ma20 * 0.98 < c[t] < ma20 * 1.02
+        ma20 <= c[t] < ma20 * 1.02
         and v[t] / (sum(v[t - 5 : t]) / 5) < 0.8
         and c[t] > _sma(c, 60, t)
         and c[t] / c[t - 20] - 1 > 0
     )
 
 
-def _new_low_entry(bars: list[dict], t: int) -> bool:
+def _closing_new_low_entry(bars: list[dict], t: int) -> bool:
+    """The polars mirror's rule over the published signal_n_day_low (close at its 60-day low)."""
     c, v = _closes(bars), [b["volume"] for b in bars]
     return (
         c[t] <= min(c[t - 59 : t + 1])
+        and c[t] > bars[t]["open"]
+        and v[t] / (sum(v[t - 5 : t]) / 5) >= 1.5
+    )
+
+
+def _new_low_entry(bars: list[dict], t: int) -> bool:
+    """n_day_low_reversal: the low breaks the prior 60-day low and the close recovers above it."""
+    c, v = _closes(bars), [b["volume"] for b in bars]
+    prior_low = min(b["low"] for b in bars[t - 60 : t])
+    return (
+        bars[t]["low"] < prior_low < c[t]
         and c[t] > bars[t]["open"]
         and v[t] / (sum(v[t - 5 : t]) / 5) >= 1.5
     )
@@ -417,8 +452,11 @@ def test_each_fixture_fires_the_false_signal_on_raw_prices():
     )
     assert any(_support_entry(adjusted, t) and not _support_entry(raw, t) for t in TREND_DAYS)
     raw, adjusted = RAW[REVERSAL], ADJUSTED[REVERSAL]
-    assert _new_low_entry(raw, EX_RIGHTS_AT) and not _new_low_entry(adjusted, EX_RIGHTS_AT)
+    assert _closing_new_low_entry(raw, EX_RIGHTS_AT)
+    assert not _closing_new_low_entry(adjusted, EX_RIGHTS_AT)
     assert _oversold_entry(raw, BOUNCE_AT) and not _oversold_entry(adjusted, BOUNCE_AT)
+    assert _new_low_entry(ADJUSTED[RECLAIM], EX_RIGHTS_AT)
+    assert not _new_low_entry(RAW[RECLAIM], EX_RIGHTS_AT)
 
 
 @pytest.mark.parametrize("strategy_id", ["bullish_alignment", "stage6_trend"])
@@ -478,11 +516,24 @@ def test_published_momentum_stays_positive_across_the_dividend(world):
     )
 
 
-@pytest.mark.parametrize("strategy_id", ["n_day_low_reversal", "stage6_new_low"])
-def test_reversal_strategies_see_no_60_day_low_on_the_ex_rights_session(world, strategy_id):
+@pytest.mark.parametrize(
+    ("strategy_id", "entry"),
+    [("n_day_low_reversal", _new_low_entry), ("stage6_new_low", _closing_new_low_entry)],
+    ids=["n_day_low_reversal", "stage6_new_low"],
+)
+def test_reversal_strategies_see_no_60_day_low_on_the_ex_rights_session(world, strategy_id, entry):
+    """Each path follows its own rule on the adjusted series; the unadjusted twin follows raw prices."""
     result = _run(world, strategy_id, DAYS[EX_RIGHTS_AT])
     assert REVERSAL not in _picked(result)
-    assert UNADJUSTED[REVERSAL] in _picked(result)
+    for symbol, bars in ((REVERSAL, ADJUSTED[REVERSAL]), (UNADJUSTED[REVERSAL], RAW[REVERSAL])):
+        assert (symbol in _picked(result)) is entry(bars, EX_RIGHTS_AT), symbol
+
+
+def test_n_day_low_reversal_takes_the_adjusted_reclaim_and_not_the_raw_twin(world):
+    """On raw prices the ex-rights session closes far below every earlier low, so it never recovers."""
+    result = _run(world, "n_day_low_reversal", DAYS[EX_RIGHTS_AT])
+    assert RECLAIM in _picked(result)
+    assert UNADJUSTED[RECLAIM] not in _picked(result)
 
 
 @pytest.mark.parametrize("strategy_id", ["oversold_reversal", "stage6_oversold"])

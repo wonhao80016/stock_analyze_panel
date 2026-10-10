@@ -8,9 +8,9 @@ from app.backtest.matrix import (
     SignalMatrix,
     make_signal_matrix,
     matrix_feature,
-    rolling_max,
-    rolling_min,
+    valid_rolling_max,
     valid_rolling_mean,
+    valid_rolling_min,
 )
 from app.backtest.matrix import (
     valid_shift as shift,
@@ -55,7 +55,7 @@ META = {
             "id": "volume_contraction_max",
             "label": "整理期量縮比上限",
             "type": "float",
-            "default": 1.05,
+            "default": 0.9,
             "min": 0.50,
             "max": 1.50,
             "step": 0.05,
@@ -71,6 +71,7 @@ META = {
         },
     ],
     "scoring": {"vol_ratio_5d": 0.4, "change_pct": 0.3, "distance_from_low_60d": 0.3},
+    "scoring_directions": {"distance_from_low_60d": "low"},
     "order_by": "score",
     "descending": True,
     "limit": 500,
@@ -88,7 +89,9 @@ class ConsolidationBreakoutMatrixStrategy:
         return frozenset({"open", "high", "low", "close", "volume"})
 
     def required_warmup_bars(self, params: dict) -> int:
-        return 60 + 2 * int(params.get("base_window", 20))
+        # Own bars read (MA60 five bars back, or two stacked base windows) plus 40 that absorb
+        # sessions the symbol missed inside the loaded window of shared sessions.
+        return max(65, 2 * int(params.get("base_window", 20)) + 1) + 40
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         base_window = int(params.get("base_window", 20))
@@ -99,16 +102,17 @@ class ConsolidationBreakoutMatrixStrategy:
             above_low <= float(params.get("bottom_zone_max", 0.45))
         )
 
+        close_valid = np.isfinite(market.close)
         # Range is measured excluding today so a breakout bar cannot widen its own base.
-        base_high = shift(rolling_max(market.high, base_window), 1)
-        base_low = shift(rolling_min(market.low, base_window), 1)
+        base_high = shift(valid_rolling_max(market.high, close_valid, base_window), 1)
+        base_low = shift(valid_rolling_min(market.low, close_valid, base_window), 1)
         compact = (base_high / base_low - 1.0) <= float(params.get("range_max", 0.30))
 
         volume_valid = np.isfinite(market.close) & np.isfinite(market.volume)
         base_volume = shift(valid_rolling_mean(market.volume, volume_valid, base_window), 1)
         prior_volume = shift(base_volume, base_window)
         dried_up = base_volume <= prior_volume * float(
-            params.get("volume_contraction_max", 1.05)
+            params.get("volume_contraction_max", 0.9)
         )
 
         ma20 = matrix_feature(market, "ma20")

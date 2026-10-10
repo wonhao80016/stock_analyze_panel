@@ -61,7 +61,7 @@ class _CapturingStrategyEngine:
 
     def run_all(
         self, context, *, params_map=None, overrides_map=None, strategy_ids=None,
-        skip_failed=False,
+        skip_failed=False, failures=None,
     ):
         self.calls.append({
             "kind": "run_all",

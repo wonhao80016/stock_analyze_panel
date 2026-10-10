@@ -183,6 +183,29 @@ export const SIGNAL_LABELS: Record<string, string> = BUILTIN_SIGNAL_DEFINITIONS.
 /** 內置訊號 ID 列表 */
 export const SIGNAL_OPTIONS = BUILTIN_SIGNAL_DEFINITIONS.map(sig => sig.id)
 
+/** Ids a builtin strategy emits for its own condition. No enriched column carries them, so they
+ * stay out of SIGNAL_OPTIONS. Keep in step with FIELD_LABELS in backend/app/strategy/field_labels.py. */
+const STRATEGY_SIGNAL_LABELS: Record<string, string> = {
+  signal_bullish_alignment_entry: '均線多頭排列',
+  signal_pullback_ma20_bounce_entry: '回踩MA20反彈',
+  signal_pullback_to_support_entry: '縮量回踩MA20',
+  signal_boll_squeeze_breakout: '布林收斂突破',
+  signal_boll_mid_break: '收盤低於布林中軌',
+  signal_capitulation_reversal: '爆量止跌反轉',
+  signal_close_20d_low: '收盤創20日新低',
+  signal_consolidation_breakout: '整理區間突破',
+  signal_ma20_break: '收盤低於MA20',
+  signal_factor_rank_entry: '因子排名進場',
+  signal_factor_rank_exit: '因子排名出場',
+  signal_lorentzian_bullish: 'Lorentzian看多',
+  signal_lorentzian_exit: 'Lorentzian出場',
+  signal_pullback_resume: '回檔再起漲',
+  signal_swing_structure_bullish: '波段結構轉多',
+  signal_swing_structure_exit: '波段結構轉弱',
+  signal_n_day_low_reclaim: '跌破60日低點後收回',
+  signal_low_volatility_leader_entry: '低波動多頭',
+}
+
 /** 常用技術指標/字段 → 中文 (閾值條件展示用, 與後端 ENRICHED_COLUMNS 對齊) */
 const FIELD_LABELS: Record<string, string> = {
   close: '收盤價', open: '開盤價', high: '最高價', low: '最低價',
@@ -196,21 +219,17 @@ const FIELD_LABELS: Record<string, string> = {
   rsi_6: 'RSI6', rsi_14: 'RSI14', rsi_24: 'RSI24',
   vol_ratio_5d: '5日量比', vol_ratio_20d: '20日量比',
   vol_ma5: '5日均量', vol_ma10: '10日均量',
-  high_60d: '60日最高', low_60d: '60日最低',
+  high_60d: '60日最高', low_60d: '60日最低', distance_from_low_60d: '距60日低點',
   momentum_5d: '5日動量', momentum_20d: '20日動量', momentum_60d: '60日動量',
   atr_14: 'ATR14', annual_vol_20d: '20日年化波動',
   consecutive_limit_ups: '連續漲停', consecutive_limit_downs: '連續跌停',
   distance_to_upper_limit: '距漲停距離', distance_to_lower_limit: '距跌停距離',
 }
 
-/**
- * 訊號/字段 ID → 中文顯示名。
- * 內置訊號查 SIGNAL_LABELS; csg_ 前綴查傳入的自定義訊號名稱映射;
- * 技術指標查 FIELD_LABELS; 都找不到則原樣返回。
- */
+/** Display name for a signal or field id; customNames maps csg_ ids, unknown ids come back unchanged. */
 export function cnSignal(name: string, customNames?: Record<string, string>): string {
   if (customNames && name in customNames) return customNames[name]
-  return SIGNAL_LABELS[name] ?? FIELD_LABELS[name] ?? name
+  return SIGNAL_LABELS[name] ?? STRATEGY_SIGNAL_LABELS[name] ?? FIELD_LABELS[name] ?? name
 }
 
 export interface AbnormalSignalDefinition {

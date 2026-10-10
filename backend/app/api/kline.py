@@ -46,6 +46,7 @@ from app.indicators.pipeline import (
 from app.market_time import cn_now, cn_today
 from app.price_limits import is_risk_warning_name, numpy_limit_price, price_limit_pct
 from app.db_safe import is_valid_ext_ident
+from app.repository import indicator_warmup_days
 from app.services import kline_sync
 from app.volume_units import TAIWAN_SUFFIXES
 
@@ -442,7 +443,7 @@ def _taiwan_reference_prices(
     return found
 
 
-_TAIWAN_INDICATOR_WARMUP_DAYS = 150
+_TAIWAN_INDICATOR_WARMUP_DAYS = indicator_warmup_days()
 # Longer than any Taiwan market closure, so a wider gap means missing trading days.
 _MAX_MARKET_CLOSURE_DAYS = 31
 

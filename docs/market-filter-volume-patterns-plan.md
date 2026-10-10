@@ -1,6 +1,6 @@
 # 原則調整、大盤濾鏡分級與量價型態：實作規劃
 
-- 日期：2026-10-02。第五版：依使用者當日的新決定改寫，並修正第三、四輪驗收的意見。狀態：已實作（2026-10-03，分支 `feat/market-filter-volume-patterns`，基底 `ba2e007`），第 7 節 11 題全部採 A；實作偏差見文末「實作結果」。本文件的 `路徑:行號` 是實作前的位置，請以程式碼為準。
+- 日期：2026-10-02。第五版：依使用者當日的新決定改寫，並修正第三、四輪驗收的意見。狀態：已實作（2026-10-03，分支 `feat/market-filter-volume-patterns`，基底 `ba2e007`），第 7 節 11 題全部採 A；實作偏差見文末「實作結果」。2026-10-10 第 4 階段改了分級規則，見文末「第 4 階段後的變更」。本文件的 `路徑:行號` 是實作前的位置，請以程式碼為準。
 - 需求原話：
   - #2「推薦加上大盤濾鏡：加權指數收盤跌破 20 日均線時，所有 BUY 降為 WATCH。」
   - #3「6 種量價型態」（定義見 4.4）。
@@ -68,13 +68,13 @@
   - 盤中監控引擎的結果會覆蓋同名策略（`:309-330`），這些結果的 `as_of` 是當天（`backend/app/strategy/monitor.py:1103`）；磁碟快取不存在時，頂層 `as_of` 為 None（`:313-314`）。
 - 評分方式：
   - 20 支會執行的內建策略都有非空的 META `scoring`（例：`backend/app/strategy/builtin/boll_breakout.py:32`）。research_only 的 `factor_rank_research` 是 `{}`（`factor_rank_research.py:52`）。全部 `limit` 都是 500。
-  - 任一因子不是有限值時，分數直接設為 0（`backend/app/backtest/matrix.py:3741`）；所有因子都落在當日最小值時，分數也可能正常地算出 0。
+  - 任一因子不是有限值時，分數直接設為 0（`backend/app/backtest/matrix.py:3741`）；所有因子都落在當日最小值時，分數也可能正常地算出 0。第 4 階段起，缺任一評分輸入的候選分數改為 null，見文末。
   - `build_matrix_score` 只在當日入選者（`entry & basic_mask`，`backend/app/backtest/matrix.py:3556-3565`）之間，對每個因子做 min-max 正規化，再依權重加總後乘以 100（`:3686-3741`）。所以分數範圍是 0–100，衡量的是「同策略當日入選者之間」的相對位置。
   - 只有 1 檔入選時，分數固定是 50（`:3734-3735`；實查 `n_day_low_reversal` 1 檔，分數 50.0）。
   - 沒有 `scoring` 的自訂策略，改用 `order_by` 的原值排序（`:3744-3756`），尺度各不相同。
 - 排序：引擎依 score 排序，方向取 `descending`，再截到 `limit`（`backend/app/strategy/engine.py:1252-1264`）。
 - 快照：`rank` 是快取各列的順序，從 1 開始（`backend/app/services/strategy_pick_history.py:417-423`），schema 中也存了 `score`（`:41-48`）。
-- 實查 2026-10-02 的快取：20 支策略，每支入選 0–342 檔；有 0 分列的策略有 3 支：`bullish_alignment` 67/342、`low_volatility_leader` 82/160、`pullback_to_support` 7/35；三支的前 5 名都沒有 0 分。
+- 實查 2026-10-02 的快取：20 支策略，每支入選 0–342 檔；有 0 分列的策略有 3 支：`bullish_alignment` 67/342、`low_volatility_leader` 82/160、`pullback_to_support` 7/35；三支的前 5 名都沒有 0 分。這些 0 分來自換手率缺值，第 4 階段已把這三支的 `turnover_rate` 評分改成 `vol_ratio_5d`。
 - 前端顯示：看板卡標題「策略當日推薦」（`frontend/src/pages/Dashboard.tsx:449-453`），每支策略顯示前 3 檔（`:417,510`）；策略庫清單分頁的選股列表在 `frontend/src/pages/Strategies.tsx:423`，「選股基準日」在 `:169-172`。
 - 既有的「買進」樣式：`frontend/src/components/AlertToast.tsx:94`（`bg-danger/15 text-danger`），用於策略監控的 `buy_signal` 推播；後端文字是「買入訊號」（`backend/app/strategy/monitor.py:1176`）。這條推播不隨大盤降級，不在本次範圍（O2-9）。
 
@@ -115,18 +115,18 @@
 
 - 推薦 A：排序本來就由各策略的 `scoring` 決定，取前 N 名等於「評分前段」，而且不受尺度影響。
 - 同分時沿用引擎排序後的順序，與快照的 `rank` 一致。
-- 推薦規則是「前 5 名且 `score > 0` 才算買進」（Q11-A）。理由：0 分多半代表有因子缺值；同為 0 分時，順序只取決於代號。這條規則會連帶排除少數「每個因子都墊底」的合法 0 分，屬於可接受的代價。0 分但在前 5 名的列記為 `watch`，`grade_reason` 為 `"zero_score"`。目前三支有 0 分的策略，前 5 名都沒有 0 分，所以不受影響。
+- 推薦規則是「前 5 名且 `score > 0` 才算買進」（Q11-A）。理由：0 分多半代表有因子缺值；同為 0 分時，順序只取決於代號。這條規則會連帶排除少數「每個因子都墊底」的合法 0 分，屬於可接受的代價。0 分但在前 5 名的列記為 `watch`，`grade_reason` 為 `"zero_score"`。目前三支有 0 分的策略，前 5 名都沒有 0 分，所以不受影響。（2026-10-09 起由第 4 階段的 D11 取代：0 分是合法分數，照排名分級；只有分數為 null 才判觀察，`grade_reason` 為 `"score_unavailable"`。）
 - `score > 0` 只用於「有評分設定」的策略。
   - 判斷依據與引擎一致：用 `effective_scoring(meta.scoring, overrides)`（`backend/app/strategy/scoring.py:68-79`，引擎在 `engine.py:877,1144` 使用）解析出權重後，套用 `matrix.py:3686-3688` 的條件，也就是存在非 0 權重、而且權重總和大於 0。
   - 沒有評分設定的策略，分數可能是排序欄位的原值，可能全為負（`matrix.py:3744-3758`）；polars 路徑甚至沒有 `score` 欄位（`engine.py:1503-1504`）。自訂策略的 scoring 預設為 `{}`（`engine.py:435`；`ai_generator.py:254` 也允許空值）。這類策略只依排名分級。
-  - `score` 缺欄位或為 null 時，不得拋例外：有評分設定的策略記 `zero_score`，其他策略忽略分數。
+  - `score` 缺欄位或為 null 時，不得拋例外：有評分設定的策略判觀察（實作時記 `zero_score`，第 4 階段起記 `score_unavailable`），其他策略忽略分數。
 
 ### 3.2 分級規則與欄位
 
 - 分級產生在後端：新增純函式模組 `backend/app/services/pick_grades.py`，提供 `assign_grades(results, market_state, top_n=5)`。`get_cached` 在完成盤中覆蓋與名稱附加之後才呼叫它，API 層保持只做轉接。
   - 這個函式回傳新的 results，每一列都先複製（`{**row, ...}`）再寫入。原因是盤中結果的列與監控引擎共用同一個物件（淺層合併，`backend/app/api/screener.py:321-322`）；直接改會違反 `CONTRIBUTING.md:183`。
   - 看板與策略庫都只讀 `/cached`（`Dashboard.tsx:421-424`、`Strategies.tsx:75-77`），在一處計算，兩邊口徑一致。
-- 每一列加上：`grade`：`"buy"` 或 `"watch"`；`grade_reason`：買進時為 `null`；排名在前 N 名之外為 `"outside_top_n"`；分數為 0 時為 `"zero_score"`；因大盤而降級時為 `"market_below_ma20"`。
+- 每一列加上：`grade`：`"buy"` 或 `"watch"`；`grade_reason`：買進時為 `null`；排名在前 N 名之外為 `"outside_top_n"`；有評分設定的策略分數無法計算（null）時為 `"score_unavailable"`（第 4 階段之前是分數為 0 時記 `"zero_score"`）；因大盤而降級時為 `"market_below_ma20"`。第 4 階段另加 `limit_up_locked`（布林值，見文末）。
 - 頂層加上：
   - `market_state`（見 3.3）。
   - `grading: {top_n, market_filter}`。`market_filter` 只有三個值，畫面文字一對一，不可混用：
@@ -164,7 +164,7 @@
 |---|---|---|
 | M2-1 | `market_state` 模組：只讀本機資料，判定是否低於 20 日均線 | #2「加權指數收盤跌破 20 日均線時」 |
 | M2-2 | 排程與手動更新都無條件補抓加權指數日 K | 同上（需要當日收盤） |
-| M2-3 | `pick_grades`：前 N 名為買進，其餘為觀察；有評分設定的策略另外要求 `score > 0`；跌破時把買進全部降為觀察 | D2；#2「所有 BUY 降為 WATCH」 |
+| M2-3 | `pick_grades`：前 N 名為買進，其餘為觀察；有評分設定的策略另外要求 `score > 0`（第 4 階段改為：分數無法計算時判觀察）；跌破時把買進全部降為觀察 | D2；#2「所有 BUY 降為 WATCH」 |
 | M2-4 | `/cached` 回傳 `grade`、`grade_reason`、`market_state`、`grading` | 同上 |
 | M2-5 | 看板卡與策略清單的徽章、大盤狀態列與「僅供參考」提示 | D2、D3 |
 
@@ -262,7 +262,7 @@ $d="$env:TEMP\mfvp-$(Get-Random)"; New-Item -ItemType Directory -Force "$d\taiwa
    - 新增案例：補抓拋錯時排程仍會重算；`dates_fetched=0` 時仍會補抓；`run_update` 拋例外時也會補抓；`refresh_current_month=True` 會繞過 300 秒快取期。
    - `<TESTS>`= `tests/test_update_latest_refreshes_caches.py tests/test_taiwan_bootstrap.py tests/test_taiwan_index_daily.py tests/test_taiwan_schedule_split.py`
 5. **M2-3、M2-4 分級與 API**：
-   - 新增 `backend/app/services/pick_grades.py` 與 `tests/test_pick_grades.py`。案例：前 N 名的邊界；入選少於 N 檔；同分；前 5 名內的 0 分列改判觀察；無評分設定的策略（負分、或整個沒有 `score` 欄位、或值為 null）前 5 名仍為買進，而且 `/cached` 回 200；`market_filter` 三種值：跌破時全部降級、`passed`、`unavailable` 時不降級；盤中覆蓋；`as_of` 為 None；呼叫後輸入的列不被修改。
+   - 新增 `backend/app/services/pick_grades.py` 與 `tests/test_pick_grades.py`。案例：前 N 名的邊界；入選少於 N 檔；同分；前 5 名內的 0 分列改判觀察（第 4 階段改為 null 分數判觀察、0 分照排名）；無評分設定的策略（負分、或整個沒有 `score` 欄位、或值為 null）前 5 名仍為買進，而且 `/cached` 回 200；`market_filter` 三種值：跌破時全部降級、`passed`、`unavailable` 時不降級；盤中覆蓋；`as_of` 為 None；呼叫後輸入的列不被修改。
    - `get_cached` 在回傳前呼叫 `assign_grades`；空快取分支（`backend/app/api/screener.py:405-407`）回傳 `market_state: null` 與 `grading`。
    - 擴充 `tests/test_screener_cache_api.py`：涵蓋有值、模組拋錯時仍回 200、空快取。
    - `<TESTS>`= `tests/test_pick_grades.py tests/test_screener_cache_api.py tests/test_screener_cached_names.py tests/test_taiwan_market_state.py`
@@ -322,7 +322,7 @@ $d="$env:TEMP\mfvp-$(Get-Random)"; New-Item -ItemType Directory -Force "$d\taiwa
 8. 低量的成交日門檻？A 20 日中至少 15 日（推薦）；B 20 日全部；C 不設門檻。
 9. 量價型態多選時的語意？A「且」（推薦）；B「或」。
 10. 放量滯漲是否計入平盤？A 計入，即 `0 <= change_pct < 0.01`（推薦）；B 不計入，即 `0 < change_pct < 0.01`，同外部；C 改以前收計算，並排除平盤。
-11. 前 5 名中分數為 0 的列怎麼處理？A 有評分設定的策略只有 `score > 0` 才算買進，0 分記為觀察（`zero_score`）；沒有評分設定的策略只看排名（推薦）；B 不特別處理，只看排名；C 往後遞補，取前 5 個分數大於 0 的列。
+11. 前 5 名中分數為 0 的列怎麼處理？A 有評分設定的策略只有 `score > 0` 才算買進，0 分記為觀察（`zero_score`）；沒有評分設定的策略只看排名（推薦）；B 不特別處理，只看排名；C 往後遞補，取前 5 個分數大於 0 的列。（2026-10-09 第 4 階段改採 D11：0 分合法，只有 null 判觀察，Q11-A 已被取代。）
 
 ## 8. 相依與順序
 
@@ -332,9 +332,23 @@ $d="$env:TEMP\mfvp-$(Get-Random)"; New-Item -ItemType Directory -Force "$d\taiwa
 ## 實作結果（2026-10-03）
 
 - 新增共用徽章元件 `frontend/src/components/PickGrade.tsx`（看板與策略庫共用），型態定義放在 `frontend/src/lib/signals.ts`。
-- 分級依 `/cached` 列序；有評分設定的判斷沿用 `effective_scoring` 與 matrix 的權重條件；複合策略、引擎查不到的策略只看排名。評分設定在請求當下讀取，可能與快取計算時不同。
+- 分級依 `/cached` 列序；有評分設定的判斷沿用 `effective_scoring` 與 matrix 的權重條件；複合策略、引擎查不到的策略只看排名（第 4 階段起，複合策略只要有子策略有評分設定，就當成有評分設定，見下一節）。評分設定在請求當下讀取，可能與快取計算時不同。
 - 「有成交」定義為有資料列、OHLC 皆非 null 且量 > 0；`_enrich_price_limits` 改為 `infer_schema_length=None`，避免稀疏的布林欄推斷失敗。
 - 尚未處理的建議：自訂 polars 策略若評分欄位全無效，前 5 名會全為觀察；補抓指數為同步執行、無總時限（R9）。
+
+## 第 4 階段後的變更（2026-10-10）
+
+第 4 階段（策略與選股）改了分級規則與每列的欄位，以 `backend/app/services/pick_grades.py` 為準：
+
+- 分數：有評分設定的策略，候選缺任一評分輸入時分數為 null，候選保留並排在最後。0 分是合法分數（每個因子都在當日最低），照排名分級。這取代了 Q11-A。
+- `grade_reason`：`zero_score` 改為 `score_unavailable`，只在分數為 null 時出現，不論排名都判觀察。判定順序是 `score_unavailable`、`outside_top_n`、`market_below_ma20`。畫面徽章顯示「觀察・資料不足」，滑鼠提示列出缺值的評分欄位（「評分欄位缺值：…」，複合策略逐一列出子策略與欄位）；沒有這項資訊的舊快取列顯示「評分資料不足（分數 —）」。
+- 複合策略：只要有任一子策略有評分設定（保存的子策略設定優先於 META），就當成有評分設定。複合分數由能評分的子策略依權重合併，只有沒有任何子策略能評分的候選，分數才是 null。只有引擎查不到的策略只看排名。
+- 「漲停鎖死」：每列新增布林欄位 `limit_up_locked`，取自該列的 `signal_limit_up`（收盤後是已發佈的旗標，盤中是即時旗標）。它和分級分開計算，不改變 `grade`、`grade_reason` 或排名；前端在徽章旁加「漲停鎖死」標籤，滑鼠提示「價格已在漲停價，買單難以成交」。
+- 實測（2026-10-10 的前後對照，21 支策略、2026-09-09 ～ 10-08 共 20 個交易日）：
+  - 判觀察的 `zero_score` 列 293 筆，改版後 `score_unavailable` 13 筆（都是上市 30–60 個交易日、還沒有 `momentum_60d` 的 `low_volatility_leader` 選股）。
+  - 買進從 1,031 列變成 1,360 列，主要來自兩處：`bullish_alignment`、`low_volatility_leader`、`pullback_to_support` 的前 5 名不再因 0 分判觀察；`factor_rank_research` 改成每天選出 20 檔。
+  - 1,677 列帶「漲停鎖死」，其中 607 列在前 5 名（前 5 名共 1,588 列）。
+- 加權指數長區間 K 線（與 R9 同源）：K 線暖機改為 539 天後，365 天的加權指數圖會在請求中同步回補本機缺少的較早月份（每個月份 20 秒逾時，失敗的月份 600 秒後才重試）。網路連不上時，最壞約每 10 分鐘卡住約 80 秒。
 
 ## 附錄：否定結論用過的搜尋（唯讀）
 

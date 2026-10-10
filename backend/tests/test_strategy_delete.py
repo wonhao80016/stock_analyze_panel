@@ -53,9 +53,9 @@ def test_delete_strategy_is_not_blocked_by_another_broken_file(monkeypatch, tmp_
     # 模拟用户目录中另有一份损坏策略。旧删除逻辑的全量 reload 会因此回滚并返回 500。
     broken_path = custom_dir / "broken.py"
     broken_path.write_text("this is not valid python", encoding="utf-8")
-    with pytest.raises(ValueError, match="strategy reload failed"):
-        engine.reload()
+    engine.reload()
     assert engine.has("target")
+    assert [item["file"] for item in engine.load_errors()] == [str(broken_path)]
 
     override_path = tmp_path / "user_data" / "strategy_overrides" / "target.json"
     override_path.parent.mkdir(parents=True)

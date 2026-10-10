@@ -78,14 +78,17 @@ def no_indicators(monkeypatch):
 
 
 def _scan_returns(monkeypatch, frame: pl.DataFrame) -> None:
-    monkeypatch.setattr(screener, "scan_enriched_parquet", lambda *a, **k: frame.lazy())
+    def read(data_dir, dirname, start, end, **kwargs):
+        return frame.filter(pl.col("date").is_between(start or date.min, end))
+
+    monkeypatch.setattr(screener, "read_enriched_window", read)
 
 
 def _scan_raises(monkeypatch) -> None:
     def boom(*args, **kwargs):
         raise OSError("disk gone")
 
-    monkeypatch.setattr(screener, "scan_enriched_parquet", boom)
+    monkeypatch.setattr(screener, "read_enriched_window", boom)
 
 
 def _status(svc, *, bars: int = 1, **kwargs) -> dict:
@@ -303,7 +306,8 @@ def builtin_engine():
 
 
 def _stub_run_all(engine, monkeypatch, seen: dict):
-    def run_all(context, *, params_map=None, overrides_map=None, strategy_ids=None, skip_failed=False):
+    def run_all(context, *, params_map=None, overrides_map=None, strategy_ids=None, skip_failed=False,
+                failures=None):
         seen["ids"] = list(strategy_ids)
         seen["context"] = context
         seen["overrides_map"] = overrides_map

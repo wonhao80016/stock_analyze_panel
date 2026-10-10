@@ -329,6 +329,12 @@ def _cached_with_realtime(request: Request) -> dict:
             results.update(realtime_results)
             cached = dict(cached)
             cached["results"] = results
+            if cached.get("failures"):
+                cached["failures"] = {
+                    sid: failure
+                    for sid, failure in cached["failures"].items()
+                    if sid not in realtime_results
+                }
             # 有实时数据时, 以最新时间戳为准
             import time as _time
             cached["updated_at"] = int(_time.time() * 1000)
@@ -703,6 +709,9 @@ class UnknownStrategiesError(LookupError):
     """Raised when explicitly requested strategy ids are absent or research-only."""
 
 
+_FAILURE_MESSAGE_LIMIT = 500
+
+
 def compute_and_cache_all(
     repo,
     engine,
@@ -775,13 +784,18 @@ def compute_and_cache_all(
     # One strategy that cannot run must not cost the page every other one: the
     # post-close refresh writes this cache unattended, so a single raise would
     # freeze the card on whatever day it last succeeded.
+    skipped: dict[str, str] = {}
     engine_results = engine.run_all(
         context,
         params_map=params_map,
         overrides_map=overrides_map,
         strategy_ids=all_ids,
         skip_failed=True,
+        failures=skipped,
     )
+    failures = {
+        sid: {"error": message[:_FAILURE_MESSAGE_LIMIT]} for sid, message in skipped.items()
+    }
 
     results: dict[str, dict] = {}
     for sid, result in engine_results.items():
@@ -795,9 +809,9 @@ def compute_and_cache_all(
     elapsed = (time.perf_counter() - t_total) * 1000
     logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
 
-    if results:
+    if results or failures:
         try:
-            strategy_cache.write_cache(data_dir, str(as_of), results)
+            strategy_cache.write_cache(data_dir, str(as_of), results, failures)
         except Exception:
             logger.exception("write strategy cache failed for %s", as_of)
 

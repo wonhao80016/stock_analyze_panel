@@ -1,10 +1,11 @@
-"""RSI is null until a symbol has accumulated n price changes; later values are unchanged."""
+"""RSI is null until a symbol has accumulated n price changes, then follows Wilder's definition."""
 from __future__ import annotations
 
 import math
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 
 from app.indicators.pipeline import compute_indicators
 
@@ -20,23 +21,23 @@ def _bars(symbol: str, n: int, phase: float = 0.0) -> pl.DataFrame:
     })
 
 
-def _reference_rsi(closes: list[float], n: int) -> list[float]:
-    """Wilder RSI as the pipeline computed it before warm-up masking."""
-    frame = pl.DataFrame({"close": closes}).with_columns(
-        pl.col("close").diff().alias("_d"),
-    ).with_columns(
-        pl.when(pl.col("_d") > 0).then(pl.col("_d")).otherwise(0.0).alias("_g"),
-        pl.when(pl.col("_d") < 0).then(-pl.col("_d")).otherwise(0.0).alias("_l"),
-    ).with_columns(
-        pl.col("_g").ewm_mean(alpha=1.0 / n, adjust=False).alias("_ag"),
-        pl.col("_l").ewm_mean(alpha=1.0 / n, adjust=False).alias("_al"),
-    )
-    return frame.select(
-        (100 - 100 / (1 + pl.col("_ag") / pl.when(pl.col("_al") == 0).then(1e-12).otherwise(pl.col("_al")))).alias("r")
-    )["r"].to_list()
+def _reference_rsi(closes: list[float], n: int) -> list[float | None]:
+    """Wilder RSI: the mean of the first n gains and losses, then (prev * (n - 1) + change) / n."""
+    out: list[float | None] = [None] * len(closes)
+    changes = [closes[t] - closes[t - 1] for t in range(1, len(closes))]
+    if len(changes) < n:
+        return out
+    gain = sum(max(c, 0.0) for c in changes[:n]) / n
+    loss = sum(max(-c, 0.0) for c in changes[:n]) / n
+    for t in range(n, len(closes)):
+        if t > n:
+            gain = (gain * (n - 1) + max(changes[t - 1], 0.0)) / n
+            loss = (loss * (n - 1) + max(-changes[t - 1], 0.0)) / n
+        out[t] = 100 - 100 / (1 + gain / (loss if loss != 0 else 1e-12))
+    return out
 
 
-def test_rsi_is_null_until_n_changes_then_bit_identical_to_the_unmasked_formula():
+def test_rsi_is_null_until_n_changes_then_follows_wilders_definition():
     long_bars = _bars("LONG.TWSE", 60)
     out = compute_indicators(long_bars, needed={"rsi_6", "rsi_14", "rsi_24"})
     closes = long_bars["close"].to_list()
@@ -44,7 +45,7 @@ def test_rsi_is_null_until_n_changes_then_bit_identical_to_the_unmasked_formula(
         got = out[f"rsi_{n}"].to_list()
         want = _reference_rsi(closes, n)
         assert got[:n] == [None] * n
-        assert got[n:] == want[n:]
+        assert got[n:] == pytest.approx(want[n:], rel=1e-12, abs=1e-9)
 
 
 def test_a_newly_listed_symbol_never_shows_an_extreme_rsi():
@@ -54,7 +55,9 @@ def test_a_newly_listed_symbol_never_shows_an_extreme_rsi():
     assert new["rsi_14"].null_count() == 10
     assert new["rsi_24"].null_count() == 10
     assert new["rsi_6"].null_count() == 6
-    assert new["rsi_6"].drop_nulls().to_list() == _reference_rsi(new["close"].to_list(), 6)[6:]
+    assert new["rsi_6"].drop_nulls().to_list() == pytest.approx(
+        _reference_rsi(new["close"].to_list(), 6)[6:], rel=1e-12, abs=1e-9
+    )
 
 
 def test_masking_is_per_symbol_and_leaves_other_symbols_unchanged():

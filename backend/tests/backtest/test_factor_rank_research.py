@@ -128,20 +128,19 @@ def test_strategy_uses_controlled_scoring_directions_thresholds_and_top_rank():
     strategy = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
     market = _market()
 
-    signals = strategy.compute_signals(
-        market,
-        {
-            "scoring": {"amount": 1.0, "turnover_rate": 1.0},
-            "directions": {"amount": "high", "turnover_rate": "low"},
-            "entry_score": 60.0,
-            "exit_score": 25.0,
-            "top_rank": 1,
-        },
-    )
+    params = {
+        "scoring": {"amount": 1.0, "turnover_rate": 1.0},
+        "directions": {"amount": "high", "turnover_rate": "low"},
+        "entry_score": 60.0,
+        "exit_score": 25.0,
+        "top_rank": 1,
+    }
+    signals = strategy.compute_signals(market, params)
+    entry = strategy.limit_entries(signals.entry.astype(bool), signals.score, params)
 
     validate_signal_matrix(signals, market.shape)
-    assert signals.entry.sum(axis=1).tolist() == [1, 1]
-    assert signals.entry.tolist() == [[0, 0, 0, 1], [1, 0, 0, 0]]
+    assert entry.sum(axis=1).tolist() == [1, 1]
+    assert entry.astype(np.uint8).tolist() == [[0, 0, 0, 1], [1, 0, 0, 0]]
     assert signals.exit.tolist() == [[1, 0, 0, 0], [0, 0, 0, 1]]
     assert signals.entry_signal_ids == ("signal_factor_rank_entry",)
     assert signals.exit_signal_ids == ("signal_factor_rank_exit",)

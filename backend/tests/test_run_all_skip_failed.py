@@ -37,7 +37,7 @@ def _context() -> StrategyDataContext:
 
 
 def _run(engine, *, skip_failed: bool, failing: set[str]):
-    def fake_run(sid, _ctx, params=None, overrides=None):
+    def fake_run(sid, _ctx, pool=None, params=None, overrides=None):
         if sid in failing:
             raise ValueError(f"unsupported matrix feature: turnover_rate ({sid})")
         return MagicMock(total=1)

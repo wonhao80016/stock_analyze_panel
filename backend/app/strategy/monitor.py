@@ -22,57 +22,13 @@ from typing import Any, Callable
 import polars as pl
 
 from app.market_time import cn_today
+from app.repository import HISTORY_WARMUP_SESSIONS
 from app.strategy import config as _strategy_config
 from app.strategy.custom_signals import _OP_BUILDERS  # type: ignore  # 复用运算符构造器
-from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_signals
+from app.strategy.field_labels import field_label
+from app.strategy.intraday_signals import uses_intraday_signals
 
 logger = logging.getLogger(__name__)
-
-# 信号 / 字段中文名映射 — 与前端 lib/signals.ts 对齐, 用于告警 message / 推送文案。
-# signal_* 为内置原子信号, 其余为技术指标/行情字段。
-# TAIWAN_LOCALIZATION_POLISH follow-up: value 全面改为正体中文 (与前端
-# frontend/src/lib/signals.ts 的 SIGNAL_LABELS/FIELD_LABELS 对齐一致); dict key
-# (signal_* id / 字段 id) 完全不变, 不影响 rule.conditions 的既有 saved 值、
-# event contract、signal 判定逻辑。
-_SIGNAL_CN: dict[str, str] = {
-    # 内置信号
-    "signal_ma_golden_5_20": "MA5上穿MA20", "signal_ma_dead_5_20": "MA5下穿MA20",
-    "signal_ma_golden_20_60": "MA20上穿MA60", "signal_macd_golden": "MACD金叉",
-    "signal_macd_dead": "MACD死叉", "signal_ma20_breakout": "突破MA20",
-    "signal_ma20_breakdown": "跌破MA20", "signal_ma5_breakout": "突破MA5",
-    "signal_ma5_breakdown": "跌破MA5", "signal_ma10_breakout": "突破MA10",
-    "signal_ma10_breakdown": "跌破MA10", "signal_n_day_high": "60日新高",
-    "signal_n_day_low": "60日新低", "signal_boll_breakout_upper": "突破布林上軌",
-    "signal_boll_breakdown_lower": "跌破布林下軌", "signal_volume_surge": "放量",
-    "signal_limit_up": "漲停", "signal_limit_down": "跌停",
-    "signal_limit_down_recovery": "跌停翹板", "signal_broken_limit_up": "炸板",
-    **INTRADAY_SIGNAL_LABELS,
-    # 行情字段
-    "close": "收盤價", "open": "開盤價", "high": "最高價", "low": "最低價",
-    "change_pct": "漲跌幅", "change_amount": "漲跌額", "amplitude": "振幅",
-    "turnover_rate": "換手率", "volume": "成交量", "amount": "成交額",
-    # 均线
-    "ma5": "MA5", "ma10": "MA10", "ma20": "MA20", "ma30": "MA30", "ma60": "MA60",
-    "ema5": "EMA5", "ema10": "EMA10", "ema20": "EMA20",
-    # MACD / BOLL / KDJ / RSI
-    "macd_dif": "MACD-DIF", "macd_dea": "MACD-DEA", "macd_hist": "MACD柱",
-    "boll_upper": "布林上軌", "boll_lower": "布林下軌",
-    "kdj_k": "KDJ-K", "kdj_d": "KDJ-D", "kdj_j": "KDJ-J",
-    "rsi_6": "RSI6", "rsi_14": "RSI14", "rsi_24": "RSI24",
-    # 量能 / 动量 / 波动
-    "vol_ratio_5d": "5日量比",
-    "vol_ma5": "5日均量", "vol_ma10": "10日均量",
-    "high_60d": "60日最高", "low_60d": "60日最低",
-    "momentum_5d": "5日動量", "momentum_20d": "20日動量", "momentum_60d": "60日動量",
-    "atr_14": "ATR14", "annual_vol_20d": "20日年化波動",
-    "consecutive_limit_ups": "連續漲停", "consecutive_limit_downs": "連續跌停",
-    "distance_to_upper_limit": "距漲停距離", "distance_to_lower_limit": "距跌停距離",
-}
-
-
-def _signal_cn_name(name: str) -> str:
-    """返回信号/字段的中文名, 找不到原样返回 (与前端 cnSignal 对齐)。"""
-    return _SIGNAL_CN.get(name, name)
 
 
 @dataclass
@@ -678,7 +634,7 @@ class MonitorRuleEngine:
                 except ValueError as exc:
                     if "requires history data" not in str(exc):
                         raise
-                    history = history_loader(cn_today(), history_bars)
+                    history = history_loader(cn_today(), history_bars + HISTORY_WARMUP_SESSIONS)
                     snapshot = self._strategy_engine.prepare_realtime_matrix(
                         StrategyDataContext(
                             asset_type=asset_type,
@@ -1060,7 +1016,7 @@ class MonitorRuleEngine:
             try:
                 today = cn_today()
                 lookback = max(1, getattr(s, "lookback_days", 1), required_history_bars)
-                hist_df = history_loader(today, lookback)
+                hist_df = history_loader(today, lookback + HISTORY_WARMUP_SESSIONS)
                 if hist_df is None or hist_df.is_empty():
                     logger.debug("策略 %s 历史数据为空, 跳过本轮实时监控", sid)
                     return []
@@ -1380,7 +1336,7 @@ class MonitorRuleEngine:
             field = c.get("field", "")
             op = c.get("op", "truth")
             value = c.get("value")
-            label = _signal_cn_name(field) or field
+            label = field_label(field) or field
             if op == "truth":
                 parts.append(label)
             else:

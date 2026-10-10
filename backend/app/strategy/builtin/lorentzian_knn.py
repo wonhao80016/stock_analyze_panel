@@ -1,17 +1,29 @@
 """Lorentzian-distance k-NN direction classifier.
 
-Each bar is classified by finding its k nearest historical neighbours under the
-Lorentzian metric sum(log1p(|a-b|)) over normalised oscillator features, then
-summing those neighbours' realised forward direction labels.
+Bars are counted in the symbol's own valid bars. Each feature is scaled to its min-max position
+over the last norm_window bars, and a bar is classified by the k nearest neighbours under the
+Lorentzian metric sum(log1p(|a-b|)): the prediction is the sum of their labels
+sign(close[j + label_horizon] - close[j]).
 
-Clean-room implementation from the published algorithm description. The feature
-set uses this project's own matrix features rather than the original indicator's
-(CCI/ADX/WaveTrend are not available in the matrix layer), so this is a strategy
-of the same family, not a port of any specific implementation.
+Neighbours are sampled every sample_stride bars back from the newest bar whose label is known,
+among the last CANDIDATE_WINDOW bars before the classified one. A bar is classified only when
+the oldest bar it reads (neighbour window, normalisation window and feature warm-up) exists and
+lies at most required_warmup_bars sessions of the matrix's session axis before it, so the
+symbol may miss up to MISSED_SESSION_ALLOWANCE of those sessions. A prediction then depends only
+on the last required_warmup_bars + 1 sessions (recursive features up to a seed weight below
+1e-4), so the screener's short history and a full-market backtest agree; a symbol with less
+history or more missed sessions is not classified in either. A bar whose normalisation window
+holds a missing value or no range for any feature neither votes nor is classified, and a bar
+with fewer usable neighbours than k (capped by the window's candidates) is not classified.
+Equal distances prefer the more recent neighbour.
 
-Look-ahead safety: labels are built from close[t+horizon], so a neighbour j may
-only be consulted from bar t when j + horizon <= t. The candidate mask below
-enforces that; loosening it silently turns the backtest into a look-ahead oracle.
+Not a port of jdehorty's TradingView "Machine Learning: Lorentzian Classification": the features
+(CCI, ADX and WaveTrend are not in the matrix layer), normalisation and filters differ, labels
+look forward, the neighbour search is an exact k-NN over a fixed window, and entries do not
+wait for a signal flip.
+
+Look-ahead safety: neighbour j is consulted from bar t only when j + label_horizon <= t;
+loosening that silently turns the backtest into a look-ahead oracle.
 """
 
 import numpy as np
@@ -19,16 +31,21 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    knn_direction_votes,
     make_signal_matrix,
     matrix_feature,
-    rolling_max,
-    rolling_min,
+    recursive_warmup_bars,
+    run_numba_parallel,
 )
 from app.backtest.matrix import (
     valid_shift as shift,
 )
 
 FEATURE_NAMES = ("rsi_14", "rsi_9", "kdj_k", "boll_position", "macd_hist_pct")
+CANDIDATE_WINDOW = 120
+MISSED_SESSION_ALLOWANCE = 40
+_BOLLINGER_BARS = 20
+_ATR_LOOKBACK = 10
 
 META = {
     "id": "lorentzian_knn",
@@ -109,14 +126,50 @@ STOP_LOSS = -0.06
 MAX_HOLD_DAYS = 4
 
 
-def _normalise(values: np.ndarray, window: int) -> np.ndarray:
-    low = rolling_min(values, window)
-    high = rolling_max(values, window)
-    # A flat window has zero span; NaN routes it to the 0.5 neutral fallback
-    # below instead of dividing by zero.
-    span = np.where(high > low, high - low, np.nan)
-    scaled = (values - low) / span
-    return np.where(np.isfinite(scaled), scaled, 0.5).astype(np.float32)
+def _candidate_offsets(horizon: int, stride: int) -> np.ndarray:
+    """Valid-bar distances from the classified bar to its candidate neighbours, newest first."""
+    # Starting at horizon keeps every candidate's label known at the classified bar.
+    return np.arange(horizon, CANDIDATE_WINDOW + 1, stride, dtype=np.int64)
+
+
+def _own_bars_read(horizon: int, stride: int, norm_window: int) -> int:
+    """Own valid bars a classified bar reads before itself, feature warm-ups included."""
+    feature_bars = max(
+        _BOLLINGER_BARS,
+        *(recursive_warmup_bars(name) for name in FEATURE_NAMES),
+    )
+    oldest_neighbour = int(_candidate_offsets(horizon, stride)[-1])
+    return max(
+        oldest_neighbour + norm_window - 1 + feature_bars - 1,
+        _ATR_LOOKBACK + recursive_warmup_bars("atr_pct") - 1,
+    )
+
+
+def _knn_prediction(market: MarketDataMatrix, params: dict, session_span: int) -> np.ndarray:
+    """Sum of the nearest neighbours' labels per valid bar; NaN where a bar is not classified."""
+    horizon = int(params.get("label_horizon", 4))
+    stride = int(params.get("sample_stride", 4))
+    norm_window = int(params.get("norm_window", 60))
+    offsets = _candidate_offsets(horizon, stride)
+    raw_features = np.stack(
+        [matrix_feature(market, name) for name in FEATURE_NAMES], axis=-1
+    ).astype(np.float32, copy=False)
+    valid_bars = market.valid_bars
+    return run_numba_parallel(
+        lambda: knn_direction_votes(
+            raw_features,
+            market.close,
+            market.session_ids,
+            valid_bars.offsets,
+            valid_bars.rows,
+            offsets,
+            min(int(params.get("neighbors", 8)), offsets.size),
+            horizon,
+            norm_window,
+            _own_bars_read(horizon, stride, norm_window),
+            session_span,
+        )
+    )
 
 
 class LorentzianKnnMatrixStrategy:
@@ -124,45 +177,16 @@ class LorentzianKnnMatrixStrategy:
         return frozenset({"high", "low", "close"})
 
     def required_warmup_bars(self, params: dict) -> int:
-        return int(params.get("norm_window", 60)) + 60
+        own_bars = _own_bars_read(
+            int(params.get("label_horizon", 4)),
+            int(params.get("sample_stride", 4)),
+            int(params.get("norm_window", 60)),
+        )
+        return own_bars + MISSED_SESSION_ALLOWANCE
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
-        bars, assets = market.shape
-        k = int(params.get("neighbors", 8))
-        horizon = int(params.get("label_horizon", 4))
-        stride = int(params.get("sample_stride", 4))
-        norm_window = int(params.get("norm_window", 60))
-
-        features = np.stack(
-            [_normalise(matrix_feature(market, n), norm_window) for n in FEATURE_NAMES],
-            axis=-1,
-        )
-
         close = market.close
-        future = np.full_like(close, np.nan)
-        if horizon < bars:
-            future[:-horizon] = close[horizon:]
-        labels = np.sign(future - close).astype(np.float32)
-        labels[~np.isfinite(labels)] = 0.0
-
-        candidate_idx = np.arange(0, bars, stride, dtype=np.int64)
-        bar_idx = np.arange(bars, dtype=np.int64)
-        # A neighbour's label is only knowable once horizon bars have elapsed.
-        usable = candidate_idx[None, :] + horizon <= bar_idx[:, None]
-
-        prediction = np.zeros((bars, assets), dtype=np.float32)
-        for asset in range(assets):
-            asset_features = features[:, asset, :]
-            candidates = asset_features[candidate_idx]
-            deltas = np.abs(asset_features[:, None, :] - candidates[None, :, :])
-            distance = np.log1p(deltas).sum(axis=-1)
-            distance = np.where(usable, distance, np.inf)
-
-            take = min(k, candidates.shape[0])
-            nearest = np.argpartition(distance, take - 1, axis=1)[:, :take]
-            chosen = labels[candidate_idx[nearest], asset]
-            reachable = np.take_along_axis(distance, nearest, axis=1)
-            prediction[:, asset] = np.where(np.isfinite(reachable), chosen, 0.0).sum(axis=1)
+        prediction = _knn_prediction(market, params, self.required_warmup_bars(params))
 
         bullish = prediction >= float(params.get("min_prediction", 1.0))
 
@@ -171,7 +195,7 @@ class LorentzianKnnMatrixStrategy:
 
         if params.get("use_volatility_filter", True):
             atr_pct = matrix_feature(market, "atr_pct")
-            entry &= atr_pct > shift(atr_pct, 10)
+            entry &= atr_pct > shift(atr_pct, _ATR_LOOKBACK)
         if params.get("use_regime_filter", True):
             entry &= ma20 >= shift(ma20, 5) * 0.999
 

@@ -86,6 +86,7 @@ META = {
     "name": "combo",
     "asset_types": ["stock"],
     "timeframes": ["1d"],
+    "basic_filter": {"enabled": False},
     "children": [{"strategy_id": "every_symbol", "weight": 1.0}],
     "limit": 0,
 }
