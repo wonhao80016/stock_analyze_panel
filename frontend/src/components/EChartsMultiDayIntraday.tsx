@@ -12,6 +12,8 @@ import {
   MIN_AVERAGE_COVERAGE,
 } from '@/lib/intraday-chart'
 import { useChartTheme } from '@/lib/theme'
+import { formatVolume, useVolumeUnit } from '@/lib/volumeUnit'
+import { VolumeUnitToggle } from '@/components/VolumeUnitToggle'
 
 const COLORS = {
   up: '#C74040',
@@ -165,6 +167,7 @@ export function EChartsMultiDayIntraday({
   modelRef.current = model
   const [info, setInfo] = useState<InfoPoint | null>(model.latest)
   const theme = useChartTheme()
+  const [volumeUnit] = useVolumeUnit()
 
   useEffect(() => {
     setInfo(model.latest)
@@ -235,6 +238,7 @@ export function EChartsMultiDayIntraday({
         smooth: false,
         connectNulls: false,
         lineStyle: { width: 1.2, color },
+        itemStyle: { color },
         areaStyle: { color, opacity: 0.08 },
         emphasis: { disabled: true },
       }
@@ -283,6 +287,7 @@ export function EChartsMultiDayIntraday({
         symbol: 'none',
         connectNulls: false,
         lineStyle: { width: 1, color: COLORS.average },
+        itemStyle: { color: COLORS.average },
         emphasis: { disabled: true },
       }
     })
@@ -374,6 +379,9 @@ export function EChartsMultiDayIntraday({
           axisTick: { show: false },
           splitLine: { show: false },
           axisLabel: { show: false },
+          axisPointer: {
+            label: { formatter: (params: any) => formatVolume(Number(params.value), volumeUnit) },
+          },
         },
       ],
       dataZoom: [{
@@ -397,7 +405,7 @@ export function EChartsMultiDayIntraday({
       ],
     }
     chart.setOption(option, true)
-  }, [height, model, priceLines, theme])
+  }, [height, model, priceLines, theme, volumeUnit])
 
   useEffect(() => () => {
     chartRef.current?.off('updateAxisPointer')
@@ -434,12 +442,15 @@ export function EChartsMultiDayIntraday({
                 <><span className="text-muted">均價</span><span style={{ color: COLORS.average }}>{info.average.toFixed(2)}</span></>
               )}
               {info.coverage != null && <span className="text-muted">{formatCoverage(info.coverage)}</span>}
-              <span className="text-muted">量</span><span className="text-secondary">{info.row.volume.toFixed(0)}</span>
+              <span className="text-muted">量</span><span className="text-secondary">{formatVolume(info.row.volume, volumeUnit)}</span>
               <span className="text-muted">額</span><span className="text-secondary">{formatAmount(info.row.amount)}</span>
             </>
           ) : <span className="text-muted">—</span>}
         </div>
-        <div className="shrink-0 text-[10px] text-muted">{sessions.length} 個交易日 · {rowCount} 分鐘</div>
+        <div className="flex shrink-0 items-center gap-2">
+          <VolumeUnitToggle />
+          <span className="text-[10px] text-muted">{sessions.length} 個交易日 · {rowCount} 分鐘</span>
+        </div>
       </div>
       <div ref={containerRef} className="w-full" style={{ height: height - 40, cursor: 'crosshair' }} />
     </div>

@@ -36,6 +36,9 @@ export const storage = {
   /** 個股日K成交量對比設置 */
   stockVolumeCompare:   kv<{ enabled: boolean; days: number }>('stock_volume_compare'),
 
+  /** Chart volume display unit: shares (股) or lots (張). */
+  volumeUnit:           kv<string>('volume_unit'),
+
   /** 個股詳情多日分時週期 */
   stockPreviewIntradayDays: kv<number>('stock_preview_intraday_days'),
 

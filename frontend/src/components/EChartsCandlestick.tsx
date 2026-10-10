@@ -4,6 +4,7 @@ import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import { BOARD_LOT_VOLUME_NOTE } from '@/lib/api'
 import { resolveTurnoverRate } from '@/lib/turnoverRate'
+import { formatVolume, formatVolumeNumber, useVolumeUnit, volumePanelTitle, type VolumeUnit } from '@/lib/volumeUnit'
 
 export interface OHLC {
   date: string
@@ -130,7 +131,7 @@ export interface SubChartDef {
   /** 構建 series 數組 */
   buildSeries: (data: OHLC[], context: SubChartContext) => any[]
   /** 構建信息欄文字 (當前數據行 -> 顯示內容) */
-  buildInfo: (d: OHLC | null) => { label: string; color: string; value: string }[]
+  buildInfo: (d: OHLC | null, volumeUnit: VolumeUnit) => { label: string; color: string; value: string }[]
   /** Y 軸特殊配置 */
   yAxisConfig?: Record<string, any>
 }
@@ -145,13 +146,6 @@ function volMaN(data: OHLC[], n: number): (number | null)[] {
     result.push(sum / n)
   }
   return result
-}
-
-function fmtVol(v: number | null | undefined): string {
-  if (v == null) return '—'
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + '億'
-  if (v >= 1e4) return (v / 1e4).toFixed(0) + '萬'
-  return v.toFixed(0)
 }
 
 export function isVolumeEstimate(bar: OHLC | null | undefined): boolean {
@@ -190,9 +184,9 @@ export function volumeRatioInfo(data: OHLC[], index: number, days: number): { la
   }
 }
 
-export function volumeInfo(bar: OHLC): { label: string; color: string; value: string } {
+export function volumeInfo(bar: OHLC, unit: VolumeUnit): { label: string; color: string; value: string } {
   const note = bar.board_lot_volume ? ` ${BOARD_LOT_VOLUME_NOTE}` : ''
-  return { label: '量', color: bar.close >= bar.open ? '#C74040' : '#2D9B65', value: fmtVol(bar.volume) + note }
+  return { label: '量', color: bar.close >= bar.open ? '#C74040' : '#2D9B65', value: formatVolume(bar.volume, unit) + note }
 }
 
 export const SUB_CHARTS: SubChartDef[] = [
@@ -250,9 +244,9 @@ export const SUB_CHARTS: SubChartDef[] = [
         },
       ]
     },
-    buildInfo: (d) => {
+    buildInfo: (d, volumeUnit) => {
       if (!d) return []
-      return [volumeInfo(d)]
+      return [volumeInfo(d, volumeUnit)]
     },
   },
   {
@@ -441,6 +435,7 @@ function buildSubInfoGraphics(
   activeIndicators: string[],
   subStartTop: number,
   volumeCompare: VolumeCompareConfig,
+  volumeUnit: VolumeUnit,
 ): any[] {
   const d = infoIdx >= 0 && infoIdx < data.length ? data[infoIdx] : null
   const graphics: any[] = []
@@ -450,7 +445,7 @@ function buildSubInfoGraphics(
     const def = SUB_CHARTS.find(s => s.key === key)
     if (!def) return
 
-    const items = def.buildInfo(d)
+    const items = def.buildInfo(d, volumeUnit)
     if (def.key === 'vol' && d) {
       const calcVolMa = (n: number) => {
         if (infoIdx < n - 1) return null
@@ -460,8 +455,8 @@ function buildSubInfoGraphics(
       }
       const vol5 = calcVolMa(5)
       const vol10 = calcVolMa(10)
-      items.push({ label: 'VOL5', color: '#FACC15', value: fmtVol(vol5) })
-      items.push({ label: 'VOL10', color: '#8B5CF6', value: fmtVol(vol10) })
+      items.push({ label: 'VOL5', color: '#FACC15', value: formatVolume(vol5, volumeUnit) })
+      items.push({ label: 'VOL10', color: '#8B5CF6', value: formatVolume(vol10, volumeUnit) })
       if (volumeCompare.enabled) {
         items.push(volumeRatioInfo(data, infoIdx, volumeCompare.days))
       }
@@ -479,7 +474,7 @@ function buildSubInfoGraphics(
       id: `sub-label-${key}`,
       type: 'text',
       style: {
-        text: def.label,
+        text: def.key === 'vol' ? volumePanelTitle(volumeUnit) : def.label,
         x: 4, y: curTop + 4,
         fill: '#8E8E96',
         fontSize: 10, fontFamily: 'JetBrains Mono, monospace',
@@ -538,6 +533,7 @@ function buildOption(
   infoIdx: number,
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
+  volumeUnit: VolumeUnit,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -808,7 +804,11 @@ function buildOption(
       axisLabel: {
         show: true, color: CT().text, fontSize: 9,
         fontFamily: 'JetBrains Mono, monospace',
+        ...(def.key === 'vol' ? { formatter: (v: number) => formatVolumeNumber(v, volumeUnit) } : {}),
       },
+      ...(def.key === 'vol' ? {
+        axisPointer: { label: { formatter: (params: any) => formatVolume(Number(params.value), volumeUnit) } },
+      } : {}),
     })
 
     xAxisIndices.push(xAxisIdx)
@@ -823,7 +823,7 @@ function buildOption(
 
   // 子圖信息欄 graphic
   const subStartTop = topPad + candleAvail + candleBottomPad
-  const infoGraphics = buildSubInfoGraphics(data, infoIdx, activeIndicators, subStartTop, volumeCompare)
+  const infoGraphics = buildSubInfoGraphics(data, infoIdx, activeIndicators, subStartTop, volumeCompare, volumeUnit)
 
   return {
     animation: false,
@@ -891,6 +891,9 @@ export function EChartsCandlestick({
   onPriceDoubleClickRef.current = onPriceDoubleClick
   // 主題: buildOption/信息欄內部通過 CT() 動態取調色板, 這裡只負責切換時觸發重建
   const theme = useTheme()
+  const [volumeUnit] = useVolumeUnit()
+  const volumeUnitRef = useRef(volumeUnit)
+  volumeUnitRef.current = volumeUnit
 
   // --- 全部用 ref，避免高頻交互觸發 React 重渲染 ---
   const infoIdxRef = useRef<number>(data.length - 1)
@@ -922,6 +925,7 @@ export function EChartsCandlestick({
       activeIndicatorsRef.current,
       subStartTop,
       volumeCompareRef.current,
+      volumeUnitRef.current,
     )
     if (infoGraphics.length > 0) {
       chart.setOption({ graphic: infoGraphics }, { lazyUpdate: true })
@@ -1193,6 +1197,7 @@ export function EChartsCandlestick({
       infoIdxRef.current,
       linkedPrice,
       volumeCompare,
+      volumeUnit,
     )
 
     chart.setOption(option, true)
@@ -1210,7 +1215,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, volumeUnit, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息欄容器 (內容由 JS 直接寫入)
   const initialHTML = useMemo(() => {

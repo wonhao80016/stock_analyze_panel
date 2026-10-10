@@ -121,9 +121,16 @@ describe('volumeRatioAt', () => {
 
 describe('volumeInfo', () => {
   it('labels intraday board-lot volume', () => {
-    expect(volumeInfo(volumeBar('2026-10-07', 300, { board_lot_volume: true })).value).toBe(
-      '300 盤中為整股量（不含零股、鉅額、盤後定價）',
+    expect(volumeInfo(volumeBar('2026-10-07', 300, { board_lot_volume: true }), 'shares').value).toBe(
+      '300股 盤中為整股量（不含零股、鉅額、盤後定價）',
     )
-    expect(volumeInfo(volumeBar('2026-10-07', 300)).value).toBe('300')
+    expect(volumeInfo(volumeBar('2026-10-07', 300), 'shares').value).toBe('300股')
+  })
+
+  it('shows the volume in lots without changing the bar', () => {
+    const bar = volumeBar('2026-10-08', 625_123, { board_lot_volume: true })
+
+    expect(volumeInfo(bar, 'lots').value).toBe('625張 盤中為整股量（不含零股、鉅額、盤後定價）')
+    expect(bar.volume).toBe(625_123)
   })
 })

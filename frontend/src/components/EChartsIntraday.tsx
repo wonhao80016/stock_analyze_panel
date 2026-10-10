@@ -12,6 +12,8 @@ import {
   MIN_AVERAGE_COVERAGE,
 } from '@/lib/intraday-chart'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
+import { DEFAULT_VOLUME_UNIT, formatVolume, useVolumeUnit, type VolumeUnit } from '@/lib/volumeUnit'
+import { VolumeUnitToggle } from '@/components/VolumeUnitToggle'
 
 type YMode = 'adaptive' | 'limit'
 
@@ -62,7 +64,7 @@ function limitStatusLabel(priceLimit?: PriceLimitInfo): string | null {
   return '漲跌停價未知'
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = []): EChartsOption {
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], volumeUnit: VolumeUnit = DEFAULT_VOLUME_UNIT): EChartsOption {
   // 將數據映射到全天時間軸上的正確位置
   const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
   const closes = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
@@ -316,6 +318,9 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         axisTick: { show: false },
         splitLine: { show: false },
         axisLabel: { show: false },
+        axisPointer: {
+          label: { formatter: (params: any) => formatVolume(Number(params.value), volumeUnit) },
+        },
       },
       ...(isValidPrice(prevClose) && yMin != null && yMax != null ? [{
         type: 'value' as const,
@@ -360,6 +365,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         symbol: 'none',
         cursor: 'crosshair',
         lineStyle: { width: 1.2, color: lineColor },
+        itemStyle: { color: lineColor },
         areaStyle,
         connectNulls: false,
         markLine: markLineData.length > 0 ? { symbol: 'none', data: markLineData, animation: false, silent: true } : undefined,
@@ -372,6 +378,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         symbol: 'none',
         cursor: 'crosshair',
         lineStyle: { width: 1, color: THEME.avgLine },
+        itemStyle: { color: THEME.avgLine },
         connectNulls: false,
       }] : []),
       {
@@ -418,6 +425,7 @@ export function EChartsIntraday({
   const [infoIdx, setInfoIdx] = useState(data.length - 1)
   const [yMode, setYMode] = useState<YMode>('adaptive')
   const ct = useChartTheme()
+  const [volumeUnit] = useVolumeUnit()
   const hasLimitPrices = getLimitPrices(priceLimit) != null
   const limitMode = yMode === 'limit' && hasLimitPrices
   const limitLabel = limitStatusLabel(priceLimit)
@@ -480,6 +488,7 @@ export function EChartsIntraday({
       })
 
       chart.on('globalout', () => {
+        setInfoIdx(dataRef.current.length - 1)
         onPriceHoverRef.current?.(null)
       })
 
@@ -510,11 +519,11 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines, volumeUnit), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines, volumeUnit])
 
   useEffect(() => {
     return () => {
@@ -542,9 +551,10 @@ export function EChartsIntraday({
   return (
     <div className="w-full">
       {/* 按鈕行: 切換式按鈕組, 居右 */}
-      {showLimitLines && <div className="flex items-center justify-end gap-2 px-1 pb-0.5">
-        {limitLabel && <span className="text-[10px] text-muted">{limitLabel}</span>}
-        <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
+      <div className="flex items-center justify-end gap-2 px-1 pb-0.5">
+        {showLimitLines && limitLabel && <span className="text-[10px] text-muted">{limitLabel}</span>}
+        <VolumeUnitToggle />
+        {showLimitLines && <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
           <button
             onClick={() => setYMode('adaptive')}
             className={`px-2.5 py-0.5 text-[10px] font-mono cursor-pointer transition-colors ${
@@ -569,8 +579,8 @@ export function EChartsIntraday({
           >
             漲跌停
           </button>
-        </div>
-      </div>}
+        </div>}
+      </div>
       <div style={{ backgroundColor: ct.infoBarBg }}>
         {/* 第一行: 日期 + OHLC */}
         <div className="flex items-center gap-x-2 px-2 font-mono text-[11px] select-none flex-wrap" style={{ height: 20 }}>
@@ -603,7 +613,7 @@ export function EChartsIntraday({
               </span>}
               {showAvgLine && coverage != null && <span className="text-muted">{formatCoverage(coverage)}</span>}
               <span className="text-muted">量</span>
-              <span className="text-secondary">{d.volume.toFixed(0)}</span>
+              <span className="text-secondary">{formatVolume(d.volume, volumeUnit)}</span>
               <span className="text-muted">額</span>
               <span className="text-secondary">{fmtAmt(d.amount)}</span>
             </>

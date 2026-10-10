@@ -70,6 +70,17 @@ describe('StockDailyKChart — empty/loading/error states (DAILY_USE_CORE_UX_FIX
     expect(screen.queryByText('目前沒有可顯示的日 K 資料')).not.toBeInTheDocument()
   })
 
+  it('offers the volume unit toggle next to the volume controls, defaulting to lots', async () => {
+    vi.mocked(api.klineDaily).mockResolvedValue({
+      symbol: '2330.TWSE',
+      rows: [{ date: '2026-09-08', open: 100, high: 105, low: 99, close: 103, volume: 1000 }],
+    } as any)
+    renderChart('2330.TWSE')
+
+    expect(await screen.findByRole('button', { name: '張' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: '股' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
   it('malformed rows (present but all fail parsing) still show the distinct format-error message', async () => {
     vi.mocked(api.klineDaily).mockResolvedValue({
       symbol: '2330.TWSE',

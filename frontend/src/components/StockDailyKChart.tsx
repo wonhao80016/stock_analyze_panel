@@ -14,6 +14,7 @@ import {
   type StockInfo,
   type VolumeCompareConfig,
 } from '@/components/EChartsCandlestick'
+import { VolumeUnitToggle } from '@/components/VolumeUnitToggle'
 
 const SUB_INFO_H = 16
 const SUB_GAP = 4
@@ -229,6 +230,7 @@ export function StockDailyKChart({
           ))}
           {activeIndicators.includes('vol') && (
             <div className="ml-0.5 flex h-5 items-center gap-1.5 border-l border-border/70 pl-2">
+              <VolumeUnitToggle />
               <span className="text-[10px] text-muted">量比</span>
               <button
                 type="button"
