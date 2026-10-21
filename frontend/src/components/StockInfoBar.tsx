@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { Settings2, RadioTower, Star } from 'lucide-react'
 import type { KlineRow, FinancialMetricRecord } from '@/lib/api'
-import { fmtPrice, fmtBigNum, fmtVolume } from '@/lib/format'
+import { fmtPrice, fmtBigNum } from '@/lib/format'
+import { formatVolume, useVolumeUnit } from '@/lib/volumeUnit'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { INFO_GROUPS, type ColumnConfig } from '@/lib/stock-info-fields'
@@ -113,6 +114,7 @@ export function StockInfoBar({
   const [customizerOpen, setCustomizerOpen] = useState(false)
   // ext 標籤展開狀態：按 symbol::colId，切股/切字段時互不干擾
   const [expandedExt, setExpandedExt] = useState<Set<string>>(new Set())
+  const [volumeUnit] = useVolumeUnit()
 
   const toggleExtExpand = (key: string) => {
     setExpandedExt(prev => {
@@ -157,7 +159,7 @@ export function StockInfoBar({
       case 'market_cap':       return marketCap != null ? fmtBigNum(marketCap) : null
       case 'float_market_cap': return floatMarketCap != null ? fmtBigNum(floatMarketCap) : null
       case 'turnover':         return turnoverRate != null ? `${turnoverRate.toFixed(2)}%` : null
-      case 'volume':           return latest.volume != null ? fmtVolume(Number(latest.volume)) : null
+      case 'volume':           return latest.volume != null ? formatVolume(Number(latest.volume), volumeUnit) : null
       case 'amplitude': {
         if (prevClose == null || prevClose === 0) return null
         const hi = Number(latest.high)

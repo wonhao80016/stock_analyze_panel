@@ -1,15 +1,18 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import type { MinuteKlineRow, MinuteKlineSession } from '@/lib/api'
 import { EChartsMultiDayIntraday } from './EChartsMultiDayIntraday'
 
 const setOption = vi.fn()
+const chartHandlers = new Map<string, () => void>()
+let currentZoom = { start: 0, end: 100 }
 
 vi.mock('echarts', () => ({
   init: () => ({
-    on: vi.fn(),
+    on: (event: string, handler: () => void) => chartHandlers.set(event, handler),
     off: vi.fn(),
     getZr: () => ({ on: vi.fn(), off: vi.fn() }),
+    getOption: () => ({ dataZoom: [currentZoom] }),
     setOption,
     clear: vi.fn(),
     resize: vi.fn(),
@@ -26,6 +29,8 @@ beforeAll(() => {
 
 afterEach(() => {
   setOption.mockClear()
+  chartHandlers.clear()
+  currentZoom = { start: 0, end: 100 }
 })
 
 function bar(date: string, utcTime: string, close: number, volume: number, unattributed?: number): MinuteKlineRow {
@@ -70,5 +75,48 @@ describe('EChartsMultiDayIntraday', () => {
     expect(names).toContain('2026-10-07 均價')
     expect(names).not.toContain('2026-10-08 均價')
     expect(screen.getByText('均價覆蓋 60%')).toBeInTheDocument()
+  })
+
+  describe('zoom', () => {
+    function lastZoom() {
+      const { start, end } = lastOption().dataZoom[0]
+      return { start, end }
+    }
+
+    function zoomTo(start: number, end: number) {
+      currentZoom = { start, end }
+      chartHandlers.get('dataZoom')!()
+    }
+
+    it('keeps the user zoom when the volume unit switches', () => {
+      render(<EChartsMultiDayIntraday sessions={[session('2026-10-07'), session('2026-10-08')]} />)
+      expect(lastZoom()).toEqual({ start: 0, end: 100 })
+
+      zoomTo(40, 80)
+      fireEvent.click(screen.getByRole('button', { name: '股' }))
+
+      expect(screen.getByRole('button', { name: '股' })).toHaveAttribute('aria-pressed', 'true')
+      expect(lastZoom()).toEqual({ start: 40, end: 80 })
+    })
+
+    it('keeps the user zoom while the latest session updates', () => {
+      const first = [session('2026-10-07'), session('2026-10-08')]
+      const view = render(<EChartsMultiDayIntraday sessions={first} />)
+      zoomTo(40, 80)
+
+      const updated = [first[0], { ...first[1], rows: [...first[1].rows, bar('2026-10-08', '02:00', 102, 300)] }]
+      view.rerender(<EChartsMultiDayIntraday sessions={updated} />)
+
+      expect(lastZoom()).toEqual({ start: 40, end: 80 })
+    })
+
+    it('shows the whole range again when the trading days change', () => {
+      const view = render(<EChartsMultiDayIntraday sessions={[session('2026-10-07'), session('2026-10-08')]} />)
+      zoomTo(40, 80)
+
+      view.rerender(<EChartsMultiDayIntraday sessions={[session('2026-10-08'), session('2026-10-09')]} />)
+
+      expect(lastZoom()).toEqual({ start: 0, end: 100 })
+    })
   })
 })

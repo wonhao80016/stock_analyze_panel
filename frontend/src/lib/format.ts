@@ -11,13 +11,6 @@ export function fmtPct(v: number | null | undefined, digits = 2): string {
   return `${sign}${(v * 100).toFixed(digits)}%`
 }
 
-export function fmtVolume(v: number | null | undefined): string {
-  if (v == null || Number.isNaN(v)) return '—'
-  if (v >= 1e8) return `${(v / 1e8).toFixed(2)}億`
-  if (v >= 1e4) return `${(v / 1e4).toFixed(2)}萬`
-  return v.toFixed(0)
-}
-
 // A 股語義色:紅漲綠跌 → 僅用於價格相關元素
 export function priceColorClass(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v) || v === 0) return 'text-muted'

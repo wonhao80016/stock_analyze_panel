@@ -168,10 +168,17 @@ export function EChartsMultiDayIntraday({
   const [info, setInfo] = useState<InfoPoint | null>(model.latest)
   const theme = useChartTheme()
   const [volumeUnit] = useVolumeUnit()
+  const userZoomRef = useRef<{ start: number; end: number } | null>(null)
+  const sessionDates = sessions.map(session => session.date).join(',')
 
   useEffect(() => {
     setInfo(model.latest)
   }, [model])
+
+  // Must run before the option effect below so a new set of trading days opens unzoomed.
+  useEffect(() => {
+    userZoomRef.current = null
+  }, [sessionDates])
 
   useEffect(() => {
     const container = containerRef.current
@@ -196,6 +203,10 @@ export function EChartsMultiDayIntraday({
         if (point) setInfo(point)
       })
       chart.on('globalout', () => setInfo(modelRef.current.latest))
+      chart.on('dataZoom', () => {
+        const zoom = (chart!.getOption() as any)?.dataZoom?.[0]
+        if (zoom) userZoomRef.current = { start: zoom.start, end: zoom.end }
+      })
 
       const handlePriceDoubleClick = (event: { offsetX: number; offsetY: number }) => {
         const pixel: [number, number] = [event.offsetX, event.offsetY]
@@ -225,6 +236,7 @@ export function EChartsMultiDayIntraday({
     const maxPrice = allPriceValues.length > 0 ? Math.max(...allPriceValues) : 1
     const padding = Math.max((maxPrice - minPrice) * 0.08, maxPrice * 0.002)
     const totalLength = model.categories.length
+    const visibleRange = userZoomRef.current ?? { start: 0, end: 100 }
     const priceSeries: any[] = model.dayRanges.map(({ start, session, values }) => {
       const data = new Array(totalLength).fill(null) as (number | null)[]
       for (let index = 0; index < values.length; index++) data[start + index] = values[index]
@@ -387,8 +399,8 @@ export function EChartsMultiDayIntraday({
       dataZoom: [{
         type: 'inside',
         xAxisIndex: [0, 1],
-        start: 0,
-        end: 100,
+        start: visibleRange.start,
+        end: visibleRange.end,
         minValueSpan: FULL_DAY_TIMES.length,
         filterMode: 'none',
       }],
@@ -410,6 +422,7 @@ export function EChartsMultiDayIntraday({
   useEffect(() => () => {
     chartRef.current?.off('updateAxisPointer')
     chartRef.current?.off('globalout')
+    chartRef.current?.off('dataZoom')
     if (priceDoubleClickHandlerRef.current) {
       chartRef.current?.getZr().off('dblclick', priceDoubleClickHandlerRef.current)
     }

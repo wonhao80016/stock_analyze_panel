@@ -3,6 +3,7 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
+import { formatVolume, useVolumeUnit } from '@/lib/volumeUnit'
 
 /**
  * 個股分析專用日 K 圖表。
@@ -129,6 +130,7 @@ export function AnalysisKChart({
   const seriesKeyMapRef = useRef<Map<number, string>>(new Map())
   // 主題: buildOption 內部用 CT() 動態取色, 這裡只負責切換時觸發重建
   const theme = useTheme()
+  const [volumeUnit] = useVolumeUnit()
   const [activeTypes, setActiveTypes] = useState<Set<LevelType>>(new Set(defaultLevelTypes))
   /** 樞軸點顯示到第幾檔:1=只P+R1/S1, 2=到R2/S2, 3=全檔(R3/S3) */
   const [pivotRank, setPivotRank] = useState<1 | 2 | 3>(1)
@@ -354,7 +356,7 @@ export function AnalysisKChart({
           // 成交量區不畫背景橫線
           splitLine: { show: false },
           axisLabel: { color: CT().text, fontSize: 9, fontFamily: 'JetBrains Mono, monospace',
-                       formatter: (v: number) => fmtVol(v) } },
+                       formatter: (v: number) => formatVolume(v, volumeUnit) } },
       ],
       dataZoom: [
         { type: 'inside', xAxisIndex: [0, 1], start: zoomStart, end: 100 },
@@ -391,7 +393,7 @@ export function AnalysisKChart({
     }
     chartInstRef.current.setOption(buildOption(), true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey])
+  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey, volumeUnit])
 
   // resize
   useEffect(() => {
@@ -612,11 +614,4 @@ function strengthColor(strength: string | undefined, base: string): string {
 /** 價位唯一標識: 同類型同價格視為同一點位(用於聯動高亮)。 */
 function levelKey(type: string, value: number): string {
   return `${type}-${value.toFixed(2)}`
-}
-
-function fmtVol(v: number): string {
-  if (!v) return '0'
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + '億'
-  if (v >= 1e4) return (v / 1e4).toFixed(0) + '萬'
-  return v.toFixed(0)
 }

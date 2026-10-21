@@ -6,12 +6,13 @@
  * kline 數據、訊號提取）的列由各頁面的 renderCell 自行處理。
  *
  * 口徑與原 ScreenerTable 對齊（已和自選頁校準過）：amplitude 用 *100、annual_vol/
- * 財務率類用 fmtPct、kdj 用 toFixed(1)、vol_ma 用 fmtBigNum 等。
+ * 財務率類用 fmtPct、kdj 用 toFixed(1) 等。
  */
 import { cloneElement, isValidElement, type ReactElement, type ReactNode } from 'react'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/list-columns'
 import { NUM_CELL_CLASS } from '@/lib/stock-table'
+import { formatVolume, useVolumeUnit } from '@/lib/volumeUnit'
 
 // ===== 板塊標識（自選/策略頁統一口徑） =====
 
@@ -31,6 +32,11 @@ export function RSIBadge({ value }: { value: number | null | undefined }) {
   else if (value <= 20) color = 'text-bear font-medium'
   else if (value <= 30) color = 'text-bear'
   return <span className={`tabular-nums ${color}`}>{value.toFixed(1)}</span>
+}
+
+function VolumeValue({ shares }: { shares: number | null | undefined }) {
+  const [unit] = useVolumeUnit()
+  return <>{formatVolume(shares, unit)}</>
 }
 
 // ===== 純數據列渲染 =====
@@ -127,8 +133,8 @@ function renderBuiltinCell(r: any, col: ColumnConfig): ReactNode | null {
     case 'boll_upper': return <td key={col.id} className={numCls}>{r.boll_upper != null ? fmtPrice(r.boll_upper) : '—'}</td>
     case 'boll_lower': return <td key={col.id} className={numCls}>{r.boll_lower != null ? fmtPrice(r.boll_lower) : '—'}</td>
     case 'atr14':    return <td key={col.id} className={numCls}>{r.atr_14 != null ? fmtPrice(r.atr_14) : '—'}</td>
-    case 'vol_ma5':  return <td key={col.id} className={numCls}>{r.vol_ma5 != null ? fmtBigNum(r.vol_ma5) : '—'}</td>
-    case 'vol_ma10': return <td key={col.id} className={numCls}>{r.vol_ma10 != null ? fmtBigNum(r.vol_ma10) : '—'}</td>
+    case 'vol_ma5':  return <td key={col.id} className={`${numCls} whitespace-nowrap`}><VolumeValue shares={r.vol_ma5} /></td>
+    case 'vol_ma10': return <td key={col.id} className={`${numCls} whitespace-nowrap`}><VolumeValue shares={r.vol_ma10} /></td>
     // 動量
     case 'momentum_5d':  return <td key={col.id} className={`${numCls} ${priceColorClass(r.momentum_5d)}`}>{fmtPct(r.momentum_5d)}</td>
     case 'momentum_10d': return <td key={col.id} className={`${numCls} ${priceColorClass(r.momentum_10d)}`}>{fmtPct(r.momentum_10d)}</td>

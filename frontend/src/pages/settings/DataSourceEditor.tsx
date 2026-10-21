@@ -35,7 +35,7 @@ const FIELD_LABELS: Record<string, string> = {
   high: '最高價',
   low: '最低價',
   close: '收盤價',
-  volume: '成交量 (張)',
+  volume: '成交量 (股，原值寫入不換算)',
   amount: '成交金額 (元)',
   trade_date: '除權日期 (YYYY-MM-DD)',
   ex_factor: '除權因子',

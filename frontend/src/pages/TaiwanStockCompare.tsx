@@ -17,6 +17,7 @@ import {
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { fmtDate } from '@/lib/format'
+import { formatVolume, useVolumeUnit } from '@/lib/volumeUnit'
 import { useCompareSymbols, MAX_COMPARE_SYMBOLS, MIN_COMPARE_SYMBOLS } from '@/lib/useCompareSymbols'
 import { DatePicker } from '@/components/DatePicker'
 
@@ -27,6 +28,7 @@ import { DatePicker } from '@/components/DatePicker'
  * 確定性比較資料自動載入；AI 客觀比較報告需使用者主動點擊觸發（絕不自動呼叫）。
  */
 export function TaiwanStockCompare() {
+  const [volumeUnit] = useVolumeUnit()
   // DAILY_USE_CORE_UX_FIXES (P1-2): Compare 可從自選股/台股選股/StockPreview/
   // 監控中心等多處進入, 不再固定寫死「返回即時監控」→ /monitor。優先用瀏覽器
   // 站內 history back(navigate(-1)); 直接輸入網址等沒有可信站內來源時, 回退到
@@ -370,7 +372,7 @@ export function TaiwanStockCompare() {
                           <td key={inst.symbol} className="py-2 px-3 font-mono">
                             {inst.context.institutional_context.foreign_net_1d == null
                               ? 'N/A（不適用）'
-                              : inst.context.institutional_context.foreign_net_1d.toLocaleString()}
+                              : formatVolume(inst.context.institutional_context.foreign_net_1d, volumeUnit)}
                           </td>
                         ))}
                       </tr>

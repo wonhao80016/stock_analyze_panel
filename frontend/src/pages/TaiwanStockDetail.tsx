@@ -34,10 +34,17 @@ import { Modal } from '@/components/Modal'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { conditionSummary } from '@/components/monitor/GenericRulesList'
 import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
+import { VolumeUnitToggle } from '@/components/VolumeUnitToggle'
 import { TaiwanReferenceData } from '@/components/taiwan/TaiwanReferenceData'
 import { DataQualityBadge, formatQuoteSource } from '@/components/taiwan/TaiwanDataQuality'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useSafeBack } from '@/lib/useSafeBack'
+
+const DAILY_CHART_HEIGHT = 520
+const INDEX_CHART_HEIGHT = 400
+// Index series carry no volume, so an index chart has no volume panel.
+const STOCK_DAILY_INDICATORS = ['vol']
+const INDEX_DAILY_INDICATORS: string[] = []
 
 const RANGE_OPTIONS = [
   { label: '1 個月', days: 30 },
@@ -556,40 +563,44 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             <div className="lg:col-span-2 rounded-2xl border border-border bg-surface p-4">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-bold text-foreground">歷史日 K 線與成交量</h3>
+                  <h3 className="text-sm font-bold text-foreground">{isIndex ? '歷史日 K 線' : '歷史日 K 線與成交量'}</h3>
                   {data.daily_history.meta?.trade_date && (
                     <span className="text-[10px] text-muted font-mono">
                       資料截至 {data.daily_history.meta.trade_date}
                     </span>
                   )}
                 </div>
-                {/* 範圍按鈕 */}
-                <div className="flex items-center gap-1 rounded-lg bg-base p-1 border border-border">
-                  {RANGE_OPTIONS.map(opt => (
-                    <button
-                      key={opt.days}
-                      onClick={() => setSelectedRange(opt.days)}
-                      className={cn(
-                        'rounded-md px-2 py-0.5 text-xs font-medium transition-all cursor-pointer',
-                        selectedRange === opt.days
-                          ? 'bg-accent text-white shadow-xs'
-                          : 'text-muted hover:text-foreground'
-                      )}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-2">
+                  {!isIndex && ohlcRows.length > 0 && <VolumeUnitToggle />}
+                  {/* 範圍按鈕 */}
+                  <div className="flex items-center gap-1 rounded-lg bg-base p-1 border border-border">
+                    {RANGE_OPTIONS.map(opt => (
+                      <button
+                        key={opt.days}
+                        onClick={() => setSelectedRange(opt.days)}
+                        className={cn(
+                          'rounded-md px-2 py-0.5 text-xs font-medium transition-all cursor-pointer',
+                          selectedRange === opt.days
+                            ? 'bg-accent text-white shadow-xs'
+                            : 'text-muted hover:text-foreground'
+                        )}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
               {/* K 線圖表主體 */}
               {ohlcRows.length > 0 ? (
-                <div className="w-full h-[400px]">
+                <div className="w-full" style={{ height: isIndex ? INDEX_CHART_HEIGHT : DAILY_CHART_HEIGHT }}>
                   <EChartsCandlestick
                     data={ohlcRows}
-                    height={400}
+                    height={isIndex ? INDEX_CHART_HEIGHT : DAILY_CHART_HEIGHT}
                     showMA={true}
                     symbol={data.symbol}
+                    activeIndicators={isIndex ? INDEX_DAILY_INDICATORS : STOCK_DAILY_INDICATORS}
                   />
                 </div>
               ) : (
