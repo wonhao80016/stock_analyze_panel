@@ -379,7 +379,7 @@ finding 判定（逐條見 [recheck-2026-10-06.md](recheck-2026-10-06.md)）：
 - 其餘各組沒有跑測試，判定靠靜態閱讀與唯讀抽查。本輪沒有執行即時市場實跑或歷史資料回補。enriched 的全量重新發佈不是本次文件同步執行的，這裡只做唯讀核對。
 - 2026-10-04 記錄的驗收命令（`152 passed`、`147 passed`、`91 passed` 等）沒有涵蓋 `test_worker_process.py`，所以當時寫的「獨立驗收沒有 P0–P3 finding」，只對那幾個測試檔成立。
 - 原始重現資產 `findings_index.json`、`coverage.json`、`reference/manifest.json` 與部分腳本沒有納入版本庫，原稽核的數字無法只靠目前倉庫完整重跑。
-- `docs/audit-2026-09-24/sections/` 目前也沒有納入版本庫，本頁對各章的連結只在本機有效。
+- `docs/audit-2026-09-24/sections/` 原本沒有納入版本庫，2026-10-21 已將 19 個章節檔納入版本庫，本頁對各章的連結都可直接開啟。
 - 原章節中 2026-09-24 的個別樣本數、影響檔數與百分比沒有用目前資料重跑，不應直接當成現況統計。
 - A12 被推翻 finding 的章節標題仍殘留 `P3 → P3`，內文才標 `none`。
 - 法規口徑沿用 2026-10-04 依[財政部證券交易稅條例](https://law-out.mof.gov.tw/LawContent.aspx?id=FL006079&kw=0.00150.&media=print)、[臺灣證券交易所 ETF 規章](https://www.twse.com.tw/zh/products/securities/etf/overview/rules.html)、[臺灣證券交易所交易制度](https://www.twse.com.tw/zh/products/system/trading.html)與[櫃買中心當沖規則](https://www.tpex.org.tw/zh-tw/mainboard/trading/day-trading/rules.html)所做的重核，本輪沒有重新查證；新上市規則的條文例外，已於 2026-10-06 查證。第 2 階段新增的依據：TDR 證交稅 0.1% 依台財稅第811672688號函（[財政部稅務入口網問答](https://www.etax.nat.gov.tw/etwmain/tax-info/understanding/tax-q-and-a/national/securities-transaction-tax/filing/LeJ1WWV)），TDR 當沖適用 0.1% 是我們的解讀；上櫃 ETF 的成分範圍與主被動型態依 TPEx ETF/detail（2026-10-07 查詢）；這兩項本次文件同步沒有重新連線查證。券商折扣與最低手續費維持為可設定的模擬參數，不宣稱是法定固定值。
