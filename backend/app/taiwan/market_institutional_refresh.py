@@ -69,6 +69,9 @@ class TaiwanMarketInstitutionalRefreshService:
     def refresh_through(self, target: date) -> dict[str, Any]:
         return self.refresh_days(self.dates_to_refresh(target))
 
+    def latest_stored_date(self) -> date | None:
+        return self._store.latest_date()
+
     def backfill(self, days: int, end: date) -> dict[str, Any]:
         """Fetch the *days* trading days ending at *end*, skipping stored days that are not provisional."""
         wanted: list[date] = []

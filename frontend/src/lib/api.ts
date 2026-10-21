@@ -3355,6 +3355,26 @@ export interface TaiwanUpdateLatestResult {
   /** Latest stored TAIEX date after the refresh, null when it could not be refreshed. */
   benchmark_index_latest_date?: string | null
   stats?: Record<string, any>
+  /** Institutional, market-wide institutional amount and margin refresh run after the daily bars. */
+  chip_data?: TaiwanChipDataRefresh
+}
+
+export interface TaiwanChipDatasetRefresh {
+  status: 'success' | 'partial' | 'failed' | 'skipped'
+  dates_requested: number
+  dates_fetched: number
+  dates_skipped: number
+  failed_dates: Record<string, any>[]
+  rows_written: number
+  note: string | null
+}
+
+export interface TaiwanChipDataRefresh {
+  institutional: TaiwanChipDatasetRefresh
+  market_institutional: TaiwanChipDatasetRefresh
+  margin: TaiwanChipDatasetRefresh
+  as_of?: Record<'institutional' | 'market_institutional' | 'margin', string | null>
+  margin_target_date?: string
 }
 
 // ===== Taiwan Institutional / Margin Enrichment Backfill =====

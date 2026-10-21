@@ -889,6 +889,9 @@ def test_the_update_button_fetches_reference_prices_through_the_shared_publish(t
         raise RuntimeError("TWSE throttled")
 
     monkeypatch.setattr(TaiwanCorporateActionRefreshService, "refresh_publish_window", failing_refresh)
+    monkeypatch.setattr(
+        TaiwanBootstrapService, "_refresh_chip_data", lambda self, target, now: None
+    )
 
     with caplog.at_level(logging.WARNING, logger="app.taiwan.daily_update"):
         res = TaiwanBootstrapService().update_to_latest()

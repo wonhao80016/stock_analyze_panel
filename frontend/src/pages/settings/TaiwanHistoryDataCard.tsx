@@ -52,7 +52,11 @@ export function TaiwanHistoryDataCard() {
     mutationFn: api.taiwanUpdateLatest,
     onSuccess: (res) => {
       toast(res.message || '更新完成', 'success')
-      if (res.dates_fetched > 0) {
+      const chip = res.chip_data
+      const chipFetched = chip
+        ? [chip.institutional, chip.market_institutional, chip.margin].some((d) => d.dates_fetched > 0)
+        : false
+      if (res.dates_fetched > 0 || chipFetched) {
         // Every panel reads the trading day that just moved, so everything is
         // invalidated rather than a list that would fall behind the next new panel.
         qc.invalidateQueries()

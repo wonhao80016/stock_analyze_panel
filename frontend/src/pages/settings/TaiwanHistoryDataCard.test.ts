@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { api } from '@/lib/api'
+import { toast } from '@/components/Toast'
 import { QK } from '@/lib/queryKeys'
 import { TaiwanHistoryDataCard } from './TaiwanHistoryDataCard'
 
@@ -84,5 +85,41 @@ describe('TaiwanHistoryDataCard update to latest', () => {
 
     await waitFor(() => expect(api.taiwanUpdateLatest).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(queryClient.getQueryState(QK.screenerCached())?.isInvalidated).toBe(true))
+  })
+
+  it('invalidates the dashboard market panels when only chip data caught up', async () => {
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue({
+      has_data: true,
+      earliest_date: '2024-01-02',
+      latest_date: '2026-10-21',
+      trading_days: 690,
+      needs_bootstrap: false,
+    })
+    const stats = (dates_fetched: number) => ({
+      status: 'success' as const,
+      dates_requested: dates_fetched,
+      dates_fetched,
+      dates_skipped: 0,
+      failed_dates: [],
+      rows_written: dates_fetched,
+      note: null,
+    })
+    vi.mocked(api.taiwanUpdateLatest).mockResolvedValue({
+      ok: true,
+      already_current: true,
+      message: '本地資料已是最新 (2026-10-21), 籌碼資料: 大盤法人金額至 2026-10-21',
+      dates_fetched: 0,
+      chip_data: { institutional: stats(0), market_institutional: stats(3), margin: stats(0) },
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['taiwanMarketIntelligence'], { institutional_amounts: null })
+    render(createElement(QueryClientProvider, { client: queryClient }, createElement(TaiwanHistoryDataCard)))
+
+    fireEvent.click(await screen.findByRole('button', { name: '更新到最新' }))
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('籌碼資料'), 'success'))
+    await waitFor(() =>
+      expect(queryClient.getQueryState(['taiwanMarketIntelligence'])?.isInvalidated).toBe(true),
+    )
   })
 })

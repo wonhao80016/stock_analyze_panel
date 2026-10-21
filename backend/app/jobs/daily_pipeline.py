@@ -264,9 +264,16 @@ def start_scheduler() -> AsyncIOScheduler:
     # 21:40 - margin, which the exchange publishes later. Daily bars and institutional flows run
     # again so a failed or early 16:30 run gets a second chance: provisional days are refetched
     # here, after the daily final cutoff, which finalizes them; other stored days are skipped.
+    from app.taiwan.daily_update import MARGIN_PUBLISH_HOUR, MARGIN_PUBLISH_MINUTE
+
     scheduler.add_job(
         _scheduled_taiwan_update,
-        trigger=CronTrigger(day_of_week="mon-fri", hour=21, minute=40, timezone="Asia/Taipei"),
+        trigger=CronTrigger(
+            day_of_week="mon-fri",
+            hour=MARGIN_PUBLISH_HOUR,
+            minute=MARGIN_PUBLISH_MINUTE,
+            timezone="Asia/Taipei",
+        ),
         id="taiwan_margin_update",
         kwargs={
             "label": "margin",

@@ -25,11 +25,15 @@ from app.config import temp_root
 from app.taiwan.daily_refresh import TaiwanDailyRefreshService
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import (
+    ChipDataRefreshResult,
+    DatasetRefreshStats,
     MasterRefreshOutcome,
+    TaiwanDailyUpdateService,
     master_refresh_due,
     pending_listing_dates,
     publish_enriched,
     refresh_security_master,
+    resolve_margin_target,
     resolve_target_latest_trading_date,
 )
 from app.taiwan.data_root import taiwan_data_root
@@ -283,6 +287,29 @@ def _publish_default(only_if_behind: bool) -> bool:
     return publish_enriched(only_if_behind=only_if_behind)
 
 
+_CHIP_LABELS = {
+    "institutional": "三大法人",
+    "market_institutional": "大盤法人金額",
+    "margin": "融資融券",
+}
+
+
+def _chip_message(chip: dict[str, Any]) -> str:
+    as_of = chip.get("as_of") or {}
+    reached = "、".join(
+        f"{label}至 {as_of.get(name) or '無資料'}" for name, label in _CHIP_LABELS.items()
+    )
+    incomplete = [
+        label
+        for name, label in _CHIP_LABELS.items()
+        if chip[name]["status"] in ("failed", "partial")
+    ]
+    message = f", 籌碼資料: {reached}"
+    if incomplete:
+        message += f", {'、'.join(incomplete)}未完整更新, 請稍後再試"
+    return message
+
+
 class TaiwanBootstrapService:
     """Orchestrates bootstrap download, checksum, extraction, and sync."""
 
@@ -294,6 +321,7 @@ class TaiwanBootstrapService:
         refresh_service: TaiwanDailyRefreshService | None = None,
         publish: Callable[[bool], bool] | None = None,
         security_master: TaiwanSecurityMaster | None = None,
+        chip_service: TaiwanDailyUpdateService | None = None,
     ) -> None:
         self.download_url = download_url
         self.expected_sha256 = expected_sha256.lower()
@@ -305,6 +333,9 @@ class TaiwanBootstrapService:
         # Likewise the default security master is refreshed only when the default store is used.
         self._security_master = security_master
         self._uses_default_master = security_master is None and store is None
+        # Likewise the configured chip stores are refreshed only when the default store is used.
+        self._chip_service = chip_service
+        self._uses_default_chip_stores = chip_service is None and store is None
 
     def start_bootstrap(self, force: bool = False) -> str:
         """Start bootstrap process in a background thread."""
@@ -539,12 +570,46 @@ class TaiwanBootstrapService:
             return self._security_master
         return get_security_master() if self._uses_default_master else None
 
+    def _chip_updater(self) -> TaiwanDailyUpdateService | None:
+        if self._chip_service is not None:
+            return self._chip_service
+        if not self._uses_default_chip_stores:
+            return None
+        return TaiwanDailyUpdateService(daily_store=self.store, daily_service=self.refresh_service)
+
+    def _refresh_chip_data(self, target: date, now: datetime) -> dict[str, Any] | None:
+        """Never raises; a failure is reported per dataset."""
+        try:
+            updater = self._chip_updater()
+            if updater is None:
+                return None
+            margin_target = resolve_margin_target(target, now, updater.calendar)
+            chip = updater.refresh_chip_data(target, margin_target=margin_target).model_dump()
+            chip["as_of"] = updater.chip_data_as_of()
+            chip["margin_target_date"] = margin_target.isoformat()
+            return chip
+        except Exception as exc:
+            logger.exception("Chip data refresh failed: %s", exc)
+            failed = DatasetRefreshStats(
+                status="failed",
+                failed_dates=[{"error": str(exc)}],
+                note=f"Chip data not refreshed: {exc}",
+            )
+            return ChipDataRefreshResult(
+                institutional=failed, market_institutional=failed, margin=failed
+            ).model_dump()
+
     def update_to_latest(self) -> dict[str, Any]:
         """Directly update existing local store to latest trading day (no zip download).
 
         Refreshes the security master first under the daily update's rules and refetches the stored
         days missing a recent listing (pending_listing_dates), so a later click retries a failed
         backfill; a changed master also republishes the enriched table.
+
+        After the daily bars, even when they are already current, institutional flows, market-wide
+        institutional amounts and margin catch up to the same target as the scheduled run does;
+        margin stops at the previous session until MARGIN_PUBLISH (resolve_margin_target). Their
+        failures never fail the update and are reported in "chip_data".
         """
         st = self.store
         dates = st.available_dates()
@@ -569,16 +634,20 @@ class TaiwanBootstrapService:
         repairs = sorted(set(st.repair_dates(target)) | set(backfill))
 
         if latest >= target and not repairs:
+            chip = self._refresh_chip_data(target, now)
             published = self._publish(not republish)
+            chip_info: dict[str, Any] = {"chip_data": chip} if chip is not None else {}
             return {
                 "ok": True,
                 "already_current": True,
                 "message": f"本地資料已是最新 ({latest})"
                 + (", 已補算技術指標" if published else "")
-                + master_suffix,
+                + master_suffix
+                + (_chip_message(chip) if chip is not None else ""),
                 "dates_fetched": 0,
                 "enriched_published": published,
                 **master_info,
+                **chip_info,
             }
 
         start = min([latest + timedelta(days=1), *repairs])
@@ -594,19 +663,22 @@ class TaiwanBootstrapService:
         ]
         if failures and not fetched:
             raise RuntimeError(f"{failures[0][0]}: {failures[0][1]}")
+        chip = self._refresh_chip_data(target, now)
         # Screening takes its basis day from these bars, so their indicators must be published too.
         published = self._publish(not fetched and not republish)
         message = f"成功更新 {fetched} 個交易日 (最新至 {target})"
         if failures:
             message = f"已更新 {fetched} 個交易日, {failures[0][0]}, 請稍後再試"
+        chip_info = {"chip_data": chip} if chip is not None else {}
         return {
             "ok": True,
             "already_current": False,
-            "message": message + master_suffix,
+            "message": message + master_suffix + (_chip_message(chip) if chip is not None else ""),
             "dates_fetched": fetched,
             "enriched_published": published,
             "stats": res,
             **master_info,
+            **chip_info,
         }
 
 

@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_POST_CLOSE_HOUR = 16
 DEFAULT_POST_CLOSE_MINUTE = 0
 
+# Margin balances are published later than institutional flows; the scheduled margin run starts here.
+MARGIN_PUBLISH_HOUR = 21
+MARGIN_PUBLISH_MINUTE = 40
+
 UpdateStatus = Literal["success", "partial", "failed", "skipped"]
 
 
@@ -93,6 +97,12 @@ class TaiwanDailyUpdateResult(BaseModel):
     security_master: dict[str, Any] | None = None
 
 
+class ChipDataRefreshResult(BaseModel):
+    institutional: DatasetRefreshStats
+    market_institutional: DatasetRefreshStats
+    margin: DatasetRefreshStats
+
+
 def resolve_target_latest_trading_date(
     calendar: TaiwanTradingCalendar | None = None,
     as_of_dt: datetime | None = None,
@@ -127,6 +137,21 @@ def resolve_target_latest_trading_date(
                 cur -= timedelta(days=1)
 
     return cur
+
+
+def resolve_margin_target(target: date, now: datetime, calendar: TaiwanTradingCalendar) -> date:
+    """Latest day up to *target* whose margin balances a run at *now* may store.
+
+    A stored margin day is never refetched, so before MARGIN_PUBLISH on a session's own day
+    (Asia/Taipei) the margin step stops at the previous trading day.
+    """
+    published = resolve_target_latest_trading_date(
+        calendar,
+        as_of_dt=now.astimezone(TAIPEI_TZ),
+        post_close_hour=MARGIN_PUBLISH_HOUR,
+        post_close_minute=MARGIN_PUBLISH_MINUTE,
+    )
+    return min(target, published)
 
 
 def resolve_missing_date_range(
@@ -460,23 +485,169 @@ class TaiwanDailyUpdateService:
             return self._security_master
         return get_security_master() if self._uses_default_master else None
 
-    def _refresh_market_institutional(self, target: date) -> str | None:
+    def refresh_chip_data(
+        self,
+        target: date,
+        *,
+        refresh_institutional: bool = True,
+        refresh_margin: bool = True,
+        margin_target: date | None = None,
+        force_from: date | None = None,
+    ) -> ChipDataRefreshResult:
+        """Catch up institutional flows, market-wide institutional amounts, then margin to *target*.
+
+        Run it after the daily step: a stored daily partition is what marks an empty market amount
+        answer as a failure. Market amounts follow refresh_institutional. *margin_target* caps the
+        margin step below *target*; *force_from* refetches every day from it. Never raises.
+        """
+        if refresh_institutional:
+            inst = self._refresh_institutional(target, force_from)
+            market = self._refresh_market_institutional(target)
+        else:
+            inst = DatasetRefreshStats(
+                note="Institutional refresh skipped by caller configuration."
+            )
+            market = DatasetRefreshStats(
+                note="Market institutional refresh skipped by caller configuration."
+            )
+        if refresh_margin:
+            margin = self._refresh_margin(
+                target if margin_target is None else margin_target, force_from
+            )
+            if margin_target is not None and margin_target < target:
+                deferred = (
+                    f"Margin for {target} is published after "
+                    f"{MARGIN_PUBLISH_HOUR}:{MARGIN_PUBLISH_MINUTE:02d} Asia/Taipei"
+                )
+                margin.note = f"{margin.note}; {deferred}" if margin.note else deferred
+        else:
+            margin = DatasetRefreshStats(note="Margin refresh skipped by caller configuration.")
+        return ChipDataRefreshResult(institutional=inst, market_institutional=market, margin=margin)
+
+    def chip_data_as_of(self) -> dict[str, str | None]:
+        """Latest stored day of each chip dataset."""
+        latest = {
+            "institutional": self.inst_store.latest_date(),
+            "market_institutional": self.market_inst_service.latest_stored_date(),
+            "margin": self.margin_store.latest_date(),
+        }
+        return {name: d.isoformat() if d else None for name, d in latest.items()}
+
+    def _refresh_institutional(self, target: date, force_from: date | None) -> DatasetRefreshStats:
+        stats = DatasetRefreshStats()
+        force = force_from is not None
+        try:
+            i_dates = self.inst_store.available_dates()
+            i_max = max(i_dates) if i_dates else None
+            i_range = (
+                (force_from, target)
+                if force
+                else resolve_missing_date_range(i_max, target, self.calendar)
+            )
+            if not force:
+                provisional = [
+                    d
+                    for d in self.inst_store.provisional_dates(i_dates[-REPAIR_WINDOW_PARTITIONS:])
+                    if d <= target
+                ]
+                if provisional:
+                    logger.info(
+                        "Refetching provisional institutional partitions: %s",
+                        ", ".join(map(str, provisional)),
+                    )
+                    i_range = (provisional[0], target)
+            if not i_range:
+                stats.status = "success"
+                stats.dates_skipped = 1
+                stats.note = "Institutional store already current"
+                return stats
+            res = self.inst_service.refresh_dates(i_range[0], i_range[1], force=force)
+            stats.dates_requested = res.get("dates_requested", 0)
+            stats.dates_fetched = res.get("dates_fetched", 0)
+            stats.dates_skipped = res.get("dates_skipped", 0)
+            stats.rows_written = res.get("total_rows_written", 0)
+            stats.failed_dates = res.get("failed_dates", [])
+            repair_failed = res.get("repair_failed_dates") or []
+            if repair_failed:
+                stats.note = "Earlier days not refreshed: " + ", ".join(
+                    f["date"] for f in repair_failed
+                )
+            if stats.failed_dates:
+                stats.status = "failed" if stats.dates_fetched == 0 else "partial"
+            else:
+                stats.status = "success"
+        except Exception as e:
+            logger.exception("Institutional refresh failed: %s", e)
+            stats.status = "failed"
+            stats.failed_dates.append({"error": str(e)})
+        return stats
+
+    def _refresh_market_institutional(self, target: date) -> DatasetRefreshStats:
+        """The note is set only for failures."""
+        stats = DatasetRefreshStats()
         try:
             res = self.market_inst_service.refresh_through(target)
         except Exception as e:
             logger.exception("Market institutional amounts refresh failed: %s", e)
-            return f"Market institutional amounts not refreshed: {e}"
+            stats.status = "failed"
+            stats.failed_dates.append({"error": str(e)})
+            stats.note = f"Market institutional amounts not refreshed: {e}"
+            return stats
+        stats.dates_requested = res.get("dates_requested", 0)
+        stats.dates_fetched = res.get("dates_fetched", 0)
+        stats.dates_skipped = res.get("dates_skipped", 0)
+        stats.rows_written = res.get("total_rows_written", 0)
+        stats.failed_dates = res.get("failed_dates") or []
+        if stats.failed_dates:
+            stats.status = "failed" if stats.dates_fetched == 0 else "partial"
+        else:
+            stats.status = "success"
         parts = []
-        failed = [f["date"] for f in res.get("failed_dates") or []]
+        failed = [f["date"] for f in stats.failed_dates]
         repair_failed = [f["date"] for f in res.get("repair_failed_dates") or []]
         if failed:
             parts.append("Market institutional amounts not stored: " + ", ".join(failed))
         if repair_failed:
-            parts.append("Earlier market institutional amount days not refreshed: " + ", ".join(repair_failed))
-        if not parts:
-            return None
-        logger.warning("%s", "; ".join(parts))
-        return "; ".join(parts)
+            parts.append(
+                "Earlier market institutional amount days not refreshed: "
+                + ", ".join(repair_failed)
+            )
+        if parts:
+            stats.note = "; ".join(parts)
+            logger.warning("%s", stats.note)
+        return stats
+
+    def _refresh_margin(self, target: date, force_from: date | None) -> DatasetRefreshStats:
+        stats = DatasetRefreshStats()
+        force = force_from is not None
+        try:
+            m_dates = self.margin_store.available_dates()
+            m_max = max(m_dates) if m_dates else None
+            m_range = (
+                (force_from, target)
+                if force
+                else resolve_missing_date_range(m_max, target, self.calendar)
+            )
+            if not m_range:
+                stats.status = "success"
+                stats.dates_skipped = 1
+                stats.note = "Margin store already current"
+                return stats
+            res = self.margin_service.refresh_dates(m_range[0], m_range[1], force=force)
+            stats.dates_requested = res.get("dates_requested", 0)
+            stats.dates_fetched = res.get("dates_fetched", 0)
+            stats.dates_skipped = res.get("dates_skipped", 0)
+            stats.rows_written = res.get("total_rows_written", 0)
+            stats.failed_dates = res.get("failed_dates", [])
+            if stats.failed_dates:
+                stats.status = "failed" if stats.dates_fetched == 0 else "partial"
+            else:
+                stats.status = "success"
+        except Exception as e:
+            logger.exception("Margin refresh failed: %s", e)
+            stats.status = "failed"
+            stats.failed_dates.append({"error": str(e)})
+        return stats
 
     def run_update(
         self,
@@ -660,79 +831,22 @@ class TaiwanDailyUpdateService:
         if master_outcome is not None and master_outcome.note:
             daily_stats.note = "; ".join(n for n in (master_outcome.note, daily_stats.note) if n)
 
-        # 3. Institutional Refresh (TWSE + TPEx = 2 HTTP calls per date)
-        inst_stats = DatasetRefreshStats()
-        if not refresh_institutional:
-            inst_stats.status = "skipped"
-            inst_stats.note = "Institutional refresh skipped by caller configuration."
-        else:
-            try:
-                i_range = resolve_missing_date_range(i_max, target, self.calendar) if not force else (start_bound, end_bound)
-                if not force:
-                    provisional = [
-                        d for d in self.inst_store.provisional_dates(i_dates[-REPAIR_WINDOW_PARTITIONS:]) if d <= target
-                    ]
-                    if provisional:
-                        logger.info("Refetching provisional institutional partitions: %s", ", ".join(map(str, provisional)))
-                        i_range = (provisional[0], target)
-                if not i_range and not force:
-                    inst_stats.status = "success"
-                    inst_stats.dates_skipped = 1
-                    inst_stats.note = "Institutional store already current"
-                else:
-                    i_start, i_end = i_range if i_range else (start_bound, end_bound)
-                    res = self.inst_service.refresh_dates(i_start, i_end, force=force)
-                    inst_stats.dates_requested = res.get("dates_requested", 0)
-                    inst_stats.dates_fetched = res.get("dates_fetched", 0)
-                    inst_stats.dates_skipped = res.get("dates_skipped", 0)
-                    inst_stats.rows_written = res.get("total_rows_written", 0)
-                    inst_stats.failed_dates = res.get("failed_dates", [])
-                    repair_failed = res.get("repair_failed_dates") or []
-                    if repair_failed:
-                        inst_stats.note = "Earlier days not refreshed: " + ", ".join(f["date"] for f in repair_failed)
-                    if inst_stats.failed_dates:
-                        inst_stats.status = "failed" if inst_stats.dates_fetched == 0 else "partial"
-                    else:
-                        inst_stats.status = "success"
-            except Exception as e:
-                logger.exception("Institutional refresh failed: %s", e)
-                inst_stats.status = "failed"
-                inst_stats.failed_dates.append({"error": str(e)})
-
-            # Must stay after the daily step: a stored daily partition is what marks an empty answer as a failure.
-            # Market-wide amounts never change the institutional status; their failures only extend its note.
-            market_note = self._refresh_market_institutional(target)
-            if market_note:
-                inst_stats.note = f"{inst_stats.note}; {market_note}" if inst_stats.note else market_note
-
-        # 4. Margin Refresh (TWSE + TPEx = 2 HTTP calls per date)
-        margin_stats = DatasetRefreshStats()
-        if not refresh_margin:
-            margin_stats.status = "skipped"
-            margin_stats.note = "Margin refresh skipped by caller configuration."
-        else:
-            try:
-                m_range = resolve_missing_date_range(m_max, target, self.calendar) if not force else (start_bound, end_bound)
-                if not m_range and not force:
-                    margin_stats.status = "success"
-                    margin_stats.dates_skipped = 1
-                    margin_stats.note = "Margin store already current"
-                else:
-                    m_start, m_end = m_range if m_range else (start_bound, end_bound)
-                    res = self.margin_service.refresh_dates(m_start, m_end, force=force)
-                    margin_stats.dates_requested = res.get("dates_requested", 0)
-                    margin_stats.dates_fetched = res.get("dates_fetched", 0)
-                    margin_stats.dates_skipped = res.get("dates_skipped", 0)
-                    margin_stats.rows_written = res.get("total_rows_written", 0)
-                    margin_stats.failed_dates = res.get("failed_dates", [])
-                    if margin_stats.failed_dates:
-                        margin_stats.status = "failed" if margin_stats.dates_fetched == 0 else "partial"
-                    else:
-                        margin_stats.status = "success"
-            except Exception as e:
-                logger.exception("Margin refresh failed: %s", e)
-                margin_stats.status = "failed"
-                margin_stats.failed_dates.append({"error": str(e)})
+        # 3-4. Institutional flows, market-wide amounts, then margin (TWSE + TPEx = 2 HTTP calls per
+        # date each). Market-wide amounts never change the institutional status; their failures only
+        # extend its note.
+        chip = self.refresh_chip_data(
+            target,
+            refresh_institutional=refresh_institutional,
+            refresh_margin=refresh_margin,
+            force_from=start_bound if force else None,
+        )
+        inst_stats = chip.institutional
+        if refresh_institutional and chip.market_institutional.note:
+            market_note = chip.market_institutional.note
+            inst_stats.note = (
+                f"{inst_stats.note}; {market_note}" if inst_stats.note else market_note
+            )
+        margin_stats = chip.margin
 
         # 4b. Publish indicators and signals for the engines that read the enriched table.
         # A partial run never stores a day past a failed new day, so the stored days have no gap to publish across.
