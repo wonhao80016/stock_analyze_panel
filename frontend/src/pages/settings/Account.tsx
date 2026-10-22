@@ -141,9 +141,9 @@ export function SettingsAccountPanel(_props: { highlight?: string } = {}) {
           <div className="flex items-start gap-2.5">
             <ShieldOff className="h-4 w-4 text-muted mt-0.5 shrink-0" />
             <div className="space-y-1.5 text-[11px] text-muted leading-relaxed">
-              <p>目前尚未設定面板存取密碼,任何連得到這個網址的人都能直接使用面板。</p>
+              <p>目前尚未設定面板存取密碼,只有伺服器本機 (127.0.0.1) 能使用面板,其他裝置的連線都會被拒絕。</p>
               <p>
-                首次設定密碼只能從伺服器本機或內網操作(公網連線會被拒絕),設定完成後就能在這裡修改密碼。
+                首次設定密碼只能在伺服器本機操作,或以 AUTH_PASSWORD 環境變量預設密碼;設定完成後就能在這裡修改密碼。
               </p>
             </div>
           </div>

@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -357,26 +356,12 @@ app = FastAPI(
 # GZipMiddleware 不会 flush 每个 chunk, 压了会把进度事件憋到最后一次吐出。
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-# CORS: 允许局域网访问 (自托管场景, 放开所有来源)
-# 注: allow_credentials=True 与 allow_origins=['*'] 不能共存 (浏览器规范),
-# 本项目认证走 header (API Key), 不依赖 cookie, 故关闭 credentials 换取通配来源。
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 # ================================================================
 # 访问认证中间件
 # ================================================================
-# 拦截所有 /api/ 请求, 三种状态:
-#   1. 未设密码 + 本机/内网 → 放行(让本机用户访问面板 + 调 /api/auth/setup 设密码)
-#   2. 未设密码 + 公网       → 拒绝(403, 防裸奔也防抢占; 引导本机设密码)
-#   3. 已设密码              → 检查 session, 无效则 401(前端跳登录)
-# 白名单: /api/auth/* (设密码/登录本身)、/health 等探活。
+# The panel is same-origin only (no CORS): any /api/ request whose Origin differs from Host is 403.
+# No password: only loopback peers addressing a loopback Host pass; everything else is 403.
+# Password set: a valid session cookie is required (401 otherwise); /api/auth/* and probes are exempt.
 _AUTH_WHITELIST_PREFIX = ("/api/auth/",)
 _AUTH_WHITELIST_EXACT = ("/health", "/api/health", "/openapi.json", "/docs", "/redoc")
 
@@ -387,6 +372,11 @@ async def auth_middleware(request: Request, call_next):
     # 仅 /api/ 走认证; 静态资源(前端页面/assets)放行, 由前端处理跳转
     if not path.startswith("/api/"):
         return await call_next(request)
+    if auth_api._is_cross_origin(request):
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "拒绝跨来源请求", "code": "CROSS_ORIGIN_FORBIDDEN"},
+        )
     # 白名单放行(设密码/登录/探活本身不拦)
     if path.startswith(_AUTH_WHITELIST_PREFIX) or path in _AUTH_WHITELIST_EXACT:
         return await call_next(request)
@@ -394,14 +384,12 @@ async def auth_middleware(request: Request, call_next):
     from app.services import auth as auth_service
     # 情况 1+2: 未设密码
     if not auth_service.is_configured():
-        # 本机/内网 → 放行(服务器主人可访问, 并去 /login 设密码)
-        if auth_api._is_local_network(auth_api._client_ip(request)):
+        if auth_api._is_local_request(request):
             return await call_next(request)
-        # 公网 → 拒绝。不裸奔, 也不给公网设密码的机会(防抢占)
         return JSONResponse(
             status_code=403,
             content={
-                "detail": "面板尚未初始化访问密码,请通过 SSH/本机浏览器访问以设置密码",
+                "detail": f"面板尚未初始化访问密码。{auth_api.SETUP_LOCAL_ONLY_DETAIL}",
                 "code": "NOT_INITIALIZED",
             },
         )

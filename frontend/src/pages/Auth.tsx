@@ -6,7 +6,7 @@
  *   - configured=true  → 顯示「登錄」
  *
  * 安全:
- *   - 設密碼接口後端限本機/內網; 公網用戶設密碼會被 403 拒絕, 頁面據此提示。
+ *   - 設密碼接口後端限本機 (127.0.0.1/::1); 其他來源設密碼會被 403 拒絕, 頁面據此提示。
  *   - 登錄失敗由後端限流(5次鎖5分鐘), 429 時前端顯示等待提示。
  */
 import { useEffect, useState, type FormEvent } from 'react'
@@ -177,7 +177,7 @@ export function Auth() {
           {isSetup && (
             <div className="mt-3 space-y-1.5 text-[10px] leading-relaxed text-muted/70">
               <p>
-                出於安全考慮, 首次設置密碼需在服務器本機或內網訪問時操作。公網環境下僅可登錄。
+                出於安全考慮, 首次設置密碼只能在服務器本機 (127.0.0.1) 操作; 區網、公網或 Docker 部署請改用 AUTH_PASSWORD 環境變量預設密碼。
               </p>
               <p>
                 詳細配置說明見{' '}

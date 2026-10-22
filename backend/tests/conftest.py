@@ -77,4 +77,4 @@ def _api_tests_are_unauthenticated_local(request, monkeypatch):
     from app.services import auth as auth_service
 
     monkeypatch.setattr(auth_service, "is_configured", lambda: False)
-    monkeypatch.setattr(auth_api, "_is_local_network", lambda _ip: True)
+    monkeypatch.setattr(auth_api, "_is_local_request", lambda _request: True)

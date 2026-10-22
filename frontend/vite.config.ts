@@ -21,6 +21,8 @@ export default defineConfig({
       // dev 时 /api 转发到与启动脚本相同的 FastAPI 地址
       '/api': {
         target: backendTarget,
+        // Without X-Forwarded-For every client of this dev server would reach the backend as 127.0.0.1.
+        xfwd: true,
         // SSE 端点需要禁用缓冲
         configure: (proxy) => {
           proxy.on('proxyReq', (_proxyReq, req) => {
