@@ -689,3 +689,24 @@ def test_promoted_config_pins_mining_minimum_commission(tmp_path, definition) ->
     promoted = _service(tmp_path, store).promote(run_id, signature)
 
     assert promoted["config"]["minimum_commission"] == 0.0
+
+
+def test_publish_factor_is_refused_while_user_strategies_are_disabled(tmp_path) -> None:
+    store, run_id, signature = _create_run(tmp_path)
+    builtin_dir = Path(__file__).resolve().parents[1] / "app" / "strategy" / "builtin"
+    custom_dir = tmp_path / "strategies" / "custom"
+    engine = StrategyEngine(strategy_dirs=[builtin_dir, custom_dir], disabled_dirs=[custom_dir])
+    service = MiningCandidateService(
+        tmp_path,
+        store,
+        CandidateStore(tmp_path),
+        engine,
+        strategy_cache_invalidator=lambda _data_dir: None,
+    )
+
+    with pytest.raises(ValueError, match="ALLOW_USER_PYTHON_STRATEGIES"):
+        service.publish(run_id, signature)
+
+    assert list(custom_dir.glob("*.py")) == []
+    persisted = pl.read_parquet(store.artifact_path(run_id, "candidates")).row(0, named=True)
+    assert persisted["published_strategy_id"] is None

@@ -87,6 +87,21 @@ AUTH_PASSWORD='你的密碼'  # 至少 6 位;僅首次生效,已設過則不覆�
 
 ---
 
+## 使用者 Python 策略(預設關閉)
+
+```ini
+ALLOW_USER_PYTHON_STRATEGIES=false   # true = 允許儲存並載入自訂 / AI / 疊加策略的 .py
+```
+
+自訂策略、AI 策略與疊加策略都存成 `data/strategies/{custom,ai,composite}` 下的 `.py`,載入時會在後端行程內以完整權限執行。存檔前的 AST 檢查只是語法提示,可以被繞過,不是安全防護。因此預設關閉:
+
+- 關閉時:`/api/strategies/code/save`、`/ai/save`、`/composite/save` 回 403,不寫入任何檔案;挖掘出的因子候選也無法發佈成新策略(發佈既有策略不受影響)。上述目錄中已有的 `.py` 不會執行,會記入後端 log,並列在 `GET /api/strategies` 與 `POST /api/strategies/reload` 回傳的 `load_errors`。內建策略照常運作;已存在的使用者策略檔仍可查看原始碼或刪除。
+- 開啟時:改成 `true` 並重啟後端才生效。三個存檔 API 與挖掘候選發佈 `POST /api/backtest/mining/runs/{run_id}/candidates/{signature}/publish` 只接受本機請求(對端與 Host 都必須是 `127.0.0.1`、`::1` 或 `localhost`),區網、公網以及經反向代理轉入的遠端請求一律回 403。
+
+只有在你信任能寫入 `data/strategies/` 的每一個人與程式時才開啟。產生與校驗程式碼的端點(`/build`、`/build/stream`、`/ai/generate`、`/code/validate`)不寫檔也不執行,開關關閉時仍可使用。
+
+---
+
 ## 後端依賴 Extras(可選)
 
 ```ini

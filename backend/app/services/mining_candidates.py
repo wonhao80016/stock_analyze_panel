@@ -151,6 +151,12 @@ class MiningCandidateService:
             )
 
             target = self._custom_strategy_path(published_id)
+            if self.strategy_engine.file_disabled(target):
+                raise ValueError(
+                    "publishing a factor strategy writes a user Python strategy file, "
+                    "which is disabled; set ALLOW_USER_PYTHON_STRATEGIES=true and restart "
+                    "the backend to publish"
+                )
             created = self._publish_or_verify_source(
                 target,
                 source,

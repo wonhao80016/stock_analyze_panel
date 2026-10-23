@@ -175,8 +175,9 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         from app.backtest.engine import BacktestEngine
         from app.backtest.optimizer import StrategyOptimizer
         from app.backtest.strategy import StrategyBacktestService
+        from app.config import settings
         from app.strategy import config as strategy_config
-        from app.strategy.engine import StrategyEngine
+        from app.strategy.engine import StrategyEngine, user_strategy_dirs
         from app.tickflow.repository import DataStore, KlineRepository
 
         data_dir = Path(task["data_dir"])
@@ -184,6 +185,9 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         repo = KlineRepository(store)
         strategy_engine = StrategyEngine(
             strategy_dirs=_strategy_dirs(data_dir),
+            disabled_dirs=(
+                () if settings.allow_user_python_strategies else user_strategy_dirs(data_dir)
+            ),
             override_loader=lambda sid: strategy_config.load_override(data_dir, sid),
         )
         service = StrategyBacktestService(BacktestEngine(repo), strategy_engine)

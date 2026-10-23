@@ -13,6 +13,8 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sse_starlette.sse import EventSourceResponse
 
+from app.api.auth import _is_local_request
+from app.api.strategy import USER_STRATEGIES_LOCAL_ONLY_DETAIL
 from app.backtest.factor import FACTOR_COLUMNS
 from app.backtest.mining import (
     MAX_BEAM_WIDTH,
@@ -20,6 +22,7 @@ from app.backtest.mining import (
     MAX_FINALISTS,
     evaluate_candidate_gate,
 )
+from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.services import preferences
 from app.services.mining_jobs import (
@@ -348,6 +351,8 @@ def promote_candidate(run_id: str, signature: str, request: Request) -> dict[str
 
 @router.post("/runs/{run_id}/candidates/{signature}/publish")
 def publish_candidate(run_id: str, signature: str, request: Request) -> dict[str, Any]:
+    if settings.allow_user_python_strategies and not _is_local_request(request):
+        raise HTTPException(status_code=403, detail=USER_STRATEGIES_LOCAL_ONLY_DETAIL)
     service = _candidate_service(request)
     try:
         return service.publish(run_id, signature)

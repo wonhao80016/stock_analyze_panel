@@ -339,8 +339,7 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
             return blocks[0].group("code").strip()
         return content.strip()
 
-    # import 白名单: Polars 与矩阵策略只开放执行协议所需模块。
-    # 白名单而非黑名单 — 黑名单挡不住 ctypes/importlib/builtins/pickle 等未列出的危险模块。
+    # Modules the Polars and matrix strategy contracts use; a lint hint, not a sandbox.
     _ALLOWED_IMPORT_MODULES = frozenset({
         "polars",
         "numpy",
@@ -358,12 +357,10 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
         extra_allowed_import_modules: frozenset[str] = frozenset(),
         extra_allowed_calls: frozenset[str] = frozenset(),
     ) -> None:
-        """AST 级安全检查: import 白名单 + 危险内建调用拦截 + dunder 遍历拦截。
+        """Lint strategy code for imports, builtin calls and dunder access outside the strategy contract.
 
-        注意: AST 名单不是真正的沙箱, 只能拦截常见攻击模式。真正的隔离需要
-        在受限子进程里执行策略 (后续 P0)。此处拦截已知的逃逸技巧:
-        - __globals__ / __builtins__ / __class__ / __subclasses__ / __mro__ 等属性访问
-        - ["__import__"] / ["__builtins__"] 等字符串下标访问
+        Not a security boundary: aliases and attribute chains pass it, and code that passes runs
+        with full backend privileges. ALLOW_USER_PYTHON_STRATEGIES decides whether user files run.
         """
         tree = ast.parse(code)
 
@@ -380,13 +377,11 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
                 or module.split(".", 1)[0] in allowed_import_modules
             )
 
-        # dunder 属性名: 访问这些属性可逃逸出策略沙箱拿到 os/subprocess 等
         forbidden_dunder_attrs = {
             "__globals__", "__builtins__", "__class__", "__subclasses__",
             "__mro__", "__bases__", "__base__", "__dict__", "__code__",
             "__import__", "__loader__", "__spec__", "__wrapped__",
         }
-        # 字符串下标访问的危险名: x["__builtins__"] / x["__import__"]
         forbidden_subscript_strs = {
             "__builtins__", "__import__", "__globals__",
         }
@@ -395,23 +390,21 @@ META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if not _module_allowed(alias.name):
-                        raise ValueError(f"禁止 import {alias.name} (不在策略安全白名单)")
+                        raise ValueError(f"禁止 import {alias.name} (策略只支持 polars、numpy 等策略协议模块)")
             if isinstance(node, ast.ImportFrom):
                 mod = node.module or ""
                 if not _module_allowed(mod):
-                    raise ValueError(f"禁止 from {node.module} import (不在策略安全白名单)")
+                    raise ValueError(f"禁止 from {node.module} import (策略只支持 polars、numpy 等策略协议模块)")
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
-                    raise ValueError(f"禁止调用 {node.func.id}()")
-            # 拦截 dunder 属性访问: x.__globals__ / ().__class__ 等
+                    raise ValueError(f"禁止调用 {node.func.id}() (策略代码不使用此内建函数)")
             if isinstance(node, ast.Attribute) and node.attr in forbidden_dunder_attrs:
-                raise ValueError(f"禁止访问属性 {node.attr} (策略不允许 dunder 遍历逃逸)")
-            # 拦截字符串下标访问危险名: x["__builtins__"]
+                raise ValueError(f"禁止访问属性 {node.attr} (策略代码不使用 dunder 属性)")
             if isinstance(node, ast.Subscript):
                 sl = node.slice
                 if isinstance(sl, ast.Constant) and isinstance(sl.value, str) \
                         and sl.value in forbidden_subscript_strs:
-                    raise ValueError(f"禁止下标访问 {sl.value} (策略不允许 dunder 遍历逃逸)")
+                    raise ValueError(f"禁止下标访问 {sl.value} (策略代码不使用 dunder 名称)")
 
     @staticmethod
     def _extract_meta(code: str) -> dict:

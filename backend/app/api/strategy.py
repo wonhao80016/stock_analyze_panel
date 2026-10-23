@@ -18,7 +18,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.api.auth import _is_local_request
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
+from app.config import settings
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
@@ -62,6 +64,21 @@ def _get_monitor(request: Request) -> StrategyMonitorService:
 
 def _data_dir(request: Request) -> Path:
     return request.app.state.repo.store.data_dir
+
+
+USER_STRATEGIES_DISABLED_DETAIL = (
+    "用户 Python 策略已停用: 后端不会保存或执行自定义、AI 与叠加策略文件。"
+    "如需启用, 请在 .env 设置 ALLOW_USER_PYTHON_STRATEGIES=true 并重启后端。"
+)
+USER_STRATEGIES_LOCAL_ONLY_DETAIL = "保存用户 Python 策略只接受本机请求 (127.0.0.1 / localhost)。"
+
+
+def _require_user_strategy_writes(request: Request) -> None:
+    """Strategy files run with full backend privileges; only an opted-in local owner may write them."""
+    if not settings.allow_user_python_strategies:
+        raise HTTPException(status_code=403, detail=USER_STRATEGIES_DISABLED_DETAIL)
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail=USER_STRATEGIES_LOCAL_ONLY_DETAIL)
 
 
 def _invalidate_strategy_runtime(request: Request) -> None:
@@ -703,7 +720,6 @@ def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRe
                 req.name.strip() or None,
                 req.description.strip() or None,
             )
-    # 安全校验始终执行 (此前 strict 字段可被客户端设 false 绕过, 已移除)
     AIStrategyGenerator._validate_safety(code)
     meta = AIStrategyGenerator._extract_meta(code)
     AIStrategyGenerator._validate_meta_semantics(code, meta)
@@ -1022,6 +1038,7 @@ def validate_strategy_code(req: StrategyCodeValidateRequest, request: Request):
 
 @router.post("/code/save")
 def save_strategy_code(req: StrategyCodeSaveRequest, request: Request):
+    _require_user_strategy_writes(request)
     try:
         return _save_strategy_code(req, request)
     except Exception as e:
@@ -1150,6 +1167,7 @@ def _save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request
 
 @router.post("/composite/save")
 def save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request):
+    _require_user_strategy_writes(request)
     try:
         return _save_composite_strategy(req, request)
     except Exception as e:
@@ -1158,6 +1176,7 @@ def save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request)
 
 @router.post("/ai/save")
 async def ai_save(req: AISaveRequest, request: Request):
+    _require_user_strategy_writes(request)
     try:
         save_req = StrategyCodeSaveRequest(
             code=req.code,

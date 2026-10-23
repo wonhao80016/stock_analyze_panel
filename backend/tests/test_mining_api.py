@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app import config as app_config
 from app.api.mining import router
 from app.backtest.mining import compute_candidate_signature
 from app.enriched_generation import EnrichedGenerationUnavailableError
@@ -483,6 +484,38 @@ def test_publish_endpoint_uses_persisted_definition_and_invalidates_runtime(
     assert invalidations == ["monitor"]
     persisted = pl.read_parquet(store.artifact_path("result-run", "candidates"))
     assert persisted["published_strategy_id"][0] == strategy_id
+
+
+@pytest.mark.parametrize(
+    ("peer", "status"),
+    [(("192.168.1.20", 50000), 403), (("127.0.0.1", 50000), 200)],
+)
+def test_publish_endpoint_writes_strategy_files_only_for_local_requests(
+    tmp_path, monkeypatch, peer, status
+) -> None:
+    monkeypatch.setattr(app_config.settings, "allow_user_python_strategies", True)
+    client, store = _client(tmp_path)
+    _successful_run(store)
+    builtin_dir = Path(__file__).resolve().parents[1] / "app" / "strategy" / "builtin"
+    custom_dir = tmp_path / "strategies" / "custom"
+    client.app.state.strategy_engine = StrategyEngine(strategy_dirs=[builtin_dir, custom_dir])
+    peer_client = TestClient(client.app, base_url="http://127.0.0.1:3018", client=peer)
+
+    response = peer_client.post(
+        f"/api/backtest/mining/runs/result-run/candidates/"
+        f"{quote(_FACTOR_SIGNATURE, safe='')}/publish",
+    )
+
+    assert response.status_code == status, response.text
+    written = list(custom_dir.glob("*.py"))
+    persisted = pl.read_parquet(store.artifact_path("result-run", "candidates"))
+    if status == 403:
+        assert "本机" in response.json()["detail"]
+        assert written == []
+        assert persisted["published_strategy_id"][0] is None
+    else:
+        assert len(written) == 1
+        assert persisted["published_strategy_id"][0] == response.json()["strategy_id"]
 
 
 def test_result_fails_closed_when_artifact_is_missing(tmp_path):

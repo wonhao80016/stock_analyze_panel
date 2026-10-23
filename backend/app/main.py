@@ -79,6 +79,18 @@ if not getattr(sys, "frozen", False):
         logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
 
 
+def _build_strategy_engine(data_dir: Path):
+    from app.strategy import config as strategy_config
+    from app.strategy.engine import StrategyEngine, user_strategy_dirs
+
+    user_dirs = user_strategy_dirs(data_dir)
+    return StrategyEngine(
+        strategy_dirs=[Path(__file__).resolve().parent / "strategy" / "builtin", *user_dirs],
+        disabled_dirs=() if settings.allow_user_python_strategies else user_dirs,
+        override_loader=lambda sid: strategy_config.load_override(data_dir, sid),
+    )
+
+
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
     logger.info(
@@ -193,23 +205,12 @@ async def _application_lifespan(app: FastAPI):
     app.state.pull_scheduler = pull_scheduler
 
     # 策略引擎
-    from app.strategy.engine import StrategyEngine
-    from app.strategy import config as strategy_config
     from app.strategy.monitor import StrategyMonitorService
     from app.services.screener import ScreenerService
 
     _screener_svc = ScreenerService(repo)
     _etf_screener_svc = ScreenerService(repo, asset_type="etf")
-    strategy_dirs = [
-        Path(__file__).resolve().parent / "strategy" / "builtin",
-        store.data_dir / "strategies" / "custom",
-        store.data_dir / "strategies" / "ai",
-        store.data_dir / "strategies" / "composite",
-    ]
-    strategy_engine = StrategyEngine(
-        strategy_dirs=strategy_dirs,
-        override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
-    )
+    strategy_engine = _build_strategy_engine(store.data_dir)
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
 

@@ -77,6 +77,16 @@ MISSING_SCORING_CHILDREN = "missing_scoring_children"
 # 叠加策略硬上限：子策略数量。控制信号计算成本与字段并集膨胀，避免 OOM。
 MAX_COMPOSITE_CHILDREN = 8
 
+USER_STRATEGY_SOURCES = ("custom", "ai", "composite")
+USER_STRATEGIES_DISABLED_ERROR = (
+    "user Python strategies are disabled, so this file was not run; "
+    "set ALLOW_USER_PYTHON_STRATEGIES=true and restart the backend to load it"
+)
+
+
+def user_strategy_dirs(data_dir: Path) -> list[Path]:
+    return [data_dir / "strategies" / source for source in USER_STRATEGY_SOURCES]
+
 
 def _normalize_param_defs(params: Any) -> list[dict]:
     """把 META["params"] 归一化为标准 list[dict] (每项含 id/label/type/default).
@@ -284,9 +294,12 @@ class StrategyEngine:
         self,
         strategy_dirs: list[Path] | None = None,
         *,
+        disabled_dirs: Iterable[Path] = (),
         override_loader: Callable[[str], dict] | None = None,
     ):
+        """``disabled_dirs`` are strategy dirs whose files are listed in load_errors, never run."""
         self._strategies: dict[str, StrategyDef] = {}
+        self._disabled_dirs = frozenset(Path(d).resolve() for d in disabled_dirs)
         self._load_errors: list[dict] = []  # 加载失败的策略 [{file, error}]
         # Serializes reloads so a slower earlier scan never replaces a newer registry.
         self._reload_lock = threading.Lock()
@@ -314,8 +327,13 @@ class StrategyEngine:
         for d in self._strategy_dirs:
             if not d.exists():
                 continue
+            disabled = d.resolve() in self._disabled_dirs
             for f in sorted(d.glob("*.py")):
                 if f.name.startswith("_"):
+                    continue
+                if disabled:
+                    logger.warning("skip strategy %s: %s", f, USER_STRATEGIES_DISABLED_ERROR)
+                    errors.append({"file": str(f), "error": USER_STRATEGIES_DISABLED_ERROR})
                     continue
                 try:
                     s = self._load_file(f)
@@ -368,6 +386,10 @@ class StrategyEngine:
     def load_errors(self) -> list[dict]:
         """返回最近一次 _load_all 中加载失败的策略 [{file, error}]。"""
         return list(self._load_errors)
+
+    def file_disabled(self, path: Path) -> bool:
+        """Whether a strategy file at ``path`` would be listed in load_errors instead of run."""
+        return path.parent.resolve() in self._disabled_dirs
 
     @staticmethod
     def _validate_composite_references(
@@ -429,8 +451,7 @@ class StrategyEngine:
     @staticmethod
     def _load_file(path: Path) -> StrategyDef:
         """从 Python 文件加载策略定义"""
-        # 纵深防御: 执行前再跑一次 AST 安全校验, 防止策略文件被直接篡改
-        # 绕过 API 校验后, 在 exec_module 时执行恶意代码。
+        # Same lint as the save API so hand-edited files get the same hints; not a security boundary.
         dependency_paths = [
             candidate
             for candidate in path.parent.glob("_*.py")

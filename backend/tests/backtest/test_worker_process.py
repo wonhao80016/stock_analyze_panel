@@ -18,11 +18,24 @@ from app.enriched_generation import bump_enriched_generation, get_enriched_gener
 from app.services.mining_jobs import MiningRunStore
 
 
-def _write_worker_strategy(data_dir) -> None:
+@pytest.fixture(autouse=True)
+def allow_user_strategies_in_worker(monkeypatch):
+    # Spawned workers read their own settings; these tests run a strategy from strategies/custom.
+    monkeypatch.setenv("ALLOW_USER_PYTHON_STRATEGIES", "true")
+
+
+def _write_worker_strategy(data_dir, marker=None) -> None:
     strategy_dir = data_dir / "strategies" / "custom"
     strategy_dir.mkdir(parents=True)
+    # polars I/O passes the AST check, so the marker proves the module body ran.
+    prelude = (
+        f"import polars as pl\npl.DataFrame({{'ran': [1]}}).write_csv({marker.as_posix()!r})\n"
+        if marker is not None
+        else ""
+    )
     (strategy_dir / "worker_always_entry.py").write_text(
-        """import numpy as np
+        prelude
+        + """import numpy as np
 from app.backtest.matrix import make_signal_matrix
 
 META = {
@@ -165,6 +178,36 @@ def test_spawn_worker_returns_compact_result_and_memory_metrics(tmp_path):
     assert worker["serialized_result_bytes"] > 0
     assert worker["worker_exitcode"] == 0
     assert worker["parent_rss_after_worker_exit_bytes"] > 0
+
+
+@pytest.mark.parametrize("allowed", ["false", "true"])
+def test_spawn_worker_runs_user_strategies_only_when_enabled(tmp_path, monkeypatch, allowed):
+    monkeypatch.setenv("ALLOW_USER_PYTHON_STRATEGIES", allowed)
+    start = date(2024, 1, 1)
+    data_dir = tmp_path / "data"
+    marker = tmp_path / "marker.txt"
+    _write_worker_strategy(data_dir, marker)
+    _write_market_data(data_dir, start)
+    config = StrategyBacktestConfig(
+        strategy_id="worker_always_entry",
+        symbols=["600000.SH"],
+        start=start,
+        end=start + timedelta(days=2),
+        overrides={"basic_filter": {"enabled": False}},
+        matching="close_t",
+        fees_pct=0,
+        slippage_bps=0,
+        max_positions=1,
+    )
+
+    result = run_worker_task(make_worker_task("backtest", data_dir, config))
+
+    if allowed == "true":
+        assert result["error"] is None
+        assert marker.exists()
+    else:
+        assert result["error"] == "unknown strategy: worker_always_entry"
+        assert not marker.exists()
 
 
 def test_spawn_optimizer_reuses_one_matrix_and_exits(tmp_path):
