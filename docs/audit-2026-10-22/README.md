@@ -153,7 +153,7 @@
 | 階段 | 狀態 | 備註 |
 |---|---|---|
 | 0 安全止血 | 已完成（2026-10-23） | B001、B005、B023：`bedae43`；B002：`6451def`；B003：`d754f6e`；B018：`b6f75a1`；B030：`f90cf95`；B035：`a41233e`；B026：`b625690`。合併後階段 0 相關測試 324 passed。後續事項見下方 |
-| 1 測試基線與隔離 | 未開始 | |
+| 1 測試基線與隔離 | 已完成（2026-10-23） | B057：`c0587fc`；B223–B228、B231–B235、B238–B241：`99931b1`；B236、B237：`3ae2f62`；B229、B230：`e6fab1c`。不設環境變數的全套基線（在不含 data/ 的副本上）：4485 passed、7 xfailed、12 deselected，約 9.5 分鐘，峰值記憶體約 0.8 GB，無外連，正式 data/ 未被寫入。後續事項見下方 |
 | 2 部署與打包 | 未開始 | |
 | 3 回測與挖掘可信度 | 未開始 | 待 D5 |
 | 4 資料寫入與一致性 | 未開始 | |
@@ -177,6 +177,14 @@
 7. FinMind provider 把含 token 的 URL 寫進資料的 `source_url` 欄位；`backend/app/api/settings.py` 約 678 行把含 URL 的例外訊息直接回傳給 API。
 8. 未帶 Origin 的跨站 GET（圖片、導覽）仍會放行；若有會改狀態的 GET 端點，可加 `Sec-Fetch-Site` 檢查。
 9. `ScreenerResult` 資料類別在 B002 之後只剩測試使用（階段 9 處理）。
+
+### 階段 1 留下的後續事項
+
+1. 網路攔截只在 pytest 主行程生效，spawn 出的子行程（回測 worker、lorentzian 測試）不受攔截；目前這些子行程只讀本機資料。
+2. `backend/app/services/mining_manager.py` 先寫終態狀態、後寫終態事件（約 206–259 行），測試已改為等兩者都到位；產品端 SSE 會自行補送終態事件，但順序本身仍可改善。
+3. `backend/tests/backtest/test_worker_process.py` 偶發子行程以 0xC0000005 結束，單獨重跑會通過，原因未查明。
+4. 合成證券主檔只含約 30 個代號；新測試用到其他代號時要補進 conftest 的 `_synthetic_instruments`。
+5. conftest 約 440 行，可拆成 `pytest_plugins` 載入的隔離與網路攔截兩個模組。
 
 ## 維護方式
 
