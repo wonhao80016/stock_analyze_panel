@@ -17,12 +17,21 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.taiwan import chip_history
 from app.taiwan.chip_history import TaiwanChipHistoryService
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar
 
 SYMBOL = "2330.TWSE"
+# The history window ends today and counts back in trading days, so the fixture
+# dates below only stay inside it when "today" is pinned right after them.
+TODAY = date(2026, 9, 17)
+
+
+@pytest.fixture(autouse=True)
+def _pinned_today(monkeypatch):
+    monkeypatch.setattr(chip_history, "taipei_today", lambda: TODAY)
 
 
 @pytest.fixture
