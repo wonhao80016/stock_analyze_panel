@@ -32,6 +32,7 @@ ROOT = Path(SPECPATH).parent
 FRONTEND_DIST = str(ROOT / "frontend" / "dist")
 VERSION_FILE = str(ROOT / "VERSION")
 BUILTIN_STRATEGIES = str(ROOT / "backend" / "app" / "strategy" / "builtin")
+STRATEGY_PROMPTS = str(ROOT / "backend" / "app" / "strategy" / "prompts" / "*.md")
 # 圖標按平台選: Windows 用 .ico, macOS 用 .icns (PyInstaller 對 .ico 在
 # mac 上靜默忽略, 不換格式 Dock/Finder 會顯示通用圖標)。兩者都由
 # packaging/generate_icon.py 一併生成。
@@ -115,6 +116,14 @@ datas += [(FRONTEND_DIST, "static")]
 datas += [(VERSION_FILE, ".")]
 # 內置策略 → app/strategy/builtin/ (importlib 動態加載, 不能進 PYZ)
 datas += [(BUILTIN_STRATEGIES, "app/strategy/builtin")]
+# ai_generator and prompt_builder read these guides relative to their own __file__.
+datas += [(STRATEGY_PROMPTS, "app/strategy/prompts")]
+
+# app.extensions.loader discovers app.custom via importlib and pkgutil, which analysis cannot follow.
+_custom_extensions = collect_submodules("app.custom")
+if "app.custom" not in _custom_extensions:
+    raise SystemExit("app.custom is not importable; build from the synced backend environment")
+hiddenimports += _custom_extensions
 
 # ── 排除不需要的重型依賴 ──────────────────────────────────────────────
 excludes = [
