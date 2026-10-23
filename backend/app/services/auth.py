@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -32,13 +33,27 @@ _TOKEN_BYTES = 32
 # 会话有效期: 30 天(自托管单用户, 长一点减少重登频率)
 SESSION_TTL = 30 * 24 * 3600
 
+# Serializes every auth.json read-modify-write and the configured-cache refresh.
 _lock = threading.Lock()
 # 内存中的有效会话: { token: expire_ts }。进程重启后从磁盘恢复。
 _sessions: dict[str, float] = {}
 
-# 「是否已设密码」缓存: 每个 /api/ 请求都要判定, auth_middleware 原先每次 read_text
-# 磁盘 (阻塞事件循环)。此处懒加载缓存, set_password 后失效重算 (仍返回最新真值)。
+# Cached "password set" flag for the per-request middleware check; only a successful write updates it.
 _configured_cache: bool | None = None
+
+
+AUTH_STORE_CORRUPT_DETAIL = (
+    "访问密码文件(数据目录下的 user_data/auth.json)已损坏或无法读取,面板已拒绝所有 API 请求。"
+    "请修复该文件的内容或权限;或删除该文件后在本机重新设置密码,"
+    "也可删除后设置 AUTH_PASSWORD 环境变量并重启服务以重设密码"
+)
+
+
+class AuthStoreCorruptError(RuntimeError):
+    """auth.json exists but is unreadable or invalid; callers must fail closed."""
+
+    def __init__(self) -> None:
+        super().__init__(AUTH_STORE_CORRUPT_DETAIL)
 
 
 def _path() -> Path:
@@ -48,23 +63,54 @@ def _path() -> Path:
     return p
 
 
+def _is_hex(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _load() -> dict:
+    """Return the stored auth data, or {} when auth.json is absent or a legacy sessions-only file.
+
+    Raises AuthStoreCorruptError for an existing file that cannot be read or lacks a valid password.
+    """
     p = _path()
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("auth.json malformed: %s", e)
-    return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        logger.error("auth.json at %s is unreadable or malformed: %s", p, e)
+        raise AuthStoreCorruptError() from e
+    # Older releases persisted {"sessions": ...} on logout before any password was set.
+    if isinstance(data, dict) and set(data) == {"sessions"} and isinstance(data["sessions"], dict):
+        return {}
+    if not (
+        isinstance(data, dict)
+        and _is_hex(data.get("password_hash"))
+        and _is_hex(data.get("password_salt"))
+        and isinstance(data.get("sessions", {}), dict)
+    ):
+        logger.error("auth.json at %s has an invalid structure", p)
+        raise AuthStoreCorruptError()
+    return data
 
 
 def _save(data: dict) -> None:
-    p = _path()
-    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    try:
-        os.chmod(p, 0o600)
-    except OSError:
-        pass
+    from app.taiwan.universe.service import write_atomically
+
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+
+    def write(tmp: Path) -> None:
+        tmp.write_text(text, encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
+
+    write_atomically(_path(), write)
 
 
 def _hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
@@ -94,31 +140,51 @@ def is_configured() -> bool:
     """是否已设置访问密码 (带缓存)。
 
     热路径 (auth_middleware 每请求调用): 命中缓存则不碰磁盘, 不阻塞事件循环。
-    首次或 set_password 失效后, 懒加载重读一次 auth.json, 保证返回最新真值。
+    Raises AuthStoreCorruptError while auth.json is damaged; that state is never cached.
     """
     global _configured_cache
-    if _configured_cache is None:
-        d = _load()
-        _configured_cache = bool(d.get("password_hash"))
-    return _configured_cache
+    cached = _configured_cache
+    if cached is not None:
+        return cached
+    with _lock:
+        if _configured_cache is None:
+            _configured_cache = bool(_load().get("password_hash"))
+        return _configured_cache
+
+
+def _write_password_locked(salt_hex: str, hash_hex: str) -> None:
+    global _configured_cache
+    _sessions.clear()  # 改密码 = 旧会话全部失效
+    _save({
+        "password_hash": hash_hex,
+        "password_salt": salt_hex,
+        "updated_at": int(time.time()),
+        "sessions": {},  # 清空持久化会话
+    })
+    _configured_cache = True
 
 
 def set_password(password: str) -> None:
     """设置/修改访问密码。清空所有现有会话(强制重新登录)。"""
-    global _configured_cache
     if len(password) < 6:
         raise ValueError("密码至少 6 位")
     salt_hex, hash_hex = _hash_password(password)
     with _lock:
-        _sessions.clear()  # 改密码 = 旧会话全部失效
-        _save({
-            "password_hash": hash_hex,
-            "password_salt": salt_hex,
-            "updated_at": int(time.time()),
-            "sessions": {},  # 清空持久化会话
-        })
-    _configured_cache = None  # 失效缓存, 下次 is_configured 重读最新真值
+        _write_password_locked(salt_hex, hash_hex)
     logger.info("access password set")
+
+
+def set_initial_password(password: str) -> bool:
+    """Set the first password; False if one already exists. The check and the write share one lock hold."""
+    if len(password) < 6:
+        raise ValueError("密码至少 6 位")
+    salt_hex, hash_hex = _hash_password(password)
+    with _lock:
+        if _load().get("password_hash"):
+            return False
+        _write_password_locked(salt_hex, hash_hex)
+    logger.info("access password set")
+    return True
 
 
 def bootstrap_from_env() -> bool:
@@ -159,7 +225,8 @@ def bootstrap_from_env() -> bool:
 
 def verify_and_create_session(password: str) -> str | None:
     """验证密码, 成功则创建会话并返回 token, 失败返回 None。"""
-    d = _load()
+    with _lock:
+        d = _load()
     if not d.get("password_hash"):
         return None
     if not _verify_password(password, d.get("password_salt", ""), d["password_hash"]):
@@ -195,8 +262,10 @@ def is_valid_session(token: str) -> bool:
 
 
 def _persist_sessions_locked() -> None:
-    """把当前内存会话写回 auth.json(需持锁调用)。"""
+    """Write in-memory sessions back to auth.json; caller holds _lock. No-op while no password exists."""
     d = _load()
+    if not d:
+        return
     d["sessions"] = {t: exp for t, exp in _sessions.items()}
     _save(d)
 
@@ -206,7 +275,7 @@ def _restore_sessions() -> None:
     with _lock:
         d = _load()
         now = time.time()
-        saved = d.get("sessions") or {}
+        saved = d.get("sessions", {})
         for token, expire in saved.items():
             if isinstance(expire, (int, float)) and expire > now:
                 _sessions[token] = expire

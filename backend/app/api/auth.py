@@ -23,6 +23,7 @@ from threading import Lock
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.services import auth
@@ -126,6 +127,10 @@ def _is_cross_origin(request: Request) -> bool:
     return (parts.hostname, origin_port or default_port) != (host, host_port or default_port)
 
 
+def auth_store_corrupt_response(exc: auth.AuthStoreCorruptError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc), "code": "AUTH_STORE_CORRUPT"})
+
+
 def _check_login_rate_limit(ip: str) -> None:
     """登录失败限流检查, 触发则抛 429。锁定过期后重置计数(重新给 5 次机会)。"""
     with _fail_lock:
@@ -206,10 +211,9 @@ def setup_password(req: PasswordIn, request: Request) -> dict:
         )
         raise HTTPException(status_code=403, detail=SETUP_LOCAL_ONLY_DETAIL)
 
-    if auth.is_configured():
+    if not auth.set_initial_password(req.password):
         raise HTTPException(status_code=409, detail="密码已设置,如需修改请登录后使用改密码功能")
 
-    auth.set_password(req.password)
     logger.info("access password set up from %s", client_ip)
     return {"ok": True, "configured": True}
 

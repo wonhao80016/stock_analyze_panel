@@ -42,6 +42,7 @@ from app.extensions.loader import (
     start_backend_extensions,
 )
 from app.jobs import daily_pipeline
+from app.services.auth import AuthStoreCorruptError
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
@@ -78,10 +79,10 @@ if not getattr(sys, "frozen", False):
     except Exception as _e:  # noqa: BLE001
         logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
 
-
 from app.services.webhook_adapter import install_url_secret_redaction  # noqa: E402
 
 install_url_secret_redaction()
+
 
 def _build_strategy_engine(data_dir: Path):
     from app.strategy import config as strategy_config
@@ -387,8 +388,14 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     from app.services import auth as auth_service
+    token = request.cookies.get(auth_api.COOKIE_NAME)
+    try:
+        configured = auth_service.is_configured()
+        has_session = configured and bool(token) and auth_service.is_valid_session(token)
+    except auth_service.AuthStoreCorruptError as exc:
+        return auth_api.auth_store_corrupt_response(exc)
     # 情况 1+2: 未设密码
-    if not auth_service.is_configured():
+    if not configured:
         if auth_api._is_local_request(request):
             return await call_next(request)
         return JSONResponse(
@@ -400,8 +407,7 @@ async def auth_middleware(request: Request, call_next):
         )
 
     # 情况 3: 已设密码, 检查会话
-    token = request.cookies.get(auth_api.COOKIE_NAME)
-    if token and auth_service.is_valid_session(token):
+    if has_session:
         return await call_next(request)
     # 未登录: 401(前端跳登录页)
     return JSONResponse(status_code=401, content={"detail": "未登录或会话已过期"})
@@ -463,6 +469,11 @@ async def security_master_unavailable_handler(
     request: Request, exc: SecurityMasterUnavailableError
 ) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(AuthStoreCorruptError)
+async def auth_store_corrupt_handler(request: Request, exc: AuthStoreCorruptError) -> JSONResponse:
+    return auth_api.auth_store_corrupt_response(exc)
 
 # 生产期静态文件(前端 dist)
 _static = Path(settings.static_dir)
