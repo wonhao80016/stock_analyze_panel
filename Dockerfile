@@ -99,6 +99,8 @@ COPY --from=codex-builder /opt/codex-native /usr/local/bin/codex
 RUN codex --version
 
 ENV PYTHONPATH=/app
+# uv run would otherwise re-sync the default dev group at every start (needs the build-time index).
+ENV UV_NO_SYNC=1
 # 兜底時區: 交易時段判斷已在代碼裡顯式用北京時間 (app/market_time.py),
 # 此處讓日誌時間戳等其餘 naive 時間也對齊北京時間。
 ENV TZ=Asia/Shanghai

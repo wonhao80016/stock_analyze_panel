@@ -146,7 +146,7 @@ jobs:
         working-directory: backend
         run: |
           uv pip install pillow
-          uv run python ../packaging/generate_icon.py
+          uv run --no-sync python ../packaging/generate_icon.py
 
       - name: 打包 (PyInstaller)
         # 在 backend 目錄跑 (用該目錄的 venv: pywebview/polars 等依賴)。
@@ -155,7 +155,7 @@ jobs:
         # SPECPATH 由 spec 文件位置決定 (packaging/tickflow.spec → 項目根),
         # 與 cwd 無關, 故 frontend/dist、tiers.yaml 等相對路徑仍正確。
         working-directory: backend
-        run: uv run pyinstaller ../packaging/tickflow.spec --noconfirm
+        run: uv run --no-sync pyinstaller ../packaging/tickflow.spec --noconfirm
 
       - name: 檢查 Polars 兼容內核 (僅 Windows)
         if: matrix.platform == 'windows'
