@@ -152,7 +152,7 @@
 
 | 階段 | 狀態 | 備註 |
 |---|---|---|
-| 0 安全止血 | 未開始 | D1–D4 已定（2026-10-22） |
+| 0 安全止血 | 已完成（2026-10-23） | B001、B005、B023：`bedae43`；B002：`6451def`；B003：`d754f6e`；B018：`b6f75a1`；B030：`f90cf95`；B035：`a41233e`；B026：`b625690`。合併後階段 0 相關測試 324 passed。後續事項見下方 |
 | 1 測試基線與隔離 | 未開始 | |
 | 2 部署與打包 | 未開始 | |
 | 3 回測與挖掘可信度 | 未開始 | 待 D5 |
@@ -163,6 +163,20 @@
 | 8 效能 | 未開始 | |
 | 9 Dead code 與遺留移除 | 未開始 | 待 D7 |
 | 10 文件與冗餘檔案 | 未開始 | 待 D9 |
+
+### 階段 0 留下的後續事項
+
+審查時確認存在、但不阻擋提交的項目，排入之後的階段：
+
+1. `auth.json` 的暫存檔在 Linux 上先以預設權限建立，之後才 chmod 0600，中間有極短的可讀窗口；應改為建檔時就用 0600（`backend/app/services/auth.py` 的 `_save`）。
+2. 前端登入頁把 503（`AUTH_STORE_CORRUPT`）當成未設密碼，顯示「設密碼」表單（`frontend/src/pages/Auth.tsx`）。
+3. 執行期間 `auth.json` 才損毀時，已登入的會話仍可用到下次讀檔；寫入沒有 fsync；手動修檔存成帶 BOM 的 UTF-8 會被判為損毀。
+4. 前端沒有顯示策略的 `load_errors`，使用者 Python 策略被停用時，畫面看不出原因。
+5. `backend/pyproject.toml` 的 `winotify>=1.1` 沒有上限；新版若改了屬性名稱，B030 的修正會失效（目前 `uv.lock` 鎖在 1.1.0）。
+6. macOS 通知（`notify_adapter.py` 的 `_notify_osascript`）只跳脫 `"`、沒跳脫 `\`，可能同類注入，需另案審查。
+7. FinMind provider 把含 token 的 URL 寫進資料的 `source_url` 欄位；`backend/app/api/settings.py` 約 678 行把含 URL 的例外訊息直接回傳給 API。
+8. 未帶 Origin 的跨站 GET（圖片、導覽）仍會放行；若有會改狀態的 GET 端點，可加 `Sec-Fetch-Site` 檢查。
+9. `ScreenerResult` 資料類別在 B002 之後只剩測試使用（階段 9 處理）。
 
 ## 維護方式
 
