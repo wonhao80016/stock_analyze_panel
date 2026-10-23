@@ -8,7 +8,7 @@ Connects to official TWSE and TPEx live endpoints:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 import json
 import urllib.request
 import pytest
@@ -31,6 +31,16 @@ def _get_recent_trading_date() -> date:
     return today - timedelta(days=offset)
 
 
+def _fetch_json(url: str, label: str) -> list[dict]:
+    """Skip, never pass, when the endpoint cannot be reached; assertions stay outside."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except OSError as e:
+        pytest.skip(f"{label} live endpoint unreachable: {e}")
+
+
 @pytest.mark.integration
 class TestTaiwanEnrichmentLiveSmoke:
     """Live smoke validation connecting to real Taiwan official sources."""
@@ -38,53 +48,41 @@ class TestTaiwanEnrichmentLiveSmoke:
     def test_live_twse_and_tpex_quotes(self):
         provider = TaiwanOfficialQuoteProvider()
 
-        # 1. Fetch live TWSE STOCK_DAY_ALL
-        try:
-            req = urllib.request.Request(provider.twse_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                twse_rows = json.loads(resp.read().decode("utf-8"))
-            quote_2330 = provider.get_quote_with_fallback("2330.TWSE", "台積電", live_rows=twse_rows)
-            assert quote_2330.symbol == "2330.TWSE"
-            assert quote_2330.price > 0.0
-            assert quote_2330.meta.status == "official_close"
-        except Exception as e:
-            pytest.skip(f"TWSE OpenAPI live quote endpoint temporarily unreachable: {e}")
+        twse_rows = _fetch_json(provider.twse_url, "TWSE OpenAPI quote")
+        quote_2330 = provider.get_quote_with_fallback("2330.TWSE", "台積電", live_rows=twse_rows)
+        assert quote_2330.symbol == "2330.TWSE"
+        assert quote_2330.price > 0.0
+        assert quote_2330.meta.status == "official_close"
 
-        # 2. Fetch live TPEx quotes
-        try:
-            req = urllib.request.Request(provider.tpex_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                tpex_rows = json.loads(resp.read().decode("utf-8"))
-            quote_8069 = provider.get_quote_with_fallback("8069.TPEX", "元太", live_rows=tpex_rows)
-            assert quote_8069.symbol == "8069.TPEX"
-            assert quote_8069.price > 0.0
-            assert quote_8069.meta.status == "official_close"
-        except Exception as e:
-            pytest.skip(f"TPEx OpenAPI live quote endpoint temporarily unreachable: {e}")
+        tpex_rows = _fetch_json(provider.tpex_url, "TPEx OpenAPI quote")
+        quote_8069 = provider.get_quote_with_fallback("8069.TPEX", "元太", live_rows=tpex_rows)
+        assert quote_8069.symbol == "8069.TPEX"
+        assert quote_8069.price > 0.0
+        assert quote_8069.meta.status == "official_close"
 
     def test_live_institutional_and_margin(self):
         recent_date = _get_recent_trading_date()
         inst_provider = TaiwanInstitutionalProvider()
         margin_provider = TaiwanMarginProvider()
 
-        # TWSE 2330 Institutional & Margin
         try:
             twse_flows = inst_provider.fetch_live_day("TWSE", recent_date, target_code="2330")
-            if twse_flows:
-                f = twse_flows[0]
-                assert f.symbol == "2330.TWSE"
-                assert f.foreign_buy >= 0
-                assert f.foreign_sell >= 0
-                assert f.computed_net == (f.foreign_net + f.investment_trust_net + f.dealer_net)
-
             twse_margins = margin_provider.fetch_live_day("TWSE", recent_date, target_code="2330")
-            if twse_margins:
-                m = twse_margins[0]
-                assert m.symbol == "2330.TWSE"
-                assert m.unit == "shares"
-                assert m.margin_balance >= 0
-        except Exception as e:
-            pytest.skip(f"TWSE institutional/margin live endpoint unavailable: {e}")
+        except OSError as e:
+            pytest.skip(f"TWSE institutional/margin live endpoint unreachable: {e}")
+        if not twse_flows or not twse_margins:
+            pytest.skip(f"TWSE published no 2330 institutional/margin rows for {recent_date} (holiday or not yet out)")
+
+        f = twse_flows[0]
+        assert f.symbol == "2330.TWSE"
+        assert f.foreign_buy >= 0
+        assert f.foreign_sell >= 0
+        assert f.computed_net == (f.foreign_net + f.investment_trust_net + f.dealer_net)
+
+        m = twse_margins[0]
+        assert m.symbol == "2330.TWSE"
+        assert m.unit == "shares"
+        assert m.margin_balance >= 0
 
     def test_etf_classification_and_bridge_validation(self):
         master = get_security_master()
@@ -98,18 +96,18 @@ class TestTaiwanEnrichmentLiveSmoke:
 
         # 2. Bond ETF: dynamically select from master
         bond_etf = master.get_instrument("00720B.TPEX")
-        if bond_etf:
-            assert bond_etf.etf_category == EtfCategory.BOND.value
-            assert MarketProfileBridge.get_price_limit_class(bond_etf).value == "no_limit"
-            expected_tax_class = (
-                "bond_etf"
-                if bond_etf.etf_management_style == "passive"
-                else "domestic_etf"
-            )
-            assert MarketProfileBridge.get_tax_class(bond_etf).value == expected_tax_class
+        assert bond_etf is not None
+        assert bond_etf.etf_category == EtfCategory.BOND.value
+        assert MarketProfileBridge.get_price_limit_class(bond_etf).value == "no_limit"
+        expected_tax_class = (
+            "bond_etf"
+            if bond_etf.etf_management_style == "passive"
+            else "domestic_etf"
+        )
+        assert MarketProfileBridge.get_tax_class(bond_etf).value == expected_tax_class
 
         # 3. Foreign Component ETF: dynamically select from master (00646 S&P 500)
         foreign_etf = master.get_instrument("00646.TWSE")
-        if foreign_etf:
-            assert foreign_etf.etf_category == EtfCategory.FOREIGN_EQUITY.value
-            assert MarketProfileBridge.get_price_limit_class(foreign_etf).value == "no_limit"
+        assert foreign_etf is not None
+        assert foreign_etf.etf_category == EtfCategory.FOREIGN_EQUITY.value
+        assert MarketProfileBridge.get_price_limit_class(foreign_etf).value == "no_limit"

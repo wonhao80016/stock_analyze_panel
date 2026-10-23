@@ -27,6 +27,8 @@ from app.taiwan.detail_models import (
     TaiwanStockRealtime,
 )
 
+pytestmark = pytest.mark.usefixtures("offline_detail_sources")
+
 
 @pytest.fixture
 def client():

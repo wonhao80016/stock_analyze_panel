@@ -228,6 +228,9 @@
 ## 5. 實作步驟（依序；每步可獨立建置與測試）
 
 後端驗證範本（在 repo 根目錄，PowerShell 5.1 執行）：
+
+> 2026-10-23 更新：`backend/tests/conftest.py` 現在會把 `DATA_DIR`、`CACHE_DIR` 改寫到測試會話的臨時目錄並使用合成證券主檔，下列指令裡的 `set DATA_DIR` 與複製證券主檔已不起作用，直接執行 pytest 即可；`data/` 前後比對仍可保留作為佐證（見 `CONTRIBUTING.md` 第 9 節）。
+
 - 必須先停掉後端，否則 `data/backend.log` 會造成比對誤報；`backend/tests/conftest.py` 沒有隔離 data_dir。
 - `DATA_DIR` 只在 `cmd /c` 內設定；`Compare-Object` 必須沒有輸出。
 - 測試要注入假 client，並 monkeypatch `httpx.Client.send` 使其拋錯，確保不連網。

@@ -262,7 +262,12 @@ def test_update_latest_before_the_post_close_cutoff_targets_the_previous_session
     setup.margin_service.refresh_dates.assert_called_once_with(MON, TUE, force=False)
 
 
-def test_the_default_service_refreshes_chip_data_against_its_own_daily_store(deny_network):
+def test_the_default_service_refreshes_chip_data_against_its_own_daily_store(
+    tmp_path, monkeypatch, deny_network
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
     svc = TaiwanBootstrapService()
 
     updater = svc._chip_updater()

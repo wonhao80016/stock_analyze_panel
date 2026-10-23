@@ -78,3 +78,8 @@ ignore = ["E501"]   # 长行交给 fmt
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Live endpoint tests run only when selected explicitly: pytest -m integration
+addopts = "-m 'not integration'"
+markers = [
+    "integration: talks to live exchange or third-party endpoints and downloads the real security master",
+]

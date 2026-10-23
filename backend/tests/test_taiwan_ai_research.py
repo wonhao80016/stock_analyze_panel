@@ -42,7 +42,7 @@ from app.taiwan.research_context import TaiwanStockResearchContextService
 
 
 @pytest.mark.asyncio
-async def test_valid_grounded_report_accepted():
+async def test_valid_grounded_report_accepted(synthetic_taiwan_daily):
     """Verify valid report citing legitimate registry evidence refs is accepted."""
     svc = TaiwanAIResearchService()
 
@@ -246,7 +246,7 @@ async def test_historical_point_in_time_no_look_ahead():
         assert "2026-08-28" not in prompt_content
 
 
-def test_api_endpoint_invokes_ai_only_on_explicit_post():
+def test_api_endpoint_invokes_ai_only_on_explicit_post(offline_detail_sources):
     """Verify GET stock detail & research-context do NOT invoke AI; only POST ai-research does."""
     client = TestClient(app, client=("127.0.0.1", 50000))
 

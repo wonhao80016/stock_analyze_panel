@@ -25,33 +25,32 @@ class TestTaiwanRealtimeLiveSmoke:
         quotes = provider.fetch_quotes(symbols)
 
         assert len(quotes) >= 3, f"Expected at least 3 symbols, got {len(quotes)}"
+        missing = [s for s in ("2330.TWSE", "0050.TWSE", "8069.TPEX") if s not in quotes]
+        assert not missing, f"MIS returned no quote for {missing}"
 
         # 1. 2330 TSMC
-        if "2330.TWSE" in quotes:
-            q_2330 = quotes["2330.TWSE"]
-            assert q_2330.symbol == "2330.TWSE"
-            assert q_2330.last_price is not None and q_2330.last_price > 500.0
-            assert q_2330.prev_close is not None and q_2330.prev_close > 500.0
-            assert q_2330.volume is not None and q_2330.volume > 1000
-            assert q_2330.source_meta.source == "twse:mis"
-            # Depth book check
-            if q_2330.bids:
-                assert q_2330.bid_price is not None
-                assert q_2330.bid_volume is not None and q_2330.bid_volume >= 1000
+        q_2330 = quotes["2330.TWSE"]
+        assert q_2330.symbol == "2330.TWSE"
+        assert q_2330.last_price is not None and q_2330.last_price > 500.0
+        assert q_2330.prev_close is not None and q_2330.prev_close > 500.0
+        assert q_2330.volume is not None and q_2330.volume > 1000
+        assert q_2330.source_meta.source == "twse:mis"
+        # The depth book is empty outside the trading session.
+        if q_2330.bids:
+            assert q_2330.bid_price is not None
+            assert q_2330.bid_volume is not None and q_2330.bid_volume >= 1000
 
         # 2. 0050 ETF
-        if "0050.TWSE" in quotes:
-            q_0050 = quotes["0050.TWSE"]
-            assert q_0050.symbol == "0050.TWSE"
-            assert q_0050.last_price is not None and q_0050.last_price > 50.0
-            assert q_0050.volume is not None and q_0050.volume > 1000
+        q_0050 = quotes["0050.TWSE"]
+        assert q_0050.symbol == "0050.TWSE"
+        assert q_0050.last_price is not None and q_0050.last_price > 50.0
+        assert q_0050.volume is not None and q_0050.volume > 1000
 
         # 3. 8069 TPEx
-        if "8069.TPEX" in quotes:
-            q_8069 = quotes["8069.TPEX"]
-            assert q_8069.symbol == "8069.TPEX"
-            assert q_8069.exchange == "TPEX"
-            assert q_8069.last_price is not None and q_8069.last_price > 50.0
+        q_8069 = quotes["8069.TPEX"]
+        assert q_8069.symbol == "8069.TPEX"
+        assert q_8069.exchange == "TPEX"
+        assert q_8069.last_price is not None and q_8069.last_price > 50.0
 
     def test_live_service_with_caching(self):
         """Verify TaiwanRealtimeService live orchestrator and cache hit metrics."""
@@ -79,12 +78,14 @@ class TestTaiwanRealtimeLiveSmoke:
         mis_quotes = mis_provider.fetch_quotes(["2330.TWSE"])
         yahoo_quote = yahoo_provider.fetch_single_quote("2330.TWSE")
 
-        if "2330.TWSE" in mis_quotes and yahoo_quote is not None:
-            q_mis = mis_quotes["2330.TWSE"]
-            # Prices should match within reasonable tick or match exactly if post-close
-            if q_mis.last_price and yahoo_quote.last_price:
-                diff = abs(q_mis.last_price - yahoo_quote.last_price)
-                assert diff <= 5.0, (
-                    f"Price mismatch between MIS ({q_mis.last_price}) "
-                    f"and Yahoo ({yahoo_quote.last_price})"
-                )
+        if "2330.TWSE" not in mis_quotes or yahoo_quote is None:
+            pytest.skip("MIS or Yahoo returned no 2330.TWSE quote")
+        q_mis = mis_quotes["2330.TWSE"]
+        if not q_mis.last_price or not yahoo_quote.last_price:
+            pytest.skip("MIS or Yahoo quote for 2330.TWSE has no last price")
+        # Prices should match within reasonable tick or match exactly if post-close
+        diff = abs(q_mis.last_price - yahoo_quote.last_price)
+        assert diff <= 5.0, (
+            f"Price mismatch between MIS ({q_mis.last_price}) "
+            f"and Yahoo ({yahoo_quote.last_price})"
+        )

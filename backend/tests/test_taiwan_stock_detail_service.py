@@ -28,6 +28,9 @@ from app.taiwan.enrichment.models import InstitutionalFlow, MarginTrading, Marke
 from app.taiwan.realtime.models import RealtimeStatus, TaiwanRealtimeQuote
 from app.taiwan.universe.models import TaiwanInstrument
 
+# A service built with default providers would fetch from TWSE, TPEx, FinMind and Yahoo.
+pytestmark = pytest.mark.usefixtures("offline_detail_sources")
+
 
 def _make_sample_quote(symbol: str, price: float, prev_close: float) -> TaiwanRealtimeQuote:
     code, ex = symbol.split(".")

@@ -241,6 +241,7 @@
 ```bash
 cd backend
 uv run pytest tests/path/to/test_x.py -q
+uv run pytest tests -m integration -q   # 連真實交易所與第三方 API 的 live smoke 測試
 uv run ruff check app/path.py tests/path.py
 
 cd frontend
@@ -250,6 +251,8 @@ git diff --check
 ```
 
 - 後端至少運行受影響模塊的測試，不應只運行新加的單個測試。
+- `backend/pyproject.toml` 預設加上 `-m "not integration"`，標了 `integration` 的 live smoke 測試即使直接指定文件路徑也會被排除；要跑必須加 `-m integration`，且會連網。
+- `backend/tests/conftest.py` 會把 `DATA_DIR`、`CACHE_DIR` 改寫到每次測試會話的臨時目錄，並忽略 `.env`；證券主檔使用測試內建的合成資料，非 integration 測試的對外連線與 DNS 查詢一律被拒絕。因此跑測試不需要、也無法再用 `DATA_DIR` 指定資料目錄，不必複製正式證券主檔。
 - 新增文件和本次改動不得引入 Ruff 告警。不要為清理歷史告警而在功能 PR 中全倉格式化。
 - 前端任何 TypeScript、組件、樣式或 API 類型改動至少執行一次 `pnpm build`。
 - 提交前必須運行 `git diff --check`，並檢查最終 diff 不含調試代碼和無關文件。

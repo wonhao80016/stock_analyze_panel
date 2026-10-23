@@ -882,6 +882,8 @@ def test_the_scheduled_update_survives_a_reference_fetch_that_raises(quiet_publi
 def test_the_update_button_fetches_reference_prices_through_the_shared_publish(tmp_path, quiet_publish, monkeypatch, caplog):
     _daily_store(tmp_path / "taiwan" / "daily", symbols=("2330.TWSE", "6488.TPEX"))
     monkeypatch.setattr("app.taiwan.bootstrap.resolve_target_latest_trading_date", lambda: SESSIONS[-1])
+    # A master listing inside the stored window would refetch those days from TWSE.
+    monkeypatch.setattr("app.taiwan.bootstrap.pending_listing_dates", lambda store, master, target: [])
     calls: list[tuple[date, date]] = []
 
     def failing_refresh(self, first_published, target):

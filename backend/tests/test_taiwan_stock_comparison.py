@@ -528,7 +528,7 @@ def test_request_schema_accepts_boundary_counts():
 # ── API Routing Regression (route-collision fix) ───────────────
 
 
-def test_routing_compare_and_single_symbol_endpoints_do_not_collide():
+def test_routing_compare_and_single_symbol_endpoints_do_not_collide(offline_detail_sources):
     """Proves all four routes resolve to their correct handlers after the
     /stocks/compare* routes were registered before any /stocks/{symbol}* route."""
     client = TestClient(app, client=("127.0.0.1", 50000))

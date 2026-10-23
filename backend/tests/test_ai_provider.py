@@ -552,7 +552,6 @@ async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
     monkeypatch.setattr(ai_provider, "_codex_process_env", lambda p: {})
     monkeypatch.setattr(ai_provider, "_run_codex_process", fake_run_process)
     monkeypatch.setattr(ai_provider, "_read_output_file", lambda p: "ok")
-    monkeypatch.setattr(ai_provider, "_remove_tree_best_effort", lambda p: None)
     monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "gpt-5.6-sol")
 
     out = await ai_provider._run_codex_cli(

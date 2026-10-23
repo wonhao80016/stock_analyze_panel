@@ -2,8 +2,24 @@
 from datetime import date
 
 import polars as pl
+import pytest
 
+from app.taiwan.daily_store import TaiwanDailyStore
 from app.tickflow.repository import DataStore, KlineRepository
+
+DAY = date(2026, 7, 28)
+
+
+@pytest.fixture(autouse=True)
+def _published_day(tmp_path, monkeypatch):
+    """Live writes reach disk only for a day the exchange has published (_live_write_allowed)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    TaiwanDailyStore().write_batch(pl.DataFrame([{
+        "symbol": "2330.TWSE", "date": DAY, "open": 1.0, "high": 1.0, "low": 1.0,
+        "close": 1.0, "volume": 1.0, "amount": 1.0, "quote_ts": None,
+    }]))
 
 
 def _enriched_row(symbol: str, close: float, dt: date) -> dict:
@@ -18,61 +34,56 @@ def _enriched_row(symbol: str, close: float, dt: date) -> dict:
 def test_merge_live_enriched_preserves_full_index_partition(tmp_path):
     """盘后管道 flush 写入全量指数后, 实时 merge 部分指数不丢已有数据。"""
     repo = KlineRepository(DataStore(tmp_path))
-    dt = date(2026, 7, 28)
+    dt = DAY
 
-    # 模拟盘后管道: flush 写入全量 3 只指数
+    # 模拟盘后管道: flush 写入全量 2 只指数
     full_df = pl.DataFrame([
-        _enriched_row("000001.SH", 3000.0, dt),
-        _enriched_row("399001.SZ", 10000.0, dt),
-        _enriched_row("399006.SZ", 2000.0, dt),
+        _enriched_row("t00.TWSE", 23000.0, dt),
+        _enriched_row("o00.TPEX", 260.0, dt),
     ])
     repo.flush_live_enriched_asset("index", full_df)
 
-    # 模拟实时刷新: 只 merge 核心指数 1 只 (价格更新)
+    # 模拟实时刷新: 只 merge 加权指数 1 只 (价格更新)
     partial_df = pl.DataFrame([
-        _enriched_row("000001.SH", 3001.0, dt),
+        _enriched_row("t00.TWSE", 23001.0, dt),
     ])
     repo.merge_live_enriched_asset("index", partial_df)
 
-    # 验证: 分区文件仍有 3 只指数, 000001.SH 价格已更新, 其他指数未丢失
+    # 验证: 分区文件仍有 2 只指数, t00.TWSE 价格已更新, 櫃買指数未丢失
     out = tmp_path / "kline_index_enriched" / f"date={dt.isoformat()}" / "part.parquet"
     result = pl.read_parquet(out)
-    assert len(result) == 3, f"merge 后分区应有 3 只指数, 实际 {len(result)}"
+    assert len(result) == 2, f"merge 后分区应有 2 只指数, 实际 {len(result)}"
 
-    sh = result.filter(pl.col("symbol") == "000001.SH")
-    assert sh["close"][0] == 3001.0, "merge 应更新 000001.SH 价格"
+    taiex = result.filter(pl.col("symbol") == "t00.TWSE")
+    assert taiex["close"][0] == 23001.0, "merge 应更新 t00.TWSE 价格"
 
-    sz = result.filter(pl.col("symbol") == "399001.SZ")
-    assert sz["close"][0] == 10000.0, "399001.SZ 不应被 merge 覆盖"
-
-    cyb = result.filter(pl.col("symbol") == "399006.SZ")
-    assert cyb["close"][0] == 2000.0, "399006.SZ 不应被 merge 覆盖"
+    otc = result.filter(pl.col("symbol") == "o00.TPEX")
+    assert otc["close"][0] == 260.0, "o00.TPEX 不应被 merge 覆盖"
 
 
 def test_merge_live_daily_preserves_full_index_partition(tmp_path):
     """日K merge 同样不截断全量分区。"""
     repo = KlineRepository(DataStore(tmp_path))
-    dt = date(2026, 7, 28)
+    dt = DAY
 
-    # 盘后管道 flush 写入全量 3 只指数日K
+    # 盘后管道 flush 写入全量 2 只指数日K
     full_df = pl.DataFrame([
-        {"symbol": "000001.SH", "date": dt, "open": 3000.0, "high": 3010.0,
-         "low": 2990.0, "close": 3000.0, "volume": 1000, "amount": 10000.0},
-        {"symbol": "399001.SZ", "date": dt, "open": 10000.0, "high": 10010.0,
-         "low": 9990.0, "close": 10000.0, "volume": 2000, "amount": 20000.0},
-        {"symbol": "399006.SZ", "date": dt, "open": 2000.0, "high": 2010.0,
-         "low": 1990.0, "close": 2000.0, "volume": 3000, "amount": 30000.0},
+        {"symbol": "t00.TWSE", "date": dt, "open": 23000.0, "high": 23010.0,
+         "low": 22990.0, "close": 23000.0, "volume": 1000, "amount": 10000.0},
+        {"symbol": "o00.TPEX", "date": dt, "open": 260.0, "high": 261.0,
+         "low": 259.0, "close": 260.0, "volume": 2000, "amount": 20000.0},
     ])
     repo.flush_live_daily_asset("index", full_df)
 
     # 实时 merge 部分指数
     partial_df = pl.DataFrame([
-        {"symbol": "000001.SH", "date": dt, "open": 3000.0, "high": 3010.0,
-         "low": 2990.0, "close": 3001.0, "volume": 1000, "amount": 10000.0},
+        {"symbol": "t00.TWSE", "date": dt, "open": 23000.0, "high": 23010.0,
+         "low": 22990.0, "close": 23001.0, "volume": 1000, "amount": 10000.0},
     ])
     repo.merge_live_daily_asset("index", partial_df)
 
     out = tmp_path / "kline_index_daily" / f"date={dt.isoformat()}" / "part.parquet"
     result = pl.read_parquet(out)
-    assert len(result) == 3, f"merge 后分区应有 3 只指数, 实际 {len(result)}"
-    assert result.filter(pl.col("symbol") == "000001.SH")["close"][0] == 3001.0
+    assert len(result) == 2, f"merge 后分区应有 2 只指数, 实际 {len(result)}"
+    assert result.filter(pl.col("symbol") == "t00.TWSE")["close"][0] == 23001.0
+    assert result.filter(pl.col("symbol") == "o00.TPEX")["close"][0] == 260.0

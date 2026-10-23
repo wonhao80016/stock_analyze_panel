@@ -31,7 +31,7 @@
 - 公司行動因子含現金股利（`backend/app/taiwan/corporate_actions.py:371-405`）；計算函式為 `forward_adjusted`、`factors_between`、`attach_reference_prices`（`backend/app/taiwan/corporate_actions.py:408-434,296-332`）。規範要求直接讀日 K 算報酬時使用這些函式（`docs/secondary-development.md:42-47`）。
 - 事件讀取會把失敗當成「沒有事件」：`read()` 缺檔回空表（`backend/app/taiwan/corporate_actions.py:199-200`）；`read_events_or_empty` 吞例外（`backend/app/taiwan/corporate_actions.py:271-282`）；`fetch_state()` 讀不到回 `{}`（`backend/app/taiwan/corporate_actions.py:161-170`），格式錯誤的來源項目 `_coverage` 回 None（`backend/app/taiwan/corporate_actions.py:264-268`）；覆蓋只在成功抓取後更新，最多到當天（`backend/app/taiwan/corporate_actions.py:573-579`）。共 6 個來源（`backend/app/taiwan/enrichment/corporate_actions.py:354-362`），實際 `covered_through` 都是 2026-10-01。
 - 交易日曆：專案的實作是 `TaiwanTradingCalendar`（`backend/app/taiwan/realtime/calendar.py:44-79`），開盤時間 `REGULAR_OPEN_START=09:00`（`backend/app/taiwan/realtime/calendar.py:22`）。建構時沒有預載休市日（`backend/app/taiwan/chip_history.py:68` 有註明），未知的平日回傳 None，專案慣例把 None 視為可能交易日（`backend/app/taiwan/daily_refresh.py:40-46`）；建構子可以傳入 `known_holidays`、`known_trading_days`（`backend/app/taiwan/realtime/calendar.py:51-57`）。
-- 測試隔離：`backend/tests/conftest.py:1-32` 沒有隔離 `data_dir`。`DATA_DIR` 會注入 `settings.data_dir`（`backend/app/config.py:24,120-121`），`backend.log` 也跟著它（`backend/app/main.py:68`）。證券主檔是全域單例（`backend/app/taiwan/universe/__init__.py:21-26`），缺檔時會連網抓取（`backend/app/taiwan/universe/service.py:134-143`）。
+- 測試隔離（實作當時）：`backend/tests/conftest.py:1-32` 沒有隔離 `data_dir`；2026-10-23 起已由 conftest 隔離，見 `CONTRIBUTING.md` 第 9 節。`DATA_DIR` 會注入 `settings.data_dir`（`backend/app/config.py:24,120-121`），`backend.log` 也跟著它（`backend/app/main.py:68`）。證券主檔是全域單例（`backend/app/taiwan/universe/__init__.py:21-26`），缺檔時會連網抓取（`backend/app/taiwan/universe/service.py:134-143`）。
 
 ## 2. 範圍：MVP 與可選
 
@@ -258,6 +258,8 @@
 
 ## 4. 實作步驟（每步可獨立建置與測試）
 
+> 2026-10-23 更新：`backend/tests/conftest.py` 現在會把 `DATA_DIR`、`CACHE_DIR` 改寫到測試會話的臨時目錄並使用合成證券主檔，下列指令裡的 `set DATA_DIR` 與複製證券主檔已不起作用，直接執行 pytest 即可；`data/` 前後比對仍可保留作為佐證（見 `CONTRIBUTING.md` 第 9 節）。
+
 以下每條後端指令都會建立新的暫存目錄 `spt-<亂數>`（每步都是空目錄，只複製證券主檔），並只在 `cmd /c` 子程序內設定 `DATA_DIR`，不會殘留在呼叫端的 shell；另外在測試前後各取一次正式 `data/` 的遞迴清單（含目錄、隱藏檔、修改時間與大小）再比對，可偵測新增、刪除、修改與新建目錄（PowerShell 5.1，在 repo 根目錄執行）。`Compare-Object` 必須沒有輸出；若使用者的 `uvicorn --reload` 同時在跑而出現 `data\backend.log` 等檔案，必須逐一判明寫入來源，無法判明就視為失敗。最穩當的做法是停掉後端再測。
 這個比對有三個偵測不到的盲點：
 - 寫到 `data/` 以外的位置偵測不到，例如沒吃到 `DATA_DIR`、改以 CWD 解析的相對路徑（`backend/app/taiwan/data_root.py:11-20` 的歷史說明）；根目錄 `.env:38` 設有相對路徑 `DATA_DIR=./data`，只有指令內的環境變數覆寫它時，才會指向暫存目錄。
@@ -311,7 +313,7 @@
 
 ## 5. 風險
 
-- R1 正式資料被改寫：`uvicorn --reload` 存檔即生效，且測試沒有隔離 `data_dir`。對策：每條指令自帶 `DATA_DIR`、遞迴比對修改時間、避開排程時段、事前備份。
+- R1 正式資料被改寫：`uvicorn --reload` 存檔即生效，且測試沒有隔離 `data_dir`。對策：每條指令自帶 `DATA_DIR`、遞迴比對修改時間、避開排程時段、事前備份。2026-10-23 起測試隔離改由 conftest 負責，`DATA_DIR` 對測試已不起作用。
 - R2 漏記：MVP 沒有啟動補記；T 日要記到快照，必須在 `as_of` 前進到 T+1 之前至少有一次 `as_of=T` 的重算。能記到的途徑只有兩種：
   - T 日 16:30 或 21:40 觸發的當下後端正在執行（記憶體 jobstore；之後才開機不會補跑該班）。
   - 在 T+1 的日 K 被抓進來前，使用者按了更新按鈕並抓到新資料（`backend/app/api/taiwan.py:152`）。

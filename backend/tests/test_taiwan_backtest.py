@@ -9,14 +9,13 @@ Covers:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import numpy as np
 import polars as pl
 import pytest
 
 from app.backtest.engine import BacktestEngine, MatcherConfig
 from app.backtest.matrix import MarketDataMatrix
-from app.data_providers.registry import get_provider
 from app.taiwan.market_rules import (
     BacktestMode,
     LotModel,
@@ -83,10 +82,20 @@ class TestGolden2330Backtest:
 
     @pytest.fixture
     def tsmc_daily_panel(self):
-        provider = get_provider("taiwan")
-        end_time = datetime.now()
-        start_time = end_time - timedelta(days=90)
-        df = provider.get_daily(["2330.TWSE"], start_time=start_time, end_time=end_time)
+        """Sixty synthetic sessions of 2330.TWSE; the checks below need prices, not market history."""
+        start = date(2026, 6, 1)
+        days = [start + timedelta(days=i) for i in range(90) if (start + timedelta(days=i)).weekday() < 5][:60]
+        closes = [1000.0 + 5.0 * i for i in range(len(days))]
+        df = pl.DataFrame({
+            "symbol": ["2330.TWSE"] * len(days),
+            "date": days,
+            "open": [c - 2.0 for c in closes],
+            "high": [c + 5.0 for c in closes],
+            "low": [c - 7.0 for c in closes],
+            "close": closes,
+            "volume": [20_000_000.0] * len(days),
+            "amount": [c * 20_000_000.0 for c in closes],
+        })
         return df.with_columns([
             pl.col("close").alias("raw_close"),
             pl.lit(True).alias("tradable"),
@@ -141,7 +150,7 @@ class TestGolden2330Backtest:
         assert gross_pl - total_fees == pytest.approx(net_pl)
 
     def test_2330_engine_backtest_execution(self, tsmc_daily_panel):
-        """Execute BacktestEngine with TaiwanMarketProfile on real TSMC data."""
+        """Execute BacktestEngine with TaiwanMarketProfile on the synthetic 2330.TWSE panel."""
         profile = TaiwanMarketProfile(
             mode=BacktestMode.STANDARD_CASH,
             cost=TradingCostModel(commission_rate=0.001425, discount=0.6, minimum_commission=20.0),

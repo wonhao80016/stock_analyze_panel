@@ -352,7 +352,7 @@ async def test_zero_is_not_missing_or_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_numerical_direction_preservation_validation():
+async def test_numerical_direction_preservation_validation(synthetic_taiwan_daily):
     """Verify that prompt explicitly enforces direction and evidence keys track signs."""
     svc = TaiwanAIResearchService()
     target_d = date(2026, 8, 28)

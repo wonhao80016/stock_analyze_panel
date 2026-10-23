@@ -29,6 +29,7 @@ def isolated_auth_store(
     auth._configured_cache = None
 
 
+@pytest.mark.real_auth
 def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
     isolated_auth_store: tuple[ModuleType, Path, Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -40,7 +41,9 @@ def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
         f"AUTH_PASSWORD={password}\nDATA_DIR={tmp_path}\n",
         encoding="utf-8",
     )
-    configured = Settings(_env_file=env_path)
+    # A DATA_DIR environment variable outranks the env file; only an init argument outranks both.
+    configured = Settings(_env_file=env_path, data_dir=tmp_path)
+    assert configured.data_dir == tmp_path
     configured.auth_password = "pw-secret"  # 模拟 Compose 将未定义的 ${special} 插值为空串
     monkeypatch.setattr(app_config, "settings", configured)
 
