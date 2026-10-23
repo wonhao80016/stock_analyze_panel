@@ -28,14 +28,18 @@ def _wait_for_status(
     *,
     timeout: float = 2.0,
 ) -> dict[str, Any]:
+    # The manager writes the manifest status before appending the matching event,
+    # so the status alone does not mean the event log is complete.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         manifest = manager.store.get(run_id)
         assert manifest is not None
-        if manifest["status"] == status:
+        events = manager.store.read_events(run_id)
+        last_status = events[-1].get("payload", {}).get("status") if events else None
+        if manifest["status"] == status and last_status == status:
             return manifest
         time.sleep(0.005)
-    pytest.fail(f"run {run_id} did not reach {status}")
+    pytest.fail(f"run {run_id} did not reach {status} with its event recorded")
 
 
 @pytest.fixture
