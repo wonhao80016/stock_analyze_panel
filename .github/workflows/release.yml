@@ -114,6 +114,20 @@ jobs:
         #   對新 CPU 性能幾乎無損 (Polars 1.x 官方推薦方案)。
         run: uv sync --no-dev --extra desktop --extra legacy-cpu
 
+      - name: 安裝 pywebview Qt 後端 (僅 Linux)
+        if: matrix.platform == 'linux'
+        working-directory: backend
+        # pywebview has no bundled GUI backend on Linux. Qt (PyQt6 + QtWebEngine wheels) is
+        # self-contained, whereas GTK needs PyGObject built from source plus the host WebKit2GTK.
+        # Qt 6.5+ xcb plugin needs libxcb-cursor0; the others are QtWebEngine/xcb runtime deps.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxcb-cursor0 libxkbcommon-x11-0 libegl1 libnss3
+          PYWEBVIEW_VERSION=$(uv run --no-sync python -c "import importlib.metadata as m; print(m.version('pywebview'))")
+          uv pip install "pywebview[qt]==${PYWEBVIEW_VERSION}"
+          uv run --no-sync python -c "import webview.platforms.qt"
+
       - name: 安裝 PyInstaller
         # 必須裝進 backend 的 uv 環境 (pywebview/polars 等依賴都在那裡),
         # 否則根目錄 uv run 找不到依賴, 打包出來的產物啟動即崩。
@@ -198,6 +212,12 @@ jobs:
             --no-internet-enable \
             "${{ matrix.artifact }}" \
             backend/dist/ItoyStockPanel.app
+
+      - name: 檢查 Qt WebEngine 後端 (僅 Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          find backend/dist/ItoyStockPanel/_internal -name QtWebEngineProcess -type f | grep -q . \
+            || { echo "PyInstaller output is missing QtWebEngineProcess"; exit 1; }
 
       - name: 壓縮產物 (Linux)
         if: matrix.platform == 'linux'
