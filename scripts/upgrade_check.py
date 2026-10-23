@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +14,8 @@ def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         ["git", *args],
         cwd=root,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     if check and result.returncode != 0:
@@ -35,27 +37,59 @@ def _resolve_commit(root: Path, ref: str) -> str:
     return _git(root, "rev-parse", "--verify", f"{ref}^{{commit}}").stdout.strip()
 
 
+WRITE_TREE_MIN_GIT = (2, 38)
+
+
+def _git_version(root: Path) -> tuple[int, int]:
+    match = re.search(r"(\d+)\.(\d+)", _git(root, "--version").stdout)
+    if not match:
+        raise RuntimeError("cannot parse git --version output")
+    return int(match.group(1)), int(match.group(2))
+
+
 def _merge_tree_conflicts(root: Path, base: str, current: str, target: str) -> list[str]:
+    if _git_version(root) < WRITE_TREE_MIN_GIT:
+        print(
+            "警告: Git 版本低于 2.38, 改用旧版 merge-tree 预演, 只能识别文本冲突, "
+            "会漏判修改/删除与二进制文件冲突。",
+            file=sys.stderr,
+        )
+        return _legacy_merge_tree_conflicts(root, base, current, target)
+    # Exit status 0 means clean and 1 means conflicts; with -z the output is the tree OID
+    # followed by NUL-terminated conflicted paths. Writes only unreferenced objects, no refs.
+    result = _git(
+        root, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", current, target,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or "git merge-tree --write-tree failed")
+    return sorted({path for path in result.stdout.split("\0")[1:] if path})
+
+
+def _legacy_merge_tree_conflicts(root: Path, base: str, current: str, target: str) -> list[str]:
+    # Fallback for Git < 2.38. Reports only "in both" sections whose merged diff adds a
+    # "+<<<<<<< .our" marker, so modify/delete and binary conflicts are not detected.
     result = _git(root, "merge-tree", base, current, target)
-    lines = result.stdout.splitlines()
-    conflicts: list[str] = []
-    current_path: str | None = None
-    current_conflicted = False
-    for line in [*lines, ""]:
-        if line in {"changed in both", "added in both", "removed in both"}:
-            if current_path and current_conflicted:
-                conflicts.append(current_path)
-            current_path = None
-            current_conflicted = False
+    return _parse_legacy_merge_tree(result.stdout)
+
+
+def _parse_legacy_merge_tree(output: str) -> list[str]:
+    conflicts: set[str] = set()
+    section = ""
+    path: str | None = None
+    for line in output.splitlines():
+        if line and line[0] not in " +-@\\":
+            section, path = line, None
             continue
-        parts = line.strip().split()
-        if current_path is None and len(parts) >= 4 and parts[0] in {"base", "our", "their"}:
-            current_path = parts[-1]
-        if line.startswith("+<<<<<<< ") or line.startswith("+=======") or line.startswith("+>>>>>>> "):
-            current_conflicted = True
-    if current_path and current_conflicted:
-        conflicts.append(current_path)
-    return sorted(set(conflicts))
+        if not section.endswith(" in both"):
+            continue
+        entry = line.split(maxsplit=3)
+        if path is None and len(entry) == 4 and entry[0] in {"base", "our", "their"}:
+            path = entry[3]
+        elif line == "+<<<<<<< .our" and path:
+            conflicts.add(path)
+    return sorted(conflicts)
 
 
 def _print_paths(title: str, paths: list[str]) -> None:
@@ -64,7 +98,16 @@ def _print_paths(title: str, paths: list[str]) -> None:
         print(f"  - {path}")
 
 
+def _use_utf8_output() -> None:
+    # Piped or redirected output otherwise uses the locale code page (cp950 on zh-TW Windows),
+    # which cannot encode the Simplified Chinese messages.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _use_utf8_output()
     parser = argparse.ArgumentParser(
         description="只读检查当前二开分支升级到目标 Git ref 时的源码重叠与文本冲突",
     )
