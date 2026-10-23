@@ -3,7 +3,6 @@
 性能优化:
   - enriched parquet 仅存 14 列基础数据, 指标和信号即时计算
   - preset 策略: 从内存缓存或即时计算获取完整指标, ~10-50ms
-  - custom SQL: DuckDB (用户传 SQL WHERE 字符串), ~10-50ms
 """
 from __future__ import annotations
 
@@ -518,70 +517,6 @@ class ScreenerService:
 
         _report_input(HISTORY, "ok", df_full, target_date)
         return df_full
-
-    def run(
-        self,
-        as_of: date,
-        conditions: list[str],
-        order_by: str | None = None,
-        limit: int = 30,
-        pool: list[str] | None = None,
-    ) -> ScreenerResult:
-        """自定义 SQL 条件选股。
-
-        先通过 Polars 即时计算完整指标, 再用 DuckDB 做 SQL WHERE 过滤。
-        kline_enriched DuckDB 视图只有 14 列, 不能直接用于指标过滤。
-        """
-        t0 = time.perf_counter()
-
-        if not conditions:
-            return ScreenerResult(as_of=as_of, strategy=None)
-
-        # 从即时计算获取完整 enriched 数据
-        df = self._load_enriched_for_date(as_of)
-        if df.is_empty():
-            return ScreenerResult(as_of=as_of, strategy=None)
-
-        # Pool 过滤
-        if pool:
-            df = df.filter(pl.col("symbol").is_in(pool))
-
-        # 用 DuckDB 做 SQL 过滤 (注册临时视图)
-        # 用独立的 :memory: 连接 (而非复用 repo 共享连接的 cursor): conditions 是用户
-        # 传入的 SQL 片段, 隔离连接下注入至多能碰 read_csv/read_parquet 文件; 若复用共享
-        # 连接则会把 app 已注册的真实业务表也暴露给注入, 扩大攻击面。隔离连接创建开销极低。
-        con = None
-        try:
-            import duckdb
-            con = duckdb.connect(database=":memory:")
-            con.register("enriched", df.to_arrow())
-            where = " AND ".join(f"({c})" for c in conditions)
-            sql = f"SELECT * FROM enriched WHERE {where}"
-            if order_by:
-                sql += f" ORDER BY {order_by}"
-            if limit:
-                sql += f" LIMIT {limit}"
-            df_result = con.execute(sql).pl()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("screener SQL query failed: %s", e)
-            df_result = pl.DataFrame()
-        finally:
-            if con is not None:
-                try:
-                    con.close()
-                except Exception:  # noqa: BLE001
-                    pass
-
-        rows = df_result.to_dicts() if not df_result.is_empty() else []
-        elapsed = (time.perf_counter() - t0) * 1000
-
-        return ScreenerResult(
-            as_of=as_of,
-            strategy=None,
-            rows=rows,
-            total=len(rows),
-            elapsed_ms=elapsed,
-        )
 
     def build_strategy_context(
         self,

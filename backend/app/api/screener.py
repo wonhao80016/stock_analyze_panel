@@ -31,16 +31,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/screener", tags=["screener"])
 
 
-class CustomRequest(BaseModel):
-    conditions: list[str]
-    order_by: Optional[str] = None
-    limit: int = 30
-    pool: Optional[list[str]] = None
-    as_of: Optional[date] = None
-    ext_columns: Optional[str] = None
-    asset_type: str = "stock"
-
-
 class PresetRequest(BaseModel):
     strategy_id: str
     pool: Optional[list[str]] = None
@@ -244,26 +234,6 @@ def strategies(
         })
 
     return {"presets": presets, "load_errors": engine.load_errors()}
-
-
-@router.post("/run")
-def run_custom(req: CustomRequest, request: Request):
-    repo = request.app.state.repo
-    svc = ScreenerService(repo, asset_type=req.asset_type)
-    as_of = req.as_of or svc.latest_date()
-    if not as_of:
-        raise HTTPException(status_code=400,
-                            detail="无可用数据日期 — enriched 表为空,请先运行盘后管道")
-    result = svc.run(
-        as_of=as_of,
-        conditions=req.conditions,
-        order_by=req.order_by,
-        limit=req.limit,
-        pool=req.pool,
-    )
-    safe_data = _safe(asdict(result))
-    ext_values = _load_ext_value_maps(repo, req.ext_columns)
-    return _result_with_ext(safe_data, ext_values)
 
 
 @router.post("/run_preset")
