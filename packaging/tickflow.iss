@@ -23,10 +23,20 @@
 #define MyAppExeName      "ItoyStockPanel.exe"
 #define MyAppPublisher    "Itoy"
 
-; 版本號: 從 frontend/package.json 讀取, 與 Release tag 保持一致
-; 手動指定更可靠 (CI 傳入 /DMyAppVersion)
+; Version: /DMyAppVersion=x.y.z wins (CI passes it); otherwise read the repo-root VERSION file,
+; which stores the release tag (e.g. v0.2.1), so the leading "v" is dropped.
 #ifndef MyAppVersion
-  #define MyAppVersion     "0.0.0"
+  #define VersionHandle FileOpen(AddBackslash(SourcePath) + "..\VERSION")
+  #if !VersionHandle
+    #error Cannot open ..\VERSION; pass /DMyAppVersion=x.y.z instead
+  #endif
+  #define RawVersion Trim(FileRead(VersionHandle))
+  #expr FileClose(VersionHandle)
+  #if Copy(RawVersion, 1, 1) == "v"
+    #define MyAppVersion Copy(RawVersion, 2)
+  #else
+    #define MyAppVersion RawVersion
+  #endif
 #endif
 
 [Setup]
@@ -36,7 +46,8 @@ AppVerName={#MyAppName} {#MyAppVersion}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 ; 默認裝到 D 盤 (非系統盤), 用戶可在精靈中改任意位置
-; 若 D 盤不存在, [Code] 段 InitializeWizard 會自動回退到用戶目錄
+; Fresh installs fall back to the user profile in InitializeWizard when D:\ is missing;
+; upgrades keep the previous directory (UsePreviousAppDir defaults to yes).
 DefaultDirName=D:\ItoyStockPanel
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
@@ -137,8 +148,8 @@ procedure InitializeWizard();
 var
   DefaultDir: String;
 begin
-  // D 盤存在 → 用 D 盤; 否則回退用戶目錄 (無需管理員權限)
-  if not DirExists('D:\') then
+  // DirEdit already holds the previous install directory on upgrades; never overwrite it.
+  if (WizardForm.PrevAppDir = '') and not DirExists('D:\') then
   begin
     DefaultDir := ExpandConstant('{localappdata}\Programs\ItoyStockPanel');
     WizardForm.DirEdit.Text := DefaultDir;
