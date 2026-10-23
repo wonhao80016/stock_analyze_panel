@@ -28,20 +28,22 @@ TICKFLOW_API_KEY=              # 選配;一般台股使用者留空即可
 
 AI 為選配功能,目前用在兩個地方:台股選股頁把中文條件翻譯成篩選欄位,以及多股比較頁對已呈現的數據做客觀解讀。兩者都要手動觸發。**所有設定留空即跳過**,不影響核心功能。支援任意 OpenAI 相容介面。
 
+`AI_BASE_URL` 與 `AI_MODEL` 沒有內建預設值。API 位址、API Key、模型任一項留空時,AI 視為未設定,相關功能回報「未設定 AI 服務」,不會連到任何預設位址。下面以 DeepSeek 為例:
+
 ```ini
 AI_PROVIDER=openai_compat              # openai_compat | ollama
-AI_BASE_URL=https://api.deepseek.com/v1
+AI_BASE_URL=https://api.deepseek.com/v1   # 留空 = 關閉 AI;OpenAI 為 https://api.openai.com/v1
 AI_API_KEY=                            # 留空 = 關閉 AI
-AI_MODEL=deepseek-chat
+AI_MODEL=deepseek-chat                 # 留空 = 關閉 AI
 AI_DAILY_TOKEN_BUDGET=500000           # 每日 token 預算上限
 ```
 
 | 配置項 | 說明 |
 | :--- | :--- |
 | `AI_PROVIDER` | `openai_compat`(OpenAI 兼容,支持 DeepSeek / 通義 / OpenAI 等)或 `ollama`(本地模型) |
-| `AI_BASE_URL` | 接口地址,如 DeepSeek `https://api.deepseek.com/v1` |
+| `AI_BASE_URL` | 接口地址,無預設值,留空則關閉 AI 功能。如 DeepSeek `https://api.deepseek.com/v1`、OpenAI `https://api.openai.com/v1` |
 | `AI_API_KEY` | 留空則關閉 AI 功能 |
-| `AI_MODEL` | 模型名,如 `deepseek-chat` |
+| `AI_MODEL` | 模型名,無預設值,留空則關閉 AI 功能。如 `deepseek-chat` |
 | `AI_DAILY_TOKEN_BUDGET` | 每日 token 預算,超限後當日不再調用 |
 
 也可以直接在面板 **設定 → AI 設定** 填寫與測試,不必手動編輯 `.env`。

@@ -122,3 +122,20 @@ describe('SettingsAIPanel quick presets', () => {
     expect(payload).not.toHaveProperty('codex_reasoning_effort')
   })
 })
+
+describe('SettingsAIPanel empty API address', () => {
+  it('asks for an address with examples but never fills one in', async () => {
+    renderPanel(settings({ has_ai_key: true, ai_api_key_masked: 'sk-a......z', ai_model: 'deepseek-chat' }))
+
+    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1')
+    await waitFor(() => expect(baseUrlInput).toHaveValue(''))
+    const hint = screen.getByText(/請填寫 API 位址/)
+    expect(hint).toHaveTextContent('https://api.deepseek.com/v1')
+    expect(hint).toHaveTextContent('https://api.openai.com/v1')
+    expect(screen.getByRole('button', { name: '儲存設定' })).toBeDisabled()
+
+    fireEvent.change(baseUrlInput, { target: { value: 'https://api.deepseek.com/v1' } })
+    expect(screen.queryByText(/請填寫 API 位址/)).not.toBeInTheDocument()
+    expect(api.saveAiSettings).not.toHaveBeenCalled()
+  })
+})

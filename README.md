@@ -146,7 +146,9 @@ PORT=3018                      # 後端服務連接埠
 HOST=0.0.0.0                   # 監聽位址;只給本機用可設 127.0.0.1
 DATA_DIR=./data                # 資料存放目錄
 AUTH_PASSWORD=''               # 首次啟動預置存取密碼(選填)
-AI_API_KEY=                    # 選配;留空 = 關閉 AI 功能
+AI_BASE_URL=                   # 選配;AI 位址、金鑰、模型三項都填才啟用,任一項留空 = 關閉 AI
+AI_API_KEY=                    # 例:DeepSeek 位址 https://api.deepseek.com/v1、模型 deepseek-chat
+AI_MODEL=                      # 例:OpenAI 位址 https://api.openai.com/v1
 ```
 
 > 📖 完整設定項見 [docs/configuration.md](./docs/configuration.md);部署與存取密碼見 [docs/deployment.md](./docs/deployment.md)、[docs/deploy-password.md](./docs/deploy-password.md)。

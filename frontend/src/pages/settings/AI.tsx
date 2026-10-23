@@ -22,6 +22,7 @@ const OPENAI_PROVIDER = 'openai'
 const OPENAI_COMPAT_PROVIDER = 'openai_compat'
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5'
 const DEFAULT_REASONING_EFFORT = 'high'
+const BASE_URL_HINT = '請填寫 API 位址,未填寫時 AI 功能不會啟用。例如 DeepSeek:https://api.deepseek.com/v1;OpenAI:https://api.openai.com/v1'
 
 type AiPreset = { label: string; provider?: string; url: string; model: string; website: string; websiteLabel: string; description: string; custom?: boolean }
 
@@ -242,7 +243,7 @@ export function SettingsAIPanel() {
             <div className="text-xs text-muted mt-0.5 truncate">
               {configured
                 ? [s?.ai_model, s?.ai_api_key_masked].filter(Boolean).join(' · ') || '已儲存 AI 設定'
-                : '設定 API Key 後即可使用 AI 功能。'}
+                : '填寫 API 位址、模型與 API Key 後即可使用 AI 功能。'}
             </div>
           </div>
         </div>
@@ -293,7 +294,7 @@ export function SettingsAIPanel() {
       >
         <div className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field label="API 位址">
+            <Field label="API 位址" hint={baseUrl.trim() ? undefined : BASE_URL_HINT}>
               <input type="text" value={baseUrl} onChange={e => handleBaseUrlChange(e.target.value)} placeholder="https://api.example.com/v1" className={INPUT_CLS} />
             </Field>
             <Field label="模型">

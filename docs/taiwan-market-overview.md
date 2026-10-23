@@ -97,6 +97,10 @@ separate, optional layer on top:
   `AI_PROVIDER` / `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` variables
   documented in [docs/configuration.md](./configuration.md) and
   `.env.example` — there is no separate Taiwan-specific AI setting.
-- Without a configured `AI_API_KEY`, the AI endpoints respond with a
-  graceful "unavailable" status rather than an error, and every other
-  Taiwan feature continues to work normally.
+- AI is enabled only when `AI_BASE_URL`, `AI_API_KEY` and `AI_MODEL` are all
+  set; there is no built-in default address or model. For example, DeepSeek
+  uses `AI_BASE_URL=https://api.deepseek.com/v1` with `AI_MODEL=deepseek-chat`,
+  and OpenAI uses `AI_BASE_URL=https://api.openai.com/v1`. If any of the three
+  is empty, the AI endpoints respond with a graceful "unavailable" status
+  rather than an error, no request is sent, and every other Taiwan feature
+  continues to work normally.

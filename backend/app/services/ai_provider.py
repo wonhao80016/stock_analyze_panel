@@ -110,6 +110,10 @@ def current_openai_model() -> str:
     return secrets_store.get_ai_config("ai_model", settings.ai_model)
 
 
+def current_ai_base_url() -> str:
+    return secrets_store.get_ai_config("ai_base_url", settings.ai_base_url).strip()
+
+
 def current_codex_model() -> str:
     stored = secrets_store.load()
     model = stored.get("ai_codex_model")
@@ -274,7 +278,11 @@ def ai_configured(provider: str | None = None) -> bool:
     provider = provider or current_ai_provider()
     if is_codex_cli_provider(provider):
         return codex_cli_available()
-    return bool(secrets_store.get_ai_key())
+    return bool(
+        current_ai_base_url()
+        and secrets_store.get_ai_key()
+        and current_openai_model().strip()
+    )
 
 
 async def generate_ai_text(
@@ -339,12 +347,8 @@ async def _run_openai_once(
     max_tokens: int | None,
     timeout: float,
 ) -> str:
-    ai_key = secrets_store.get_ai_key()
-    if not ai_key:
-        raise RuntimeError("AI API Key 未配置, 请在设置页配置")
-
-    client = _openai_client(ai_key, timeout)
-    model = current_ai_model()
+    ai_key, base_url, model = _openai_connection()
+    client = _openai_client(ai_key, base_url, timeout)
     req_messages = list(messages)
     kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens)
     while True:
@@ -375,12 +379,8 @@ async def _stream_openai(
     max_tokens: int | None,
     timeout: float,
 ) -> AsyncIterator[str]:
-    ai_key = secrets_store.get_ai_key()
-    if not ai_key:
-        raise RuntimeError("AI API Key 未配置, 请在设置页配置")
-
-    client = _openai_client(ai_key, timeout)
-    model = current_ai_model()
+    ai_key, base_url, model = _openai_connection()
+    client = _openai_client(ai_key, base_url, timeout)
     req_messages = list(messages)
 
     async def _iter(stream):
@@ -418,13 +418,27 @@ async def _stream_openai(
         raise
 
 
-def _openai_client(api_key: str, timeout: float):
+def _openai_connection() -> tuple[str, str, str]:
+    """Return (api_key, base_url, model); raise before any request when one is missing."""
+    base_url = current_ai_base_url()
+    if not base_url:
+        raise RuntimeError("未設定 AI 服務: 請在設定頁填寫 API 位址")
+    ai_key = secrets_store.get_ai_key()
+    if not ai_key:
+        raise RuntimeError("AI API Key 未配置, 请在设置页配置")
+    model = current_ai_model()
+    if not model.strip():
+        raise RuntimeError("未設定 AI 模型: 請在設定頁填寫模型")
+    return ai_key, base_url, model
+
+
+def _openai_client(api_key: str, base_url: str, timeout: float):
     from openai import AsyncOpenAI
 
     user_agent = secrets_store.get_ai_config("ai_user_agent", "") or settings.ai_user_agent
     return AsyncOpenAI(
         api_key=api_key,
-        base_url=normalize_openai_base_url(secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)),
+        base_url=normalize_openai_base_url(base_url),
         timeout=timeout,
         max_retries=0,
         default_headers={"User-Agent": user_agent},
