@@ -147,6 +147,10 @@ def _setup_logging() -> None:
         # 日志落盘失败不阻断启动 (开发模式 data_dir 可能不可写)
         logger.warning("日志文件初始化失败, 仅输出到 stderr: %s", e)
 
+    from app.services.webhook_adapter import install_url_secret_redaction
+
+    install_url_secret_redaction()
+
 
 def _show_crash(title: str, text: str) -> None:
     """崩溃时弹原生 MessageBox 提示用户 (仅 Windows)。

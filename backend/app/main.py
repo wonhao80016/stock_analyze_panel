@@ -79,6 +79,10 @@ if not getattr(sys, "frozen", False):
         logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
 
 
+from app.services.webhook_adapter import install_url_secret_redaction  # noqa: E402
+
+install_url_secret_redaction()
+
 def _build_strategy_engine(data_dir: Path):
     from app.strategy import config as strategy_config
     from app.strategy.engine import StrategyEngine, user_strategy_dirs

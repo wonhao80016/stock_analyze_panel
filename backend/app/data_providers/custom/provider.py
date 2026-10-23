@@ -21,6 +21,7 @@ from app.data_providers.custom.mapper import (
     map_rows,
 )
 from app.data_providers.normalizer import normalize_adj_factors, normalize_daily
+from app.services.webhook_adapter import register_log_secret
 from app.tickflow.rate_limits import chunked, sleep_between_batches
 
 logger = logging.getLogger(__name__)
@@ -334,6 +335,7 @@ class GenericHTTPProvider:
         if not token:
             logger.warning("custom data source %s auth token is not set", self.name)
             return {}, {}
+        register_log_secret(token)
         if auth.type == "bearer":
             return {auth.header: f"Bearer {token}"}, {}
         if auth.type == "header":
