@@ -1,4 +1,4 @@
-# Itoy 的台股監控看板 - one-shot launcher for backend + frontend (Windows / PowerShell)
+﻿# Itoy 的台股監控看板 - one-shot launcher for backend + frontend (Windows / PowerShell)
 #
 # Usage:
 #   .\dev.ps1
