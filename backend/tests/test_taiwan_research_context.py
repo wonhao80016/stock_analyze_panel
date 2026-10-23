@@ -243,9 +243,7 @@ def _indicator_service(d_prev: date, d_curr: date) -> TaiwanStockResearchContext
     dates = [d_curr - timedelta(days=60 - i) for i in range(61)]
     assert dates[-2] == d_prev
     closes = [100.0 + (i % 7) * 0.9 + i * 0.05 for i in range(60)] + [105.0]
-    mock_daily = MagicMock()
-    mock_daily.available_dates.return_value = dates
-    mock_daily.read_range.return_value = pl.DataFrame({
+    bars = pl.DataFrame({
         "symbol": ["TEST.TWSE"] * 61,
         "date": dates,
         "open": closes,
@@ -255,6 +253,22 @@ def _indicator_service(d_prev: date, d_curr: date) -> TaiwanStockResearchContext
         "volume": [10000.0 + (i % 5) * 1000.0 for i in range(61)],
         "amount": [1000000.0] * 61,
     })
+
+    # Single-day reads feed the industry snapshot's per-symbol joins; returning
+    # every bar for them multiplies the rows at each join.
+    def read_range(symbols, start, end):
+        rows = bars
+        if symbols is not None:
+            rows = rows.filter(pl.col("symbol").is_in(symbols))
+        if start is not None:
+            rows = rows.filter(pl.col("date") >= start)
+        if end is not None:
+            rows = rows.filter(pl.col("date") <= end)
+        return rows
+
+    mock_daily = MagicMock()
+    mock_daily.available_dates.return_value = dates
+    mock_daily.read_range.side_effect = read_range
     mock_inst = MagicMock()
     mock_inst.symbol = "TEST.TWSE"
     mock_inst.code = "TEST"
