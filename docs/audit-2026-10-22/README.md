@@ -58,6 +58,7 @@
 - D2：預設停用「儲存並載入使用者 Python 策略」（`/api/strategies/code/save`、`/ai/save` 與 `data/strategies/{custom,ai,composite}` 的載入）；需要時由設定明確開啟，且只限本機請求。AST 檢查不再視為安全邊界。
 - D3：未設密碼時只放行 127.0.0.1 與 ::1，區網請求要先設密碼；CORS 改為同源；`X-Forwarded-For` 只在設定的可信代理清單內採信，取最右側的不受信任位址。
 - D4：AI 服務位址預設留空，未設定即視為 AI 未啟用；設定頁提示需填寫。
+- D5（2026-10-24）：B006–B009 修正後，以修正後的程式重新評估既有挖掘發佈的策略，未通過門檻的下架。
 
 ## 各階段做法與完成條件
 
@@ -154,7 +155,7 @@
 |---|---|---|
 | 0 安全止血 | 已完成（2026-10-23） | B001、B005、B023：`bedae43`；B002：`6451def`；B003：`d754f6e`；B018：`b6f75a1`；B030：`f90cf95`；B035：`a41233e`；B026：`b625690`。合併後階段 0 相關測試 324 passed。後續事項見下方 |
 | 1 測試基線與隔離 | 已完成（2026-10-23） | B057：`c0587fc`；B223–B228、B231–B235、B238–B241：`99931b1`；B236、B237：`3ae2f62`；B229、B230：`e6fab1c`。不設環境變數的全套基線（在不含 data/ 的副本上）：4485 passed、7 xfailed、12 deselected，約 9.5 分鐘，峰值記憶體約 0.8 GB，無外連，正式 data/ 未被寫入。後續事項見下方 |
-| 2 部署與打包 | 未開始 | |
+| 2 部署與打包 | 程式已完成（2026-10-24），待實機驗證 | B004：`bfaf74e`；B069、B334：`de8086d`；B010：`7e5eff8`；B222：`cdab715`；B242、B243：`62d8e9b`；B332、B333：`e45ca41`；B335、B336：`76fd791`。本機沒有 Docker、PyInstaller 與 Inno Setup，打包與容器只做了靜態驗證，實機步驟見下方 |
 | 3 回測與挖掘可信度 | 未開始 | 待 D5 |
 | 4 資料寫入與一致性 | 未開始 | |
 | 5 台股資料與分析 | 未開始 | 待 D8 |
@@ -185,6 +186,21 @@
 3. `backend/tests/backtest/test_worker_process.py` 偶發子行程以 0xC0000005 結束，單獨重跑會通過，原因未查明。
 4. 合成證券主檔只含約 30 個代號；新測試用到其他代號時要補進 conftest 的 `_synthetic_instruments`。
 5. conftest 約 440 行，可拆成 `pytest_plugins` 載入的隔離與網路攔截兩個模組。
+
+### 階段 2 待實機驗證與後續事項
+
+待實機驗證：
+
+1. Docker：`docker compose up --build` 後 `curl http://127.0.0.1:3018/health`，應回 VERSION 的版本；確認容器啟動時沒有重新安裝開發工具。
+2. Linux 桌面版：以 `platforms=linux` 跑 release workflow，確認 Qt 步驟與 QtWebEngineProcess 檢查通過，並在有桌面的 Linux 上實際開出視窗。
+3. Windows 桌面版：本機打包後確認 `_internal/app/strategy/prompts/*.md` 與 `app.custom` 存在；不帶 `/D` 執行 ISCC，產物版本應為 VERSION；先裝到非預設目錄再升級，確認沿用原目錄。
+
+後續事項：
+
+1. 找不到 AI 提示詞時仍會靜默回空字串（`ai_generator._get_guide` 只記警告，`prompt_builder._load_doc` 沒有任何紀錄），應改為明確報錯。
+2. 容器內 `_PROJECT_ROOT` 為 `/`；若 `.env` 把 CACHE_DIR 設成相對路徑，會落在掛載卷之外。
+3. `scripts/upgrade_check.py`：docstring 的「Read-only」應改為「不修改 refs 與工作區」；標題「文本冲突」應改為「合并冲突」；`git diff --name-only` 的中文路徑可加 `-c core.quotepath=false`。
+4. cp950 解碼的回歸測試只在系統編碼為 cp950 的機器上有效。
 
 ## 維護方式
 
