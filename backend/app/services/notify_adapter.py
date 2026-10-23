@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import base64
 import logging
 import shutil
 import subprocess
@@ -104,17 +105,34 @@ def notify(title: str, message: str, icon: Path | None = None) -> bool:
     return False
 
 
+def _powershell_text(text: str) -> str:
+    """PowerShell subexpression that evaluates to `text` without parsing any of it."""
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return f"$([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')))"
+
+
+def _cdata_text(text: str) -> str:
+    return text.replace("]]>", "]]]]><![CDATA[>")
+
+
 def _notify_winotify(title: str, message: str) -> bool:
     """Windows toast through winotify's Notification API."""
     from winotify import Notification  # type: ignore[import-not-found]
 
     # duration only accepts "short" or "long"; launch stays unset (no clickable action).
-    Notification(
+    notification = Notification(
         app_id=_WINDOWS_APP_ID,
         title=title,
         msg=message,
         duration="short",
-    ).show()
+    )
+    # winotify 1.1.0 str.formats title/msg into CDATA inside an expandable PowerShell
+    # here-string and tag into a double-quoted string, all run via -Command unescaped.
+    # Only base64 decode expressions may reach that script, or alert text becomes code.
+    notification.title = _powershell_text(_cdata_text(title))
+    notification.msg = _powershell_text(_cdata_text(message))
+    notification.tag = _powershell_text(title)
+    notification.show()
     return True
 
 
