@@ -1,29 +1,29 @@
 import { useSyncExternalStore } from 'react'
 
 /**
- * 監控中心未讀觸發記錄徽標 — 全局 store + localStorage 持久化。
- *
- * 核心邏輯:
- *   - 在監控中心頁面時, 每次收到新推送都同步更新 lastSeen (看到=已讀)
- *   - 離開監控中心後, 新推送才計入未讀
- *   - 刷新頁面從 localStorage 恢復 lastSeen, 未讀 = 期間新增
+ * Unread badge of the monitor center: alerts newer than the last seen alert ts, persisted in localStorage.
+ * The alert store prunes by age and record cap, so its total is not a monotonic counter.
  */
 
-const STORAGE_KEY = 'monitor_last_seen_total'
+const STORAGE_KEY = 'monitor_last_seen_ts'
 
-let currentTotal = 0
-let lastSeenTotal = readSeen()
+/** Recent alerts fetched per poll; the badge caps its display at 99+. */
+export const RECENT_ALERT_LIMIT = 100
+
+let recentTs: number[] = []
+let loaded = false
+let lastSeenTs = readSeen()
 let onMonitorPage = false    // 當前是否在監控中心頁面
-let pendingSeen = false      // Monitor mount 請求 markSeen, 等 currentTotal 就緒
 const listeners = new Set<() => void>()
 
-function readSeen(): number {
+function readSeen(): number | null {
   try {
     const v = localStorage.getItem(STORAGE_KEY)
-    if (v === null) return -1  // 從未設置過 → 未初始化
-    return parseInt(v, 10) || 0
+    if (v === null) return null
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
   } catch {
-    return -1
+    return null
   }
 }
 
@@ -31,10 +31,15 @@ function writeSeen(v: number) {
   try { localStorage.setItem(STORAGE_KEY, String(v)) } catch { /* ignore */ }
 }
 
+function newestTs(): number {
+  return recentTs.reduce((max, ts) => (ts > max ? ts : max), 0)
+}
+
 function syncSeen() {
-  if (lastSeenTotal !== currentTotal) {
-    lastSeenTotal = currentTotal
-    writeSeen(currentTotal)
+  const newest = Math.max(newestTs(), lastSeenTs ?? 0)
+  if (lastSeenTs !== newest) {
+    lastSeenTs = newest
+    writeSeen(newest)
   }
 }
 
@@ -47,71 +52,43 @@ function subscribe(fn: () => void) {
   return () => { listeners.delete(fn) }
 }
 
-function getSnapshot() {
-  return Math.max(0, currentTotal - Math.max(0, lastSeenTotal))
+export function getUnreadAlertCount(): number {
+  const seen = lastSeenTs
+  if (seen == null) return 0
+  return recentTs.filter(ts => ts > seen).length
 }
 
-/** 輪詢更新最新總數 (Layout 層調用)。 */
-export function setCurrentTotal(total: number): void {
-  if (total < 0) return
-
-  // 首次初始化: lastSeen < 0 (從未設置) → 把已讀基線設為當前總數
-  // 否則 lastSeen=0 + total=1 會被誤算成"1條未讀" (首次進入就顯示徽標的 bug)
-  if (lastSeenTotal < 0) {
-    lastSeenTotal = total
-    writeSeen(total)
-  }
-  // 總數減少 (清空) → 同步重置
-  if (total < lastSeenTotal) {
-    lastSeenTotal = total
-    writeSeen(total)
-  }
-
-  const changed = total !== currentTotal
-  currentTotal = total
-
-  // 消費 pending markSeen
-  if (pendingSeen) {
-    pendingSeen = false
-    syncSeen()
-  }
-  // ★ 在監控中心頁面期間: 收到新推送立即同步 (看到=已讀, 不計入未讀)
-  else if (onMonitorPage && changed) {
-    syncSeen()
-  }
-
+/** Called by the Layout poll with the ts of the most recent alerts. */
+export function setRecentAlertTimestamps(timestamps: number[]): void {
+  recentTs = timestamps.filter(ts => Number.isFinite(ts))
+  loaded = true
+  // Without a stored cursor, alerts that already exist on the first load count as read.
+  if (lastSeenTs == null || onMonitorPage) syncSeen()
   emit()
 }
 
 /** 進入監控頁時調用。 */
 export function markSeen(): void {
   onMonitorPage = true
-  if (currentTotal > 0) {
+  if (loaded) {
     syncSeen()
     emit()
-  } else {
-    pendingSeen = true
   }
 }
 
 /** 離開監控頁時調用 (停止同步, 之後新增才計入未讀)。 */
 export function leaveMonitorPage(): void {
   onMonitorPage = false
-  pendingSeen = false
-  // 不在此處 syncSeen — lastSeen 保持頁面期間最後一次同步的值即可
-  // (避免 currentTotal 此刻還沒刷新到最新, 寫入偏小的值)
 }
 
 /** 記錄被清空時調用。 */
 export function resetBadge(): void {
-  currentTotal = 0
-  lastSeenTotal = 0
-  pendingSeen = false
-  writeSeen(0)
+  syncSeen()
+  recentTs = []
   emit()
 }
 
 /** 讀取當前未讀數。 */
 export function useUnreadAlerts(): number {
-  return useSyncExternalStore(subscribe, getSnapshot, () => 0)
+  return useSyncExternalStore(subscribe, getUnreadAlertCount, () => 0)
 }

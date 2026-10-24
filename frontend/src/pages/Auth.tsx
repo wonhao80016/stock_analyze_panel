@@ -9,7 +9,7 @@
  *   - 設密碼接口後端限本機 (127.0.0.1/::1); 其他來源設密碼會被 403 拒絕, 頁面據此提示。
  *   - 登錄失敗由後端限流(5次鎖5分鐘), 429 時前端顯示等待提示。
  */
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useMutation } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -27,13 +27,19 @@ export function Auth() {
 
   // 取認證狀態(是否已設密碼)
   const [status, setStatus] = useState<{ configured: boolean } | null>(null)
-  useEffect(() => {
+  const [statusError, setStatusError] = useState('')
+  const loadStatus = useCallback(() => {
+    setStatusError('')
     api.authStatus().then(s => {
       setStatus(s)
       // 已登錄的話直接進面板(避免登錄頁死循環)
       if (s.authenticated) navigate('/', { replace: true })
-    }).catch(() => setStatus({ configured: false }))
+    }).catch((err: unknown) => {
+      // An unknown status must not fall back to the setup form; a configured panel would answer 409.
+      setStatusError(err instanceof Error && err.message ? err.message : '無法取得登入狀態')
+    })
   }, [navigate])
+  useEffect(() => { loadStatus() }, [loadStatus])
 
   const isSetup = !status?.configured  // configured=false → 設密碼模式
   // Settings > Account hard-navigates here after a password change; the flag survives that reload.
@@ -43,7 +49,9 @@ export function Auth() {
   const submitMut = useMutation({
     mutationFn: async () => {
       if (isSetup) {
-        return api.authSetup(password)
+        await api.authSetup(password)
+        // Setup issues no session cookie; without this login the guard would send the user back here.
+        setStatus({ configured: true })
       }
       return api.authLogin(password)
     },
@@ -67,6 +75,25 @@ export function Auth() {
       if (password !== confirmPassword) { setLocalError('兩次密碼不一致'); return }
     }
     submitMut.mutate()
+  }
+
+  if (!status && statusError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-base px-4">
+        <div className="w-full max-w-sm rounded-card border border-border bg-surface/90 p-6 text-center shadow-2xl">
+          <ShieldAlert className="mx-auto h-6 w-6 text-danger" />
+          <div className="mt-2 text-sm font-medium text-foreground">無法取得登入狀態</div>
+          <p className="mt-1 break-words text-[11px] text-muted">{statusError}</p>
+          <button
+            type="button"
+            onClick={loadStatus}
+            className="mt-4 inline-flex h-9 items-center justify-center rounded-btn bg-accent px-4 text-sm font-medium text-white transition-colors hover:bg-accent/90"
+          >
+            重試
+          </button>
+        </div>
+      </div>
+    )
   }
 
   if (!status) {

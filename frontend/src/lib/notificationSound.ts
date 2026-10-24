@@ -9,6 +9,8 @@
  * - none:   無聲
  */
 
+import { activateVoice } from './voiceBroadcast'
+
 let _audioCtx: AudioContext | null = null
 
 function getCtx(): AudioContext | null {
@@ -16,11 +18,30 @@ function getCtx(): AudioContext | null {
     if (!_audioCtx) {
       _audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)()
     }
-    if (_audioCtx.state === 'suspended') _audioCtx.resume()
+    if (_audioCtx.state === 'suspended') void _audioCtx.resume().catch(() => {})
     return _audioCtx
   } catch {
     return null
   }
+}
+
+const UNLOCK_EVENTS = ['pointerdown', 'keydown'] as const
+
+/**
+ * Unlocks Web Audio and speech on the first pointer or key gesture; returns the uninstaller.
+ * Browsers only let a context resume inside a user gesture, so alerts before it stay silent.
+ */
+export function installAudioUnlock(): () => void {
+  const unlock = () => {
+    uninstall()
+    getCtx()
+    activateVoice()
+  }
+  const uninstall = () => {
+    UNLOCK_EVENTS.forEach(type => window.removeEventListener(type, unlock, true))
+  }
+  UNLOCK_EVENTS.forEach(type => window.addEventListener(type, unlock, true))
+  return uninstall
 }
 
 /** 播放單個音符 */
@@ -118,7 +139,8 @@ export function playNotificationSound() {
     if (sound === 'none') return
 
     const ctx = getCtx()
-    if (!ctx) return
+    // A suspended context would replay the queued tones whenever it is finally resumed.
+    if (!ctx || ctx.state !== 'running') return
 
     const preset = SOUND_PRESETS[sound]
     if (preset) preset(ctx)

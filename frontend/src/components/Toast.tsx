@@ -35,12 +35,12 @@ export function ToastContainer() {
       role="status"
       aria-live="polite"
       aria-atomic="false"
-      className="fixed bottom-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none"
+      className="fixed top-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none"
     >
       {items.map(t => (
         <div
           key={t.id}
-          className={`pointer-events-auto px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium animate-in slide-in-from-bottom-2 fade-in duration-200 ${
+          className={`pointer-events-auto px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium animate-in slide-in-from-top-2 fade-in duration-200 ${
             t.kind === 'error'
               ? 'bg-red-500/90 text-white'
               : 'bg-emerald-500/90 text-white'

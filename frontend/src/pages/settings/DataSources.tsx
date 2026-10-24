@@ -412,7 +412,7 @@ export function SettingsDataSourcesPanel() {
   })
 
   const editExisting = useMutation({
-    mutationFn: (name: string) => api.dataSource(name),
+    mutationFn: (name: string) => api.dataSource(name, { dedupe: false }),
     onSuccess: (_data, name) => setSelected(name),
   })
 

@@ -177,8 +177,9 @@ describe('TaiwanHistoryDataCard failures and bundle import', () => {
       progress: 100,
       message: 'done',
       error: null,
-      downloaded_bytes: 0,
+      bytes_downloaded: 0,
       total_bytes: 0,
+      updated_at: '2026-10-24T08:00:00Z',
     })
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     queryClient.setQueryData(['taiwanMarketIntelligence'], { institutional_amounts: null })

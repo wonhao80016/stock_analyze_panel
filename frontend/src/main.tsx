@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, QueryCache } from '@tanstack/react-query'
 import { initializeFrontendExtensions } from './extensions/bootstrap'
+import { isLoginRequiredError } from './lib/api'
 import './index.css'
 
 // 全局認證攔截: 任何 query/mutation 收到 401 (未登錄/會話過期) → 跳登錄頁。
@@ -12,13 +13,7 @@ const _redirectToLogin = (() => {
   let redirecting = false
   return (err: unknown) => {
     if (redirecting) return
-    if (!(err instanceof Error)) return
-    const msg = err.message || ''
-    // 401 (未登錄/會話過期) → 跳登錄頁
-    // 403 未初始化 (面板未設密碼, 公網訪問) → 也跳登錄頁(顯示設密碼提示)
-    const is401 = msg.includes('未登录') || msg.includes('会话已过期') || msg.includes('401')
-    const isNotInit = msg.includes('尚未初始化访问密码') || msg.includes('NOT_INITIALIZED')
-    if (!is401 && !isNotInit) return
+    if (!isLoginRequiredError(err)) return
     // 已在登錄頁則不跳(避免死循環)
     if (window.location.pathname === '/login') return
     redirecting = true

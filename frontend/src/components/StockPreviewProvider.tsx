@@ -1,6 +1,9 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, lazy, Suspense, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
 
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+// The dialog pulls in the stock detail page and ECharts, so it stays out of the first-screen bundle.
+const StockPreviewDialog = lazy(() =>
+  import('@/components/StockPreviewDialog').then(m => ({ default: m.StockPreviewDialog })),
+)
 
 interface PreviewTarget {
   symbol: string
@@ -24,9 +27,12 @@ const StockPreviewContext = createContext<StockPreviewContextValue>(FALLBACK)
 /** Mounted once so any page can open the preview card instead of routing away. */
 export function StockPreviewProvider({ children }: { children: ReactNode }) {
   const [target, setTarget] = useState<PreviewTarget | null>(null)
+  // Stays mounted after the first open so the close animation still plays.
+  const [dialogRequested, setDialogRequested] = useState(false)
 
   const openPreview = useCallback((symbol: string, name?: string) => {
     if (!symbol) return
+    setDialogRequested(true)
     setTarget({ symbol, name })
   }, [])
 
@@ -37,11 +43,15 @@ export function StockPreviewProvider({ children }: { children: ReactNode }) {
   return (
     <StockPreviewContext.Provider value={value}>
       {children}
-      <StockPreviewDialog
-        symbol={target?.symbol ?? null}
-        name={target?.name ?? ''}
-        onClose={closePreview}
-      />
+      {dialogRequested && (
+        <Suspense fallback={null}>
+          <StockPreviewDialog
+            symbol={target?.symbol ?? null}
+            name={target?.name ?? ''}
+            onClose={closePreview}
+          />
+        </Suspense>
+      )}
     </StockPreviewContext.Provider>
   )
 }

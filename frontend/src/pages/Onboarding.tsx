@@ -19,6 +19,7 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { INVESTMENT_DISCLAIMER } from '@/lib/disclaimer'
 import { Logo } from '@/components/Logo'
+import { toast } from '@/components/Toast'
 
 // ===== 引導頁：4 步流程 =====
 // 0. 使用須知  1. 歡迎  2. 台股資料狀態  3. 完成 → 寫入標記 → 進主介面
@@ -28,6 +29,17 @@ import { Logo } from '@/components/Logo'
 // 「設定 → 資料來源」「設定 → AI」,不再是引導流程的必經步驟。
 
 const STEPS = ['使用須知', '歡迎', '台股資料狀態', '完成'] as const
+
+const SKIP_FOR_SESSION_KEY = 'tf-onboarding-skipped'
+
+/** Set when the completion marker failed to save, so the route guard lets this browser session in. */
+export function isOnboardingSkippedForSession(): boolean {
+  try { return sessionStorage.getItem(SKIP_FOR_SESSION_KEY) === '1' } catch { return false }
+}
+
+function skipOnboardingForSession() {
+  try { sessionStorage.setItem(SKIP_FOR_SESSION_KEY, '1') } catch { /* ignore */ }
+}
 
 const BRAND = '#8B5CF6'
 
@@ -48,7 +60,7 @@ export function Onboarding() {
 
   // 完成引導 —— 寫後端標記,讓路由守衛放行
   const complete = useMutation({
-    mutationFn: api.completeOnboarding,
+    mutationFn: () => api.completeOnboarding({ quiet: true }),
     onSuccess: (data) => {
       // 用回傳值同步更新快取,確保跳轉時守衛立即看到 onboarding_completed: true
       // (避免 invalidate 後台重取未返回時, 守衛用舊快取 false 誤導回引導頁)
@@ -58,8 +70,11 @@ export function Onboarding() {
       qc.invalidateQueries({ queryKey: QK.settings })
       navigate('/', { replace: true })
     },
-    onError: () => {
+    onError: (err) => {
       // 標記失敗不應阻擋使用者進入主介面,仍放行
+      skipOnboardingForSession()
+      const reason = err instanceof Error && err.message ? `(${err.message})` : ''
+      toast(`引導完成標記未寫入${reason},本次先進入主介面;重新開啟後可能再次顯示引導`, 'error')
       navigate('/', { replace: true })
     },
   })

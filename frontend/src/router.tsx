@@ -1,7 +1,7 @@
 import { lazy } from 'react'
-import { createBrowserRouter, Navigate } from 'react-router-dom'
+import { createBrowserRouter, isRouteErrorResponse, Link, Navigate, useRouteError } from 'react-router-dom'
 import { Layout } from './components/Layout'
-import { Onboarding } from './pages/Onboarding'
+import { isOnboardingSkippedForSession, Onboarding } from './pages/Onboarding'
 import { Auth } from './pages/Auth'
 import { useSettings } from './lib/useSharedQueries'
 import { Logo } from './components/Logo'
@@ -57,7 +57,7 @@ if (frontendExtensionErrors.length > 0) {
 // 首次使用守卫 —— 未完成向导则重定向到 /onboarding
 // 只挂在根路由上;/onboarding 本身不被守卫,避免循环重定向。
 // settings 由 Layout 预取,守卫判定不产生额外请求。
-function OnboardingGuard({ children }: { children: React.ReactNode }) {
+export function OnboardingGuard({ children }: { children: React.ReactNode }) {
   const settings = useSettings()
 
   // 仅首次加载(本地无缓存)时显示占位。
@@ -75,16 +75,65 @@ function OnboardingGuard({ children }: { children: React.ReactNode }) {
   }
 
   // 查询出错或字段缺失时不拦截 —— 宁可放行,也不把用户卡在空白页
-  if (settings.data && settings.data.onboarding_completed === false) {
+  if (settings.data && settings.data.onboarding_completed === false && !isOnboardingSkippedForSession()) {
     return <Navigate to="/onboarding" replace />
   }
 
   return <>{children}</>
 }
 
+// Browsers word a failed dynamic import differently; all of them mean the page chunk did not load.
+const CHUNK_LOAD_ERROR = /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|ChunkLoadError/i
+
+function RouteErrorPage() {
+  const error = useRouteError()
+  const notFound = isRouteErrorResponse(error) && error.status === 404
+  const message = error instanceof Error ? error.message : ''
+  const chunkFailed = CHUNK_LOAD_ERROR.test(message) || (error instanceof Error && error.name === 'ChunkLoadError')
+  const title = notFound ? '找不到這個頁面' : chunkFailed ? '頁面載入失敗' : '頁面發生錯誤'
+  const detail = chunkFailed
+    ? '頁面資源可能已隨版本更新而變動,請重新整理後再試。'
+    : notFound
+      ? '網址可能有誤,或頁面已經移除。'
+      : message || '請重新整理後再試。'
+  return (
+    <div className="min-h-screen bg-base grid place-items-center px-4">
+      <div className="max-w-sm text-center space-y-3">
+        <Logo size={28} className="mx-auto text-foreground" />
+        <h1 className="text-base font-semibold text-foreground">{title}</h1>
+        <p className="text-xs text-muted break-words">{detail}</p>
+        <div className="flex items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90"
+          >
+            重新整理
+          </button>
+          <a href="/" className="rounded-btn border border-border px-3 py-1.5 text-xs text-secondary hover:text-foreground">
+            回到看板
+          </a>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function NotFoundPage() {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
+      <h1 className="text-base font-semibold text-foreground">找不到這個頁面</h1>
+      <p className="text-xs text-muted">網址可能有誤,或頁面已經移除。</p>
+      <Link to="/" className="rounded-btn border border-border px-3 py-1.5 text-xs text-secondary hover:text-foreground">
+        回到看板
+      </Link>
+    </div>
+  )
+}
+
 export const router = createBrowserRouter([
-  { path: '/onboarding', element: <Onboarding /> },
-  { path: '/login', element: <Auth /> },
+  { path: '/onboarding', element: <Onboarding />, errorElement: <RouteErrorPage /> },
+  { path: '/login', element: <Auth />, errorElement: <RouteErrorPage /> },
   {
     path: '/',
     element: (
@@ -92,6 +141,7 @@ export const router = createBrowserRouter([
         <Layout />
       </OnboardingGuard>
     ),
+    errorElement: <RouteErrorPage />,
     children: [
       { index: true, element: <Dashboard /> },
       { path: 'overview', element: <Navigate to="/" replace /> },
@@ -105,7 +155,7 @@ export const router = createBrowserRouter([
       { path: 'branding', element: <Branding /> },
       { path: 'settings', element: <Settings /> },
       // 隐藏路由：开发者工具（不暴露在菜单，仅供调试）
-      { path: 'dev', element: <Dev /> },
+      ...(import.meta.env.DEV ? [{ path: 'dev', element: <Dev /> }] : []),
       // 旧路由兼容重定向
       { path: 'settings/keys', element: <Navigate to="/settings?tab=data-sources" replace /> },
       { path: 'settings/ai', element: <Navigate to="/settings?tab=ai" replace /> },
@@ -121,6 +171,7 @@ export const router = createBrowserRouter([
           ),
         }
       }),
+      { path: '*', element: <NotFoundPage /> },
     ],
   },
 ])

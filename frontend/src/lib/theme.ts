@@ -21,10 +21,21 @@ export function getTheme(): Theme {
   }
 }
 
+function applyTheme(theme: Theme) {
+  document.documentElement.classList.toggle('dark', theme === 'dark')
+}
+
 export function setTheme(theme: Theme) {
   try { localStorage.setItem(KEY, theme) } catch { /* ignore */ }
-  document.documentElement.classList.toggle('dark', theme === 'dark')
+  applyTheme(theme)
   window.dispatchEvent(new CustomEvent(EVENT, { detail: theme }))
+}
+
+// A storage event carries another tab's switch; key is null when that tab cleared localStorage.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key === KEY || event.key === null) applyTheme(getTheme())
+  })
 }
 
 export function toggleTheme(): Theme {

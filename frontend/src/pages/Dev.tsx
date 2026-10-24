@@ -2,13 +2,27 @@ import { useState } from 'react'
 import { Loader2, Search, AlertTriangle, CheckCircle2, XCircle, Activity } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { api } from '@/lib/api'
+import { fmtDate } from '@/lib/format'
 
 // ── 分鐘K探測 (遷移自 MinuteDataProbe) ─────────────────
 interface ProbeResult {
   date: string
   rows: number
   source: string
-  ok: boolean
+  /** Only the full local copy counts; local_partial and live are fallbacks for an incomplete day. */
+  complete: boolean
+}
+
+/** The latest `count` weekdays up to today, in local calendar dates; exchange holidays are not known here. */
+function recentWeekdays(count: number): string[] {
+  const dates: string[] = []
+  const d = new Date()
+  while (dates.length < count) {
+    const weekday = d.getDay()
+    if (weekday !== 0 && weekday !== 6) dates.push(fmtDate(d))
+    d.setDate(d.getDate() - 1)
+  }
+  return dates
 }
 
 function MinuteProbePanel() {
@@ -25,13 +39,7 @@ function MinuteProbePanel() {
     setError(null)
     setResults([])
 
-    const dates: string[] = []
-    const today = new Date()
-    for (let i = 0; i < days; i++) {
-      const d = new Date(today)
-      d.setDate(d.getDate() - i)
-      dates.push(d.toISOString().slice(0, 10))
-    }
+    const dates = recentWeekdays(days)
 
     const out: ProbeResult[] = []
     try {
@@ -42,7 +50,7 @@ function MinuteProbePanel() {
           date,
           rows,
           source: r.source ?? (rows > 0 ? 'local' : 'none'),
-          ok: rows > 0,
+          complete: r.source === 'local',
         })
         setResults([...out])
       }
@@ -54,8 +62,8 @@ function MinuteProbePanel() {
   }
 
   const total = results.length
-  const hasData = results.filter((r) => r.ok).length
-  const missing = results.filter((r) => !r.ok)
+  const completeCount = results.filter((r) => r.complete).length
+  const missing = results.filter((r) => !r.complete)
 
   return (
     <div className="space-y-4">
@@ -113,11 +121,11 @@ function MinuteProbePanel() {
             <div className="mt-1 text-lg font-semibold text-foreground">{total}</div>
           </div>
           <div className="rounded-btn bg-elevated p-3">
-            <div className="text-xs text-muted">有數據</div>
-            <div className="mt-1 text-lg font-semibold text-emerald-400">{hasData}</div>
+            <div className="text-xs text-muted">完整</div>
+            <div className="mt-1 text-lg font-semibold text-emerald-400">{completeCount}</div>
           </div>
           <div className="rounded-btn bg-elevated p-3">
-            <div className="text-xs text-muted">缺失</div>
+            <div className="text-xs text-muted">不完整或缺失</div>
             <div className="mt-1 text-lg font-semibold text-danger">{missing.length}</div>
           </div>
         </div>
@@ -143,9 +151,13 @@ function MinuteProbePanel() {
                     <span className="rounded bg-elevated px-1.5 py-0.5 text-xs">{r.source}</span>
                   </td>
                   <td className="px-4 py-2 text-center">
-                    {r.ok ? (
+                    {r.complete ? (
                       <span className="inline-flex items-center gap-1 text-emerald-400">
-                        <CheckCircle2 className="h-4 w-4" /> 有
+                        <CheckCircle2 className="h-4 w-4" /> 完整
+                      </span>
+                    ) : r.rows > 0 ? (
+                      <span className="inline-flex items-center gap-1 text-warning">
+                        <AlertTriangle className="h-4 w-4" /> 不完整
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 text-danger">
@@ -166,8 +178,9 @@ function MinuteProbePanel() {
             <AlertTriangle className="h-4 w-4" /> 缺失日期的診斷
           </div>
           <p className="leading-relaxed text-secondary">
-            缺失日期若為<span className="text-foreground">週末/節假日</span>屬正常；
+            已略過週末；缺失日期若為<span className="text-foreground">國定假日或休市日</span>屬正常；
             若為<span className="text-foreground">停牌日</span>（成交量為 0）也屬正常；
+            「不完整」表示本機只有部分分鐘K（local_partial）或改由即時來源補上（live）；
             若為<span className="text-foreground">正常交易日</span>（日K有成交量）卻缺失分鐘K，
             則是內建數據源未提供該日分鐘數據。
           </p>

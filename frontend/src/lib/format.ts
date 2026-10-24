@@ -19,7 +19,7 @@ export function priceColorClass(v: number | null | undefined): string {
 
 export function fmtBigNum(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return '—'
-  if (v >= 1_000_000_000_000) return `${(v / 1_000_000_000_000).toFixed(2)}萬億`
+  if (v >= 1_000_000_000_000) return `${(v / 1_000_000_000_000).toFixed(2)}兆`
   if (v >= 100_000_000) return `${(v / 100_000_000).toFixed(2)}億`
   if (v >= 10_000) return `${(v / 10_000).toFixed(0)}萬`
   return v.toFixed(0)

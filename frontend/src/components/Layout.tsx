@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, Suspense } from 'react'
+import { useEffect, useMemo, useState, Suspense } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -21,7 +21,6 @@ import {
   DatabaseZap,
   Loader2,
   Sparkles,
-  CheckCircle2,
   ChevronRight,
   ChevronDown,
   Sun,
@@ -39,7 +38,8 @@ import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
 import { computeGroupPcts, groupPctColor, groupPctTitle } from '@/lib/watchlistGroupStats'
 import { fmtPct } from '@/lib/format'
 import { toggleTheme, useTheme } from '@/lib/theme'
-import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
+import { RECENT_ALERT_LIMIT, setRecentAlertTimestamps, useUnreadAlerts } from '@/lib/monitorBadge'
+import { installAudioUnlock } from '@/lib/notificationSound'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 import { getFrontendExtensionNavigation } from '@/extensions/registry'
 import { CORE_NAV as nav } from '@/lib/navigation'
@@ -173,8 +173,9 @@ export function Layout() {
     enabled: navGroupPctVisible,
     staleTime: 60_000,
   })
+  // The watchlist page keys its default columns as '', so the sidebar reuses that entry.
   const { data: navEnriched } = useQuery({
-    queryKey: QK.watchlistEnriched(undefined),
+    queryKey: QK.watchlistEnriched(''),
     queryFn: () => api.watchlistEnriched(),
     enabled: navGroupPctVisible,
     staleTime: 60_000,
@@ -186,30 +187,6 @@ export function Layout() {
     ),
     [navWatchlist, navEnriched],
   )
-
-  // 數據同步狀態輪詢: 有活躍 job 時「數據」菜單項顯示轉圈
-  const { data: pipelineJobs } = useQuery({
-    queryKey: QK.pipelineJobs,
-    queryFn: () => api.pipelineJobs(1),
-    refetchInterval: (query) => (query.state.data?.active_id ? 2000 : 15000),
-    refetchIntervalInBackground: true,
-  })
-  const isDataSyncing = !!pipelineJobs?.active_id
-
-  // 數據同步完成的"瞬時反饋": isDataSyncing 從 true→false 時顯示綠色對勾,
-  // 閃爍約 3 秒後自動消失。
-  const [dataSyncJustDone, setDataSyncJustDone] = useState(false)
-  const prevSyncingRef = useRef(false)
-  useEffect(() => {
-    // 僅在"剛結束"(true→false)且非首次掛載時觸發
-    if (prevSyncingRef.current && !isDataSyncing) {
-      setDataSyncJustDone(true)
-      const t = setTimeout(() => setDataSyncJustDone(false), 3000)
-      prevSyncingRef.current = isDataSyncing
-      return () => clearTimeout(t)
-    }
-    prevSyncingRef.current = isDataSyncing
-  }, [isDataSyncing])
 
   const qc = useQueryClient()
   const navigate = useNavigate()
@@ -263,9 +240,9 @@ export function Layout() {
   const realtimeUnavailable = quoteMode === 'none'
   const isWatchlistMode = quoteMode === 'watchlist'
   const realtimeModeLabel = isWatchlistMode ? '自選股' : '全市場'
-  // 當前實時行情數據源名稱 (custom 時顯示源名, tickflow 時不顯示)
+  // Only a custom realtime source is named; the built-in 'taiwan' source shows the mode instead.
   const realtimeProvider = prefs?.realtime_data_provider
-  const realtimeProviderName = realtimeProvider && realtimeProvider !== 'tickflow'
+  const realtimeProviderName = realtimeProvider && realtimeProvider !== 'taiwan'
     ? (dataSources?.custom?.find(s => s.name === realtimeProvider)?.display_name || realtimeProvider)
     : null
   const realtimeToggleDisabled = toggleQuote.isPending || isPaused
@@ -303,18 +280,18 @@ export function Layout() {
     ? '台灣官方資料源'
     : (dataSources?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
 
-  // 輪詢觸發記錄總數 → 更新監控中心徽標 (每 15 秒; 後台標籤頁由 SSE 事件驅動, 不輪詢)
-  const alertsTotalQuery = useQuery({
+  // Background tabs skip this poll; the SSE alert event invalidates the key instead.
+  const recentAlertsQuery = useQuery({
     queryKey: ['alerts-total'],
-    queryFn: () => api.alertsList({ days: 7, limit: 1 }),
+    queryFn: () => api.alertsList({ days: 7, limit: RECENT_ALERT_LIMIT }),
     refetchInterval: 15000,
-    select: (data) => data.total,
   })
-  // 只在拿到真實總數時同步徽標 (避免 data=undefined 時傳 0 重置 lastSeen)
-  const alertsTotal = alertsTotalQuery.data
+  const recentAlerts = recentAlertsQuery.data?.alerts
   useEffect(() => {
-    if (alertsTotal != null) setAlertTotal(alertsTotal)
-  }, [alertsTotal])
+    if (recentAlerts) setRecentAlertTimestamps(recentAlerts.map(alert => alert.ts))
+  }, [recentAlerts])
+
+  useEffect(() => installAudioUnlock(), [])
 
   // 合併內置頁面 + 擴展導航
   type NavItem = { to: string; label: string; icon: LucideIcon; badge?: string }
@@ -495,13 +472,6 @@ export function Layout() {
                           <span className="ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
                             {badge}
                           </span>
-                        )}
-                        {/* 數據同步狀態: 同步中轉圈, 剛完成顯示綠色對勾閃爍 3 秒 */}
-                        {to === '/data' && isDataSyncing && !navCollapsed && (
-                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                        )}
-                        {to === '/data' && !isDataSyncing && dataSyncJustDone && !navCollapsed && (
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
                         )}
                         {/* 監控中心徽標: 僅非監控頁且有未讀時顯示 */}
                         {to === '/monitor' && !navCollapsed && <MonitorBadge active={isActive} />}

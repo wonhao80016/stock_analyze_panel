@@ -10,10 +10,46 @@ const BASE = ''
 type RequestOptions = RequestInit & {
   /** 為 true 時不彈錯誤 toast（由調用方自行彙總提示，如多圖串行隊列） */
   quiet?: boolean
+  /** false for a read the user triggered: its every failure gets a toast even if the same read just failed. */
+  dedupe?: boolean
+}
+
+/** A non-2xx response; `code` is the backend's machine-readable error code when it sent one. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | undefined,
+    readonly path: string,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/** True when the panel needs a login: a session 401 or an uninitialised password (403 NOT_INITIALIZED). */
+export function isLoginRequiredError(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false
+  if (err.status === 403) return err.code === 'NOT_INITIALIZED'
+  // The auth endpoints answer 401 for a wrong password, which is not an expired session.
+  return err.status === 401 && !err.path.startsWith('/api/auth/')
+}
+
+// Retries and polling repeat the same read; its toast is shown again only after it succeeded
+// or stayed quiet for this long, while every failed write still raises its own toast.
+const REPEATED_READ_FAILURE_QUIET_MS = 60_000
+const lastReadFailures = new Map<string, { msg: string; at: number }>()
+
+function isRepeatedReadFailure(path: string, msg: string): boolean {
+  const now = Date.now()
+  const previous = lastReadFailures.get(path)
+  lastReadFailures.set(path, { msg, at: now })
+  return previous != null && previous.msg === msg && now - previous.at < REPEATED_READ_FAILURE_QUIET_MS
 }
 
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
-  const { quiet, ...fetchInit } = init ?? {}
+  const { quiet, dedupe = true, ...fetchInit } = init ?? {}
+  const isRead = (fetchInit.method ?? 'GET').toUpperCase() === 'GET'
   const isFormData = fetchInit.body instanceof FormData
   const headers: Record<string, string> = {}
   if (!isFormData) headers['Content-Type'] = 'application/json'
@@ -22,6 +58,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { ...fetchInit, headers })
   if (!res.ok) {
     let detail = ''
+    let code: string | undefined
     try {
       const j = JSON.parse(await res.text())
       const raw = j.detail ?? j.message ?? ''
@@ -33,12 +70,17 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
       } else if (raw && typeof raw === 'object') {
         detail = JSON.stringify(raw)
       }
+      if (typeof j.code === 'string') code = j.code
+      else if (raw && typeof raw === 'object' && typeof raw.code === 'string') code = raw.code
     } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`
+    // A silenced or undeduped failure must not mute the next deduped read of the same path.
+    const repeated = isRead && !quiet && dedupe && isRepeatedReadFailure(path, msg)
     // 401 (未登錄/會話過期) 不彈 toast — 由全局認證攔截器統一跳登錄頁, 避免刷屏
-    if (res.status !== 401 && !quiet) toast(msg, 'error')
-    throw new Error(msg)
+    if (res.status !== 401 && !quiet && !repeated) toast(msg, 'error')
+    throw new ApiError(msg, res.status, code, path)
   }
+  if (isRead) lastReadFailures.delete(path)
   return res.json() as Promise<T>
 }
 
@@ -249,6 +291,39 @@ export interface ScreenerResult {
   rows: any[]
   total: number
   elapsed_ms: number
+}
+
+/** engine.StrategyResult as returned by /api/screener/run_preset and /api/strategies/run. */
+export interface StrategyRunResult {
+  as_of: string
+  strategy_id: string
+  rows: any[]
+  total: number
+  elapsed_ms: number
+  scores: Record<string, number | null>
+  entry_signal_hits: Record<string, any>[]
+  exit_signal_hits: Record<string, any>[]
+}
+
+/** QuoteService.status(); /api/intraday/refresh returns the same payload after one fetch. */
+export interface QuoteStatus {
+  enabled: boolean
+  running: boolean
+  paused?: boolean
+  mode?: 'none' | 'watchlist' | 'full_market'
+  realtime_allowed?: boolean
+  interval_s: number
+  symbol_count: number
+  watchlist_symbol_count?: number
+  index_symbol_count?: number
+  etf_symbol_count?: number
+  quote_age_ms: number | null
+  is_trading_hours: boolean
+  is_polling_window?: boolean
+  market_phase?: string
+  final_sync_done?: boolean
+  final_sync_failed?: string | null
+  last_fetch_ms: number | null
 }
 
 export interface ScreenerResultSummary {
@@ -2384,9 +2459,9 @@ export const api = {
     request<any>('/api/settings/tickflow-key', { method: 'DELETE' }),
 
   /** 標記首次使用嚮導完成（持久化到後端 preferences） */
-  completeOnboarding: () =>
+  completeOnboarding: (options?: { quiet?: boolean }) =>
     request<{ ok: boolean; onboarding_completed: boolean }>(
-      '/api/settings/onboarding/complete', { method: 'POST' },
+      '/api/settings/onboarding/complete', { method: 'POST', ...options },
     ),
 
   /** 保存 AI 配置 */
@@ -2402,7 +2477,8 @@ export const api = {
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
-  dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
+  dataSource: (name: string, options?: { dedupe?: boolean }) =>
+    request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`, options),
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {
       method: 'POST',
@@ -2493,25 +2569,7 @@ export const api = {
       body: JSON.stringify({ watchlist_groups_in_nav: enabled }),
     }),
   quoteStatus: () =>
-    request<{
-      enabled: boolean
-      running: boolean
-      paused?: boolean
-      mode?: 'none' | 'watchlist' | 'full_market'
-      realtime_allowed?: boolean
-      interval_s: number
-      symbol_count: number
-      watchlist_symbol_count?: number
-      index_symbol_count?: number
-      etf_symbol_count?: number
-      quote_age_ms: number | null
-      is_trading_hours: boolean
-      is_polling_window?: boolean
-      market_phase?: string
-      final_sync_done?: boolean
-      final_sync_failed?: string | null
-      last_fetch_ms: number | null
-    }>('/api/intraday/status'),
+    request<QuoteStatus>('/api/intraday/status'),
   quoteInterval: () =>
     request<{ interval: number; min_interval: number; max_interval: number }>(
       '/api/settings/preferences/quote-interval',
@@ -2521,7 +2579,8 @@ export const api = {
       '/api/settings/preferences/quote-interval',
       { method: 'PUT', body: JSON.stringify({ interval }) },
     ),
-  intradayRefresh: () => request<{ status: string }>('/api/intraday/refresh', { method: 'POST' }),
+  intradayRefresh: () =>
+    request<QuoteStatus | { error: string }>('/api/intraday/refresh', { method: 'POST' }),
   updateRealtimeMonitorConfig: (cfg: {
     sse_refresh_pages?: Record<string, boolean>
     strategy_monitor_enabled?: boolean
@@ -2561,12 +2620,12 @@ export const api = {
       body: JSON.stringify({ channels }),
     }),
   updateLineMessaging: (recipient: string, token?: string, clearToken: boolean = false) =>
-    request<{ ok: boolean; line_target_id: string; line_configured: boolean }>('/api/settings/preferences/line-messaging', {
+    request<{ line_target_id: string; line_channel_access_token_masked: string; line_configured: boolean }>('/api/settings/preferences/line-messaging', {
       method: 'PUT',
       body: JSON.stringify({ recipient, token, clear_token: clearToken }),
     }),
   updateTelegramBot: (recipient: string, token?: string, clearToken: boolean = false) =>
-    request<{ ok: boolean; telegram_chat_id: string; telegram_configured: boolean }>('/api/settings/preferences/telegram-bot', {
+    request<{ telegram_chat_id: string; telegram_bot_token_masked: string; telegram_configured: boolean }>('/api/settings/preferences/telegram-bot', {
       method: 'PUT',
       body: JSON.stringify({ recipient, token, clear_token: clearToken }),
     }),
@@ -2649,7 +2708,7 @@ export const api = {
       stock_info?: { name?: string; total_shares?: number; float_shares?: number }
       date: string | null
       rows: MinuteKlineRow[]
-      source?: 'local' | 'live' | 'none'
+      source?: 'local' | 'local_partial' | 'live' | 'none'
       asset_type?: 'stock' | 'etf' | 'index'
       price_limit?: PriceLimitInfo | null
       prev_close?: number | null
@@ -2779,7 +2838,7 @@ export const api = {
     return { presets: data.strategies, load_errors: data.load_errors }
   },
   screenerRunPreset: (strategy_id: string, pool?: string[], asOf?: string, extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
-    request<ScreenerResult>('/api/screener/run_preset', {
+    request<StrategyRunResult>('/api/screener/run_preset', {
       method: 'POST',
       body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType }),
     }),
@@ -3000,7 +3059,7 @@ export const api = {
     request<StrategyDetail>(`/api/strategies/${id}`),
 
   strategyRun: (strategyId: string, params?: Record<string, any>, asOf?: string, pool?: string[]) =>
-    request<ScreenerResult>('/api/strategies/run', {
+    request<StrategyRunResult>('/api/strategies/run', {
       method: 'POST',
       body: JSON.stringify({ strategy_id: strategyId, params, as_of: asOf ?? null, pool }),
     }),
@@ -3107,9 +3166,10 @@ export const api = {
       `/api/intraday/taiwan/search?q=${encodeURIComponent(query)}&limit=${limit}`,
     ),
 
-  taiwanStockDetail: (symbol: string, days = 120) =>
+  taiwanStockDetail: (symbol: string, days = 120, quiet = false) =>
     request<TaiwanStockDetailResponse>(
       `/api/taiwan/stocks/${encodeURIComponent(symbol)}?days=${days}`,
+      { quiet },
     ),
 
   taiwanCapabilities: () =>
@@ -3374,13 +3434,14 @@ export interface TaiwanHistoryStatus {
 
 export interface TaiwanBootstrapJobState {
   job_id: string
-  status: 'pending' | 'downloading' | 'verifying' | 'extracting' | 'importing' | 'refreshing' | 'success' | 'failed'
+  status: 'pending' | 'downloading' | 'verifying' | 'extracting' | 'importing' | 'syncing' | 'success' | 'failed'
   stage: string
   progress: number
   message: string
   error?: string | null
-  downloaded_bytes: number
+  bytes_downloaded: number
   total_bytes: number
+  updated_at: string
 }
 
 export interface TaiwanBootstrapRunResult {
