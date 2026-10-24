@@ -393,6 +393,7 @@ class DatasetConfigIn(BaseModel):
     end_param: str = "end_time"
     asset_type_param: str | None = None
     freq_param: str | None = None
+    units: dict[str, str] = {}
     timeout: float | None = Field(
         default=None,
         gt=0,
@@ -605,7 +606,7 @@ def uninstall_plugin(name: str) -> dict:
 def get_data_source(name: str) -> dict:
     """读取一个自定义数据源的完整配置(用于前端编辑回填)。"""
     from app.data_providers import custom as custom_sources
-    cfg = custom_sources.get_config_dict(name)
+    cfg = custom_sources.get_config_dict(name) or custom_sources.failed_config_dict(name)
     if cfg is None:
         raise HTTPException(status_code=404, detail=f"数据源 '{name}' 不存在")
     return cfg
@@ -618,6 +619,9 @@ def save_data_source(req: CustomSourceIn) -> dict:
     config = req.model_dump()
     config["name"] = (config.get("name") or "").lower()
     try:
+        errors = custom_sources.validate_config(config)
+        if errors:
+            raise ValueError("資料來源設定無法載入, 未儲存: " + "; ".join(errors))
         custom_sources.save_config(config["name"], config)
         custom_sources.load_all()
     except ValueError as e:

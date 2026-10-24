@@ -96,6 +96,24 @@ def user_strategy_dirs(data_dir: Path) -> list[Path]:
     return [data_dir / "strategies" / source for source in USER_STRATEGY_SOURCES]
 
 
+# sys.modules names that strategy files own; reloading one of them replaces only a strategy module.
+_STRATEGY_MODULE_NAMES: set[str] = set()
+
+
+def _shadows_module(name: str, loaded: Any) -> bool:
+    """Whether registering a strategy module as *name* would replace or pre-empt a Python module."""
+    if name in _STRATEGY_MODULE_NAMES:
+        return False
+    if loaded is not None or name in sys.stdlib_module_names:
+        return True
+    if "." in name:
+        return False
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _normalize_param_defs(params: Any) -> list[dict]:
     """把 META["params"] 归一化为标准 list[dict] (每项含 id/label/type/default).
 
@@ -485,7 +503,7 @@ class StrategyEngine:
         dependency_paths = [
             candidate
             for candidate in path.parent.glob("_*.py")
-            if candidate != path
+            if candidate != path and not candidate.name.startswith("__")
         ]
         dependency_names = frozenset(candidate.stem for candidate in dependency_paths)
         try:
@@ -517,7 +535,20 @@ class StrategyEngine:
         mod = importlib.util.module_from_spec(spec)
         with StrategyEngine._module_load_lock:
             previous_module = sys.modules.get(spec.name)
+            if _shadows_module(spec.name, previous_module):
+                raise ValueError(
+                    f"strategy file name {path.name} is the name of the Python module {spec.name!r}; "
+                    "loading it would replace that module for the whole backend, so rename the file"
+                )
+            for dependency_name in sorted(dependency_names):
+                if _shadows_module(dependency_name, sys.modules.get(dependency_name)):
+                    raise ValueError(
+                        f"strategy helper {dependency_name}.py is the name of a Python module; "
+                        "importing it would replace that module for the whole backend, so rename the file"
+                    )
             sys.modules[spec.name] = mod
+            _STRATEGY_MODULE_NAMES.add(spec.name)
+            _STRATEGY_MODULE_NAMES.update(dependency_names)
             inserted_path = str(path.parent)
             sys.path.insert(0, inserted_path)
             try:
@@ -536,7 +567,12 @@ class StrategyEngine:
                 except ValueError:
                     pass
 
-        meta = dict(getattr(mod, "META", {}) or {})
+        from app.strategy.ai_generator import META_NAMES
+
+        meta = dict(next(
+            (value for name in META_NAMES if isinstance(value := getattr(mod, name, None), dict)),
+            {},
+        ))
         meta.setdefault("id", path.stem)
         meta.setdefault("name", path.stem)
         meta.setdefault("description", "")
@@ -547,14 +583,7 @@ class StrategyEngine:
         meta.setdefault("descending", True)
         meta.setdefault("limit", 100)
 
-        source = "custom"
-        normalized_path = str(path).replace("\\", "/")
-        if "/builtin/" in normalized_path:
-            source = "builtin"
-        elif "/ai/" in normalized_path:
-            source = "ai"
-        elif "/composite/" in normalized_path:
-            source = "composite"
+        source = path.parent.name if path.parent.name in {"builtin", "ai", "composite"} else "custom"
 
         if source == "builtin" and "asset_types" not in meta:
             raise ValueError("builtin strategy META must declare asset_types")

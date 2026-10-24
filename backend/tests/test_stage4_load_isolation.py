@@ -135,13 +135,13 @@ def test_a_save_whose_own_file_fails_to_load_is_rolled_back_with_its_error(works
     with pytest.raises(ValueError, match="custom_bad") as raised:
         _save_strategy_code(
             StrategyCodeSaveRequest(
-                code=_custom("custom_bad").replace('"timeframes": ["1d"]', '"timeframes": []'),
+                code=_custom("custom_bad") + "\n_LOAD_FAILS = 1 / 0\n",
                 strategy_id="custom_bad",
             ),
             workspace.request,
         )
 
-    assert "META['timeframes'] must be a non-empty string list" in str(raised.value)
+    assert "division by zero" in str(raised.value)
     assert not (workspace.dirs["custom"] / "custom_bad.py").exists()
     assert not workspace.engine.has("custom_bad")
 

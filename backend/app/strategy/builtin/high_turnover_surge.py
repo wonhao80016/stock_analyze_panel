@@ -48,7 +48,7 @@ META = {
 }
 
 EXECUTION_BACKEND = "matrix_native"
-ENTRY_SIGNALS = ["signal_volume_surge"]
+ENTRY_SIGNALS = ["signal_high_turnover_surge_entry"]
 EXIT_SIGNALS = ["signal_ma20_breakdown"]
 STOP_LOSS = -0.05
 MAX_HOLD_DAYS = 10
@@ -86,7 +86,7 @@ class HighTurnoverSurgeMatrixStrategy:
             exit=exit_.astype(np.uint8),
             entry_signal_code=np.where(entry, 0, -1).astype(np.int16),
             exit_signal_code=np.where(exit_, 0, -1).astype(np.int16),
-            entry_signal_ids=("signal_volume_surge",),
+            entry_signal_ids=("signal_high_turnover_surge_entry",),
             exit_signal_ids=("signal_ma20_breakdown",),
         )
 

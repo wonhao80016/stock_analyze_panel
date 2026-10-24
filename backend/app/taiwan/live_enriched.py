@@ -412,8 +412,7 @@ def _scale_volume_ratio(enriched: pl.DataFrame, live: pl.DataFrame, today: date)
     Rows quoted at or after the close keep the published values. Custom signals are evaluated
     again on the whole history, so their date offsets still read earlier sessions.
     """
-    from app.indicators.pipeline import _get_custom_signal_exprs
-    from app.strategy import custom_signals
+    from app.indicators.pipeline import _get_custom_signal_exprs, inject_custom_signals
 
     factors = {
         symbol: _volume_time_factor(quote_ts)
@@ -431,7 +430,7 @@ def _scale_volume_ratio(enriched: pl.DataFrame, live: pl.DataFrame, today: date)
     scaled_rows = factor != 1.0
     scaled = enriched.with_columns((pl.col("vol_ratio_5d") * factor).alias("vol_ratio_5d"))
     exprs = _get_custom_signal_exprs()
-    reevaluated = custom_signals.inject(scaled, exprs)
+    reevaluated = inject_custom_signals(scaled, exprs)
     recomputed = {
         "signal_volume_surge": pl.col("vol_ratio_5d") >= 2.0,
         **{

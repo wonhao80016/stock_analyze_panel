@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Check, Database, Eye, EyeOff, KeyRound, Plus, RefreshCw, Zap, FileWarning, Puzzle, AlertCircle, CheckCircle2, Loader2, Save, Trash2 } from 'lucide-react'
-import { api, type DataSourceItem, type PluginDataSourceItem } from '@/lib/api'
+import { api, type DataSourceItem, type DataSourceLoadError, type PluginDataSourceItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { toast } from '@/components/Toast'
@@ -314,6 +314,34 @@ function PluginKeyConfig({ plugin }: { plugin: PluginDataSourceItem }) {
         </div>
       )}
     </section>
+  )
+}
+
+export function LoadErrorList({ errors, onEdit }: {
+  errors: DataSourceLoadError[]
+  onEdit: (name: string) => void
+}) {
+  if (errors.length === 0) return null
+  return (
+    <div className="mt-3 flex items-start gap-1.5 px-3 py-2 rounded-lg bg-danger/5 border border-danger/20">
+      <FileWarning className="h-3.5 w-3.5 text-danger shrink-0 mt-0.5" />
+      <div className="text-[11px] text-danger/80 leading-relaxed space-y-0.5">
+        {errors.map((err, idx) => (
+          <div key={idx}>
+            <span className="font-mono">{err.name || err.path}</span>: {err.errors.join('; ')}
+            {err.name && (
+              <button
+                type="button"
+                onClick={() => onEdit(err.name!)}
+                className="ml-2 underline text-danger hover:text-danger/70"
+              >
+                編輯修正
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -702,18 +730,7 @@ export function SettingsDataSourcesPanel() {
         </div>
 
         {/* 錯誤提示 */}
-        {errors.length > 0 && (
-          <div className="mt-3 flex items-start gap-1.5 px-3 py-2 rounded-lg bg-danger/5 border border-danger/20">
-            <FileWarning className="h-3.5 w-3.5 text-danger shrink-0 mt-0.5" />
-            <div className="text-[11px] text-danger/80 leading-relaxed space-y-0.5">
-              {errors.map((err, idx) => (
-                <div key={idx}>
-                  <span className="font-mono">{err.name || err.path}</span>: {err.errors.join('; ')}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+        <LoadErrorList errors={errors} onEdit={setSelected} />
 
         <div className="mt-3 flex items-center gap-3 text-[10px] text-muted/50">
           <span>點擊查看各來源能力</span>
@@ -742,7 +759,7 @@ export function SettingsDataSourcesPanel() {
               switching={switchProvider.isPending}
               route={routeCtx}
             />
-          ) : selected === '__new__' || customList.some(c => c.name === selected) ? (
+          ) : selected === '__new__' || customList.some(c => c.name === selected) || errors.some(e => e.name === selected) ? (
             selected === '__new__' ? (
               <DataSourceEditor
                 key={selected}

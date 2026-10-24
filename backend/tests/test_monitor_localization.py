@@ -38,6 +38,7 @@ _STRATEGY_SIGNAL_LABELS = {
     "signal_swing_structure_exit": "波段結構轉弱",
     "signal_n_day_low_reclaim": "跌破60日低點後收回",
     "signal_low_volatility_leader_entry": "低波動多頭",
+    "signal_high_turnover_surge_entry": "高換手拉升",
 }
 
 # 常見簡體專用字 (與對應正體字不同形), 若出現在使用者可見文案中即代表殘留簡體。
@@ -63,14 +64,14 @@ def test_signal_cn_internal_keys_unchanged():
         "signal_n_day_low", "signal_boll_breakout_upper", "signal_boll_breakdown_lower",
         "signal_volume_surge", "signal_limit_up", "signal_limit_down",
         "signal_limit_down_recovery", "signal_broken_limit_up",
-        "close", "open", "high", "low", "change_pct", "change_amount", "amplitude",
+        "close", "open", "high", "low", "prev_close", "change_pct", "change_amount", "amplitude",
         "turnover_rate", "volume", "amount",
-        "ma5", "ma10", "ma20", "ma30", "ma60", "ema5", "ema10", "ema20",
+        "ma5", "ma10", "ma20", "ma30", "ma60", "ema5", "ema10", "ema20", "ema30", "ema60",
         "macd_dif", "macd_dea", "macd_hist", "boll_upper", "boll_lower",
         "kdj_k", "kdj_d", "kdj_j", "rsi_6", "rsi_14", "rsi_24",
         "vol_ratio_5d", "vol_ma5", "vol_ma10",
         "high_60d", "low_60d", "distance_from_low_60d",
-        "momentum_5d", "momentum_20d", "momentum_60d",
+        "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
         "atr_14", "annual_vol_20d", "consecutive_limit_ups", "consecutive_limit_downs",
         "distance_to_upper_limit", "distance_to_lower_limit",
         *INTRADAY_SIGNAL_LABELS.keys(),
@@ -135,10 +136,10 @@ def test_format_conditions_text_traditional():
     rule = {"logic": "and", "conditions": []}
     conditions = [
         {"field": "signal_limit_up", "op": "truth"},
-        {"field": "change_pct", "op": "gte", "value": 5},
+        {"field": "change_pct", "op": ">=", "value": 0.05},
     ]
     text = MonitorRuleEngine._format_conditions_text(rule, conditions)
-    assert text == "漲停 且 漲跌幅≥5"
+    assert text == "漲停 且 漲跌幅大於等於5%"
     _assert_no_simplified(text)
 
 

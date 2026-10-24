@@ -228,7 +228,7 @@ def test_delete_of_a_builtin_without_a_user_file_reusing_its_id_is_still_forbidd
 def _failing_code_save(workspace) -> None:
     _save_strategy_code(
         StrategyCodeSaveRequest(
-            code=_custom("custom_bad").replace('"timeframes": ["1d"]', '"timeframes": []'),
+            code=_custom("custom_bad") + "\n_LOAD_FAILS = 1 / 0\n",
             strategy_id="custom_bad",
         ),
         workspace.request,

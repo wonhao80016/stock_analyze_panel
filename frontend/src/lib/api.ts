@@ -679,18 +679,32 @@ export interface CustomSignal {
   enabled: boolean
 }
 
+export type CustomSignalFieldUnit = 'TWD' | 'shares' | 'percent' | 'decimal' | 'ratio' | 'index' | 'count'
+
+export interface CustomSignalField {
+  key: string
+  label: string
+  unit?: CustomSignalFieldUnit
+}
+
 export interface CustomSignalFieldGroup {
   key: string
   label: string
-  fields: { key: string; label: string }[]
+  fields: CustomSignalField[]
 }
 
 export interface CustomSignalOptions {
-  fields: { key: string; label: string }[]
+  fields: CustomSignalField[]
   groups?: CustomSignalFieldGroup[]
   maxDays?: number
   operators: string[]
   kinds: { key: string; label: string }[]
+  units?: Partial<Record<CustomSignalFieldUnit, string>>
+}
+
+export interface CustomSignalReferences {
+  monitor_rules: { id: string; name: string }[]
+  strategies: { id: string; name: string }[]
 }
 
 export interface CustomSignalAIGenerateResult {
@@ -2240,6 +2254,8 @@ export interface DatasetConfig {
   asset_type_param?: string | null
   freq_param?: string | null
   timeout?: number | null
+  /** Unit of each mapped ratio field (change_pct, amplitude, turnover_rate); a mapped one must be declared. */
+  units?: Record<string, 'decimal' | 'percent'>
 }
 
 export interface AuthConfig {
@@ -2254,6 +2270,8 @@ export interface CustomSourceConfig {
   display_name: string
   auth: AuthConfig
   datasets: Record<string, DatasetConfig>
+  /** Set only on a source read back from disk because it failed to load. */
+  load_error?: string[]
 }
 
 export interface Preferences {
@@ -3026,14 +3044,28 @@ export const api = {
   customSignalsOptions: () =>
     request<CustomSignalOptions>('/api/custom-signals/options'),
 
-  customSignalSave: (signal: CustomSignal) =>
+  customSignalCreate: (signal: CustomSignal) =>
     request<{ ok: boolean; signal: CustomSignal }>('/api/custom-signals', {
       method: 'POST',
       body: JSON.stringify(signal),
     }),
 
-  customSignalDelete: (id: string) =>
-    request<{ ok: boolean }>(`/api/custom-signals/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Without force, disabling a signal that monitor rules use fails with 409. */
+  customSignalUpdate: (signal: CustomSignal, force = false) =>
+    request<{ ok: boolean; signal: CustomSignal }>(
+      `/api/custom-signals/${encodeURIComponent(signal.id)}${force ? '?force=true' : ''}`,
+      { method: 'PUT', body: JSON.stringify(signal) },
+    ),
+
+  customSignalReferences: (id: string) =>
+    request<CustomSignalReferences>(`/api/custom-signals/${encodeURIComponent(id)}/references`),
+
+  /** Without force, deleting a signal that monitor rules use fails with 409. */
+  customSignalDelete: (id: string, force = false) =>
+    request<{ ok: boolean }>(
+      `/api/custom-signals/${encodeURIComponent(id)}${force ? '?force=true' : ''}`,
+      { method: 'DELETE' },
+    ),
 
   customSignalsAiGenerate: (description: string) =>
     request<CustomSignalAIGenerateResult>('/api/custom-signals/ai/generate', {

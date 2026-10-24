@@ -12,15 +12,16 @@ from __future__ import annotations
 import json
 import re
 
-from app.indicators.pipeline import ENRICHED_COLUMNS, ENRICHED_COLUMNS_BY_CATEGORY
+from app.indicators.pipeline import ENRICHED_COLUMNS_BY_CATEGORY
 from app.strategy import custom_signals
+from app.strategy.field_labels import field_label
 
-# 分类 → 中文标签（与 /api/custom-signals/options 的分组一致）
+# Category groups in the order of the /api/custom-signals/options groups.
 _GROUP_LABELS = {
-    "basic": "基础", "ma": "均线 MA", "ema": "指数均线 EMA",
-    "macd": "MACD", "boll": "布林带 BOLL", "kdj": "KDJ",
-    "atr": "ATR", "volume": "量价", "extremes": "极值",
-    "momentum": "动量", "volatility": "波动率", "rsi": "RSI",
+    "basic": "基礎", "ma": "均線 MA", "ema": "指數均線 EMA",
+    "macd": "MACD", "boll": "布林通道 BOLL", "kdj": "KDJ",
+    "atr": "ATR", "volume": "量價", "extremes": "極值",
+    "momentum": "動量", "volatility": "波動率", "rsi": "RSI",
 }
 # 行情类字段不在 ENRICHED_COLUMNS_BY_CATEGORY 里, 单独归一组
 _QUOTE_FIELDS = {
@@ -31,49 +32,60 @@ _QUOTE_FIELDS = {
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
 
 
+def _describe(field: str) -> str:
+    unit = custom_signals.UNIT_LABELS[custom_signals.FIELD_UNITS[field]]
+    return f"{field}({field_label(field)}; 單位: {unit})"
+
+
 def _format_fields() -> str:
-    """按类别格式化白名单字段（key(中文标签)），供 LLM 参考。"""
+    """Whitelisted fields by category as key(label; unit), for the LLM."""
     allowed = custom_signals.ALLOWED_FIELDS
     lines: list[str] = []
     quote = sorted(f for f in _QUOTE_FIELDS if f in allowed)
-    lines.append(
-        "行情: " + ", ".join(f"{f}({ENRICHED_COLUMNS.get(f, f)})" for f in quote)
-    )
+    lines.append("行情: " + ", ".join(_describe(f) for f in quote))
+    listed = set(quote)
     for cat, label in _GROUP_LABELS.items():
         fields = [f for f in ENRICHED_COLUMNS_BY_CATEGORY.get(cat, []) if f in allowed]
         if fields:
-            lines.append(
-                f"{label}: "
-                + ", ".join(f"{f}({ENRICHED_COLUMNS.get(f, f)})" for f in fields)
-            )
+            lines.append(f"{label}: " + ", ".join(_describe(f) for f in fields))
+            listed.update(fields)
+    rest = sorted(allowed - listed)
+    if rest:
+        lines.append("漲跌停: " + ", ".join(_describe(f) for f in rest))
     return "\n".join(lines)
 
 
-_SYSTEM_TEMPLATE = """你是A股量化信号设计专家。用户会描述一个信号思路，你要把它拆解为布尔条件组合（多条件之间是「且」关系，即同时满足），并输出结构化 JSON 供系统编译为选股/回测/监控信号。
+_SYSTEM_TEMPLATE = """你是台股量化訊號設計專家。使用者會描述一個訊號思路, 你要把它拆解為布林條件組合 (多條件之間是「且」關係, 即同時滿足), 並輸出結構化 JSON 供系統編譯為選股/回測/監控訊號。
 
-可用字段（白名单，只能使用以下字段，禁止自造或使用白名单之外的字段）：
+可用欄位 (白名單, 只能使用以下欄位, 禁止自創或使用白名單之外的欄位):
 {fields}
 
-运算符（op）：>  >=  <  <=  ==  !=
+單位說明 (常數門檻必須依欄位單位填寫):
+- 小數: change_pct、amplitude、momentum_*、annual_vol_20d、distance_to_* 都是小數, 0.05 表示 5%
+- 百分數: turnover_rate 是百分數, 5 表示 5%
+- 成交量 volume、vol_ma5、vol_ma10 以股計, 1 張 = 1000 股; 成交額 amount 與價格欄位以元計
 
-右值（right）：
-- 数字：写字符串形式，如 "2"、"3000"、"0.05"
-- 另一字段：必须带 "field:" 前缀，如 "field:ma20"；严禁裸写字段名，如 "macd_dea" 应写成 "field:macd_dea"
+運算子 (op): >  >=  <  <=  ==  !=
 
-日期偏移（leftDays / rightDays）：取 N 个交易日前的值，0 = 当日最新；范围 0~{max_days}。只有明确需要「前N日」时才使用偏移。
+右值 (right):
+- 數字: 寫字串形式, 如 "2"、"3000"、"0.05"
+- 另一欄位: 必須帶 "field:" 前綴, 如 "field:ma20"; 嚴禁裸寫欄位名, 如 "macd_dea" 應寫成 "field:macd_dea"
 
-要求：
-1. 只输出一个 JSON 对象，禁止 markdown 代码块、禁止任何解释或多余文字。
-2. JSON 结构固定为：
-{{"name": "简短中文信号名称(≤12字)", "conditions": [
-  {{"left": "字段", "op": "运算符", "right": "数字字符串或field:字段", "leftDays": 0, "rightDays": 0}}
+日期偏移 (leftDays / rightDays): 取 N 個交易日前的值, 0 = 當日最新; 範圍 0~{max_days}。只有明確需要「前N日」時才使用偏移。
+
+要求:
+1. 只輸出一個 JSON 物件, 禁止 markdown 程式碼區塊、禁止任何解釋或多餘文字。
+2. JSON 結構固定為:
+{{"name": "簡短繁體中文訊號名稱(≤12字)", "conditions": [
+  {{"left": "欄位", "op": "運算子", "right": "數字字串或field:欄位", "leftDays": 0, "rightDays": 0}}
 ]}}
-   示例（右值引用另一字段时必须带 field: 前缀，不能裸写字段名）：
-   {{"name": "MACD金叉", "conditions": [
+   範例 (右值引用另一欄位時必須帶 field: 前綴, 不能裸寫欄位名):
+   {{"name": "MACD黃金交叉", "conditions": [
      {{"left": "macd_dif", "op": ">", "right": "field:macd_dea", "leftDays": 0, "rightDays": 0}}
    ]}}
-3. conditions 至少 1 个、最多 8 个；优先用最少的条件表达清晰的思路。
-4. 多条件必须能同时满足，不要输出互相矛盾的条件。"""
+3. conditions 至少 1 個、最多 8 個; 優先用最少的條件表達清楚的思路。
+4. 多條件必須能同時滿足, 不要輸出互相矛盾的條件。
+5. name 一律使用繁體中文, 不得使用簡體字。"""
 
 
 def build_messages(description: str) -> list[dict]:

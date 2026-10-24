@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import weakref
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,7 +15,12 @@ import polars as pl
 
 from app.config import settings
 from app.data_providers.base import AssetType
-from app.data_providers.custom.config import CustomSourceConfig, DatasetConfig
+from app.data_providers.custom.config import (
+    RATIO_FIELDS,
+    RATIO_UNITS,
+    CustomSourceConfig,
+    DatasetConfig,
+)
 from app.data_providers.custom.mapper import (
     apply_transforms,
     datetime_payload,
@@ -34,30 +41,19 @@ _REQUIRED = {
     # financial 字段由数据源决定, 只要求能映射出 symbol
     "financial": {"symbol"},
 }
-
-# 小数制下 change_pct/amplitude/turnover_rate 的物理上限: A股最大涨跌停 30% (+容差)。
-# 中位数口径下小数制批次不可能超过该值, 百分制批次(典型中位数 0.5~3)必然超过。
-_PCT_FRACTION_MAX = 0.31
+# A transform that already turns a percent into a decimal.
+_PERCENT_TRANSFORM_RE = re.compile(r"/\s*100(?:\.0*)?(?![\d.])|\*\s*0?\.01(?![\d])")
 
 
-def _normalize_pct_units(df: pl.DataFrame) -> pl.DataFrame:
-    """百分制源自适应归一为小数制 (契约: change_pct/amplitude/turnover_rate 为小数,
-    0.0366 = 3.66%)。不少第三方接口(如 a-stock-data)直接返回 3.66 表示 3.66%,
-    若不归一, 下游(行业/概念统计、前端 x100 展示)会整体放大 100 倍。
-
-    截面判定: 样本 >= 5 用 |值| 中位数(对个别无涨跌幅限制新股免疫),
-    小样本退用最大值。整批同除 100, 避免逐值阈值在 0.3~1 区间的歧义。
-    """
-    for col in ("change_pct", "amplitude", "turnover_rate"):
+def _apply_declared_units(df: pl.DataFrame, units: dict[str, str]) -> pl.DataFrame:
+    """Convert the ratio fields to the decimal contract by their declared unit, never by their values."""
+    for col in RATIO_FIELDS:
         if col not in df.columns:
             continue
-        df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False).alias(col))
-        vals = df[col].drop_nulls().abs()
-        if vals.is_empty():
-            continue
-        stat = vals.median() if vals.len() >= 5 else vals.max()
-        if stat > _PCT_FRACTION_MAX:
-            df = df.with_columns((pl.col(col) / 100).alias(col))
+        value = pl.col(col).cast(pl.Float64, strict=False)
+        if units.get(col) == "percent":
+            value = value / 100
+        df = df.with_columns(value.alias(col))
     return df
 
 
@@ -68,15 +64,37 @@ class GenericHTTPProvider:
         self.config = config
         self.name = config.name
         self._client = httpx.Client(timeout=30.0)
+        # The client closes when the last holder drops this provider, or on an explicit close().
+        self._finalizer = weakref.finalize(self, self._client.close)
 
     def close(self) -> None:
-        self._client.close()
+        self._finalizer()
 
     def validate(self) -> list[str]:
         errors: list[str] = []
         for dataset, cfg in self.config.datasets.items():
             if not cfg.url:
                 errors.append(f"{dataset}: url is required")
+            mapped_fields = set(cfg.field_map.values())
+            for col in RATIO_FIELDS:
+                # Only realtime feeds these ratios into monitoring; other datasets drop them on normalize.
+                if dataset == "realtime" and col in mapped_fields and col not in cfg.units:
+                    errors.append(
+                        f"{dataset}: {col} 已映射但未宣告單位, 請在 units 宣告 percent 或 decimal"
+                    )
+                if cfg.units.get(col) == "percent" and _PERCENT_TRANSFORM_RE.search(cfg.transforms.get(col, "")):
+                    errors.append(
+                        f"{dataset}: {col} 在 transforms 已除以 100 又宣告 units 為 percent, 會重複換算"
+                    )
+            for col, unit in cfg.units.items():
+                if col not in RATIO_FIELDS:
+                    errors.append(
+                        f"{dataset}: units.{col} cannot be declared; only {', '.join(RATIO_FIELDS)} can"
+                    )
+                elif unit not in RATIO_UNITS:
+                    errors.append(
+                        f"{dataset}: units.{col} must be one of {', '.join(RATIO_UNITS)}, got {unit!r}"
+                    )
             required = _REQUIRED.get(dataset)
             if required:
                 mapped = set(cfg.field_map.values())
@@ -147,8 +165,6 @@ class GenericHTTPProvider:
         cfg = self._dataset("realtime")
         rows = self._request_rows(cfg)
         df = self._mapped_frame(cfg, rows)
-        # 百分制源(返回 3.66 表示 3.66%)截面归一为契约小数制
-        df = _normalize_pct_units(df)
         if df.is_empty():
             return []
         return df.to_dicts()
@@ -199,6 +215,8 @@ class GenericHTTPProvider:
     ) -> pl.DataFrame:
         """拉取财务数据。table 包含四张财务报表及 shares 股本表。
 
+        No sync flow calls this; only the settings-page dataset test reaches a financial config.
+
         custom 源用一个 'financial' dataset 配置覆盖全部财务表; 请求时把 table 作为参数传给上游,
         上游根据 table 返回对应数据。字段由数据源决定, 这里只确保有 symbol 列。
         """
@@ -239,7 +257,7 @@ class GenericHTTPProvider:
 
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
         cfg = self._dataset(dataset)
-        test_symbols = symbols or ["000001.SZ"]
+        test_symbols = symbols or ["2330.TWSE"]
         end_time = datetime.now()
         start_time = end_time - timedelta(days=7)
         if dataset == "realtime":
@@ -284,7 +302,7 @@ class GenericHTTPProvider:
 
     def _mapped_frame(self, cfg: DatasetConfig, rows: list[dict]) -> pl.DataFrame:
         df = map_rows(rows, cfg.field_map)
-        return apply_transforms(df, cfg.transforms)
+        return _apply_declared_units(apply_transforms(df, cfg.transforms), cfg.units)
 
     def _request_rows(
         self,

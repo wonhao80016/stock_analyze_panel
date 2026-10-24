@@ -204,6 +204,7 @@ const STRATEGY_SIGNAL_LABELS: Record<string, string> = {
   signal_swing_structure_exit: '波段結構轉弱',
   signal_n_day_low_reclaim: '跌破60日低點後收回',
   signal_low_volatility_leader_entry: '低波動多頭',
+  signal_high_turnover_surge_entry: '高換手拉升',
 }
 
 /** 常用技術指標/字段 → 中文 (閾值條件展示用, 與後端 ENRICHED_COLUMNS 對齊) */

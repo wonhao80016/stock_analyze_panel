@@ -56,3 +56,8 @@ datasets:
       turnover: turnover_rate
       timestamp: timestamp
       session: session
+    # mock_server.py returns pct = change / prev, amplitude 0.025 and turnover 0.012: all decimals.
+    units:
+      change_pct: decimal
+      amplitude: decimal
+      turnover_rate: decimal

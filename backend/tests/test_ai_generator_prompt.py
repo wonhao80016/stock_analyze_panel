@@ -18,7 +18,7 @@ def test_ai_strategy_generator_uses_compact_guide():
 
     guide = AIStrategyGenerator()._get_guide()
 
-    assert "AI 策略生成精简指南" in guide
+    assert "AI 策略生成精簡指南" in guide
     assert "策略示例" not in guide
     assert len(guide) < 5000
 
@@ -51,11 +51,11 @@ def test_build_step1_keeps_user_prompt_compact():
 def test_build_step2_uses_runtime_meta_constraints():
     prompt = build_step2("META = {}", "调整参数和评分")
 
-    assert "权重总和保持 1.0" in prompt
-    assert "权重总和保持 100" not in prompt
+    assert "權重總和保持 1.0" in prompt
+    assert "權重總和保持 100" not in prompt
     assert "filter()`、`filter_history()` 或 `MATRIX_STRATEGY" in prompt
-    assert "没有匹配信号时允许为空" in prompt
-    assert "模块顶层字面量字典" in prompt
+    assert "沒有匹配訊號時允許為空" in prompt
+    assert "模組頂層字面量字典" in prompt
 
 
 def test_matrix_backend_prompt_and_imports_are_supported():

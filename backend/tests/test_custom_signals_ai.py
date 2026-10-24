@@ -45,8 +45,8 @@ def test_build_messages_only_contains_whitelisted_fields():
     from app.strategy.custom_signals import ALLOWED_FIELDS
 
     system = build_messages("x")[0]["content"]
-    # 只检查「字段清单」段落（可用字段 … 运算符），排除 JSON 格式示例里的 "name"
-    field_section = system.split("运算符（op）", 1)[0]
+    # 只检查「字段清单」段落（可用欄位 … 運算子），排除 JSON 格式示例里的 "name"
+    field_section = system.split("運算子 (op)", 1)[0]
     for field in ("ma20", "rsi_14", "boll_upper"):
         assert field in field_section
     # 字段清单里出现的每个 key( 都必须在白名单内

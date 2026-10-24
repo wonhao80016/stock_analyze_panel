@@ -782,7 +782,10 @@ def get_signal_dependencies() -> dict[str, frozenset[str]]:
 
     return {
         **SIGNAL_DEPENDENCIES,
-        **custom_signals.expression_dependencies(_get_custom_signal_exprs()),
+        **{
+            name: limit_distance_inputs(deps)
+            for name, deps in custom_signals.expression_dependencies(_get_custom_signal_exprs()).items()
+        },
     }
 
 
@@ -851,8 +854,7 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
         df = df.with_columns([expressions[name] for name in SIGNAL_DEPENDENCIES if name in want])
 
     # 自定义信号（用户配置的字段+运算符+值组合，编译为布尔列）
-    from app.strategy import custom_signals
-    df = custom_signals.inject(df, _get_custom_signal_exprs(), needed=needed)
+    df = inject_custom_signals(df, _get_custom_signal_exprs(), needed=needed)
 
     return df
 
@@ -2237,6 +2239,37 @@ def taiwan_limit_profile(symbols: list[str], sessions: ListingSessions | None = 
     return pl.DataFrame(rows, schema=schema)
 
 
+LIMIT_DISTANCE_COLUMNS = ("distance_to_upper_limit", "distance_to_lower_limit")
+_LIMIT_DISTANCE_INPUTS = frozenset({"close", "prev_close", "raw_close", "ref_limit_up", "ref_limit_down"})
+
+
+def limit_distance_inputs(dependencies: frozenset[str]) -> frozenset[str]:
+    """*dependencies* with the limit-distance columns replaced by the columns they are computed from."""
+    if dependencies.isdisjoint(LIMIT_DISTANCE_COLUMNS):
+        return dependencies
+    return (dependencies - set(LIMIT_DISTANCE_COLUMNS)) | _LIMIT_DISTANCE_INPUTS
+
+
+def inject_custom_signals(
+    df: pl.DataFrame,
+    exprs: dict[str, pl.Expr],
+    needed: set[str] | None = None,
+) -> pl.DataFrame:
+    """custom_signals.inject, computing the limit-distance columns the injected signals read.
+
+    Columns computed here are dropped again, so the enriched schema stays the same.
+    """
+    from app.strategy import custom_signals
+
+    wanted = exprs if needed is None else {name: e for name, e in exprs.items() if name in needed}
+    read = set().union(*custom_signals.expression_dependencies(wanted).values()) if wanted else set()
+    missing = [c for c in LIMIT_DISTANCE_COLUMNS if c in read and c not in df.columns]
+    if df.is_empty() or not missing:
+        return custom_signals.inject(df, exprs, needed=needed)
+    added = [c for c in LIMIT_DISTANCE_COLUMNS if c not in df.columns]
+    return custom_signals.inject(add_limit_distance_columns(df), exprs, needed=needed).drop(added)
+
+
 def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
     """Add distance_to_upper_limit / distance_to_lower_limit (decimal, 0.01 = 1%).
 
@@ -2244,6 +2277,7 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
     No-limit symbols (foreign-component ETFs incl. bond ETFs, unconfirmed underlying_scope) get
     null in both columns, so filters on them drop those rows (fail-closed).
     """
+    from app.taiwan.corporate_actions import REF_LIMIT_DOWN, REF_LIMIT_UP
     from app.taiwan.market_rules import PriceLimitModel
 
     out_cols = ("distance_to_upper_limit", "distance_to_lower_limit")
@@ -2252,7 +2286,7 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
 
     profile = taiwan_limit_profile(df["symbol"].unique().to_list())
     trade_date = pl.col("date") if "date" in df.columns else pl.lit(cn_today())
-    df = df.join(profile, on="symbol", how="left").with_columns(
+    df = df.join(profile, on="symbol", how="left", maintain_order="left").with_columns(
         PriceLimitModel.polars_session_limit_pct(
             pl.col("limit_pct"), trade_date, pl.col("ipo_start"), pl.col("ipo_end")
         ).alias("limit_pct")
@@ -2269,6 +2303,11 @@ def add_limit_distance_columns(df: pl.DataFrame) -> pl.DataFrame:
     limit_up, limit_down = PriceLimitModel.polars_limit_prices(
         ref, pl.col("limit_pct"), pl.col("is_etf_tick").fill_null(False)
     )
+    # A corporate-action session uses the limits the exchange published, as signal_limit_up does.
+    if REF_LIMIT_UP in df.columns:
+        limit_up = pl.coalesce(pl.col(REF_LIMIT_UP), limit_up)
+    if REF_LIMIT_DOWN in df.columns:
+        limit_down = pl.coalesce(pl.col(REF_LIMIT_DOWN), limit_down)
 
     usable = (
         pl.col("limit_pct").is_not_null()

@@ -10,6 +10,9 @@ import yaml
 DatasetName = Literal["daily", "adj_factor", "realtime", "minute", "financial"]
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 300.0
+# Fields whose unit a dataset may declare; an undeclared field is decimal (0.0366 = 3.66%).
+RATIO_FIELDS = ("change_pct", "amplitude", "turnover_rate")
+RATIO_UNITS = ("decimal", "percent")
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class DatasetConfig:
     end_param: str = "end_time"
     asset_type_param: str | None = None
     freq_param: str | None = None
+    units: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,7 @@ def _dataset_from_dict(raw: dict[str, Any]) -> DatasetConfig:
         end_param=str(raw.get("end_param", "end_time") or "end_time").strip() or "end_time",
         asset_type_param=(str(raw.get("asset_type_param") or "").strip() or None),
         freq_param=(str(raw.get("freq_param") or "").strip() or None),
+        units={str(k): str(v).strip().lower() for k, v in (raw.get("units") or {}).items()},
     )
 
 

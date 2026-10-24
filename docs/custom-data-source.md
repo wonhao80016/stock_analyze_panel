@@ -4,7 +4,7 @@
 
 ## 支持範圍
 
-當前自定義源支持五類數據:
+當前自定義源支持四類數據:
 
 | 數據集 | 配置名 | 說明 |
 | --- | --- | --- |
@@ -12,9 +12,10 @@
 | 除權因子 | `adj_factor` | 批量返回一組股票的復權因子 |
 | 實時行情 | `realtime` | 返回全市場快照,用於盤中 enriched 增量計算 |
 | 分鐘K | `minute` | 返回 1m 分鐘K(需映射出 symbol / datetime / OHLC / 量額) |
-| 財務數據 | `financial` | 一個配置覆蓋全部財務表,請求時把表名作為參數傳給上游;字段由數據源決定,僅需映射出 symbol |
 
 深度盤口(depth5)暫無數據集契約,仍由內建數據源提供。
+
+YAML 仍可寫 `financial` 數據集,設置頁的「試拉測試」也能試拉它,但目前沒有任何同步流程會呼叫它,寫了不會把財務數據帶進系統。
 
 ## 配置位置
 
@@ -91,6 +92,10 @@ datasets:
       amount_change: change_amount
       amplitude: amplitude
       turnover: turnover_rate
+    units:  # mock 源返回小數; 上游返回百分數的字段改寫 percent
+      change_pct: decimal
+      amplitude: decimal
+      turnover_rate: decimal
 ```
 
 ## 字段契約
@@ -125,7 +130,26 @@ datasets:
 
 建議實時接口額外提供 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`。缺失時部分字段會由 pipeline 回算,但精度取決於可用輸入。
 
-`change_pct` 和 `amplitude` 使用小數制,例如 `0.0366` 表示 `3.66%`(`turnover_rate` 同)。若接口直接返回百分數值 `3.66`,實時行情會按截面中位數自動歸一為小數制,但仍建議接口直接提供小數制以避免小樣本歧義。
+`change_pct`、`amplitude`、`turnover_rate` 的契約是小數制,例如 `0.0366` 表示 `3.66%`。realtime 數據集映射了其中任何一個字段,就必須在 `units` 明確宣告它的單位,未宣告就拒絕載入;可宣告的字段只有這三個,值只能是:
+
+| `units` 值 | 含義 | 換算 |
+| --- | --- | --- |
+| `decimal` | 小數制,`0.0366` 表示 `3.66%` | 不換算 |
+| `percent` | 百分數,`3.66` 表示 `3.66%` | 除以 100 |
+
+系統不會依數值大小猜測單位,也沒有預設單位。realtime 數據集映射了這三個字段之一卻沒有宣告、或宣告了其他字段或其他值時,重新加載會在「設置 -> 數據源」列出錯誤,該數據源不會載入,「試拉測試」也會失敗;在設置頁存檔時會先做同樣的檢查,不通過就不寫檔並顯示錯誤。載入失敗的數據源仍可在設置頁打開編輯、補上 `units` 後重新存檔。同一字段已在 `transforms` 寫了 `value / 100` 又宣告 `percent` 屬於重複換算,同樣會被拒絕:兩者擇一即可。「試拉測試」的預覽顯示的是按 `units` 換算後的值。
+
+### 舊設定的遷移
+
+舊版會依數值大小猜測是不是百分數,現在改為明確宣告。升級後,凡是 realtime 映射了 `change_pct`、`amplitude` 或 `turnover_rate` 卻沒有 `units` 的舊 YAML 都會拒絕載入,請依接口實際返回值補上:
+
+```yaml
+    units:
+      change_pct: percent   # 接口返回 3.66 表示 3.66%
+      turnover_rate: decimal  # 接口返回 0.05 表示 5%
+```
+
+舊設定若已用 `transforms` 把百分數除以 100,對應字段宣告 `decimal`,或刪掉該 transform 改宣告 `percent`。
 
 ## 請求約定
 
@@ -203,6 +227,8 @@ mkdir -p data/data_sources
 cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_source.yaml
 ```
 
+   示例的 realtime 映射了比例字段,若複製的檔案還沒有 `units`,請照上方「最小 YAML」補上(mock 源返回小數制,三個字段都宣告 `decimal`)。
+
 3. 在「設置 -> 數據源」點擊「重新加載」。
 
 4. 使用「試拉測試」選擇 `mock_source` 和 `daily` / `adj_factor` / `realtime`。
@@ -273,8 +299,9 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
   amount = 成交額
   change_pct = 漲跌幅 (小數, 0.0366 = 3.66%)
   change_amount = 漲跌額
-  amplitude = 振幅
-  turnover_rate = 換手率 (小數, 0.05 = 5%; 若上游返回 5 表示 5%, 配置 transforms: turnover_rate: "value / 100")
+  amplitude = 振幅 (小數)
+  turnover_rate = 換手率 (小數, 0.05 = 5%)
+  上面三個比例字段若上游返回百分數 (5 表示 5%), 在 realtime 下加 units, 例如 units: {turnover_rate: percent}; 小數制則宣告 decimal。realtime 映射了這三個字段卻沒寫 units 會拒絕載入
 
 分鐘K (minute):
   symbol = 股票代碼

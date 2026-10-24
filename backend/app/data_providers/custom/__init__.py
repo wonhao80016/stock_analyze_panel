@@ -4,6 +4,7 @@ from app.data_providers.custom.loader import (
     data_sources_dir,
     delete_config,
     errors,
+    failed_config_dict,
     get_config_dict,
     get_provider,
     install_plugin,
@@ -18,6 +19,7 @@ from app.data_providers.custom.loader import (
     provider_has_dataset,
     save_config,
     uninstall_plugin,
+    validate_config,
 )
 
 __all__ = [
@@ -25,6 +27,7 @@ __all__ = [
     "data_sources_dir",
     "delete_config",
     "errors",
+    "failed_config_dict",
     "get_config_dict",
     "get_provider",
     "install_plugin",
@@ -39,4 +42,5 @@ __all__ = [
     "provider_has_dataset",
     "save_config",
     "uninstall_plugin",
+    "validate_config",
 ]

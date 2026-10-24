@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowRight, Loader2, Plus, Save, Search, Sparkles, X } from 'lucide-react'
-import { api, type CustomSignal, type CustomSignalCondition, type CustomSignalFieldGroup } from '@/lib/api'
+import { api, type CustomSignal, type CustomSignalCondition, type CustomSignalField, type CustomSignalFieldGroup, type CustomSignalFieldUnit } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 
@@ -36,8 +36,10 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
   const [aiConfigured, setAiConfigured] = useState<boolean | null>(null)
   const checkedAi = useRef(false)
 
+  const existing = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList, enabled: open })
   const fields = options.data?.fields ?? []
   const groups = options.data?.groups
+  const unitLabels = options.data?.units ?? {}
   const maxDays = options.data?.maxDays ?? 60
   const operators = options.data?.operators ?? ['>', '>=', '<', '<=', '==', '!=']
   const editing = !!signal
@@ -87,7 +89,9 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
       for (const c of d.conditions) {
         if (!c.left || !c.op || c.right === '') throw new Error('條件填寫不完整')
       }
-      return api.customSignalSave(d)
+      if (editing) return api.customSignalUpdate(d)
+      if (existing.data?.signals.some(s => s.id === d.id)) throw new Error(`訊號標識 ${d.id} 已存在，請換一個標識或改用編輯`)
+      return api.customSignalCreate(d)
     },
     onSuccess: res => {
       qc.invalidateQueries({ queryKey: QK.customSignals })
@@ -188,7 +192,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
                       </select>
 
                       {/* 右操作數: 前N日(僅字段) + 字段/常量(彈出選擇) */}
-                      <RightValueInput cond={c} fields={fields} groups={groups} maxDays={maxDays}
+                      <RightValueInput cond={c} fields={fields} groups={groups} maxDays={maxDays} unitLabels={unitLabels}
                         onChangeRight={v => updateCond(i, { right: v })}
                         onChangeDays={v => updateCond(i, { rightDays: v })} />
 
@@ -260,7 +264,7 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
 
 function FieldPicker({ value, fields, groups, onChange }: {
   value: string
-  fields: { key: string; label: string }[]
+  fields: CustomSignalField[]
   groups?: CustomSignalFieldGroup[]
   onChange: (v: string) => void
 }) {
@@ -421,17 +425,23 @@ function DaysInput({ value, max, onChange }: { value: number; max: number; onCha
 
 // ── 右操作數: 字段(彈出) / 常量 切換 ─────────────────────
 
-function RightValueInput({ cond, fields, groups, maxDays, onChangeRight, onChangeDays }: {
+function RightValueInput({ cond, fields, groups, maxDays, unitLabels, onChangeRight, onChangeDays }: {
   cond: CustomSignalCondition
-  fields: { key: string; label: string }[]
+  fields: CustomSignalField[]
   groups?: CustomSignalFieldGroup[]
   maxDays: number
+  unitLabels: Partial<Record<CustomSignalFieldUnit, string>>
   onChangeRight: (v: string) => void
   onChangeDays: (v: number) => void
 }) {
   const isField = cond.right.startsWith('field:')
   const fieldValue = isField ? cond.right.slice(6) : ''
   const numValue = isField ? '' : cond.right
+  const unit = fields.find(f => f.key === cond.left)?.unit
+  const unitLabel = unit ? unitLabels[unit] ?? unit : ''
+  const asPercent = unit === 'decimal' && numValue !== '' && Number.isFinite(Number(numValue))
+    ? `≈ ${+(Number(numValue) * 100).toFixed(4)}%`
+    : ''
 
   return (
     <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -448,7 +458,13 @@ function RightValueInput({ cond, fields, groups, maxDays, onChangeRight, onChang
           {/* 常量無前N日概念, 佔位保持與字段模式對齊 */}
           <div className="shrink-0" style={{ width: 44 }} />
           <input type="number" value={numValue} onChange={e => onChangeRight(e.target.value)} step="any"
+            title={unitLabel ? `單位：${unitLabel}` : undefined}
             className="flex-1 min-w-0 h-7 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
+          {unitLabel && (
+            <span className="shrink-0 text-[10px] text-muted whitespace-nowrap" data-testid="custom-signal-unit">
+              {unitLabel}{asPercent && ` ${asPercent}`}
+            </span>
+          )}
           <button onClick={() => onChangeRight('field:close')} title="切換為欄位" className="p-0.5 rounded text-muted hover:text-accent cursor-pointer shrink-0">
             <ArrowRight className="h-3 w-3 -rotate-90" />
           </button>

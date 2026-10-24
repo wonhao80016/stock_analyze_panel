@@ -293,6 +293,25 @@ def list_rules(request: Request):
         index_error = monitor_rules.taiwan_index_condition_error(rule)
         if index_error:
             _add_runtime_warning(rule, index_error)
+    # A csg_ condition on a deleted or disabled custom signal never fires.
+    from app.strategy import custom_signals
+
+    signal_enabled = {
+        sig.get("id"): sig.get("enabled") is not False
+        for sig in custom_signals.load_all(_data_dir(request))
+    }
+    for rule in rules:
+        for cond in rule.get("conditions") or []:
+            field = cond.get("field", "") if isinstance(cond, dict) else ""
+            if not field.startswith(custom_signals.PREFIX):
+                continue
+            state = signal_enabled.get(field[len(custom_signals.PREFIX):])
+            if state is None:
+                _add_runtime_warning(rule, f"引用的自訂訊號 {field} 不存在, 這條規則不會觸發")
+                break
+            if state is False:
+                _add_runtime_warning(rule, f"引用的自訂訊號 {field} 已停用, 這條規則不會觸發")
+                break
     # 分组作用域规则: 绑定的分组被删除 → 标注运行时警告 (引擎侧已 fail-closed 跳过)
     group_rules = [rule for rule in rules if rule.get("scope") == "watchlist_group"]
     if group_rules:

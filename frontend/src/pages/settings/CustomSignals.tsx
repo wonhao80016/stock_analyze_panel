@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Zap, Settings2, Lock } from 'lucide-react'
-import { api, type CustomSignal } from '@/lib/api'
+import { api, type CustomSignal, type CustomSignalReferences } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS, type SignalKind } from '@/lib/signals'
 import { CustomSignalDialog } from '@/components/signals/CustomSignalDialog'
@@ -25,6 +25,13 @@ export function SettingsCustomSignalsPanel() {
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<CustomSignal | null>(null)
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null)
+  const [referenced, setReferenced] = useState<{
+    signal: CustomSignal
+    action: 'delete' | 'disable'
+    rules: CustomSignalReferences['monitor_rules']
+    strategies: CustomSignalReferences['strategies']
+  } | null>(null)
+  const [actionError, setActionError] = useState('')
   const resetDeleteTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const fields = options.data?.fields ?? []
@@ -63,22 +70,57 @@ export function SettingsCustomSignalsPanel() {
     setEditing(null)
   }
 
+  const showError = (err: unknown) => setActionError(String((err as Error)?.message ?? err))
+
   const del = useMutation({
-    mutationFn: api.customSignalDelete,
+    mutationFn: ({ id, force }: { id: string; force: boolean }) => api.customSignalDelete(id, force),
     onSuccess: () => {
       clearDeleteConfirm()
+      setReferenced(null)
       qc.invalidateQueries({ queryKey: QK.customSignals })
     },
+    onError: showError,
   })
 
+  const saveEnabled = (sig: CustomSignal, enabled: boolean, force: boolean) => {
+    setActionError('')
+    api.customSignalUpdate({ ...sig, enabled }, force)
+      .then(() => {
+        setReferenced(null)
+        qc.invalidateQueries({ queryKey: QK.customSignals })
+      })
+      .catch(showError)
+  }
+
+  const checkReferences = (sig: CustomSignal, action: 'delete' | 'disable', proceed: () => void) => {
+    setActionError('')
+    api.customSignalReferences(sig.id)
+      .then(res => {
+        const strategies = res.strategies ?? []
+        if (res.monitor_rules.length === 0 && strategies.length === 0) proceed()
+        else setReferenced({ signal: sig, action, rules: res.monitor_rules, strategies })
+      })
+      .catch(showError)
+  }
+
   const toggleEnabled = (sig: CustomSignal) => {
-    api.customSignalSave({ ...sig, enabled: !sig.enabled }).then(() => qc.invalidateQueries({ queryKey: QK.customSignals }))
+    if (!sig.enabled) {
+      saveEnabled(sig, true, false)
+      return
+    }
+    checkReferences(sig, 'disable', () => saveEnabled(sig, false, false))
+  }
+
+  const confirmReferenced = () => {
+    if (!referenced) return
+    if (referenced.action === 'delete') del.mutate({ id: referenced.signal.id, force: true })
+    else saveEnabled(referenced.signal, false, true)
   }
 
   const handleDeleteClick = (sig: CustomSignal) => {
     if (confirmingDeleteId === sig.id) {
       clearDeleteConfirm()
-      del.mutate(sig.id)
+      checkReferences(sig, 'delete', () => del.mutate({ id: sig.id, force: false }))
       return
     }
     setConfirmingDeleteId(sig.id)
@@ -228,6 +270,35 @@ export function SettingsCustomSignalsPanel() {
               新建自訂訊號
             </button>
           </div>
+
+          {actionError && (
+            <div role="alert" className="rounded-btn border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">
+              {actionError}
+            </div>
+          )}
+
+          {referenced && (
+            <div role="alert" className="rounded-card border border-danger/30 bg-danger/5 p-4 space-y-2">
+              <p className="text-xs text-danger">
+                訊號 csg_{referenced.signal.id} 仍被以下監控規則或策略引用，
+                {referenced.action === 'delete' ? '刪除' : '停用'}後它們讀不到這個訊號：
+              </p>
+              <ul className="list-disc pl-5 text-xs text-secondary">
+                {referenced.rules.map(rule => (
+                  <li key={`rule-${rule.id}`}>監控規則:{rule.name} <span className="font-mono text-muted">({rule.id})</span></li>
+                ))}
+                {referenced.strategies.map(strategy => (
+                  <li key={`strategy-${strategy.id}`}>策略:{strategy.name} <span className="font-mono text-muted">({strategy.id})</span></li>
+                ))}
+              </ul>
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setReferenced(null)} className="px-3 py-1 rounded-btn bg-elevated text-secondary text-xs">取消</button>
+                <button onClick={confirmReferenced} disabled={del.isPending} className="px-3 py-1 rounded-btn bg-danger/80 text-white text-xs disabled:opacity-50">
+                  {referenced.action === 'delete' ? '仍要刪除' : '仍要停用'}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {signals.map(sig => (

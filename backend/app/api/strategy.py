@@ -494,6 +494,7 @@ def save_config(req: SaveConfigRequest, request: Request):
     overrides = _strip_defaults(req.strategy_id, req.overrides, engine)
 
     strategy_config.save_override(_data_dir(request), req.strategy_id, overrides)
+    _invalidate_strategy_runtime(request)
     return {"ok": True}
 
 
@@ -510,6 +511,7 @@ def patch_config(req: SaveConfigRequest, request: Request):
         req.strategy_id,
         _strip_defaults(req.strategy_id, overrides, engine),
     )
+    _invalidate_strategy_runtime(request)
     return {"ok": True}
 
 
@@ -566,6 +568,7 @@ def _strip_defaults(strategy_id: str, overrides: dict, engine) -> dict:
 def reset_config(strategy_id: str, request: Request):
     _get_public_strategy(_get_engine(request), strategy_id)
     strategy_config.delete_override(_data_dir(request), strategy_id)
+    _invalidate_strategy_runtime(request)
     return {"ok": True}
 
 
@@ -697,6 +700,24 @@ def _validate_strategy_id(strategy_id: str) -> str:
     return sid
 
 
+class StrategyIdConflictError(ValueError):
+    """A create would reuse a strategy id or overwrite an existing strategy file."""
+
+
+def _refuse_taken_strategy_id(
+    engine: StrategyEngine, sid: str, existing: StrategyDef | None, path: Path
+) -> None:
+    if existing is not None:
+        raise StrategyIdConflictError(f"策略 {sid} 已存在, 请改用修改模式或换一个策略 ID")
+    failed = sorted(
+        Path(item["file"]).name for item in engine.load_errors() if Path(item["file"]).stem == sid
+    )
+    if path.exists() or failed:
+        raise StrategyIdConflictError(
+            f"策略文件 {', '.join(failed) or path.name} 已存在但未能加载, 请先修复或删除该文件, 或换一个策略 ID"
+        )
+
+
 def _target_dir(data_dir: Path, source: str) -> Path:
     if source not in {"ai", "custom", "composite"}:
         raise ValueError("target_source 必须是 ai、custom 或 composite")
@@ -708,8 +729,10 @@ def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRe
     code = req.code
     if sid:
         current_meta = AIStrategyGenerator._extract_meta(code)
+        found = find_meta_assignment(code)
         needs_normalize = (
             current_meta.get("id") != sid
+            or (found is not None and found[0].id != "META")
             or bool(req.name.strip())
             or bool(req.description.strip())
         )
@@ -805,6 +828,7 @@ def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legac
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{sid}.py"
         expected_source = "ai"
+        _refuse_taken_strategy_id(engine, sid, existing, path)
     elif req.mode == "update":
         if existing is None:
             raise ValueError(f"策略 {sid} 不存在")
@@ -813,13 +837,11 @@ def _save_strategy_code(req: StrategyCodeSaveRequest, request: Request, *, legac
         path = existing.file_path
         expected_source = existing.source
     else:
-        if existing is not None:
-            raise ValueError(f"策略 {sid} 已存在，请改用修改模式或换一个策略 ID")
-        source_dir = "ai" if legacy_ai_path else req.target_source
-        out_dir = _target_dir(data_dir, source_dir)
+        out_dir = _target_dir(data_dir, req.target_source)
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{sid}.py"
-        expected_source = "ai" if legacy_ai_path else req.target_source
+        expected_source = req.target_source
+        _refuse_taken_strategy_id(engine, sid, existing, path)
 
     if path is None:
         raise ValueError("策略源文件不存在")
@@ -1041,6 +1063,8 @@ def save_strategy_code(req: StrategyCodeSaveRequest, request: Request):
     _require_user_strategy_writes(request)
     try:
         return _save_strategy_code(req, request)
+    except StrategyIdConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -1106,8 +1130,7 @@ def _save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request
         existing = None
 
     if req.mode == "create":
-        if existing is not None:
-            raise ValueError(f"策略 {sid} 已存在，请改用修改模式或换一个策略 ID")
+        _refuse_taken_strategy_id(engine, sid, existing, _target_dir(data_dir, "composite") / f"{sid}.py")
     else:  # update
         if existing is None:
             raise ValueError(f"策略 {sid} 不存在")
@@ -1170,6 +1193,8 @@ def save_composite_strategy(req: StrategyCompositeSaveRequest, request: Request)
     _require_user_strategy_writes(request)
     try:
         return _save_composite_strategy(req, request)
+    except StrategyIdConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -1189,6 +1214,8 @@ async def ai_save(req: AISaveRequest, request: Request):
         )
         result = _save_strategy_code(save_req, request, legacy_ai_path=True)
         return {"ok": True, "path": result["path"]}
+    except StrategyIdConflictError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

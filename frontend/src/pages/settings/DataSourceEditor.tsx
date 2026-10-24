@@ -19,6 +19,8 @@ const DATASET_LABEL: Record<DatasetKey, string> = {
   minute: '分鐘K',
 }
 
+const RATIO_FIELDS = ['change_pct', 'amplitude', 'turnover_rate'] as const
+
 const TARGET_FIELDS: Record<DatasetKey, string[]> = {
   daily: ['symbol', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount'],
   adj_factor: ['symbol', 'trade_date', 'ex_factor'],
@@ -42,15 +44,15 @@ const FIELD_LABELS: Record<string, string> = {
   name: '股票名稱',
   last_price: '最新價',
   prev_close: '昨收價',
-  change_pct: '漲跌幅 (小數 0.0366=3.66%)',
+  change_pct: '漲跌幅 (須宣告單位)',
   change_amount: '漲跌額',
-  amplitude: '振幅 (小數)',
-  turnover_rate: '換手率 (小數 0.05=5%)',
+  amplitude: '振幅 (須宣告單位)',
+  turnover_rate: '換手率 (須宣告單位)',
   timestamp: '時間戳',
   session: '交易時段',
 }
 
-function normalizeConfig(config: CustomSourceConfig): CustomSourceConfig {
+function normalizeConfig({ load_error: _loadError, ...config }: CustomSourceConfig): CustomSourceConfig {
   return {
     ...config,
     name: config.name.toLowerCase().trim(),
@@ -298,6 +300,15 @@ export function DataSourceEditor({
         </div>
       )}
 
+      {(config.load_error?.length || save.error) && (
+        <div role="alert" className="mx-6 mb-3 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger space-y-0.5">
+          {config.load_error?.length ? (
+            <div>此資料來源目前無法載入,修正後重新儲存:{config.load_error.join('; ')}</div>
+          ) : null}
+          {save.error && <div>儲存失敗:{(save.error as Error).message}</div>}
+        </div>
+      )}
+
       {/* 底部保存欄 */}
       <div className="px-6 py-3.5 border-t border-border/60 flex items-center justify-between bg-elevated/20">
         <div className="text-[11px] text-muted">
@@ -339,7 +350,7 @@ function DatasetDetail({
   onToggle: (v: boolean) => void
 }) {
   const enabled = !!cfg
-  const [testSymbols, setTestSymbols] = useState('000001.SZ,600000.SH')
+  const [testSymbols, setTestSymbols] = useState('2330.TWSE,6488.TPEX')
   const [showParams, setShowParams] = useState(false)
   const showTimeParams = datasetKey !== 'realtime'
   const test = useMutation({
@@ -538,6 +549,7 @@ function DatasetDetail({
                 targets={TARGET_FIELDS[datasetKey]}
                 onChange={onFieldMap}
               />
+              <RatioUnitsEditor cfg={cfg} onUpdate={onUpdate} />
             </div>
 
             <div className="pt-3 border-t border-border/30">
@@ -565,10 +577,20 @@ function DatasetDetail({
                   <span className="text-accent font-medium">{test.data.rows}</span> 行
                   <span className="text-muted mx-1.5">·</span>
                   欄:<span className="text-secondary">{test.data.columns.join(', ')}</span>
+                  {RATIO_FIELDS.some(f => test.data.preview[0]?.[f] != null) && (
+                    <div className="mt-1 text-secondary">
+                      首列換算後:{' '}
+                      {RATIO_FIELDS.filter(f => test.data.preview[0]?.[f] != null)
+                        .map(f => `${f} = ${String(test.data.preview[0][f])}`)
+                        .join(' · ')}
+                    </div>
+                  )}
                 </div>
               )}
               {test.isError && (
-                <div className="mt-2 text-xs text-danger">測試失敗,請檢查介面和對應</div>
+                <div className="mt-2 text-xs text-danger">
+                  測試失敗,請檢查介面、對應和單位:{String((test.error as Error)?.message ?? '')}
+                </div>
               )}
             </div>
           </motion.div>
@@ -591,6 +613,47 @@ function DatasetDetail({
           </motion.div>
         )}
       </AnimatePresence>
+    </div>
+  )
+}
+
+function RatioUnitsEditor({ cfg, onUpdate }: {
+  cfg: DatasetConfig
+  onUpdate: (patch: Partial<DatasetConfig>) => void
+}) {
+  const mapped = RATIO_FIELDS.filter(f => Object.values(cfg.field_map).includes(f))
+  if (mapped.length === 0) return null
+  const units = cfg.units ?? {}
+  const missing = mapped.filter(f => !units[f])
+  const setUnit = (field: string, unit: string) => {
+    const next = { ...units }
+    if (unit === 'decimal' || unit === 'percent') next[field] = unit
+    else delete next[field]
+    onUpdate({ units: next })
+  }
+  return (
+    <div className="mt-3 space-y-1.5">
+      <div className="text-[10px] uppercase tracking-widest text-muted">比例欄位單位</div>
+      {mapped.map(field => (
+        <label key={field} className="flex items-center gap-2 text-xs">
+          <span className="w-28 font-mono text-secondary">{field}</span>
+          <select
+            aria-label={`${field} 單位`}
+            value={units[field] ?? ''}
+            onChange={e => setUnit(field, e.target.value)}
+            className={`${INPUT_CLS} flex-1`}
+          >
+            <option value="">未宣告</option>
+            <option value="decimal">小數 (0.0366 = 3.66%)</option>
+            <option value="percent">百分數 (3.66 = 3.66%)</option>
+          </select>
+        </label>
+      ))}
+      {missing.length > 0 && (
+        <div className="text-[10px] text-danger">
+          {missing.join(', ')} 尚未宣告單位,未宣告時資料源不會載入
+        </div>
+      )}
     </div>
   )
 }

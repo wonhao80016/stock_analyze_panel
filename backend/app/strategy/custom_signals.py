@@ -55,6 +55,37 @@ ALLOWED_FIELDS: frozenset[str] = frozenset({
     "distance_to_upper_limit", "distance_to_lower_limit",
 })
 
+# Unit of each ALLOWED_FIELDS value on the enriched rows a custom signal is evaluated on.
+UNIT_LABELS: dict[str, str] = {
+    "TWD": "元",
+    "shares": "股 (1 張 = 1000 股)",
+    "percent": "百分數 (5 = 5%)",
+    "decimal": "小數 (0.05 = 5%)",
+    "ratio": "倍數",
+    "index": "指標值",
+    "count": "次數",
+}
+_PRICE_FIELDS = {
+    "open", "high", "low", "close", "prev_close", "change_amount",
+    "ma5", "ma10", "ma20", "ma30", "ma60", "ema5", "ema10", "ema20", "ema30", "ema60",
+    "macd_dif", "macd_dea", "macd_hist", "boll_upper", "boll_lower", "atr_14",
+    "high_60d", "low_60d",
+}
+FIELD_UNITS: dict[str, str] = {
+    **{name: "TWD" for name in _PRICE_FIELDS},
+    "amount": "TWD",
+    "volume": "shares", "vol_ma5": "shares", "vol_ma10": "shares",
+    "turnover_rate": "percent",
+    "change_pct": "decimal", "amplitude": "decimal", "annual_vol_20d": "decimal",
+    "momentum_5d": "decimal", "momentum_10d": "decimal", "momentum_20d": "decimal",
+    "momentum_30d": "decimal", "momentum_60d": "decimal",
+    "distance_to_upper_limit": "decimal", "distance_to_lower_limit": "decimal",
+    "vol_ratio_5d": "ratio",
+    "kdj_k": "index", "kdj_d": "index", "kdj_j": "index",
+    "rsi_6": "index", "rsi_14": "index", "rsi_24": "index",
+    "consecutive_limit_ups": "count", "consecutive_limit_downs": "count",
+}
+
 # 运算符 → Polars 表达式构造器（输入 col_expr, value）
 _OP_BUILDERS = {
     ">":   lambda c, v: c > v,
@@ -87,6 +118,23 @@ def load_all(data_dir: Path) -> list[dict]:
         except Exception as e:
             logger.warning("custom signal load failed %s: %s", f.name, e)
     return out
+
+
+def exists(data_dir: Path, signal_id: str) -> bool:
+    return _path(data_dir, signal_id).exists()
+
+
+def load_one(data_dir: Path, signal_id: str) -> dict | None:
+    """The stored definition; None when absent, {} when the file is unreadable."""
+    p = _path(data_dir, signal_id)
+    if not p.exists():
+        return None
+    try:
+        loaded = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("custom signal load failed %s: %s", p.name, e)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def save_one(data_dir: Path, sig: dict) -> None:

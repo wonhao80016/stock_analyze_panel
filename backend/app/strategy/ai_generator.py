@@ -1,6 +1,7 @@
 """AI 策略生成器 — 读取策略开发文档 + 调用 LLM 生成策略代码。
 
-职责: 接收用户自然语言描述 → 读取 prompts/strategy-guide.md → 调用 LLM → 返回策略代码。
+职责: 接收用户自然语言描述 → 读取 prompts/strategy-guide-compact.md → 调用 LLM → 返回策略代码。
+prompts/strategy-guide.md is the full reference for people and never enters a prompt.
 不知道: 引擎内部、API、前端、配置持久化、回测。
 """
 from __future__ import annotations
@@ -19,49 +20,74 @@ logger = logging.getLogger(__name__)
 # 策略开发精简指南路径 (随 backend/app 打包进 Docker, 避免 .dockerignore 排除 docs/ 导致运行时缺失)
 GUIDE_PATH = Path(__file__).resolve().parent / "prompts" / "strategy-guide-compact.md"
 
-_SYSTEM_PREFIX = """你是A股量化策略设计专家。根据用户描述的需求，参考下方的《策略开发指南》生成一个完整的策略Python文件。
+_SYSTEM_PREFIX = """你是台股量化策略設計專家。依使用者描述的需求, 參考下方的《策略開發指南》生成一個完整的策略 Python 檔。
 
-文件与范围铁律（不可违反）:
-1. 只创建这一个策略文件：只生成一个 .py 文件，绝不创建多文件、不拆分模块、不跨文件引用
-2. 绝不触碰项目源码：不要写任何会修改 backend/、docs/、frontend/ 等现有文件的代码；不要 import os/sys/pathlib 等文件系统模块
-3. 不得放入内置策略目录：AI 生成的策略只属于 data/strategies/ai/，文件名/ID 用 ai_ 前缀；内置目录 backend/app/strategy/builtin/ 由项目维护，AI 不得染指
-4. polars 策略只 import polars 和 datetime；matrix_native 策略只允许 import numpy 以及 from app.backtest.matrix import 所需矩阵协议和算子
+檔案與範圍鐵律 (不可違反):
+1. 只建立這一個策略檔: 只生成一個 .py 檔, 絕不建立多檔、不拆分模組、不跨檔引用
+2. 絕不觸碰專案原始碼: 不要寫任何會修改 backend/、docs/、frontend/ 等現有檔案的程式碼; 不要 import os/sys/pathlib 等檔案系統模組
+3. 不得放入內建策略目錄: AI 生成的策略只屬於 data/strategies/ai/, 檔名/ID 用 ai_ 前綴; 內建目錄 backend/app/strategy/builtin/ 由專案維護, AI 不得改動
+4. polars 策略只 import polars 和 datetime; matrix_native 策略只允許 import numpy 以及 from app.backtest.matrix import 所需矩陣協定和算子
 
 要求:
-1. 用户可能调整的策略阈值通过 META["params"] 暴露，每项使用 id/label/type/default/min/max/step；公式常数、固定窗口边界、布尔开关不必强行参数化
-2. 遵循指南中的文件结构，但优先贴合用户规则，不要为了套模板歪曲策略含义
-3. ENTRY_SIGNALS/EXIT_SIGNALS 根据策略逻辑自行选择匹配的信号列，不要照搬示例
-4. scoring 权重根据策略核心逻辑定制，总和 = 1.0；键只能使用指南中的真实数值字段或受控虚拟评分字段 ma20_bias，不得创造条件名称作为评分列
-5. 优先使用 Polars 表达式、窗口函数、聚合和 with_columns/filter 实现，避免逐行/逐股 Python 循环；只有表达式难以描述的复杂状态机才使用 partition_by/to_dicts
-6. 直接输出Python代码，不要输出其他内容
-7. 元数据必须使用模块顶层的 META = {...} 或 META: dict = {...}，不得省略或改名；并且必须定义所选执行后端要求的策略入口
+1. 使用者可能調整的策略門檻透過 META["params"] 暴露, 每項使用 id/label/type/default/min/max/step; 公式常數、固定窗口邊界、布林開關不必強行參數化
+2. 遵循指南中的檔案結構, 但優先貼合使用者規則, 不要為了套範本扭曲策略含義
+3. ENTRY_SIGNALS/EXIT_SIGNALS 依策略邏輯自行選擇匹配的訊號列, 不要照搬範例
+4. scoring 權重依策略核心邏輯訂定, 總和 = 1.0; 鍵只能使用指南中的真實數值欄位或受控虛擬評分欄位 ma20_bias, 不得自創條件名稱作為評分欄
+5. 優先使用 Polars 表達式、窗口函數、聚合和 with_columns/filter 實作, 避免逐列/逐股 Python 迴圈; 只有表達式難以描述的複雜狀態機才使用 partition_by/to_dicts
+6. 直接輸出 Python 程式碼, 不要輸出其他內容
+7. 中繼資料必須使用模組頂層的 META = {...} 或 META: dict = {...}, 不得省略或改名; 並且必須定義所選執行後端要求的策略入口
+8. name、description、RULES 與參數 label 一律使用繁體中文; 欄位單位依指南的台股口徑
 
---- 策略开发指南 ---
+--- 策略開發指南 ---
 
 """
 
-_META_NAMES = ("META", "STRATEGY_META", "meta")
+# Accepted META assignment names, in lookup order; the engine reads the same names.
+META_NAMES = ("META", "STRATEGY_META", "meta")
 _FENCED_CODE_RE = re.compile(
     r"```(?P<language>[^\n`]*)\r?\n(?P<code>.*?)```",
     re.DOTALL,
 )
 _POLARS_ENTRYPOINT_ERROR = "找不到策略入口函数 filter() 或 filter_history()"
 _MATRIX_ENTRYPOINT_ERROR = "找不到 Matrix 策略入口 MATRIX_STRATEGY"
+_ENTRYPOINT_ERRORS = {
+    "matrix_native": "matrix_native 策略只能定义 MATRIX_STRATEGY, 不得定义 filter() 或 filter_history()",
+    "polars_expr": "polars_expr 策略只能定义 filter(), 不得定义 filter_history()",
+    "python_history_legacy": "python_history_legacy 策略只能定义 filter_history(), 不得定义 filter()",
+}
+_BACKEND_ERROR_PREFIX = "不支持的执行后端"
 
+# Neither JOIN columns nor the live-only limit distances exist on the stored rows a Polars score reads.
 _POLARS_SCORING_FIELDS = frozenset(
     name
     for name in ENRICHED_COLUMNS
-    if name not in {"symbol", "date", "name"} and not name.startswith("signal_")
+    if name not in {"symbol", "date", "name", "total_shares", "float_shares",
+                    "distance_to_upper_limit", "distance_to_lower_limit"}
+    and not name.startswith("signal_")
 ) | frozenset(VIRTUAL_SCORING_DEPENDENCIES)
-_MATRIX_SCORING_FIELDS = frozenset({
+
+_MATRIX_STORED_SCORING_FIELDS = frozenset({
     "open", "high", "low", "close", "volume", "amount", "turnover_rate",
-    "total_shares", "float_shares", "consecutive_limit_ups",
-    "consecutive_limit_downs", "prev_close", "change_pct", "change_amount",
-    "amplitude", "ma5", "ma10", "ma20", "ma30", "ma60", "boll_upper",
-    "boll_lower", "high_60d", "low_60d", "momentum_5d", "momentum_10d",
-    "momentum_20d", "momentum_30d", "momentum_60d", "annual_vol_20d",
-    "rsi_6", "rsi_14", "rsi_24", "vol_ratio_5d", "ma20_bias",
+    "consecutive_limit_ups", "consecutive_limit_downs", "ma20_bias",
 })
+# Keep in step with the name families app.backtest.matrix.matrix_feature computes.
+_MATRIX_FEATURE_FAMILY_RE = re.compile(r"(?:ma|ema)\d+(?:_bias)?|rsi_\d+|momentum_\d+d")
+
+
+class _MatrixScoringFields:
+    """Membership test for the fields a matrix_native score can read through matrix_feature."""
+
+    def __contains__(self, name: object) -> bool:
+        from app.backtest.matrix import _MATRIX_COMPUTED_FEATURES
+
+        return isinstance(name, str) and (
+            name in _MATRIX_STORED_SCORING_FIELDS
+            or name in _MATRIX_COMPUTED_FEATURES
+            or _MATRIX_FEATURE_FAMILY_RE.fullmatch(name) is not None
+        )
+
+
+_MATRIX_SCORING_FIELDS = _MatrixScoringFields()
 
 
 def _top_level_assignment(
@@ -87,7 +113,7 @@ def _top_level_assignment(
 def find_meta_assignment(code: str) -> tuple[ast.Name, ast.Dict] | None:
     """Find a supported module-level META assignment without executing code."""
     tree = ast.parse(code)
-    for name in _META_NAMES:
+    for name in META_NAMES:
         found = _top_level_assignment(tree, name)
         if found is not None:
             target, value = found
@@ -118,15 +144,26 @@ def _strategy_execution_backend(tree: ast.Module, meta: dict | None = None) -> s
 
 
 def _strategy_entrypoint_error(code: str, meta: dict | None = None) -> str | None:
+    """The entry-point rule StrategyEngine._load_file enforces for the resolved backend, or None."""
     tree = ast.parse(code)
-    if _strategy_execution_backend(tree, meta) == "matrix_native":
-        return None if _top_level_assignment(tree, "MATRIX_STRATEGY") else _MATRIX_ENTRYPOINT_ERROR
-    has_polars_entrypoint = any(
-        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"filter", "filter_history"}
+    backend = _strategy_execution_backend(tree, meta)
+    functions = {
+        node.name
         for node in tree.body
-    )
-    return None if has_polars_entrypoint else _POLARS_ENTRYPOINT_ERROR
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    has_filter = "filter" in functions
+    has_history = "filter_history" in functions
+    if backend == "matrix_native":
+        if not _top_level_assignment(tree, "MATRIX_STRATEGY"):
+            return _MATRIX_ENTRYPOINT_ERROR
+        return _ENTRYPOINT_ERRORS[backend] if has_filter or has_history else None
+    if backend not in _ENTRYPOINT_ERRORS:
+        return f"{_BACKEND_ERROR_PREFIX} {backend!r}, 请使用 polars_expr、python_history_legacy 或 matrix_native"
+    if not has_filter and not has_history:
+        return _POLARS_ENTRYPOINT_ERROR
+    expected_filter = backend == "polars_expr"
+    return None if has_filter == expected_filter and has_history != expected_filter else _ENTRYPOINT_ERRORS[backend]
 
 
 class AIStrategyGenerator:
@@ -238,15 +275,39 @@ class AIStrategyGenerator:
         return error.startswith("解析META失败:") or error in {
             _POLARS_ENTRYPOINT_ERROR,
             _MATRIX_ENTRYPOINT_ERROR,
-        } or error.startswith(("META.params", "META.scoring"))
+            *_ENTRYPOINT_ERRORS.values(),
+        } or error.startswith((
+            _BACKEND_ERROR_PREFIX, "META.params", "META.scoring", "META.asset_types", "META.timeframes",
+        ))
 
     @staticmethod
     def _validate_meta_semantics(code: str, meta: dict) -> None:
+        from app.strategy.engine import STRATEGY_ASSET_TYPES
+        from app.strategy.scoring import meta_scoring_directions
+
         params = meta.get("params", [])
         if isinstance(params, (list, tuple)):
             for index, item in enumerate(params):
                 if isinstance(item, dict) and not str(item.get("id") or "").strip():
                     raise ValueError(f"META.params[{index}] 缺少非空 id")
+
+        for field_name in ("asset_types", "timeframes"):
+            values = meta.get(field_name)
+            if values is None:
+                continue
+            if not isinstance(values, (list, tuple)) or not values \
+                    or any(not isinstance(value, str) or not value for value in values):
+                raise ValueError(f"META.{field_name} 必须是非空字符串列表")
+        unknown_assets = sorted(set(meta.get("asset_types") or ()) - STRATEGY_ASSET_TYPES)
+        if unknown_assets:
+            raise ValueError(
+                f"META.asset_types 含不支持的值 {unknown_assets}; 只能用 {sorted(STRATEGY_ASSET_TYPES)}"
+            )
+        if "scoring_directions" in meta:
+            try:
+                meta_scoring_directions(meta["scoring_directions"])
+            except ValueError as e:
+                raise ValueError(f"META.scoring_directions 无效: {e}") from e
 
         scoring = meta.get("scoring", {})
         if not isinstance(scoring, dict):
@@ -268,7 +329,7 @@ class AIStrategyGenerator:
         if backend == "python_history_legacy":
             return
         allowed = _MATRIX_SCORING_FIELDS if backend == "matrix_native" else _POLARS_SCORING_FIELDS
-        unknown = sorted(set(scoring) - set(allowed))
+        unknown = sorted(name for name in scoring if name not in allowed)
         if unknown:
             raise ValueError(
                 f"META.scoring 引用了不可用字段: {unknown}; "
@@ -283,21 +344,21 @@ class AIStrategyGenerator:
             backend = "polars_expr"
         if backend == "matrix_native":
             entrypoint_requirement = (
-                '保留 EXECUTION_BACKEND = "matrix_native"，定义 MATRIX_STRATEGY，'
-                "不得添加 filter() 或 filter_history()"
+                '保留 EXECUTION_BACKEND = "matrix_native", 定義 MATRIX_STRATEGY, '
+                "不得新增 filter() 或 filter_history()"
             )
         else:
             entrypoint_requirement = (
-                "保留原执行后端，并定义对应的 filter() 或 filter_history()"
+                "保留原執行後端, polars_expr 只定義 filter(), python_history_legacy 只定義 filter_history()"
             )
-        prompt = f"""上一次生成的策略代码未通过结构校验。
+        prompt = f"""上一次生成的策略程式碼未通過結構檢查。
 
-校验错误：{error}
+檢查錯誤: {error}
 
-请输出修复后的完整策略 Python 文件。必须保留原策略意图和参数，使用模块顶层
-META = {{...}}，{entrypoint_requirement}。只输出完整 Python 代码。
+請輸出修正後的完整策略 Python 檔。必須保留原策略意圖和參數, 使用模組頂層
+META = {{...}}, {entrypoint_requirement}。名稱、說明、RULES 與參數 label 使用繁體中文。只輸出完整 Python 程式碼。
 
-上一次代码：
+上一次程式碼:
 ```python
 {code}
 ```"""

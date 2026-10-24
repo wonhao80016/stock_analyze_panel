@@ -7,6 +7,7 @@ import math
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import yaml
@@ -42,13 +43,23 @@ def data_sources_dir() -> Path:
     return settings.data_dir / "data_sources"
 
 
+_LOAD_LOCK = threading.Lock()
+
+
 def load_all(path: Path | None = None) -> None:
-    """Load all custom provider YAML files into process memory."""
+    """Load all custom provider YAML files and swap them in as one registry.
+
+    Retired providers are not closed here: a sync job may still hold one, and each
+    GenericHTTPProvider closes its client once the last holder releases it.
+    """
+    with _LOAD_LOCK:
+        _load_all_locked(path)
+
+
+def _load_all_locked(path: Path | None) -> None:
     global _PROVIDERS, _LOAD_ERRORS
-    for provider in _PROVIDERS.values():
-        provider.close()
-    _PROVIDERS = {}
-    _LOAD_ERRORS = []
+    providers: dict = {}
+    load_errors: list[dict] = []
 
     base = path or data_sources_dir()
     base.mkdir(parents=True, exist_ok=True)
@@ -58,16 +69,36 @@ def load_all(path: Path | None = None) -> None:
             provider = GenericHTTPProvider(config)
             errors = provider.validate()
             if errors:
-                _LOAD_ERRORS.append({"path": str(file), "name": config.name, "errors": errors})
+                load_errors.append({"path": str(file), "name": config.name, "errors": errors})
                 provider.close()
                 continue
-            _PROVIDERS[config.name] = provider
+            providers[config.name] = provider
         except Exception as e:  # noqa: BLE001
             logger.warning("custom data source load failed %s: %s", file, e)
-            _LOAD_ERRORS.append({"path": str(file), "errors": [str(e)]})
+            load_errors.append({"path": str(file), "errors": [str(e)]})
 
     # 内置可选插件 (plugins/ 目录)。与用户 YAML 源独立, 缺依赖只记状态不报错。
-    _load_builtin_plugins()
+    _load_builtin_plugins(providers)
+
+    retired = [p for name, p in _PROVIDERS.items() if providers.get(name) is not p]
+    _PROVIDERS = providers
+    _LOAD_ERRORS = load_errors
+    for provider in retired:
+        _close_retired_plugin(provider)
+
+
+def _close_retired_plugin(provider) -> None:
+    """Close a retired plugin provider once; HTTP providers close when their last holder drops them.
+
+    weakref.finalize cannot call a plugin's own close(), which needs the instance it would outlive.
+    """
+    closer = getattr(provider, "close", None)
+    if closer is None or hasattr(provider, "_finalizer"):
+        return
+    try:
+        closer()
+    except Exception as e:
+        logger.warning("closing retired plugin %s failed: %s", getattr(provider, "name", "?"), e)
 
 
 def list_sources() -> list[dict]:
@@ -298,6 +329,29 @@ def create_provider(config: dict) -> GenericHTTPProvider:
     return provider
 
 
+def validate_config(config: dict) -> list[str]:
+    """Errors that would keep *config* from loading, checked without writing or registering it."""
+    provider = GenericHTTPProvider(config_from_dict(_sanitize_for_yaml(config)))
+    try:
+        return provider.validate()
+    finally:
+        provider.close()
+
+
+def failed_config_dict(name: str) -> dict | None:
+    """The on-disk config of a source that failed to load, with its errors under load_error."""
+    if is_builtin(name) or not _NAME_RE.match(name or ""):
+        return None
+    failures = [item for item in _LOAD_ERRORS if Path(item["path"]).stem == name]
+    if not failures:
+        return None
+    try:
+        config = _config_to_dict(load_config(Path(failures[0]["path"])))
+    except Exception:
+        return None
+    return {**config, "load_error": [e for item in failures for e in item["errors"]]}
+
+
 def is_custom_provider(name: str) -> bool:
     return (name or "").lower() in _PROVIDERS
 
@@ -353,6 +407,7 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
             } if ds_name != "realtime" else {}),
             **({"asset_type_param": ds.asset_type_param} if ds_name == "minute" and ds.asset_type_param else {}),
             **({"freq_param": ds.freq_param} if ds_name == "minute" and ds.freq_param else {}),
+            **({"units": dict(ds.units)} if ds.units else {}),
         }
     return out
 
@@ -466,6 +521,13 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
     }
     if transforms:
         out["transforms"] = transforms
+    units = {
+        str(k): str(v).strip().lower()
+        for k, v in (ds_cfg.get("units") or {}).items()
+        if str(k).strip() and str(v).strip()
+    }
+    if units:
+        out["units"] = units
     if ds_name != "realtime":
         symbols_param = str(ds_cfg.get("symbols_param") or "").strip()
         start_param = str(ds_cfg.get("start_param") or "").strip()
@@ -506,14 +568,15 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
 # 内置可选插件 (plugins/ 目录) 的发现与注册
 # ================================================================
 
-def _load_builtin_plugins() -> None:
+def _load_builtin_plugins(providers: dict | None = None) -> None:
     """扫描 plugins/ 目录下每个含 plugin.yaml 的子目录, 动态加载。
 
     缺依赖时记录 "不可用" 状态, 不抛异常, 不影响主流程。
-    每次调用重建 _PLUGIN_STATUS, 并把可用的插件注册进 _PROVIDERS。
+    每次调用重建 _PLUGIN_STATUS, 并把可用的插件注册进 *providers* (默认 _PROVIDERS)。
     """
     global _PLUGIN_STATUS
     _PLUGIN_STATUS = {}
+    target = _PROVIDERS if providers is None else providers
     pdir = plugins_dir()
     if not pdir.exists():
         return
@@ -525,13 +588,13 @@ def _load_builtin_plugins() -> None:
             continue
         try:
             manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-            _register_one_plugin(manifest)
+            _register_one_plugin(manifest, target)
         except Exception as e:  # noqa: BLE001
             logger.warning("插件 %s 清单解析失败: %s", plugin_dir.name, e)
 
 
-def _register_one_plugin(manifest: dict) -> None:
-    """注册单个插件: 委托自检 → 可用则动态 import entry 注册进 _PROVIDERS。"""
+def _register_one_plugin(manifest: dict, providers: dict) -> None:
+    """注册单个插件: 委托自检 → 可用则动态 import entry 注册进 *providers*。"""
     name = manifest.get("name")
     if not name or not _NAME_RE.match(name):
         logger.warning("插件清单缺少合法 name: %r", name)
@@ -561,7 +624,7 @@ def _register_one_plugin(manifest: dict) -> None:
         provider_cls = _load_entry(manifest["entry"])
         provider = provider_cls() if isinstance(provider_cls, type) else provider_cls
         provider.builtin = True  # 标记为内置 (list_sources 过滤, 不可被用户编辑/删除)
-        _PROVIDERS[name] = provider
+        providers[name] = provider
         logger.info("内置插件 %s 已注册 (runtime=%s)", name, runtime)
     except Exception as e:  # noqa: BLE001
         # 声称可用但 import 失败 → 标记不可用, 避免启动崩溃
