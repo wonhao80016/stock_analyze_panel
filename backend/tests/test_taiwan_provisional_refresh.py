@@ -457,7 +457,7 @@ def test_an_error_on_a_day_past_the_latest_stored_one_is_a_failure(tmp_path):
 
     stats = svc.refresh_dates(D, NEXT)
 
-    assert [f["date"] for f in stats["failed_dates"]] == [str(D), str(NEXT)]
+    assert [f["date"] for f in stats["failed_dates"]] == [str(D)]
     assert stats["repair_failed_dates"] == []
 
 

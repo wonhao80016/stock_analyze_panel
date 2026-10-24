@@ -255,12 +255,19 @@ class TaiwanEnrichmentBackfillService:
             )
 
             result = {"institutional": inst_stats, "margin": margin_stats}
+            stopped = [
+                f"{label}於 {stats['stopped_at']} 中止, 之後 {stats.get('dates_not_attempted', 0)} 天未嘗試"
+                for label, stats in (("三大法人", inst_stats), ("融資融券", margin_stats))
+                if stats.get("stopped_at")
+            ]
             message = (
-                f"回補完成。三大法人: 成功 {inst_stats['dates_fetched']} / "
+                f"{'回補未完成' if stopped else '回補完成'}。三大法人: 成功 {inst_stats['dates_fetched']} / "
                 f"跳過 {inst_stats['dates_skipped']} / 失敗 {len(inst_stats['failed_dates']) + len(inst_stats.get('repair_failed_dates', []))}；"
                 f"融資融券: 成功 {margin_stats['dates_fetched']} / "
                 f"跳過 {margin_stats['dates_skipped']} / 失敗 {len(margin_stats['failed_dates'])}。"
             )
+            if stopped:
+                message += " " + "; ".join(stopped) + ", 請稍後再回補。"
             throttled = _count_throttled(inst_stats) + _count_throttled(margin_stats)
             if throttled:
                 message += (

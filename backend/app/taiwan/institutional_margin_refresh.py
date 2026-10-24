@@ -6,6 +6,7 @@ Design:
     service operates at the trading-day level.
   - Resume-capable: Inspects persisted store dates and skips finalized ones; institutional
     days written on the trading day itself are refetched (margin days are still skipped).
+    A failed day after the newest stored one stops the run, so the next run resumes from it.
   - Calendar-aware: Skips weekends and confirmed market holidays.
   - Rate-limit friendly: Bounded timeout and retry policy.
 """
@@ -34,7 +35,7 @@ from app.taiwan.enrichment.margin import (
 )
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
-from app.taiwan.realtime.calendar import TaiwanTradingCalendar
+from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,16 @@ INTER_REQUEST_DELAY_SEC = 0.4
 
 class ExchangeThrottledError(RuntimeError):
     """The exchange refused the request because we asked too often."""
+
+
+def _record_stop(stats: dict[str, Any], calendar: TaiwanTradingCalendar, stopped: date, end_date: date) -> None:
+    """Note in *stats* the day a run stopped at and how many trading days after it up to *end_date* it skipped."""
+    stats["stopped_at"] = str(stopped)
+    stats["dates_not_attempted"] = sum(
+        1
+        for offset in range(1, (end_date - stopped).days + 1)
+        if calendar.is_trading_day(stopped + timedelta(days=offset)) is not False
+    )
 
 
 def _fetch_json_with_retry(
@@ -151,7 +162,9 @@ class TaiwanInstitutionalRefreshService:
         such day is listed there too, since moving on opens no new gap. Failures on
         later days, and every failure under force, go to failed_dates. Under force a
         stored provisional day with no rows from either exchange is also listed in
-        repair_failed_dates, and a single-exchange result is written as before.
+        repair_failed_dates, and a single-exchange result is written as before. A failure on a
+        day after the latest stored one ends the run there, noted in stopped_at and
+        dates_not_attempted.
         """
         stored = self._store.available_dates()
         latest_stored = max(stored, default=None)
@@ -165,6 +178,8 @@ class TaiwanInstitutionalRefreshService:
             "total_rows_written": 0,
             "failed_dates": [],
             "repair_failed_dates": [],
+            "stopped_at": None,
+            "dates_not_attempted": 0,
         }
 
         cur = start_date
@@ -252,8 +267,12 @@ class TaiwanInstitutionalRefreshService:
             except Exception as exc:
                 logger.warning("Institutional refresh failed for %s: %s", cur, exc)
                 failure = {"date": str(cur), "error": str(exc)}
-                past_gap = latest_stored is not None and cur <= latest_stored
-                stats["repair_failed_dates" if past_gap and not force else "failed_dates"].append(failure)
+                if latest_stored is None or cur > latest_stored:
+                    stats["failed_dates"].append(failure)
+                    # Storing later days would move the latest stored date past this gap.
+                    _record_stop(stats, self._calendar, cur, end_date)
+                    break
+                stats["failed_dates" if force else "repair_failed_dates"].append(failure)
 
             cur += timedelta(days=1)
 
@@ -287,14 +306,26 @@ class TaiwanMarginRefreshService:
 
         on_progress, when given, is called with (current_date, day_index) for every
         trading day visited (day_index starts at 1), before that day is fetched or skipped.
+
+        *end_date* stops at the latest day published by now (resolve_margin_target): a stored margin
+        day is never refetched. A day is written only when both exchanges return rows; a day where
+        only one does, or a failure, is listed in failed_dates, and on a day after the latest
+        stored one it ends the run there, noted in stopped_at and dates_not_attempted.
         """
-        available = set(self._store.available_dates()) if not force else set()
+        from app.taiwan.daily_update import resolve_margin_target
+
+        end_date = resolve_margin_target(end_date, taipei_now(), self._calendar)
+        stored = self._store.available_dates()
+        latest_stored = max(stored, default=None)
+        available = set(stored) if not force else set()
         stats = {
             "dates_requested": 0,
             "dates_fetched": 0,
             "dates_skipped": 0,
             "total_rows_written": 0,
             "failed_dates": [],
+            "stopped_at": None,
+            "dates_not_attempted": 0,
         }
 
         cur = start_date
@@ -335,6 +366,8 @@ class TaiwanMarginRefreshService:
                     self._provider.tpex.build_url(cur),
                 )
                 all_margins = margins_twse + margins_tpex
+                if all_margins and not (margins_twse and margins_tpex):
+                    raise ValueError(f"no {'TWSE' if not margins_twse else 'TPEx'} margin rows")
                 if all_margins:
                     rows = [
                         {
@@ -369,6 +402,9 @@ class TaiwanMarginRefreshService:
             except Exception as exc:
                 logger.warning("Margin refresh failed for %s: %s", cur, exc)
                 stats["failed_dates"].append({"date": str(cur), "error": str(exc)})
+                if latest_stored is None or cur > latest_stored:
+                    _record_stop(stats, self._calendar, cur, end_date)
+                    break
 
             cur += timedelta(days=1)
 

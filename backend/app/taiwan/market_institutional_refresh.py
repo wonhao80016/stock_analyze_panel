@@ -4,7 +4,8 @@ A day is written only when both exchanges return rows for it. When neither does,
 counts as closed and is skipped only if it is neither stored here nor stored in the daily
 bar store; otherwise it is a trading day and the empty answer is a failure. A failure, or
 rows from one exchange only, on a day later than the latest day stored here when the call
-started goes to failed_dates; on any other day it goes to repair_failed_dates and the
+started goes to failed_dates and ends the run there, since storing a later day would leave
+this one behind the latest stored day; on any other day it goes to repair_failed_dates and the
 stored partition is kept.
 
 Backfill CLI: python -m app.taiwan.market_institutional_refresh --days 60
@@ -99,13 +100,19 @@ class TaiwanMarketInstitutionalRefreshService:
             "total_rows_written": 0,
             "failed_dates": [],
             "repair_failed_dates": [],
+            "stopped_at": None,
+            "dates_not_attempted": 0,
         }
 
-        def record_failure(d: date, error: str) -> None:
+        def record_failure(d: date, error: str) -> bool:
+            """Whether the run must stop at *d*."""
             past_gap = latest_stored is not None and d <= latest_stored
             stats["repair_failed_dates" if past_gap else "failed_dates"].append({"date": str(d), "error": error})
+            return not past_gap
 
-        for d in sorted(days):
+        ordered = sorted(days)
+        for index, d in enumerate(ordered):
+            stop = False
             try:
                 twse_rows = self._fetch_side(self._twse, d)
                 tpex_rows = self._fetch_side(self._tpex, d)
@@ -115,13 +122,17 @@ class TaiwanMarketInstitutionalRefreshService:
                 elif not twse_rows and not tpex_rows:
                     stats["dates_skipped"] += 1
                     if d in known_trading_days:
-                        record_failure(d, "no TWSE or TPEx rows on a trading day")
+                        stop = record_failure(d, "no TWSE or TPEx rows on a trading day")
                 else:
                     stats["dates_skipped"] += 1
-                    record_failure(d, f"no {'TWSE' if not twse_rows else 'TPEx'} rows")
+                    stop = record_failure(d, f"no {'TWSE' if not twse_rows else 'TPEx'} rows")
             except Exception as exc:
                 logger.warning("Market institutional amounts refresh failed for %s: %s", d, exc)
-                record_failure(d, str(exc))
+                stop = record_failure(d, str(exc))
+            if stop:
+                stats["stopped_at"] = str(d)
+                stats["dates_not_attempted"] = len(ordered) - index - 1
+                break
         return stats
 
     def _fetch_side(

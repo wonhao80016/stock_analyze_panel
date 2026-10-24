@@ -34,7 +34,14 @@ from app.taiwan.institutional_margin_refresh import (
 )
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
-from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar
+from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar, taipei_now
+
+
+@pytest.fixture(autouse=True)
+def _margin_published_today(monkeypatch):
+    """The backfill range ends at today after 16:00; margin waits for 21:40, so pin the margin clock past it."""
+    late = taipei_now().replace(hour=23, minute=59)
+    monkeypatch.setattr("app.taiwan.institutional_margin_refresh.taipei_now", lambda: late)
 
 
 def _wait_for_job(svc: TaiwanEnrichmentBackfillService, job_id: str, timeout: float = 5.0):

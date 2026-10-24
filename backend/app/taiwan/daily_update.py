@@ -838,6 +838,7 @@ class TaiwanDailyUpdateService:
             target,
             refresh_institutional=refresh_institutional,
             refresh_margin=refresh_margin,
+            margin_target=resolve_margin_target(target, run_start, self.calendar),
             force_from=start_bound if force else None,
         )
         inst_stats = chip.institutional
