@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Annotated, Optional
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -68,16 +68,30 @@ def _minute_allowed(capset) -> bool:
     return not fallback
 
 
-def _search_taiwan_instruments(q: str, limit: int) -> list[dict]:
+_SEARCHABLE_ASSET_TYPES = frozenset({"stock", "etf", "index"})
+# The asset-type filter runs after the master's ranking cut, so the pool must exceed
+# the whole supported stock + ETF universe or a filtered search can come back short.
+_MASTER_SEARCH_POOL = 5000
+
+
+def _parse_search_asset_types(raw: str) -> frozenset[str]:
+    requested = frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    unknown = requested - _SEARCHABLE_ASSET_TYPES
+    if not requested or unknown:
+        raise HTTPException(400, f"不支持的资产类型: {raw}")
+    return requested
+
+
+def _search_taiwan_instruments(q: str, limit: int, asset_types: frozenset[str]) -> list[dict]:
     """仅查 TaiwanSecurityMaster, 不触碰 repo.get_instruments*() 的 legacy A 股缓存。
 
     canonical symbol 形如 2330.TWSE / 6488.TPEX; 支持代码/canonical symbol/
     繁体中文名称查询, 排序/评分逻辑在 TaiwanSecurityMaster.search() 内完成。
-    只保留 is_supported 的 stock/etf(权证等未支援标的不该出现在自选搜索里)。
+    只保留 is_supported 且属于 asset_types 的 stock/etf(权证等未支援标的不该出现在搜索里)。
     """
     from app.taiwan.universe import get_security_master
 
-    hits = get_security_master().search(q.strip(), limit=limit)
+    hits = get_security_master().search(q.strip(), limit=_MASTER_SEARCH_POOL)
     return [
         {
             "symbol": hit["symbol"],
@@ -87,23 +101,46 @@ def _search_taiwan_instruments(q: str, limit: int) -> list[dict]:
             "market": "taiwan",
         }
         for hit in hits
-        if hit.get("is_supported") and hit.get("instrument_type") in ("stock", "etf")
+        if hit.get("is_supported") and hit.get("instrument_type") in asset_types
     ][:limit]
+
+
+def _search_benchmark_indices(q: str) -> list[dict]:
+    """Benchmark indices are not in the security master; match them by symbol, code or name."""
+    from app.taiwan.benchmarks import BENCHMARK_INDICES
+
+    query = q.strip().upper()
+    return [
+        {
+            "symbol": index.symbol,
+            "name": index.name,
+            "code": index.code,
+            "asset_type": "index",
+            "market": "taiwan",
+        }
+        for index in BENCHMARK_INDICES.values()
+        if query in index.symbol.upper() or query in index.name.upper()
+    ]
 
 
 @router.get("/instruments/search")
 def search_instruments(
     q: str = Query("", min_length=0, max_length=50, description="搜索关键词"),
     limit: int = Query(20, ge=1, le=50),
-    asset_types: str = Query("stock", description="逗号分隔的资产类型: stock,etf"),
+    asset_types: Annotated[str, Query(description="逗号分隔的资产类型: stock,etf,index")] = "stock",
 ):
-    """模糊搜索台股标的 (代码 / 繁体中文名称), 查 TaiwanSecurityMaster。
+    """模糊搜索台股标的 (代码 / 繁体中文名称), 查 TaiwanSecurityMaster; index 查基准指数。
 
-    结果统一附带 market: "taiwan" 字段, symbol 形如 2330.TWSE / 6488.TPEX。
+    结果统一附带 market: "taiwan" 字段, symbol 形如 2330.TWSE / 6488.TPEX / t00.TWSE。
     """
+    requested = _parse_search_asset_types(asset_types)
     if not q.strip():
         return {"results": []}
-    return {"results": _search_taiwan_instruments(q, limit)}
+    results = _search_benchmark_indices(q) if "index" in requested else []
+    listed_types = requested - {"index"}
+    if listed_types and len(results) < limit:
+        results += _search_taiwan_instruments(q, limit - len(results), listed_types)
+    return {"results": results[:limit]}
 
 
 @router.post("/instruments/names")

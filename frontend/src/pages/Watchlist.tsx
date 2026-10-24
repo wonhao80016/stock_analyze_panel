@@ -251,8 +251,9 @@ function StockSearchBox({
   const search = useQuery({
     // Taiwan-only 產品方向: 自選搜索只查台股證券主檔(TaiwanSecurityMaster),
     // 不應再出現 A 股 .SH/.SZ/.BJ 結果。2330.TWSE / 6488.TPEX 這類標的可被搜到並加入自選。
-    queryKey: QK.instrumentSearch(query, 'stock,etf,index'),
-    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf,index'),
+    // Benchmark indices stay out: Taiwan watchlist enrichment types any symbol missing from the security master as a stock.
+    queryKey: QK.instrumentSearch(query, 'stock,etf'),
+    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf'),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })

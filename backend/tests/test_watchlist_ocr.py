@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
-import polars as pl
 import pytest
 from fastapi import HTTPException
 from PIL import Image
@@ -71,8 +70,8 @@ def test_extract_codes_order_and_dedupe():
 
 
 def test_extract_codes_joins_ocr_split():
-    text = "科创半导体\n5881 70 [融]\n创业板\n159382"
-    assert extract_codes(text) == ["588170", "159382"]
+    text = "富邦台50\n006 208 [融]\n國泰永續高股息\n00878"
+    assert extract_codes(text, {"006208", "00878"}) == ["006208", "00878"]
 
 
 def test_resolve_candidates_matched_and_unmatched():
@@ -91,17 +90,7 @@ def test_resolve_candidates_matched_and_unmatched():
 
 
 def test_import_watchlist_image_with_fake_ocr(tmp_path: Path):
-    inst = tmp_path / "instruments"
-    inst.mkdir()
-    pl.DataFrame(
-        {
-            "code": ["600036", "515880"],
-            "symbol": ["600036.SH", "515880.SH"],
-            "name": ["招商银行", "通信ETF国泰"],
-        }
-    ).write_parquet(inst / "instruments.parquet")
-
-    fake_text = "招商银行\n600036\n通信ETF\n515880\n伦敦金 XAUUSD"
+    fake_text = "台積電\n2330\n元大台灣50\n0050\n倫敦金 XAUUSD"
     result = import_watchlist_image(
         b"fake-bytes",
         tmp_path,
@@ -109,7 +98,7 @@ def test_import_watchlist_image_with_fake_ocr(tmp_path: Path):
         provider=_FakeOcr(fake_text),
     )
     assert result["provider"] == "fake"
-    assert result["codes"] == ["600036", "515880"]
+    assert result["codes"] == ["2330", "0050"]
     assert result["matched_count"] == 2
     assert result["unmatched_count"] == 0
 
