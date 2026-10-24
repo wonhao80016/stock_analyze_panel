@@ -320,7 +320,7 @@ def _reference(bars: list[dict]) -> dict[str, list]:
     ref["change_pct"] = returns
     log_returns = [None] + [math.log(closes[t] / closes[t - 1]) for t in range(1, len(closes))]
     ref["annual_vol_20d"] = [
-        None if t < 20 else statistics.stdev(log_returns[t - 19 : t + 1]) * math.sqrt(250)
+        None if t < 20 else statistics.stdev(log_returns[t - 19 : t + 1]) * math.sqrt(252)
         for t in range(len(closes))
     ]
     return ref
@@ -438,84 +438,21 @@ def _from_warm(values: list) -> list:
 
 
 @pytest.mark.parametrize("symbol", [SPLIT, DIVIDEND])
-def test_macd_hist_keeps_the_doubled_convention(published, symbol):
-    # Pins the current 2 * (DIF - DEA) of A02#4 (open); the corrected OSC is the xfail below.
-    dif, dea = REFERENCE[symbol]["macd_dif"], REFERENCE[symbol]["macd_dea"]
-    expected = [2 * (f - d) for f, d in zip(_from_warm(dif), _from_warm(dea), strict=True)]
-    assert _from_warm(_column(published, symbol, "macd_hist")) == pytest.approx(expected, abs=1e-6)
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="A02#4: macd_hist is 2 x (DIF - DEA), the Taiwan OSC is DIF - DEA",
-)
-@pytest.mark.parametrize("symbol", [SPLIT, DIVIDEND])
 def test_macd_hist_is_dif_minus_dea(published, symbol):
     _assert_matches(published, symbol, "macd_hist")
 
 
-def _simple_return_vol(closes: list[float], t: int) -> float:
-    returns = [closes[i] / closes[i - 1] - 1 for i in range(t - 19, t + 1)]
-    return statistics.stdev(returns) * math.sqrt(252)
-
-
 @pytest.mark.parametrize("symbol", [SPLIT, DIVIDEND])
-def test_annual_vol_keeps_the_declared_simple_return_convention(published, symbol):
-    # Pins simple returns, ddof=1 and sqrt(252) of A04#8 / A09#10 (open); the corrected one is the xfail below.
-    closes = [b["close"] for b in ADJUSTED[symbol]]
-    expected = [_simple_return_vol(closes, t) for t in range(WARM, SESSIONS)]
-    got = _from_warm(_column(published, symbol, "annual_vol_20d"))
-    assert got == pytest.approx(expected, rel=1e-9)
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "A04#8/A09#10: simple returns by sqrt(252), not log returns by sqrt(250); A09#10 suggests"
-        " sqrt(242) and both accept documenting the current convention, so the target may change"
-    ),
-)
-@pytest.mark.parametrize("symbol", [SPLIT, DIVIDEND])
-def test_annual_vol_uses_log_returns_and_the_taiwan_session_count(published, symbol):
+def test_annual_vol_uses_log_returns_and_sqrt_252(published, symbol):
     _assert_matches(published, symbol, "annual_vol_20d")
 
 
-def _sample_bands(closes: list[float]) -> tuple[list, list]:
-    upper, lower = [], []
-    for t in range(len(closes)):
-        if t < 19:
-            upper.append(None)
-            lower.append(None)
-            continue
-        window = closes[t - 19 : t + 1]
-        mid, sigma = sum(window) / 20, statistics.stdev(window)
-        upper.append(mid + 2 * sigma)
-        lower.append(mid - 2 * sigma)
-    return upper, lower
-
-
-@pytest.mark.parametrize("symbol", [SPLIT, DIVIDEND])
-def test_bollinger_bands_follow_the_adjusted_series_with_the_sample_sigma(published, symbol):
-    # Pins the sample sigma of A08#6 (RC30, open) on every session, the event and the warm-up included.
-    upper, lower = _sample_bands([b["close"] for b in ADJUSTED[symbol]])
-    for name, expected in (("boll_upper", upper), ("boll_lower", lower)):
-        got = _column(published, symbol, name)
-        assert got[:19] == [None] * 19, name
-        assert got[19:] == pytest.approx(expected[19:], abs=1e-6), name
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="A08#6 (RC30): Bollinger bands use the sample standard deviation (ddof=1)",
-)
 @pytest.mark.parametrize("symbol", [SPLIT, DIVIDEND])
 def test_bollinger_bands_match_the_population_definition(published, symbol):
     for name in ("boll_upper", "boll_lower"):
-        got = _from_warm(_column(published, symbol, name))
-        assert got == pytest.approx(_from_warm(REFERENCE[symbol][name]), abs=1e-6), name
+        got = _column(published, symbol, name)
+        assert got[:19] == [None] * 19, name
+        assert _from_warm(got) == pytest.approx(_from_warm(REFERENCE[symbol][name]), abs=1e-6), name
 
 
 # ---- warm-up: the first sessions of a listing ------------------------------------------------

@@ -5,12 +5,11 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_above,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
     recursive_warmup_bars,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
@@ -62,11 +61,8 @@ class MACDGoldenMatrixStrategy:
     ) -> SignalMatrix:
         dif = matrix_feature(market, "macd_dif")
         dea = matrix_feature(market, "macd_dea")
-        dif_valid = np.isfinite(dif)
-        previous_dif = shift(dif, 1, dif_valid)
-        previous_dea = shift(dea, 1, np.isfinite(dea))
-        golden = (dif > dea) & (previous_dif <= previous_dea)
-        dead = (dif < dea) & (previous_dif >= previous_dea)
+        golden = cross_above(dif, dea, market.close)
+        dead = cross_below(dif, dea, market.close)
 
         entry = (
             golden

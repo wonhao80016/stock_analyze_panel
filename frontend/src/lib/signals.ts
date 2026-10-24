@@ -102,17 +102,17 @@ export const BUILTIN_SIGNAL_DEFINITIONS: BuiltinSignalDefinition[] = [
   },
   {
     id: 'signal_n_day_high',
-    name: '60日新高',
+    name: '60日收盤新高',
     kind: 'entry',
     category: '趨勢',
-    description: '收盤價創近 60 日新高，表示階段強勢或突破。',
+    description: '收盤價達近 60 日（含當日）收盤最高，表示階段強勢或突破。',
   },
   {
     id: 'signal_n_day_low',
-    name: '60日新低',
+    name: '60日收盤新低',
     kind: 'exit',
     category: '趨勢',
-    description: '收盤價創近 60 日新低，表示階段弱勢或風險釋放。',
+    description: '收盤價達近 60 日（含當日）收盤最低，表示階段弱勢或風險釋放。',
   },
   {
     id: 'signal_boll_breakout_upper',
@@ -161,7 +161,7 @@ export const BUILTIN_SIGNAL_DEFINITIONS: BuiltinSignalDefinition[] = [
     name: '跌停翻紅',
     kind: 'entry',
     category: '漲跌停',
-    description: '盤中觸及跌停價後收盤回升至跌停之上。',
+    description: '盤中觸及跌停價，收盤高於昨收。',
   },
 ]
 
@@ -219,7 +219,7 @@ const FIELD_LABELS: Record<string, string> = {
   rsi_6: 'RSI6', rsi_14: 'RSI14', rsi_24: 'RSI24',
   vol_ratio_5d: '5日量比', vol_ratio_20d: '20日量比',
   vol_ma5: '5日均量', vol_ma10: '10日均量',
-  high_60d: '60日最高', low_60d: '60日最低', distance_from_low_60d: '距60日低點',
+  high_60d: '60日收盤最高', low_60d: '60日收盤最低', distance_from_low_60d: '距60日低點',
   momentum_5d: '5日動量', momentum_20d: '20日動量', momentum_60d: '60日動量',
   atr_14: 'ATR14', annual_vol_20d: '20日年化波動',
   consecutive_limit_ups: '連續漲停', consecutive_limit_downs: '連續跌停',

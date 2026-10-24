@@ -6,6 +6,7 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
     valid_rolling_min,
@@ -77,7 +78,7 @@ class NDayLowReversalMatrixStrategy:
                 params.get("vol_ratio_min", 1.5)
             )
         ma20 = matrix_feature(market, "ma20")
-        exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        exit_ = cross_below(market.close, ma20, market.close)
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),

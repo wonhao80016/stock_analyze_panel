@@ -409,14 +409,14 @@ def test_enriched_limit_signals_use_the_shared_ladder():
          "ipo_start": [None] * len(symbols), "ipo_end": [None] * len(symbols)},
         schema_overrides={"ipo_start": pl.Date, "ipo_end": pl.Date},
     )
-    closes = [5695.0, 5690.0, 4665.0, 4670.0]
+    closes = [5695.0, 5690.0, 4665.0, 5200.0]
     frame = pl.DataFrame({
         "symbol": [f"S{i}" for i in range(len(closes))],
         "date": [date(2026, 10, 6)] * len(closes),
         "prev_close": [5180.0] * len(closes),
         "close": closes,
         "raw_close": closes,
-        "raw_high": [5695.0, 5695.0, 4670.0, 4700.0],
+        "raw_high": [5695.0, 5695.0, 4670.0, 5200.0],
         "raw_low": [5600.0, 5600.0, 4665.0, 4665.0],
     })
 

@@ -28,8 +28,8 @@ export const SIGNAL_FIELDS: [string, string, SignalType][] = [
   ['signal_macd_dead', 'MACD死叉', 'bear'],
   ['signal_ma20_breakout', '站上MA20', 'bull'],
   ['signal_ma20_breakdown', '跌破MA20', 'bear'],
-  ['signal_n_day_high', '60日新高', 'bull'],
-  ['signal_n_day_low', '60日新低', 'bear'],
+  ['signal_n_day_high', '60日收盤新高', 'bull'],
+  ['signal_n_day_low', '60日收盤新低', 'bear'],
   ['signal_boll_breakout_upper', '布林突破', 'bull'],
   ['signal_boll_breakdown_lower', '布林下破', 'bear'],
 ]

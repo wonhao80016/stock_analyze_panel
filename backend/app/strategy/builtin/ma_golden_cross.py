@@ -5,11 +5,10 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_above,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
@@ -64,8 +63,8 @@ class MAGoldenCrossMatrixStrategy:
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         ma5 = matrix_feature(market, "ma5")
         ma20 = matrix_feature(market, "ma20")
-        golden = (ma5 > ma20) & (shift(ma5, 1) <= shift(ma20, 1))
-        dead = (ma5 < ma20) & (shift(ma5, 1) >= shift(ma20, 1))
+        golden = cross_above(ma5, ma20, market.close)
+        dead = cross_below(ma5, ma20, market.close)
         entry = np.ones(market.shape, dtype=bool)
         if params.get("require_ma_golden", True):
             entry &= golden

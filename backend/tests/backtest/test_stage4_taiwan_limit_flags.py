@@ -59,7 +59,7 @@ EVENTS = {
     ("2330.TWSE", LIMIT_UP): (1.05, 1.10, 1.05, 1.10),
     ("2330.TWSE", BROKEN): (1.01, 1.10, 1.00, 1.03),
     ("2330.TWSE", LIMIT_DOWN): (0.95, 0.95, 0.90, 0.90),
-    ("2330.TWSE", RECOVERY): (0.95, 0.98, 0.90, 0.97),
+    ("2330.TWSE", RECOVERY): (0.95, 1.02, 0.90, 1.01),
     ("1101.TWSE", LATE_LIMIT_UP): (1.05, 1.10, 1.05, 1.10),
 }
 # Rows written without the publish: every derived column is null.

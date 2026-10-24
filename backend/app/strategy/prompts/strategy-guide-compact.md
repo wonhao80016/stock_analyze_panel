@@ -114,7 +114,7 @@ date 参数是字符串，比较前先转换：`_date.fromisoformat(raw) if isin
 通用：`symbol`, `date`, `name`
 价格：`open`, `high`, `low`, `close`, `raw_close`, `raw_high`, `raw_low`, `prev_close`, `change_pct`, `change_amount`, `amount`, `amplitude`
 均线：`ma5`, `ma10`, `ma20`, `ma30`, `ma60`, `ema5`, `ema10`, `ema20`, `ema30`, `ema60`
-技术指标：`macd_dif`, `macd_dea`, `macd_hist`, `boll_upper`, `boll_lower`, `kdj_k`, `kdj_d`, `kdj_j`, `rsi_6`, `rsi_14`, `rsi_24`, `atr_14`
+技术指标：`macd_dif`, `macd_dea`, `macd_hist`, `boll_upper`, `boll_lower`, `kdj_k`, `kdj_d`, `kdj_j`, `rsi_6`, `rsi_14`, `rsi_24`, `atr_14`（hist=DIF−DEA）
 量能：`volume`, `vol_ma5`, `vol_ma10`, `vol_ratio_5d`, `turnover_rate`（%，分母为已发行普通股扣私募；各交易日发布后才有，ETF/TDR 为空）
 动量与波动：`momentum_5d`, `momentum_10d`, `momentum_20d`, `momentum_30d`, `momentum_60d`, `annual_vol_20d`, `high_60d`, `low_60d`
 虚拟评分：`ma20_bias = close / ma20 - 1`。
@@ -123,7 +123,7 @@ date 参数是字符串，比较前先转换：`_date.fromisoformat(raw) if isin
 
 ## 常用信号列
 
-信号列是布尔值，用时加 `.fill_null(False)`：`signal_ma_golden_5_20`/`signal_ma_dead_5_20`（MA5 上/下穿 MA20）、`signal_ma_golden_20_60`（MA20 上穿 MA60）、`signal_macd_golden`/`signal_macd_dead`（MACD 金/死叉）、`signal_ma20_breakout`/`signal_ma20_breakdown`、`signal_n_day_high`/`signal_n_day_low`（60 日新高/新低）、`signal_boll_breakout_upper`/`signal_boll_breakdown_lower`、`signal_volume_surge`、`signal_limit_up`/`signal_limit_down`、`signal_limit_down_recovery`（跌停翘板）、`signal_broken_limit_up`（炸板）。涨跌停优先用稳定列 `consecutive_limit_ups >= 1`。
+信号列是布尔值，用时加 `.fill_null(False)`：`signal_ma_golden_5_20`/`signal_ma_dead_5_20`（MA5 上/下穿 MA20）、`signal_ma_golden_20_60`（MA20 上穿 MA60）、`signal_macd_golden`/`signal_macd_dead`（MACD 金/死叉）、`signal_ma20_breakout`/`signal_ma20_breakdown`、`signal_n_day_high`/`signal_n_day_low`（60 日收盘新高/新低）、`signal_boll_breakout_upper`/`signal_boll_breakdown_lower`、`signal_volume_surge`、`signal_limit_up`/`signal_limit_down`、`signal_limit_down_recovery`（跌停翘板）、`signal_broken_limit_up`（炸板）。涨跌停优先用稳定列 `consecutive_limit_ups >= 1`。
 
 ## 不可直接引用的数据
 

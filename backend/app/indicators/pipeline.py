@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 # Bump whenever a published indicator's definition changes: the Taiwan enriched publish
 # records it and rewrites every partition once when the recorded version differs.
-INDICATOR_DEFINITION_VERSION = 2
+INDICATOR_DEFINITION_VERSION = 3
 
 
 # ── 自定义信号缓存 ─────────────────────────────────────
@@ -170,10 +170,10 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     # ── MACD ─────────────────────────────────────────────
     "macd_dif":                "MACD DIF线(快线-慢线)",
     "macd_dea":                "MACD DEA线(信号线)",
-    "macd_hist":               "MACD柱状图 (DIF-DEA)×2",
+    "macd_hist":               "MACD柱状图 (DIF-DEA)",
     # ── 布林带 BOLL ──────────────────────────────────────
-    "boll_upper":              "布林带上轨 MA20+2σ",
-    "boll_lower":              "布林带下轨 MA20-2σ",
+    "boll_upper":              "布林带上轨 MA20+2σ (总体标准差)",
+    "boll_lower":              "布林带下轨 MA20-2σ (总体标准差)",
     # ── KDJ ──────────────────────────────────────────────
     "kdj_k":                   "KDJ K值",
     "kdj_d":                   "KDJ D值",
@@ -185,8 +185,8 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "vol_ma10":                "10日成交均量",
     "vol_ratio_5d":            "量比 (成交量/5日均量)",
     # ── 极值 ─────────────────────────────────────────────
-    "high_60d":                "60日最高价",
-    "low_60d":                 "60日最低价",
+    "high_60d":                "60日收盘最高价 (含当日)",
+    "low_60d":                 "60日收盘最低价 (含当日)",
     # ── 动量 ─────────────────────────────────────────────
     "momentum_5d":             "5日动量(涨跌幅小数)",
     "momentum_10d":            "10日动量",
@@ -194,7 +194,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "momentum_30d":            "30日动量",
     "momentum_60d":            "60日动量",
     # ── 波动率 ───────────────────────────────────────────
-    "annual_vol_20d":          "20日年化波动率",
+    "annual_vol_20d":          "20日年化波动率 (对数收益样本标准差乘以√252)",
     # ── RSI ──────────────────────────────────────────────
     "rsi_6":                   "6日相对强弱指标",
     "rsi_14":                  "14日相对强弱指标",
@@ -211,14 +211,14 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "signal_ma5_breakdown":    "收盘跌破MA5下方",
     "signal_ma10_breakout":    "收盘突破MA10上方",
     "signal_ma10_breakdown":   "收盘跌破MA10下方",
-    "signal_n_day_high":       "创60日新高",
-    "signal_n_day_low":        "创60日新低",
+    "signal_n_day_high":       "收盘达60日收盘最高",
+    "signal_n_day_low":        "收盘达60日收盘最低",
     "signal_boll_breakout_upper": "突破布林上轨",
     "signal_boll_breakdown_lower": "跌破布林下轨",
     "signal_volume_surge":     "放量 (量比≥2.0)",
     "signal_limit_up":         "涨停",
     "signal_limit_down":       "跌停",
-    "signal_limit_down_recovery": "跌停翘板(跌停后回升)",
+    "signal_limit_down_recovery": "跌停翻红(盘中触及跌停, 收盘高于昨收)",
     "signal_broken_limit_up":  "炸板(最高触及涨停但收盘未封住)",
     # ── JOIN 列 (由 repository 从 instruments 表补充) ───
     "name":                    "股票名称 (来自 instruments)",
@@ -256,7 +256,12 @@ KD_PRIOR = 50.0
 
 @njit(cache=True, nogil=True)
 def _seeded_ewm_kernel(
-    values: np.ndarray, offsets: np.ndarray, alpha: float, seed: int, prior: float
+    values: np.ndarray,
+    offsets: np.ndarray,
+    alpha: float,
+    seed: int,
+    prior: float,
+    hold: np.ndarray,
 ) -> np.ndarray:
     out = np.full(values.shape[0], np.nan)
     decay = 1.0 - alpha
@@ -266,6 +271,9 @@ def _seeded_ewm_kernel(
         total = 0.0
         seen = 0
         for i in range(offsets[group], offsets[group + 1]):
+            if hold[i] and seeded:
+                out[i] = state
+                continue
             value = values[i]
             if not np.isfinite(value):
                 continue
@@ -289,18 +297,24 @@ def seeded_ewm(
     *,
     seed: int = 1,
     prior: float | None = None,
+    hold: np.ndarray | None = None,
 ) -> np.ndarray:
     """adjust=False EWM of each group ``values[offsets[g]:offsets[g + 1]]`` over its finite values.
 
     The state starts at *prior* when given, otherwise at the mean of the group's first *seed*
-    finite values, with NaN before it. Non-finite values are skipped and give NaN.
+    finite values, with NaN before it. Non-finite values are skipped and give NaN. Where *hold*
+    is true and the state exists, the state is kept and output whatever the value.
     """
+    values = np.ascontiguousarray(values, dtype=np.float64)
     return _seeded_ewm_kernel(
-        np.ascontiguousarray(values, dtype=np.float64),
+        values,
         np.ascontiguousarray(offsets, dtype=np.int64),
         float(alpha),
         int(seed),
         np.nan if prior is None else float(prior),
+        np.zeros(values.shape[0], dtype=np.bool_)
+        if hold is None
+        else np.ascontiguousarray(hold, dtype=np.bool_),
     )
 
 
@@ -320,17 +334,28 @@ def macd_values(close: np.ndarray, offsets: np.ndarray) -> tuple[np.ndarray, np.
     return dif, ema_values(dif, offsets, 9)
 
 
-def kd_values(rsv: np.ndarray, offsets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """KD 9/3/3: K = 2/3 K + 1/3 RSV and D = 2/3 D + 1/3 K, both from KD_PRIOR."""
-    k = seeded_ewm(rsv, offsets, 1.0 / 3.0, prior=KD_PRIOR)
+def kd_values(
+    rsv: np.ndarray, offsets: np.ndarray, flat: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """KD 9/3/3: K = 2/3 K + 1/3 RSV and D = 2/3 D + 1/3 K, both from KD_PRIOR.
+
+    On a *flat* bar (9-bar high equal to the 9-bar low) RSV is the previous K, so K is unchanged.
+    """
+    k = seeded_ewm(rsv, offsets, 1.0 / 3.0, prior=KD_PRIOR, hold=flat)
     return k, seeded_ewm(k, offsets, 1.0 / 3.0, prior=KD_PRIOR)
+
+
+def rsi_from_averages(average_gain: np.ndarray, average_loss: np.ndarray) -> np.ndarray:
+    """RSI of Wilder averages: 50 with neither gains nor losses, 100 with gains only."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rsi = 100.0 - 100.0 / (1.0 + average_gain / average_loss)
+    rsi = np.where(average_loss == 0, np.where(average_gain == 0, 50.0, 100.0), rsi)
+    return np.where(np.isfinite(average_gain) & np.isfinite(average_loss), rsi, np.nan)
 
 
 def rsi_values(gains: np.ndarray, losses: np.ndarray, offsets: np.ndarray, n: int) -> np.ndarray:
     """Wilder RSI from per-bar gains and losses, NaN where the change is missing."""
-    average_gain = wilder_values(gains, offsets, n)
-    average_loss = wilder_values(losses, offsets, n)
-    return 100.0 - 100.0 / (1.0 + average_gain / np.where(average_loss == 0, 1e-12, average_loss))
+    return rsi_from_averages(wilder_values(gains, offsets, n), wilder_values(losses, offsets, n))
 
 
 def _symbol_offsets(df: pl.DataFrame) -> np.ndarray:
@@ -465,7 +490,7 @@ _INDICATOR_DEPS: dict[str, set[str]] = {
     "kdj_j": {"kdj_k", "kdj_d"},
     "atr_14": {"_tr"},
     "vol_ratio_5d": {"_vol_ma5"},
-    "annual_vol_20d": {"_daily_pct"},
+    "annual_vol_20d": {"_daily_log_return"},
 }
 
 # compute_indicators 可产出的全部指标/临时列 (needed=None 时即为此全集, 行为不变)
@@ -478,7 +503,7 @@ _ALL_INDICATOR_COLS: frozenset[str] = frozenset({
     "kdj_k", "kdj_d", "kdj_j",
     "atr_14", "vol_ratio_5d",
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
-    "change_pct", "change_amount", "amplitude", "_daily_pct", "annual_vol_20d",
+    "change_pct", "change_amount", "amplitude", "_daily_log_return", "annual_vol_20d",
     "rsi_6", "rsi_14", "rsi_24",
 })
 
@@ -568,7 +593,7 @@ def compute_indicators(
         if f"ema{span}" in want:
             _p1.append(_series(f"ema{span}", ema_values(close, offsets, span)))
     if "_boll_std" in want:
-        _p1.append(pl.col("close").rolling_std(20).over("symbol").alias("_boll_std"))
+        _p1.append(pl.col("close").rolling_std(20, ddof=0).over("symbol").alias("_boll_std"))
     if "_kdj_ln" in want:
         _p1.append(pl.col("low").rolling_min(9).over("symbol").alias("_kdj_ln"))
     if "_kdj_hn" in want:
@@ -616,17 +641,21 @@ def compute_indicators(
         df = df.with_columns(_series("macd_dea", macd_dea))
     if "macd_hist" in want:
         df = df.with_columns(
-            ((pl.col("macd_dif") - pl.col("macd_dea")) * 2).alias("macd_hist"),
+            (pl.col("macd_dif") - pl.col("macd_dea")).alias("macd_hist"),
         )
 
     # Pass 3: KDJ
     if "kdj_k" in want:
-        _kdj_rsv = (
-            100 * (pl.col("close") - pl.col("_kdj_ln"))
-            / (pl.col("_kdj_hn") - pl.col("_kdj_ln")).fill_null(1e-12)
+        _kdj_range = pl.col("_kdj_hn") - pl.col("_kdj_ln")
+        _kdj = df.select(
+            pl.when(_kdj_range > 0)
+            .then(100 * (pl.col("close") - pl.col("_kdj_ln")) / _kdj_range)
+            .cast(pl.Float64)
+            .alias("rsv"),
+            (_kdj_range == 0).fill_null(False).alias("flat"),
         )
         kdj_k, kdj_d = kd_values(
-            df.select(_kdj_rsv.cast(pl.Float64)).to_series().to_numpy(), offsets
+            _kdj["rsv"].to_numpy(), offsets, _kdj["flat"].to_numpy()
         )
         df = df.with_columns(_series("kdj_k", kdj_k))
     if "kdj_d" in want:
@@ -673,13 +702,13 @@ def compute_indicators(
               .otherwise(None)
               .alias("amplitude"),
         )
-    if "_daily_pct" in want:
+    if "_daily_log_return" in want:
         df = df.with_columns(
-            pl.col("close").pct_change().over("symbol").alias("_daily_pct"),
+            (pl.col("close") / pl.col("close").shift(1)).log().over("symbol").alias("_daily_log_return"),
         )
     if "annual_vol_20d" in want:
         df = df.with_columns(
-            (pl.col("_daily_pct").rolling_std(20).over("symbol") * (252 ** 0.5))
+            (pl.col("_daily_log_return").rolling_std(20, ddof=1).over("symbol") * (252 ** 0.5))
                 .alias("annual_vol_20d"),
         )
 
@@ -703,7 +732,7 @@ def compute_indicators(
 
     # 清理临时列 (只丢弃实际存在的临时列)
     _temp_cols = ["_boll_std", "_tr",
-                  "_kdj_ln", "_kdj_hn", "_vol_ma5", "_vol_ma5_prev", "_daily_pct"]
+                  "_kdj_ln", "_kdj_hn", "_vol_ma5", "_vol_ma5_prev", "_daily_log_return"]
     df = df.drop([c for c in _temp_cols if c in df.columns])
 
     _elapsed = (_time.perf_counter() - _t0) * 1000
@@ -756,6 +785,41 @@ def get_signal_dependencies() -> dict[str, frozenset[str]]:
         **custom_signals.expression_dependencies(_get_custom_signal_exprs()),
     }
 
+
+CROSS_TOLERANCE = 1e-9
+
+
+def cross_side(left: pl.Expr, right: pl.Expr, scale: pl.Expr) -> pl.Expr:
+    """1.0 above, -1.0 below, 0.0 within max(1e-9, 1e-9 * |scale|) of *right*; null when either is null."""
+    diff = left - right
+    tolerance = pl.max_horizontal(pl.lit(CROSS_TOLERANCE), CROSS_TOLERANCE * scale.abs())
+    return (
+        pl.when(diff >= tolerance).then(1.0)
+        .when(diff <= -tolerance).then(-1.0)
+        .when(diff.is_not_null()).then(0.0)
+    )
+
+
+def _previous_side(side: pl.Expr) -> pl.Expr:
+    """The last nonzero side before each row of the symbol; zero-side and null rows are skipped."""
+    return pl.when(side != 0).then(side).forward_fill().shift(1).over("symbol")
+
+
+def cross_above(left: pl.Expr, right: pl.Expr, scale: pl.Expr) -> pl.Expr:
+    """*left* is strictly above *right* and was strictly below on the last bar on either side.
+
+    Rows must be sorted by symbol and date.
+    """
+    side = cross_side(left, right, scale)
+    return (side == 1) & (_previous_side(side) == -1)
+
+
+def cross_below(left: pl.Expr, right: pl.Expr, scale: pl.Expr) -> pl.Expr:
+    """The mirror of cross_above."""
+    side = cross_side(left, right, scale)
+    return (side == -1) & (_previous_side(side) == 1)
+
+
 def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
     """从已有指标列计算原子信号布尔列。
 
@@ -766,39 +830,17 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
 
     want = set(SIGNAL_DEPENDENCIES) if needed is None else set(needed) & set(SIGNAL_DEPENDENCIES)
     expressions: dict[str, pl.Expr] = {
-        "signal_ma_golden_5_20": ((pl.col("ma5") > pl.col("ma20")) &
-         (pl.col("ma5").shift(1).over("symbol") <= pl.col("ma20").shift(1).over("symbol")))
-            .alias("signal_ma_golden_5_20"),
-        "signal_ma_dead_5_20": ((pl.col("ma5") < pl.col("ma20")) &
-         (pl.col("ma5").shift(1).over("symbol") >= pl.col("ma20").shift(1).over("symbol")))
-            .alias("signal_ma_dead_5_20"),
-        "signal_ma_golden_20_60": ((pl.col("ma20") > pl.col("ma60")) &
-         (pl.col("ma20").shift(1).over("symbol") <= pl.col("ma60").shift(1).over("symbol")))
-            .alias("signal_ma_golden_20_60"),
-        "signal_macd_golden": ((pl.col("macd_dif") > pl.col("macd_dea")) &
-         (pl.col("macd_dif").shift(1).over("symbol") <= pl.col("macd_dea").shift(1).over("symbol")))
-            .alias("signal_macd_golden"),
-        "signal_macd_dead": ((pl.col("macd_dif") < pl.col("macd_dea")) &
-         (pl.col("macd_dif").shift(1).over("symbol") >= pl.col("macd_dea").shift(1).over("symbol")))
-            .alias("signal_macd_dead"),
-        "signal_ma20_breakout": ((pl.col("close") > pl.col("ma20")) &
-         (pl.col("close").shift(1).over("symbol") <= pl.col("ma20").shift(1).over("symbol")))
-            .alias("signal_ma20_breakout"),
-        "signal_ma20_breakdown": ((pl.col("close") < pl.col("ma20")) &
-         (pl.col("close").shift(1).over("symbol") >= pl.col("ma20").shift(1).over("symbol")))
-            .alias("signal_ma20_breakdown"),
-        "signal_ma5_breakout": ((pl.col("close") > pl.col("ma5")) &
-         (pl.col("close").shift(1).over("symbol") <= pl.col("ma5").shift(1).over("symbol")))
-            .alias("signal_ma5_breakout"),
-        "signal_ma5_breakdown": ((pl.col("close") < pl.col("ma5")) &
-         (pl.col("close").shift(1).over("symbol") >= pl.col("ma5").shift(1).over("symbol")))
-            .alias("signal_ma5_breakdown"),
-        "signal_ma10_breakout": ((pl.col("close") > pl.col("ma10")) &
-         (pl.col("close").shift(1).over("symbol") <= pl.col("ma10").shift(1).over("symbol")))
-            .alias("signal_ma10_breakout"),
-        "signal_ma10_breakdown": ((pl.col("close") < pl.col("ma10")) &
-         (pl.col("close").shift(1).over("symbol") >= pl.col("ma10").shift(1).over("symbol")))
-            .alias("signal_ma10_breakdown"),
+        "signal_ma_golden_5_20": cross_above(pl.col("ma5"), pl.col("ma20"), pl.col("close")).alias("signal_ma_golden_5_20"),
+        "signal_ma_dead_5_20": cross_below(pl.col("ma5"), pl.col("ma20"), pl.col("close")).alias("signal_ma_dead_5_20"),
+        "signal_ma_golden_20_60": cross_above(pl.col("ma20"), pl.col("ma60"), pl.col("close")).alias("signal_ma_golden_20_60"),
+        "signal_macd_golden": cross_above(pl.col("macd_dif"), pl.col("macd_dea"), pl.col("close")).alias("signal_macd_golden"),
+        "signal_macd_dead": cross_below(pl.col("macd_dif"), pl.col("macd_dea"), pl.col("close")).alias("signal_macd_dead"),
+        "signal_ma20_breakout": cross_above(pl.col("close"), pl.col("ma20"), pl.col("close")).alias("signal_ma20_breakout"),
+        "signal_ma20_breakdown": cross_below(pl.col("close"), pl.col("ma20"), pl.col("close")).alias("signal_ma20_breakdown"),
+        "signal_ma5_breakout": cross_above(pl.col("close"), pl.col("ma5"), pl.col("close")).alias("signal_ma5_breakout"),
+        "signal_ma5_breakdown": cross_below(pl.col("close"), pl.col("ma5"), pl.col("close")).alias("signal_ma5_breakdown"),
+        "signal_ma10_breakout": cross_above(pl.col("close"), pl.col("ma10"), pl.col("close")).alias("signal_ma10_breakout"),
+        "signal_ma10_breakdown": cross_below(pl.col("close"), pl.col("ma10"), pl.col("close")).alias("signal_ma10_breakdown"),
         "signal_n_day_high": (pl.col("close") >= pl.col("high_60d")).alias("signal_n_day_high"),
         "signal_n_day_low": (pl.col("close") <= pl.col("low_60d")).alias("signal_n_day_low"),
         "signal_boll_breakout_upper": (pl.col("close") > pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
@@ -859,6 +901,21 @@ def _join_taiwan_limit_profile(df: pl.DataFrame, trade_date: pl.Expr) -> pl.Data
             trade_date, pl.col("_tw_ipo_start"), pl.col("_tw_ipo_end")
         ).alias("_tw_ipo_session"),
     ).drop("_tw_ipo_start", "_tw_ipo_end")
+
+
+LIMIT_TOUCH_TOLERANCE = 0.005
+
+
+def limit_down_recovery(
+    raw_low: pl.Expr, raw_close: pl.Expr, limit_down: pl.Expr, prev_raw_close: pl.Expr
+) -> pl.Expr:
+    """Limit-down recovery (跌停翻紅): the raw low touched the limit-down price and the raw close
+    ended above the previous close, both on the raw scale.
+
+    The one definition of signal_limit_down_recovery; a close between the limit and the
+    previous close is only an opened limit, not a recovery.
+    """
+    return (raw_low <= limit_down + LIMIT_TOUCH_TOLERANCE) & (raw_close > prev_raw_close)
 
 
 def _statutory_limit_prices(previous: pl.Expr, limit_pct: pl.Expr) -> tuple[pl.Expr, pl.Expr]:
@@ -1067,7 +1124,6 @@ def compute_limit_signals(
         df = with_limit_streak(df, "signal_limit_down", "consecutive_limit_downs")
 
     # ── signal_limit_down_recovery (跌停翘板) ──
-    # 条件: 当日最低价曾触及跌停价 + 最终没有跌停 + 收阳
     if "signal_limit_down_recovery" in want:
         df = df.with_columns(
         pl.when(
@@ -1075,9 +1131,12 @@ def compute_limit_signals(
             & (pl.col("_prev_raw_close") > 0)
             & (pl.col("raw_low") > 0)
         ).then(
-            (~pl.col("signal_limit_down").fill_null(False))              # 最终没跌停
-            & (pl.col("raw_low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停(原始价口径, 跌停价为原始价基准)
-            & (pl.col("close") > pl.col("open"))                          # 收阳
+            limit_down_recovery(
+                pl.col("raw_low"),
+                pl.col("raw_close"),
+                pl.col("_effective_limit_down"),
+                pl.col("_prev_raw_close"),
+            )
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_limit_down_recovery")
         )
@@ -1709,7 +1768,7 @@ def compute_enriched_today(
     df = df.with_columns([
         dif.alias("macd_dif"),
         dea.alias("macd_dea"),
-        ((dif - dea) * 2).alias("macd_hist"),
+        (dif - dea).alias("macd_hist"),
     ])
 
     # ---- MA (用部分和) ----
@@ -1735,7 +1794,11 @@ def compute_enriched_today(
     # ---- KDJ (递推) ----
     kdj_ln = pl.min_horizontal(pl.col("_kdj_8d_low"), pl.col("low"))
     kdj_hn = pl.max_horizontal(pl.col("_kdj_8d_high"), pl.col("high"))
-    rsv = (pl.col("close") - kdj_ln) / (kdj_hn - kdj_ln).fill_null(1e-12) * 100
+    rsv = (
+        pl.when(kdj_hn == kdj_ln)
+        .then(pl.col("kdj_k"))
+        .otherwise((pl.col("close") - kdj_ln) / (kdj_hn - kdj_ln) * 100)
+    )
     k_today = rsv / 3 + pl.col("kdj_k") * 2 / 3
     d_today = k_today / 3 + pl.col("kdj_d") * 2 / 3
     df = df.with_columns([
@@ -1765,7 +1828,10 @@ def compute_enriched_today(
         df = df.with_columns([
             avg_gain.alias(f"_rsi_avg_gain_{n}"),
             avg_loss.alias(f"_rsi_avg_loss_{n}"),
-            (100 - 100 / (1 + avg_gain / pl.when(avg_loss == 0).then(1e-12).otherwise(avg_loss)))
+            pl.when(avg_loss.is_null() | avg_gain.is_null()).then(None)
+            .when(avg_loss != 0).then(100 - 100 / (1 + avg_gain / avg_loss))
+            .when(avg_gain == 0).then(50.0)
+            .otherwise(100.0)
             .alias(f"rsi_{n}"),
         ])
 
@@ -1790,11 +1856,11 @@ def compute_enriched_today(
     # ---- 极值 60 日 ----
     df = df.with_columns([
         pl.when(has_history_state)
-          .then(pl.max_horizontal(pl.col("_high_59d"), pl.col("high")))
+          .then(pl.max_horizontal(pl.col("_high_59d"), pl.col("close")))
           .otherwise(None)
           .alias("high_60d"),
         pl.when(has_history_state)
-          .then(pl.min_horizontal(pl.col("_low_59d"), pl.col("low")))
+          .then(pl.min_horizontal(pl.col("_low_59d"), pl.col("close")))
           .otherwise(None)
           .alias("low_60d"),
     ])
@@ -1809,12 +1875,11 @@ def compute_enriched_today(
     ])
 
     # ---- 年化波动率 20d (递推) ----
-    # 用 Welford 简化: sum + sum_sq of 19 historical returns + today's return
-    today_ret = pl.col("close") / pl.col("prev_close") - 1
+    # _vol_19d_pct_sum / _sq_sum hold the last 19 daily log returns; sample variance of 20.
+    today_ret = (pl.col("close") / pl.col("prev_close")).log()
     total_sum = pl.col("_vol_19d_pct_sum").fill_null(0.0) + today_ret
     total_sq_sum = pl.col("_vol_19d_pct_sq_sum").fill_null(0.0) + today_ret ** 2
-    vol_mean = total_sum / 20
-    vol_var = total_sq_sum / 20 - vol_mean ** 2
+    vol_var = (total_sq_sum - total_sum ** 2 / 20) / 19
     df = df.with_columns(
         pl.when(has_history_state & (vol_var > 0))
           .then(vol_var.sqrt() * (252 ** 0.5))
@@ -1838,37 +1903,45 @@ def compute_enriched_today(
         )
         df = df.join(sig_prev, on="symbol", how="left")
 
+        # Only yesterday's row is at hand, so a cross through a zero-side bar yesterday is
+        # left to the next full compute_signals run.
+        today_scale, prev_scale = pl.col("close"), pl.col("_prev_close_enriched")
         df = df.with_columns([
-            # MA 金叉/死叉
-            ((pl.col("ma5") > pl.col("ma20")) & (pl.col("_prev_ma5") <= pl.col("_prev_ma20")))
+            ((cross_side(pl.col("ma5"), pl.col("ma20"), today_scale) == 1)
+             & (cross_side(pl.col("_prev_ma5"), pl.col("_prev_ma20"), prev_scale) == -1))
                 .alias("signal_ma_golden_5_20"),
-            ((pl.col("ma5") < pl.col("ma20")) & (pl.col("_prev_ma5") >= pl.col("_prev_ma20")))
+            ((cross_side(pl.col("ma5"), pl.col("ma20"), today_scale) == -1)
+             & (cross_side(pl.col("_prev_ma5"), pl.col("_prev_ma20"), prev_scale) == 1))
                 .alias("signal_ma_dead_5_20"),
-            ((pl.col("ma20") > pl.col("ma60")) & (pl.col("_prev_ma20") <= pl.col("_prev_ma60")))
+            ((cross_side(pl.col("ma20"), pl.col("ma60"), today_scale) == 1)
+             & (cross_side(pl.col("_prev_ma20"), pl.col("_prev_ma60"), prev_scale) == -1))
                 .alias("signal_ma_golden_20_60"),
-            # MACD 金叉/死叉
-            ((pl.col("macd_dif") > pl.col("macd_dea")) & (pl.col("_prev_dif") <= pl.col("_prev_dea")))
+            ((cross_side(pl.col("macd_dif"), pl.col("macd_dea"), today_scale) == 1)
+             & (cross_side(pl.col("_prev_dif"), pl.col("_prev_dea"), prev_scale) == -1))
                 .alias("signal_macd_golden"),
-            ((pl.col("macd_dif") < pl.col("macd_dea")) & (pl.col("_prev_dif") >= pl.col("_prev_dea")))
+            ((cross_side(pl.col("macd_dif"), pl.col("macd_dea"), today_scale) == -1)
+             & (cross_side(pl.col("_prev_dif"), pl.col("_prev_dea"), prev_scale) == 1))
                 .alias("signal_macd_dead"),
-            # MA20 突破/跌破
-            ((pl.col("close") > pl.col("ma20")) & (pl.col("_prev_close_enriched") <= pl.col("_prev_ma20")))
+            ((cross_side(pl.col("close"), pl.col("ma20"), today_scale) == 1)
+             & (cross_side(pl.col("_prev_close_enriched"), pl.col("_prev_ma20"), prev_scale) == -1))
                 .alias("signal_ma20_breakout"),
-            ((pl.col("close") < pl.col("ma20")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma20")))
+            ((cross_side(pl.col("close"), pl.col("ma20"), today_scale) == -1)
+             & (cross_side(pl.col("_prev_close_enriched"), pl.col("_prev_ma20"), prev_scale) == 1))
                 .alias("signal_ma20_breakdown"),
-            # MA5 突破/跌破
-            ((pl.col("close") > pl.col("ma5")) & (pl.col("_prev_close_enriched") <= pl.col("_prev_ma5")))
+            ((cross_side(pl.col("close"), pl.col("ma5"), today_scale) == 1)
+             & (cross_side(pl.col("_prev_close_enriched"), pl.col("_prev_ma5"), prev_scale) == -1))
                 .alias("signal_ma5_breakout"),
-            ((pl.col("close") < pl.col("ma5")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma5")))
+            ((cross_side(pl.col("close"), pl.col("ma5"), today_scale) == -1)
+             & (cross_side(pl.col("_prev_close_enriched"), pl.col("_prev_ma5"), prev_scale) == 1))
                 .alias("signal_ma5_breakdown"),
-            # MA10 突破/跌破
-            ((pl.col("close") > pl.col("ma10")) & (pl.col("_prev_close_enriched") <= pl.col("_prev_ma10")))
+            ((cross_side(pl.col("close"), pl.col("ma10"), today_scale) == 1)
+             & (cross_side(pl.col("_prev_close_enriched"), pl.col("_prev_ma10"), prev_scale) == -1))
                 .alias("signal_ma10_breakout"),
-            ((pl.col("close") < pl.col("ma10")) & (pl.col("_prev_close_enriched") >= pl.col("_prev_ma10")))
+            ((cross_side(pl.col("close"), pl.col("ma10"), today_scale) == -1)
+             & (cross_side(pl.col("_prev_close_enriched"), pl.col("_prev_ma10"), prev_scale) == 1))
                 .alias("signal_ma10_breakdown"),
-            # BOLL 突破
-            (pl.col("close") >= pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
-            (pl.col("close") <= pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
+            (pl.col("close") > pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
+            (pl.col("close") < pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
         ])
 
         df = df.drop([
@@ -2047,9 +2120,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         # 跌停翘板
         pl.when((valid_prev_raw | has_authoritative_down) & (pl.col("raw_low") > 0))
           .then(
-              (~is_limit_down.fill_null(True))
-              & (pl.col("raw_low") <= effective_limit_down + 0.005)
-              & (pl.col("close") > pl.col("open"))
+              limit_down_recovery(pl.col("raw_low"), pl.col("raw_close"), effective_limit_down, prev_raw)
           ).otherwise(None).cast(pl.Boolean)
           .alias("signal_limit_down_recovery"),
         # 炸板: 最高价曾触及涨停价 + 最终未封住

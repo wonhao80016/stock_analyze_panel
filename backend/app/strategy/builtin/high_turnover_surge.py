@@ -5,11 +5,9 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 DEFAULT_MIN_TURNOVER = 2.0
@@ -81,7 +79,7 @@ class HighTurnoverSurgeMatrixStrategy:
                 matrix_feature(market, "change_pct") > float(params.get("min_change", 3.0)) / 100.0
             )
         ma20 = matrix_feature(market, "ma20")
-        exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        exit_ = cross_below(market.close, ma20, market.close)
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),

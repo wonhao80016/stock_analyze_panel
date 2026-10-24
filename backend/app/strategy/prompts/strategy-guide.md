@@ -218,13 +218,13 @@ REQUIRED_FEATURES = {"ma20", "momentum_20d", "vol_ratio_5d"}
 |------|------|
 | macd_dif | MACD DIF 线 |
 | macd_dea | MACD DEA 线 |
-| macd_hist | MACD 柱状 |
-| boll_upper, boll_lower | 布林带上/下轨 |
+| macd_hist | MACD 柱状，DIF − DEA（不乘 2） |
+| boll_upper, boll_lower | 布林带上/下轨，MA20 ± 2 倍总体标准差 |
 | kdj_k, kdj_d, kdj_j | KDJ 指标 |
 | rsi_6, rsi_14, rsi_24 | RSI 相对强弱 |
 | atr_14 | 平均真实波幅 |
 
-EMA、MACD、RSI、ATR 在每只股票最初的若干根 K 线为空：EMA 以前 n 根的 SMA 起始，RSI、ATR 用 Wilder 平滑；KD 从 50 起算。
+EMA、MACD、RSI、ATR 在每只股票最初的若干根 K 线为空：EMA 以前 n 根的 SMA 起始，RSI、ATR 用 Wilder 平滑；KD 从 50 起算，9 日最高等于最低时 K 维持前值；RSI 无涨无跌时为 50，只涨不跌为 100。
 
 ### 量能
 
@@ -240,8 +240,8 @@ EMA、MACD、RSI、ATR 在每只股票最初的若干根 K 线为空：EMA 以�
 | 列名 | 说明 |
 |------|------|
 | momentum_5d / 10d / 20d / 30d / 60d | N日涨幅 |
-| annual_vol_20d | 20日年化波动率 |
-| high_60d, low_60d | 60日最高/最低价 |
+| annual_vol_20d | 20日年化波动率：20 个日对数收益的样本标准差 × √252 |
+| high_60d, low_60d | 含当日的 60 日收盘最高/最低价（不是盘中最高/最低价） |
 
 ### 受控虚拟评分字段
 
@@ -281,14 +281,14 @@ EMA、MACD、RSI、ATR 在每只股票最初的若干根 K 线为空：EMA 以�
 | signal_macd_dead | 卖出 | MACD 死叉 |
 | signal_ma20_breakout | 买入 | 突破 MA20 |
 | signal_ma20_breakdown | 卖出 | 跌破 MA20 |
-| signal_n_day_high | 买入 | 60日新高 |
-| signal_n_day_low | 卖出 | 60日新低 |
+| signal_n_day_high | 买入 | 收盘达 60 日收盘最高 |
+| signal_n_day_low | 卖出 | 收盘达 60 日收盘最低 |
 | signal_boll_breakout_upper | 中性 | 突破布林上轨 |
 | signal_boll_breakdown_lower | 中性 | 跌破布林下轨 |
 | signal_volume_surge | 中性 | 放量 |
 | signal_limit_up | 买入 | 涨停 (见下方注意) |
 | signal_limit_down | 卖出 | 跌停 (见下方注意) |
-| signal_limit_down_recovery | 买入 | 跌停翘板 (见下方注意) |
+| signal_limit_down_recovery | 买入 | 跌停翻红：盘中触及跌停价、收盘高于昨收 (见下方注意) |
 | signal_broken_limit_up | 卖出 | 炸板 (见下方注意) |
 
 > **注意**：台股已发布的数据带有这四个涨跌停信号，Polars 策略回测时缺少的行按台股发布规则补算，不依赖 instruments 表；其他市场仍需要 instruments 表（板块代码）才能计算，部分环境不生成。如果策略只用涨停判断，优先用 `consecutive_limit_ups >= 1`（稳定列，始终可用）。

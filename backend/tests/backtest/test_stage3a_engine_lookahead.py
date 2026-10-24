@@ -157,8 +157,10 @@ class _MinuteRepo:
 
 
 def _false_breakdown_case() -> tuple[pl.DataFrame, pl.Series, pl.Series, pl.DataFrame]:
+    # Day 1 closes strictly above its MA20, which arms day 2; a close equal to the line has no side.
     # Day 2 dips below the MA20 trigger line of 10.0 at 09:32 and closes back above it.
     panel = _panel(["A"], days=5, overrides={
+        ("A", 1): {"high": 10.1, "close": 10.1},
         ("A", 2): {"open": 10.1, "high": 10.3, "low": 9.6, "close": 10.1},
     }).with_columns(
         pl.Series("ma20", [10.0, 10.0, 10.005, 10.005, 10.005]),

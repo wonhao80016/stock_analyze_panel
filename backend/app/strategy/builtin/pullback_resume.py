@@ -11,6 +11,7 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_above,
     make_signal_matrix,
     matrix_feature,
     valid_rolling_mean,
@@ -143,7 +144,7 @@ class PullbackResumeMatrixStrategy:
             params.get("pullback_vol_ratio_max", 1.0)
         )
 
-        reclaim_ma5 = (market.close > ma5) & (shift(market.close, 1) <= shift(ma5, 1))
+        reclaim_ma5 = cross_above(market.close, ma5, market.close)
         volume_expanding = market.volume > pullback_volume
 
         entry = (

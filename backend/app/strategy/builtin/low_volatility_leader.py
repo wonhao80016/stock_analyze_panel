@@ -5,11 +5,9 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
@@ -76,7 +74,7 @@ class LowVolatilityLeaderMatrixStrategy:
             entry &= matrix_feature(market, "annual_vol_20d") < float(params.get("vol_max", 0.30))
         if params.get("require_above_ma20", True):
             entry &= market.close > ma20
-        exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        exit_ = cross_below(market.close, ma20, market.close)
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),

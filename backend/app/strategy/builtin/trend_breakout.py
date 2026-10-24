@@ -1,21 +1,19 @@
-"""趋势突破 — MA60上方 + 60日新高 + 放量"""
+"""趋势突破 — MA60上方 + 60日收盘新高 + 放量"""
 
 import numpy as np
 
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
     "id": "trend_breakout",
     "name": "趨勢突破",
-    "description": "MA60上方 + 60日新高 + 量能 ≥ 2倍均量",
+    "description": "MA60上方 + 60日收盘新高 + 量能 ≥ 2倍均量",
     "tags": ["趨勢", "突破", "放量"],
     "asset_types": ["stock", "etf"],
     "timeframes": ["1d"],
@@ -30,7 +28,7 @@ META = {
             "type": "bool",
             "default": True,
         },
-        {"id": "require_n_day_high", "label": "要求60日新高", "type": "bool", "default": True},
+        {"id": "require_n_day_high", "label": "要求60日收盤新高", "type": "bool", "default": True},
         {"id": "use_volume_filter", "label": "啟用量比過濾", "type": "bool", "default": True},
         {
             "id": "vol_ratio_min",
@@ -76,7 +74,7 @@ class TrendBreakoutMatrixStrategy:
                 params.get("vol_ratio_min", 2.0)
             )
         ma20 = matrix_feature(market, "ma20")
-        exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        exit_ = cross_below(market.close, ma20, market.close)
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),

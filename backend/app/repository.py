@@ -1009,7 +1009,7 @@ class KlineRepository:
         df_daily_pct = (
             df_hist.sort(["symbol", "date"])
             .with_columns(
-                pl.col("close").pct_change().over("symbol").alias("_daily_pct")
+                (pl.col("close") / pl.col("close").shift(1)).log().over("symbol").alias("_daily_pct")
             )
         )
         df_vol = df_daily_pct.group_by("symbol").agg([
@@ -1065,8 +1065,8 @@ class KlineRepository:
                 pl.col("close").tail(19).sum().alias("_boll_partial_sum"),
                 (pl.col("close").tail(19) ** 2).sum().alias("_boll_partial_sq_sum"),
 
-                pl.col("high").tail(59).max().alias("_high_59d"),
-                pl.col("low").tail(59).min().alias("_low_59d"),
+                pl.col("close").tail(59).max().alias("_high_59d"),
+                pl.col("close").tail(59).min().alias("_low_59d"),
 
                 pl.col("close").tail(5).first().alias("_close_5d_ago"),
                 pl.col("close").tail(10).first().alias("_close_10d_ago"),

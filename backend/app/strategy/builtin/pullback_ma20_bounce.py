@@ -5,11 +5,9 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
@@ -75,8 +73,8 @@ class PullbackMA20BounceMatrixStrategy:
             entry &= (ma5 > ma20) & (ma20 > ma60)
         if params.get("require_positive_change", True):
             entry &= matrix_feature(market, "change_pct") > 0
-        ma20_breakdown = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
-        ma_dead = (ma5 < ma20) & (shift(ma5, 1) >= shift(ma20, 1))
+        ma20_breakdown = cross_below(market.close, ma20, market.close)
+        ma_dead = cross_below(ma5, ma20, market.close)
         exit_ = ma20_breakdown | ma_dead
         return make_signal_matrix(
             market.shape,

@@ -11,6 +11,7 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
     valid_rolling_max,
@@ -161,7 +162,7 @@ class BottomReversalMatrixStrategy:
 
         # Entries fire below a falling MA20, so a level test would exit on the entry bar itself.
         ma20 = matrix_feature(market, "ma20")
-        ma20_breakdown = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        ma20_breakdown = cross_below(market.close, ma20, market.close)
         close_20d_low = market.close < shift(valid_rolling_min(market.close, close_valid, 20), 1)
         exit_ = ma20_breakdown | close_20d_low
         exit_code = np.where(ma20_breakdown, 0, np.where(close_20d_low, 1, -1))

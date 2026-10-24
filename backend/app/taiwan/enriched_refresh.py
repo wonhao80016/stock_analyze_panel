@@ -39,6 +39,7 @@ from app.indicators.pipeline import (
     INDICATOR_DEFINITION_VERSION,
     compute_enriched,
     filter_halt_days,
+    limit_down_recovery,
     with_limit_streak,
 )
 from app.taiwan.corporate_actions import (
@@ -537,7 +538,7 @@ class TaiwanEnrichedRefreshService:
             (usable & (close <= pl.col("_limit_down"))).fill_null(False).alias("signal_limit_down"),
             (usable & (high >= pl.col("_limit_up")) & (close < pl.col("_limit_up")))
             .fill_null(False).alias("signal_broken_limit_up"),
-            (usable & (low <= pl.col("_limit_down")) & (close > pl.col("_limit_down")))
+            (usable & limit_down_recovery(low, close, pl.col("_limit_down"), ref))
             .fill_null(False).alias("signal_limit_down_recovery"),
         ]).drop(["limit_pct", "is_etf_tick", "ipo_start", "ipo_end", "_limit_up", "_limit_down"])
 

@@ -5,12 +5,10 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
     recursive_warmup_bars,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
@@ -82,7 +80,7 @@ class OversoldReversalMatrixStrategy:
         if params.get("require_above_ma5", True):
             entry &= market.close > matrix_feature(market, "ma5")
         ma20 = matrix_feature(market, "ma20")
-        exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        exit_ = cross_below(market.close, ma20, market.close)
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),

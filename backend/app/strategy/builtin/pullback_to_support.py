@@ -6,11 +6,9 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
@@ -94,7 +92,7 @@ class PullbackToSupportMatrixStrategy:
             entry &= market.close > matrix_feature(market, "ma60")
         if params.get("require_positive_momentum", True):
             entry &= matrix_feature(market, "momentum_20d") > 0
-        exit_ = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        exit_ = cross_below(market.close, ma20, market.close)
         return make_signal_matrix(
             market.shape,
             entry=entry.astype(np.uint8),

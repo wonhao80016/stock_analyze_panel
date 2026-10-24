@@ -29,6 +29,7 @@ import pyarrow.dataset as pads
 from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
 from app.indicators.pipeline import (
+    CROSS_TOLERANCE,
     ema_values,
     kd_values,
     macd_values,
@@ -2623,8 +2624,8 @@ def build_market_matrix_from_signals(
     )
 
 
-# Each replayable crossing signal fires only when the left series was at or above the right one
-# on the previous bar, as in app.indicators.pipeline.
+# Each replayable crossing signal fires only while the left series was last strictly above the
+# right one before this bar, as cross_below requires.
 _MINUTE_EXIT_ARMING = {
     "signal_ma5_breakdown": ("close", "ma5"),
     "signal_ma10_breakdown": ("close", "ma10"),
@@ -2656,10 +2657,10 @@ def _armed_minute_exit_lines(
         left, right = (_series(name) for name in arming)
         if left is None or right is None:
             continue
-        previous_left = _previous_bar_values(left, present)
-        previous_right = _previous_bar_values(right, present)
-        with np.errstate(invalid="ignore"):
-            armed = previous_left >= previous_right
+        side = cross_side(
+            np.where(present, left, np.nan), np.where(present, right, np.nan), market.close
+        )
+        armed = _previous_side(side) == 1
         candidate = build_minute_exit_reference(
             market.close,
             market.fields,
@@ -3184,6 +3185,50 @@ def shift(values: np.ndarray, periods: int = 1) -> np.ndarray:
     elif periods < 0 and -periods < source.shape[0]:
         out[:periods] = source[-periods:]
     return out
+
+
+_FLOAT32_CROSS_TOLERANCE = 2.0**-22
+
+
+def cross_side(left: np.ndarray, right: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    """app.indicators.pipeline.cross_side on ``time x asset`` arrays; NaN where either is missing.
+
+    The difference is taken in float64. When either input is float32, as the matrix's own moving
+    averages are, the tolerance is at least 2^-22 * max(|left|, |right|), two float32 ulps.
+    """
+    left_values = np.asarray(left, dtype=np.float64)
+    right_values = np.asarray(right, dtype=np.float64)
+    diff = left_values - right_values
+    tolerance = np.fmax(CROSS_TOLERANCE, CROSS_TOLERANCE * np.abs(np.asarray(scale, dtype=np.float64)))
+    if np.asarray(left).dtype == np.float32 or np.asarray(right).dtype == np.float32:
+        rounding = _FLOAT32_CROSS_TOLERANCE * np.fmax(np.abs(left_values), np.abs(right_values))
+        tolerance = np.fmax(tolerance, rounding)
+    with np.errstate(invalid="ignore"):
+        side = np.where(diff >= tolerance, 1.0, np.where(diff <= -tolerance, -1.0, 0.0))
+    side[~np.isfinite(diff)] = np.nan
+    return side
+
+
+def _previous_side(side: np.ndarray) -> np.ndarray:
+    """The last nonzero side above each row of its column, 0 where none; NaN rows are skipped."""
+    rows = np.arange(side.shape[0])[:, None]
+    known = np.where(np.isfinite(side) & (side != 0), rows, -1)
+    last = np.maximum.accumulate(known, axis=0)
+    previous = np.vstack([np.full((1, side.shape[1]), -1), last[:-1]])
+    values = np.take_along_axis(side, np.maximum(previous, 0), axis=0)
+    return np.where(previous >= 0, values, 0.0)
+
+
+def cross_above(left: np.ndarray, right: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    """app.indicators.pipeline.cross_above: a missing bar, like an absent published row, is skipped."""
+    side = cross_side(left, right, scale)
+    return (side == 1) & (_previous_side(side) == -1)
+
+
+def cross_below(left: np.ndarray, right: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    """The mirror of cross_above."""
+    side = cross_side(left, right, scale)
+    return (side == -1) & (_previous_side(side) == 1)
 
 
 def _resolve_valid_bar_index(
@@ -4396,7 +4441,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             return dif
         if name == "macd_dea":
             return dea
-        return ((dif - dea) * np.float32(2.0)).astype(np.float32, copy=False)
+        return (dif - dea).astype(np.float32, copy=False)
     if name in {"macd_dif_pct", "macd_dea_pct", "macd_hist_pct"}:
         source = matrix_feature(market, name.removesuffix("_pct"))
         return _matrix_ratio(source, market.close)
@@ -4444,7 +4489,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         )
     if name == "boll_upper" or name == "boll_lower":
         middle = valid_rolling_mean(market.close, close_valid, 20)
-        deviation = valid_rolling_std(market.close, close_valid, 20, ddof=1)
+        deviation = valid_rolling_std(market.close, close_valid, 20, ddof=0)
         offset = np.float32(2.0) * deviation
         return middle + offset if name == "boll_upper" else middle - offset
     if name == "boll_position":
@@ -4462,7 +4507,11 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     if name == "low_60d":
         return valid_rolling_min(market.close, close_valid, 60)
     if name == "annual_vol_20d":
-        daily = _valid_return_over_bars(market.close, close_valid, 1)
+        previous = valid_shift(market.close, 1, close_valid).astype(np.float64)
+        ratio = np.full(market.shape, np.nan, dtype=np.float64)
+        np.divide(market.close, previous, out=ratio, where=np.isfinite(previous) & (previous > 0))
+        daily = np.full(market.shape, np.nan, dtype=np.float64)
+        np.log(ratio, out=daily, where=ratio > 0)
         return valid_rolling_std(
             daily,
             np.isfinite(daily),
@@ -4475,8 +4524,9 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         low_9 = valid_rolling_min(market.low, low_valid, 9)
         high_9 = valid_rolling_max(market.high, high_valid, 9)
         rsv = _matrix_ratio(market.close - low_9, high_9 - low_9) * np.float32(100.0)
+        flat = np.isfinite(low_9) & np.isfinite(high_9) & (high_9 == low_9)
         offsets, cells = _valid_bar_runs(market.close, close_valid)
-        k, d = kd_values(_gather(rsv, np.isfinite(rsv), cells), offsets)
+        k, d = kd_values(_gather(rsv, np.isfinite(rsv), cells), offsets, flat[cells])
         kdj = {"kdj_k": k, "kdj_d": d, "kdj_j": 3.0 * k - 2.0 * d}
         return _scatter(market.shape, cells, kdj[name])
     if name in {"atr_14", "atr_pct"}:

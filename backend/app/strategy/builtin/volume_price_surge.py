@@ -5,11 +5,10 @@ import numpy as np
 from app.backtest.matrix import (
     MarketDataMatrix,
     SignalMatrix,
+    cross_above,
+    cross_below,
     make_signal_matrix,
     matrix_feature,
-)
-from app.backtest.matrix import (
-    valid_shift as shift,
 )
 
 META = {
@@ -56,8 +55,8 @@ class VolumePriceSurgeMatrixStrategy:
 
     def compute_signals(self, market: MarketDataMatrix, params: dict) -> SignalMatrix:
         ma20 = matrix_feature(market, "ma20")
-        breakout = (market.close > ma20) & (shift(market.close, 1) <= shift(ma20, 1))
-        breakdown = (market.close < ma20) & (shift(market.close, 1) >= shift(ma20, 1))
+        breakout = cross_above(market.close, ma20, market.close)
+        breakdown = cross_below(market.close, ma20, market.close)
         entry = np.ones(market.shape, dtype=bool)
         if params.get("require_ma20_breakout", True):
             entry &= breakout

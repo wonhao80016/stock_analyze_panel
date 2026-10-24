@@ -121,7 +121,7 @@ def _reference(bars: list[dict]) -> dict[str, list]:
     dif = _minus(_ema(closes, 12), _ema(closes, 26))
     dea = _ema(dif, 9)
     ref["macd_dif"], ref["macd_dea"] = dif, dea
-    ref["macd_hist"] = [None if d is None else 2 * d for d in _minus(dif, dea)]
+    ref["macd_hist"] = _minus(dif, dea)
     changes = [None] + [closes[t] - closes[t - 1] for t in range(1, len(closes))]
     gains = [None if c is None else max(c, 0.0) for c in changes]
     losses = [None if c is None else max(-c, 0.0) for c in changes]
