@@ -66,7 +66,7 @@ function formatAlertTime(ts: number | string | undefined): string {
 export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListProps) {
   const qc = useQueryClient()
   const deleteMut = useMutation({
-    mutationFn: (ts: number) => api.alertDelete(ts),
+    mutationFn: (id: string) => api.alertDelete(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.alerts(undefined) }),
   })
 
@@ -85,7 +85,8 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
   return (
     <div className="space-y-2">
       {alerts.map((alert, idx) => {
-        const id = (alert as any).alert_id || `${alert.rule_id || 'rule'}_${alert.ts || idx}`
+        const recordId = typeof alert.id === 'string' && alert.id ? alert.id : undefined
+        const key = recordId ?? `${alert.rule_id || 'rule'}_${alert.ts ?? ''}_${idx}`
         const sev = (alert.severity || 'warning').toLowerCase()
         const sevCfg = SEVERITY_CONFIG[sev] || SEVERITY_CONFIG.warning
         const SevIcon = sevCfg.icon
@@ -93,7 +94,7 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
 
         return (
           <motion.div
-            key={id}
+            key={key}
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
             className="group relative flex overflow-hidden rounded-xl border border-border/70 bg-surface/80 shadow-sm hover:border-accent/40 transition-all p-3 text-xs"
@@ -135,9 +136,9 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
                       {alert.source}
                     </span>
                   )}
-                  {alert.ts != null && (
+                  {recordId && (
                     <button
-                      onClick={() => deleteMut.mutate(alert.ts!)}
+                      onClick={() => deleteMut.mutate(recordId)}
                       disabled={deleteMut.isPending}
                       title="刪除這筆記錄"
                       className="inline-flex h-5 w-5 items-center justify-center rounded border border-transparent text-muted opacity-0 transition-all hover:border-danger/40 hover:text-danger group-hover:opacity-100 cursor-pointer disabled:cursor-not-allowed"

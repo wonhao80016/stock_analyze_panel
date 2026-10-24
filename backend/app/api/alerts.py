@@ -51,10 +51,19 @@ def clear_alerts(request: Request):
     return {"ok": True, "cleared": n}
 
 
-@router.delete("/{ts}")
-def delete_alert(ts: int, request: Request):
-    """删除单条触发记录 (按 ts 毫秒时间戳)。"""
-    deleted = alert_store.delete_one(_data_dir(request), ts)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="记录不存在")
-    return {"ok": True}
+@router.delete("/{alert_id}")
+def delete_alert(alert_id: str, request: Request):
+    """删除单条触发记录 (按记录 id)。
+
+    纯数字且无对应 id 时按旧客户端的 ts 处理, 同 ts 多条则返回 409 而不删除。
+    """
+    data_dir = _data_dir(request)
+    if alert_store.delete_one(data_dir, alert_id):
+        return {"ok": True}
+    if alert_id.isascii() and alert_id.isdigit():
+        outcome = alert_store.delete_by_unique_ts(data_dir, int(alert_id))
+        if outcome == "deleted":
+            return {"ok": True}
+        if outcome == "ambiguous":
+            raise HTTPException(status_code=409, detail="多条记录共用此时间戳, 请按 id 删除")
+    raise HTTPException(status_code=404, detail="记录不存在")

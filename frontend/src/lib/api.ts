@@ -777,6 +777,8 @@ export interface MonitorRuleOptions {
 }
 
 export interface AlertEvent {
+  /** Unique per record; several alerts from one evaluation round share the same ts. */
+  id?: string
   ts: number
   rule_id?: string
   rule_name?: string
@@ -867,6 +869,7 @@ export interface TaiwanRealtimeQuote {
  * still render pre-merge rows persisted in data/user_data/alerts.jsonl;
  * fields are optional since no code writes this shape anymore. */
 export interface TaiwanAlertEvent {
+  id?: string
   alert_id?: string
   rule_id?: string
   rule_name?: string
@@ -3173,8 +3176,8 @@ export const api = {
   alertsClear: () =>
     request<{ ok: boolean; cleared: number }>('/api/alerts', { method: 'DELETE' }),
 
-  alertDelete: (ts: number) =>
-    request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),
+  alertDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/alerts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   /** 檢查 AI 配置狀態 */
   strategyAiStatus: () =>
