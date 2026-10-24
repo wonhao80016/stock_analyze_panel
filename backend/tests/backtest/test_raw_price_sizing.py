@@ -8,7 +8,7 @@ dividends and splits never show up as losses.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import numpy as np
@@ -291,6 +291,15 @@ def test_minute_fill_compares_raw_minutes_with_the_reference_on_the_same_scale(t
         "volume": [10_000.0, 10_000.0],
         "amount": [1_005_000.0, 1_028_000.0],
     })
+    # Flat bars through the 13:30 close, so the minute bars cover the whole session.
+    rest = [datetime(2025, 7, 2, 9, 3) + timedelta(minutes=step) for step in range(262)]
+    minutes = pl.concat([minutes, pl.DataFrame({
+        "symbol": [DIVIDEND_SYMBOL] * (len(rest) + 1),
+        "datetime": [*rest, datetime(2025, 7, 2, 13, 30)],
+        **{column: [102.8] * (len(rest) + 1) for column in ("open", "high", "low", "close")},
+        "volume": [1_000.0] * (len(rest) + 1),
+        "amount": [102_800.0] * (len(rest) + 1),
+    })])
     config = _config(
         tmp_path,
         DIVIDEND_SYMBOL,

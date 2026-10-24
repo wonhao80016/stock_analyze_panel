@@ -1291,7 +1291,7 @@ def run_pipeline(data_dir: Path | None = None,
             raw_new = scan_daily_parquet(new_date_dirs[0] / "*.parquet", cast_options=_cast)
             for nd in new_date_dirs[1:]:
                 raw_new = pl.concat([raw_new, scan_daily_parquet(nd / "*.parquet", cast_options=_cast)], how="diagonal_relaxed")
-            raw_new = raw_new.sort(["symbol", "date"]).collect(streaming=True)
+            raw_new = raw_new.sort(["symbol", "date"]).collect(engine="streaming")
 
             # 增量模式: 只算新日期, 但指标需要历史窗口
             # 读已有 enriched 最近 60 天作为历史前缀
@@ -1345,7 +1345,7 @@ def run_pipeline(data_dir: Path | None = None,
             sym_set = set(symbols)
             raw_sym = scan_daily_parquet(daily_glob, cast_options=_cast).sort(["symbol", "date"])
             raw_sym = raw_sym.filter(pl.col("symbol").is_in(list(sym_set)))
-            raw_sym = raw_sym.collect(streaming=True)
+            raw_sym = raw_sym.collect(engine="streaming")
             if not raw_sym.is_empty():
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
@@ -1397,7 +1397,7 @@ def run_pipeline(data_dir: Path | None = None,
 
     all_symbols = (
         lf_all.select("symbol").unique().sort("symbol")
-        .collect(streaming=True)["symbol"].to_list()
+        .collect(engine="streaming")["symbol"].to_list()
     )
     if not all_symbols:
         logger.info("无日K数据, 跳过管道")
@@ -1428,7 +1428,7 @@ def run_pipeline(data_dir: Path | None = None,
         # 只读取本批 symbol 的数据
         lf_batch = scan_daily_parquet(daily_glob, cast_options=_cast)
         lf_batch = lf_batch.filter(pl.col("symbol").is_in(batch_syms))
-        raw = lf_batch.sort(["symbol", "date"]).collect(streaming=True)
+        raw = lf_batch.sort(["symbol", "date"]).collect(engine="streaming")
 
         if raw.is_empty():
             continue

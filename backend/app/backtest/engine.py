@@ -78,7 +78,7 @@ def _with_taiwan_limit_flags(df: pl.DataFrame, flags: list[str]) -> pl.DataFrame
         else pl.lit(True)
     )
     symbols = df.filter(lacking).get_column("symbol").unique()
-    inputs = df.filter(pl.col("symbol").is_in(symbols)).select(
+    inputs = df.filter(pl.col("symbol").is_in(symbols.implode())).select(
         [name for name in _TAIWAN_LIMIT_INPUTS if name in df.columns]
     )
     flagged = taiwan_limit_signals(compute_indicators(inputs, needed={"prev_close"}))
@@ -114,6 +114,15 @@ def _security_master_names(symbols: list[str]) -> pl.DataFrame:
         schema={"symbol": pl.Utf8, "name": pl.Utf8},
     )
 
+
+# Minutes of the day bounding a complete Taiwan session of minute bars (bar start times).
+_TAIWAN_FIRST_BAR_MINUTE = 9 * 60 + 1
+_TAIWAN_LAST_BAR_MINUTE = 13 * 60 + 30
+# The 13:25-13:30 closing call may leave no bar between 13:24 and 13:30.
+_TAIWAN_MAX_MINUTE_GAP = 6
+
+# Full-mode samples still held when the data ends, valued at their last close and reported apart.
+UNCLOSED_EXIT_REASON = "end_unclosed"
 
 STATS_METHODOLOGY_VERSION = "stats_v3"
 # Annual return, Sharpe, Sortino and Calmar are null for shorter series.
@@ -220,6 +229,30 @@ def _trigger_fill(
     return raw_fill / scale
 
 
+# Half the smallest Taiwan tick, on the raw price scale.
+_LIMIT_PRICE_TOLERANCE = 0.005
+
+
+def _at_locked_limit(
+    matrix: MarketMatrix, time_id: int, asset_id: int, price: float, direction: str,
+) -> bool:
+    """Whether a fill at adjusted *price* sits on the session's limit price while it is locked.
+
+    A session locked at a limit closes on that limit price, so the raw close is the limit price.
+    """
+    flags = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
+    if not flags[time_id, asset_id]:
+        return False
+    scale = float(matrix.raw_scale[time_id, asset_id])
+    limit = float(matrix.close[time_id, asset_id]) * scale
+    traded = float(price) * scale
+    if not (math.isfinite(limit) and math.isfinite(traded)):
+        return False
+    if direction == "up":
+        return traded >= limit - _LIMIT_PRICE_TOLERANCE
+    return traded <= limit + _LIMIT_PRICE_TOLERANCE
+
+
 def _exit_signal_code(matrix: MarketMatrix, time_id: int, asset_id: int) -> int:
     """Daily exit signal code, else the code of the armed minute-replay line."""
     code = int(matrix.exit_signal_code[time_id, asset_id])
@@ -253,6 +286,8 @@ class _MinuteBars:
         self._armed = None if exit_line is None else np.isfinite(exit_line) & (exit_line > 0)
         self._rows: dict[tuple[int, int], np.ndarray] = {}
         self._read: set[tuple[int, int]] = set()
+        # (symbol, day) whose minute bars miss part of the session; those fills stay daily.
+        self.incomplete: set[tuple[str, str]] = set()
 
     def refinable(self, time_id: int, asset_id: int) -> bool:
         return bool(self._trigger_times[time_id] and self._trigger_assets[asset_id])
@@ -277,7 +312,9 @@ class _MinuteBars:
             return
         day = self._matrix.timestamp_labels[time_id][:10]
         symbols = [self._matrix.symbols[asset] for asset in assets]
-        loaded = self._engine._load_minute_for_fills(self._engine.repo, symbols, {day}, self._asset_type)
+        loaded = self._engine._load_minute_for_fills(
+            self._engine.repo, symbols, {day}, self._asset_type, incomplete=self.incomplete,
+        )
         for asset, symbol in zip(assets, symbols, strict=True):
             self._read.add((asset, time_id))
             rows = loaded.get((symbol, day))
@@ -296,6 +333,7 @@ class _MinuteBars:
         days = {int(t): self._matrix.timestamp_labels[int(t)][:10] for t in times}
         loaded = self._engine._load_minute_for_fills(
             self._engine.repo, [symbol], set(days.values()), self._asset_type,
+            incomplete=self.incomplete,
         )
         for time_id, day in days.items():
             self._read.add((asset_id, time_id))
@@ -449,6 +487,10 @@ class MatcherConfig:
         else:
             tax = 0.0
         return commission + tax + trade_value * self.slippage_bps / 10000.0
+
+    def odd_lot(self) -> bool:
+        profile_lot = getattr(self.market_profile, "lot", None)
+        return self.lot_mode == "odd_lot" or getattr(profile_lot, "mode", None) == "odd_lot"
 
     def can_exit_after_sessions(self, symbol: str, holding_sessions: int) -> bool:
         if holding_sessions < self.minimum_holding_sessions:
@@ -1105,33 +1147,29 @@ class BacktestEngine:
         from app.tickflow.repository import enriched_dirname
         enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
 
-        try:
-            published_flags = sorted(_PUBLISHED_LIMIT_FLAGS.intersection(columns or ()))
-            lf = scan_enriched_parquet(
-                enriched_glob,
-                schema={**ENRICHED_STORAGE_SCHEMA, **dict.fromkeys(published_flags, pl.Boolean)},
+        published_flags = sorted(_PUBLISHED_LIMIT_FLAGS.intersection(columns or ()))
+        lf = scan_enriched_parquet(
+            enriched_glob,
+            schema={**ENRICHED_STORAGE_SCHEMA, **dict.fromkeys(published_flags, pl.Boolean)},
+        )
+        if symbols is not None:
+            lf = lf.filter(pl.col("symbol").is_in(symbols))
+        if columns is not None:
+            available = set(lf.collect_schema().names())
+            selected = [c for c in columns if c in available]
+            if "symbol" not in selected and "symbol" in available:
+                selected.insert(0, "symbol")
+            if "date" not in selected and "date" in available:
+                selected.insert(1, "date")
+            lf = lf.select(selected)
+        df = (
+            lf.filter(
+                (pl.col("date") >= start)
+                & (pl.col("date") <= end)
             )
-            if symbols is not None:
-                lf = lf.filter(pl.col("symbol").is_in(symbols))
-            if columns is not None:
-                available = set(lf.collect_schema().names())
-                selected = [c for c in columns if c in available]
-                if "symbol" not in selected and "symbol" in available:
-                    selected.insert(0, "symbol")
-                if "date" not in selected and "date" in available:
-                    selected.insert(1, "date")
-                lf = lf.select(selected)
-            df = (
-                lf.filter(
-                    (pl.col("date") >= start)
-                    & (pl.col("date") <= end)
-                )
-                .sort(["symbol", "date"])
-                .collect(streaming=True)
-            )
-        except Exception as e:
-            logger.warning("backtest load panel failed: %s", e)
-            return pl.DataFrame()
+            .sort(["symbol", "date"])
+            .collect(engine="streaming")
+        )
 
         if df.is_empty():
             return df
@@ -1219,6 +1257,7 @@ class BacktestEngine:
             "sell_minimum_holding": 0,
             "sell_no_future": 0,
             "pending_exit": 0,
+            "unclosed_at_end": 0,
         }
 
         minute_exit_line = matrix.minute_exit_line if config.exit_fill == "signal_next_minute" else None
@@ -1238,11 +1277,31 @@ class BacktestEngine:
         def _valid_price(value) -> bool:
             return bool(np.isfinite(value) and value > 0)
 
-        def _present(time_id: int, asset_id: int) -> bool:
-            return bool(np.isfinite([
-                matrix.open[time_id, asset_id], matrix.high[time_id, asset_id],
-                matrix.low[time_id, asset_id], matrix.close[time_id, asset_id],
-            ]).any())
+        present = (
+            np.isfinite(np.asarray(matrix.open)) | np.isfinite(np.asarray(matrix.high))
+            | np.isfinite(np.asarray(matrix.low)) | np.isfinite(np.asarray(matrix.close))
+        )
+        asset_bars: dict[int, np.ndarray] = {}
+
+        def _bars_after(time_id: int, asset_id: int) -> np.ndarray:
+            bars = asset_bars.get(asset_id)
+            if bars is None:
+                bars = asset_bars[asset_id] = np.flatnonzero(present[:, asset_id])
+            return bars[np.searchsorted(bars, time_id, side="right"):]
+
+        # A full-mode sample is one board lot; an odd-lot sample spends the portfolio mode's opening
+        # per-position target, so a one-share sample is not dominated by the minimum commission.
+        odd_lot_notional = (
+            config.initial_capital
+            * min(max(float(config.max_exposure_pct), 0.0), 1.0)
+            / max(int(config.max_positions), 1)
+        )
+
+        def _sample_shares(symbol: str, traded_entry: float) -> float:
+            lot_size = float(config.lot_size(symbol))
+            if not config.odd_lot():
+                return lot_size
+            return max(config.align_shares(odd_lot_notional, traded_entry, symbol), lot_size)
 
         def _signal_id(code: int, ids: tuple[str, ...]) -> str | None:
             return ids[code] if 0 <= code < len(ids) else None
@@ -1293,27 +1352,13 @@ class BacktestEngine:
                 return None
             return _minute_trigger_price(time_id, asset_id)
 
-        def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
-            if not matrix.tradable[time_id, asset_id]:
-                return False
-            prices = [
-                float(matrix.open[time_id, asset_id]), float(matrix.high[time_id, asset_id]),
-                float(matrix.low[time_id, asset_id]), float(matrix.close[time_id, asset_id]),
-            ]
-            if not all(_valid_price(value) for value in prices):
-                return False
-            same = max(prices) - min(prices) <= max(abs(prices[3]) * 1e-4, 0.01)
-            flags = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
-            return bool(flags[time_id, asset_id]) and same
-
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
             if not matrix.tradable[time_id, asset_id]:
                 return False, "buy_suspended"
-            if not _valid_price(entry_prices[time_id, asset_id]) or not _valid_price(
-                matrix.raw_scale[time_id, asset_id]
-            ):
+            price = entry_prices[time_id, asset_id]
+            if not _valid_price(price) or not _valid_price(matrix.raw_scale[time_id, asset_id]):
                 return False, "buy_invalid_price"
-            if _one_price_limit(time_id, asset_id, "up"):
+            if _at_locked_limit(matrix, time_id, asset_id, price, "up"):
                 return False, "buy_limit_up"
             return True, ""
 
@@ -1323,7 +1368,7 @@ class BacktestEngine:
             price = override if override is not None else exit_prices[time_id, asset_id]
             if not _valid_price(price) or not _valid_price(matrix.raw_scale[time_id, asset_id]):
                 return False, "sell_invalid_price"
-            if _one_price_limit(time_id, asset_id, "down"):
+            if _at_locked_limit(matrix, time_id, asset_id, price, "down"):
                 return False, "sell_limit_down"
             return True, ""
 
@@ -1420,9 +1465,22 @@ class BacktestEngine:
             exit_price = float(override) if override is not None else _refill(
                 time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
             )
+            _record_trade(pos, time_id, asset_id, reason, signal_date, exit_price, signal_id)
+            return True
+
+        def _record_trade(
+            pos: dict,
+            time_id: int,
+            asset_id: int,
+            reason: str,
+            signal_date: str,
+            exit_price: float,
+            signal_id: str | None,
+        ) -> None:
+            symbol = matrix.symbols[asset_id]
             exit_date = matrix.timestamp_labels[time_id][:10]
             traded_exit = _traded_price(matrix, time_id, asset_id, exit_price)
-            shares = float(config.lot_size(symbol))
+            shares = float(pos["shares"])
             exit_shares = shares * config.held_share_factor(symbol, pos["entry_date"], exit_date)
             entry_gross = shares * pos["traded_entry_price"]
             traded_exit_gross = exit_shares * traded_exit
@@ -1449,7 +1507,7 @@ class BacktestEngine:
                 exit_reason=reason,
                 shares=shares,
                 exit_shares=round(float(exit_shares), 4),
-                lots=1.0,
+                lots=round(shares / config.lot_size(symbol), 4),
                 entry_value=round(float(entry_value), 2),
                 exit_value=round(float(exit_value), 2),
                 pnl_amount=round(float(pnl_amount), 2),
@@ -1460,7 +1518,20 @@ class BacktestEngine:
                 entry_signal_id=pos["entry_signal_id"],
                 exit_signal_id=(pos.get("pending_exit_signal_id") or signal_id) if reason == "signal" else None,
             ))
-            return True
+
+        def _record_unclosed(pos: dict, asset_id: int, bars: np.ndarray) -> None:
+            """Value a candidate still held at the end of the data at its last close."""
+            _count("unclosed_at_end")
+            for time_id in reversed(bars.tolist()):
+                close = float(matrix.close[time_id, asset_id])
+                if _valid_price(close) and _valid_price(matrix.raw_scale[time_id, asset_id]):
+                    break
+            else:
+                time_id, close = int(pos["entry_time"]), float(pos["entry_price"])
+            _record_trade(
+                pos, time_id, asset_id, UNCLOSED_EXIT_REASON, matrix.timestamp_labels[time_id][:10],
+                close, None,
+            )
 
         entry_times, entry_assets = np.nonzero(matrix.entry)
         order = np.lexsort((entry_times, entry_assets))
@@ -1495,6 +1566,7 @@ class BacktestEngine:
             entry_price = _refill(time_id, asset_id, "buy", float(entry_prices[time_id, asset_id]))
             traded_entry = _traded_price(matrix, time_id, asset_id, entry_price)
             entry_date = matrix.timestamp_labels[time_id][:10]
+            shares = _sample_shares(matrix.symbols[asset_id], traded_entry)
             pos = {
                 "entry_time": time_id,
                 "entry_date": entry_date,
@@ -1506,7 +1578,8 @@ class BacktestEngine:
                 ),
                 "entry_price": entry_price,
                 "traded_entry_price": traded_entry,
-                "adjusted_units": config.lot_size(matrix.symbols[asset_id]) * (traded_entry / entry_price),
+                "shares": shares,
+                "adjusted_units": shares * (traded_entry / entry_price),
                 "entry_score": score,
                 "hold_days": 0,
                 "max_high": (
@@ -1531,15 +1604,14 @@ class BacktestEngine:
                 )
                 if _try_close(pos, time_id, asset_id, "signal", signal_date):
                     continue
-            future_times = [
-                future for future in range(time_id + 1, matrix.shape[0])
-                if _present(future, asset_id)
-            ]
-            if not future_times:
+            future_times = _bars_after(time_id, asset_id)
+            if not future_times.size:
                 _count("sell_no_future")
                 continue
+            last_time = int(future_times[-1])
             closed = False
             for future in future_times:
+                future = int(future)
                 pos["hold_days"] += 1
                 date_text = matrix.timestamp_labels[future][:10]
                 reason, override = _risk_exit(pos, future, asset_id)
@@ -1560,7 +1632,7 @@ class BacktestEngine:
                     signal_date = _signal_date(int(matrix.exit_signal_time[future, asset_id]), date_text)
                 elif config.max_hold_days is not None and pos["hold_days"] >= config.max_hold_days:
                     reason = "max_hold"
-                elif future == future_times[-1]:
+                elif future == last_time:
                     reason = "end"
                 if reason and _try_close(pos, future, asset_id, reason, signal_date, override):
                     closed = True
@@ -1568,12 +1640,11 @@ class BacktestEngine:
                 high_price = float(matrix.high[future, asset_id])
                 if _valid_price(high_price):
                     pos["max_high"] = max(float(pos["max_high"]), high_price)
-            if not closed and not pos.get("pending_exit_reason"):
-                last_time = future_times[-1]
-                _try_close(
-                    pos, last_time, asset_id, "end", matrix.timestamp_labels[last_time][:10]
-                )
+            if not closed:
+                _record_unclosed(pos, asset_id, future_times)
 
+        if minute_bars.enabled:
+            execution_stats["minute_incomplete_sessions"] = len(minute_bars.incomplete)
         result = self._calc_independent_candidate_result(
             trades,
             raw_candidates,
@@ -1582,6 +1653,11 @@ class BacktestEngine:
             session_dates=matrix.timestamp_labels,
             risk_free_rate=config.risk_free_rate,
             formal_end=formal_end,
+        )
+        result.stats["sample_sizing"] = (
+            {"basis": "odd_lot_notional", "notional": round(odd_lot_notional, 2)}
+            if config.odd_lot()
+            else {"basis": "board_lot"}
         )
         result.stats["market_matrix_shape"] = list(matrix.shape)
         result.stats["market_matrix_bytes"] = matrix.nbytes
@@ -1736,15 +1812,38 @@ class BacktestEngine:
     _MINUTE_NUMERIC_COLS = ["open", "high", "low", "close", "volume", "amount"]
 
     @staticmethod
+    def _taiwan_minute_session_complete(day: pl.DataFrame) -> bool:
+        """Whether one Taiwan session's minute bars run from the open to the 13:30 close.
+
+        A recorder gap shows as a late first bar, an early last bar, a long jump between bars or
+        volume it could not place in any bar.
+        """
+        stamps = day["datetime"]
+        # The recorder writes zone-aware stamps, stored in UTC; naive stamps are Taipei wall time.
+        if getattr(stamps.dtype, "time_zone", None):
+            stamps = stamps.dt.convert_time_zone("Asia/Taipei")
+        minutes = (stamps.dt.hour().cast(pl.Int32) * 60 + stamps.dt.minute().cast(pl.Int32)).to_numpy()
+        if minutes[0] > _TAIWAN_FIRST_BAR_MINUTE or minutes[-1] < _TAIWAN_LAST_BAR_MINUTE:
+            return False
+        if len(minutes) > 1 and int(np.diff(minutes).max()) > _TAIWAN_MAX_MINUTE_GAP:
+            return False
+        if "unattributed_volume" in day.columns:
+            return not bool((day["unattributed_volume"].fill_null(0.0) > 0).any())
+        return True
+
+    @staticmethod
     def _load_minute_for_fills(
         repo,
         symbols: list[str],
         dates_needed: set,
         asset_type: str,
+        incomplete: set | None = None,
     ) -> dict:
         """按触发日加载分钟K, 返回 {(symbol, date_str): float64 2D ndarray}。
 
         dates_needed: 需要分钟数据的日期集合 (set of date strings "YYYY-MM-DD")
+        incomplete: receives the (symbol, day) of Taiwan sessions left out because their minute
+            bars do not cover the whole session.
 
         按触发日分批读取对应分区文件 (get_minute_by_dates), 而非扫描整个区间
         (get_minute_range)。内存与回测区间长度解耦, 只随触发日数量增长 ——
@@ -1765,11 +1864,7 @@ class BacktestEngine:
         numeric_cols = BacktestEngine._MINUTE_NUMERIC_COLS
         for i in range(0, len(date_objs), BATCH):
             batch = date_objs[i:i + BATCH]
-            try:
-                df = repo.get_minute_by_dates(symbols, batch, asset_type=asset_type)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("minute fill data load failed (batch %d-%d): %s", i, i + len(batch), e)
-                continue
+            df = repo.get_minute_by_dates(symbols, batch, asset_type=asset_type)
             if df.is_empty():
                 continue
             # 按 (symbol, 日期) 分组, 每组转紧凑 float64 数组存入 cache
@@ -1781,6 +1876,10 @@ class BacktestEngine:
                     continue
                 sym = sub["symbol"][0]
                 d_str = sub["_d_str"][0]
+                if str(sym).endswith(TAIWAN_SUFFIXES) and not BacktestEngine._taiwan_minute_session_complete(sub):
+                    if incomplete is not None:
+                        incomplete.add((sym, d_str))
+                    continue
                 cols = [c for c in numeric_cols if c in sub.columns]
                 cache[(sym, d_str)] = sub.select(
                     [pl.col(c).cast(pl.Float64) for c in cols]
@@ -1962,29 +2061,13 @@ class BacktestEngine:
                 return None
             return _minute_trigger_price(time_id, asset_id)
 
-        def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
-            if not matrix.tradable[time_id, asset_id]:
-                return False
-            prices = (
-                float(matrix.open[time_id, asset_id]),
-                float(matrix.high[time_id, asset_id]),
-                float(matrix.low[time_id, asset_id]),
-                float(matrix.close[time_id, asset_id]),
-            )
-            if not all(_valid_price(value) for value in prices):
-                return False
-            same_price = max(prices) - min(prices) <= max(abs(prices[3]) * 1e-4, 0.01)
-            flag = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
-            return bool(flag[time_id, asset_id]) and same_price
-
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
             if not matrix.tradable[time_id, asset_id]:
                 return False, "buy_suspended"
-            if not _valid_price(entry_prices[time_id, asset_id]) or not _valid_price(
-                matrix.raw_scale[time_id, asset_id]
-            ):
+            price = entry_prices[time_id, asset_id]
+            if not _valid_price(price) or not _valid_price(matrix.raw_scale[time_id, asset_id]):
                 return False, "buy_invalid_price"
-            if _one_price_limit(time_id, asset_id, "up"):
+            if _at_locked_limit(matrix, time_id, asset_id, price, "up"):
                 return False, "buy_limit_up"
             return True, ""
 
@@ -1994,7 +2077,7 @@ class BacktestEngine:
             price = override if override is not None else exit_prices[time_id, asset_id]
             if not _valid_price(price) or not _valid_price(matrix.raw_scale[time_id, asset_id]):
                 return False, "sell_invalid_price"
-            if _one_price_limit(time_id, asset_id, "down"):
+            if _at_locked_limit(matrix, time_id, asset_id, price, "down"):
                 return False, "sell_limit_down"
             return True, ""
 
@@ -2093,17 +2176,16 @@ class BacktestEngine:
         ) -> bool:
             pos = positions[asset_id]
             symbol = matrix.symbols[asset_id]
-            if not config.can_exit_after_sessions(symbol, int(pos["hold_days"])):
-                _mark_pending(asset_id, reason, signal_date)
-                _count("sell_minimum_holding")
-                return False
             signal_id = (
                 _signal_id(_exit_signal_code(matrix, time_id, asset_id), matrix.exit_signal_ids)
                 if reason == "signal" else None
             )
+            if not config.can_exit_after_sessions(symbol, int(pos["hold_days"])):
+                _mark_pending(asset_id, reason, signal_date, signal_id)
+                _count("sell_minimum_holding")
+                return False
             minute_trigger = config.exit_fill == "signal_next_minute" and reason == "signal"
             if minute_trigger and override is None:
-                pos = positions[asset_id]
                 if pos.get("pending_exit_next_open"):
                     override = float(matrix.open[time_id, asset_id])
                     at_open = True
@@ -2390,6 +2472,8 @@ class BacktestEngine:
             (time.perf_counter() - statistics_started) * 1000,
             1,
         )
+        if minute_bars.enabled:
+            execution_stats["minute_incomplete_sessions"] = len(minute_bars.incomplete)
         stats["execution"] = execution_stats
         stats["pending_exit_positions"] = sum(1 for pos in positions.values() if pos.get("pending_exit_reason"))
         stats["market_matrix_shape"] = [time_count, asset_count]
@@ -2518,16 +2602,30 @@ class BacktestEngine:
     ) -> SimResult:
         """全量独立候选统计：按每个候选样本的实际执行收益聚合。
 
+        Statistics cover realized samples only; UNCLOSED_EXIT_REASON samples are listed in trades
+        and summarized apart in unclosed_at_end.
+
         Sharpe/Sortino use one return per session from the first session through the later of
         formal_end and the last exit, zero on sessions without exits; without session_dates
         only exit days are used.
         """
         options = options or SimulationOptions()
+        unclosed = [t for t in trades if t.exit_reason == UNCLOSED_EXIT_REASON]
+        unclosed_stats = {
+            "count": len(unclosed),
+            "avg_return": (
+                round(float(np.mean([t.pnl_pct for t in unclosed])), 4) if unclosed else None
+            ),
+            "pnl_amount": round(float(sum(t.pnl_amount for t in unclosed)), 2),
+            "valuation": "last_close",
+        }
+        all_trades = trades
+        trades = [t for t in trades if t.exit_reason != UNCLOSED_EXIT_REASON]
         if not trades:
             return SimResult(
                 equity_curve=[],
                 drawdown_curve=[],
-                trades=[],
+                trades=all_trades if options.include_trades else [],
                 per_symbol_stats=[],
                 stats={
                     "mode": "full",
@@ -2535,6 +2633,7 @@ class BacktestEngine:
                     "error": "no executable trades",
                     "n_candidates": int(n_candidates),
                     "n_trades": 0,
+                    "unclosed_at_end": unclosed_stats,
                     "execution": execution_stats,
                 },
             )
@@ -2609,6 +2708,7 @@ class BacktestEngine:
             "full_kind": "candidate_execution",
             "n_candidates": int(n_candidates),
             "n_trades": int(len(trades)),
+            "unclosed_at_end": unclosed_stats,
             "n_days": int(len(daily_returns)),
             "avg_daily_candidates": round(float(len(trades) / max(len(daily_returns), 1)), 1),
             "avg_return": round(float(np.mean(pnls)), 4),
@@ -2652,7 +2752,7 @@ class BacktestEngine:
         return SimResult(
             equity_curve=equity_curve if options.include_curves else [],
             drawdown_curve=drawdown_curve if options.include_curves else [],
-            trades=trades if options.include_trades else [],
+            trades=all_trades if options.include_trades else [],
             per_symbol_stats=(
                 BacktestEngine._calc_per_symbol(trades)
                 if options.include_per_symbol_stats

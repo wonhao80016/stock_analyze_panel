@@ -11,7 +11,7 @@ import polars as pl
 import pytest
 
 from app.backtest.engine import BacktestEngine
-from app.backtest.matrix import build_market_data_matrix, matrix_feature
+from app.backtest.matrix import RealtimeMarketDataMatrix, build_market_data_matrix, matrix_feature
 from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
 from app.repository import HISTORY_WARMUP_SESSIONS
 from app.services.screener import ScreenerService
@@ -208,9 +208,14 @@ def test_an_estimated_row_left_in_the_buffer_is_skipped_by_later_windows(tmp_pat
     """Like a missing bar, an estimated amount drops out of later 5- and 20-bar windows."""
     engine, panel, days, context = _realtime_setup(tmp_path)
     engine.prepare_realtime_matrix(context, ["amount_scored"])
-    # The engine rebuilds on a new session; append to its buffer to keep the estimated row.
-    buffer = engine._realtime_matrices["test:amount"].buffer
-    buffer.update(_live(panel, days[-1], {ESTIMATED: False, QUOTED: False}))
+    # A new session must rebuild the buffer, so build one that still holds the estimated row.
+    field_columns = engine._realtime_matrices["test:amount"].buffer.field_columns
+    later = _live(panel, days[-1], {ESTIMATED: False, QUOTED: False})
+    buffer = RealtimeMarketDataMatrix(
+        pl.concat([context.history, context.current, later], how="diagonal_relaxed"),
+        field_columns=field_columns,
+    )
+    buffer.update(later)
 
     snapshot = buffer.snapshot()
 

@@ -44,6 +44,7 @@ def _daily_panel(start: date, days: int, symbols: tuple[str, ...]) -> pl.DataFra
                 "high": 10.5,
                 "low": 9.5,
                 "close": 10.0 + offset * 0.1,
+                "raw_close": 10.0 + offset * 0.1,
                 "volume": 1000.0,
             })
     return pl.DataFrame(rows).sort(["symbol", "date"])
@@ -85,7 +86,7 @@ def test_attach_replaces_with_newer_announcement():
     assert roe[4] is None            # 4-5 公告日
     assert roe[5] == 20.0            # 4-6 起 20.0
     assert roe[13] == 20.0           # 4-14
-    assert roe[14] is None           # 4-15 二次公告日, 当天仍不可用 (严格大于)
+    assert roe[14] == 20.0           # 4-15 二次公告日: 新公告当天不可用, 沿用 4-05 公告
     assert roe[15] == 33.0           # 4-16 起新公告生效
 
 

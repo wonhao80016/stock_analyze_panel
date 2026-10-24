@@ -70,8 +70,10 @@ _RAW_PRICE_BOUND_KEYS = (
     "float_cap_min", "float_cap_max",
 )
 _MATRIX_CACHE_VERSION = 3
-_DIRECT_MATRIX_LOADER_VERSION = 10
+_DIRECT_MATRIX_LOADER_VERSION = 11
 _MATRIX_AXIS_INDEX_VERSION = 1
+# Newest axis index files kept next to the matrix disk cache.
+_MATRIX_AXIS_INDEX_KEEP = 16
 _PUBLISHED_LIMIT_SIGNALS = (
     ("signal_limit_up", "limit_up_locked"),
     ("signal_limit_down", "limit_down_locked"),
@@ -1605,18 +1607,13 @@ def _write_tradable_matrix(
     close: np.ndarray,
     volume: np.ndarray,
 ) -> None:
+    """_tradable_matrix written in row chunks, so a memmap build keeps bounded memory."""
     rows_per_chunk = max(1, (32 * 1024 * 1024) // max(1, open_.shape[1] * 4))
     for start in range(0, open_.shape[0], rows_per_chunk):
         stop = min(open_.shape[0], start + rows_per_chunk)
-        values = (
-            np.isfinite(open_[start:stop])
-            & np.isfinite(high[start:stop])
-            & np.isfinite(low[start:stop])
-            & np.isfinite(close[start:stop])
-            & np.isfinite(volume[start:stop])
-            & (volume[start:stop] > 0)
+        target[start:stop] = _tradable_matrix(
+            open_[start:stop], high[start:stop], low[start:stop], close[start:stop], volume[start:stop],
         )
-        target[start:stop] = values.astype(np.uint8, copy=False)
 
 
 def _matrix_time_axes(
@@ -1998,10 +1995,18 @@ def _prune_matrix_disk_cache(
         if not leased:
             _try_delete_matrix_cache_path(path)
 
+    _prune_matrix_axis_indexes(root)
     entries: list[tuple[Path, int, int]] = []
     for path in root.glob("v*-*"):
         if not path.is_dir():
             continue
+        if path != keep and not path.name.startswith(f"v{_DIRECT_MATRIX_LOADER_VERSION}-"):
+            with _MATRIX_DISK_CACHE_LOCK:
+                leased = _MATRIX_DISK_CACHE_LEASES.get(str(path), 0) > 0
+                if leased:
+                    _MATRIX_DISK_CACHE_PENDING_DELETE.add(str(path))
+            if not leased and _try_delete_matrix_cache_path(path):
+                continue
         try:
             size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
             entries.append((path, size, path.stat().st_mtime_ns))
@@ -2056,6 +2061,24 @@ def _prune_matrix_disk_cache(
             total -= size
 
 
+def _prune_matrix_axis_indexes(root: Path) -> None:
+    """Delete axis index files of other versions and all but the newest current ones."""
+    current: list[tuple[int, Path]] = []
+    for path in root.glob(".axes-*.json"):
+        try:
+            if path.name.startswith(f".axes-v{_MATRIX_AXIS_INDEX_VERSION}-"):
+                current.append((path.stat().st_mtime_ns, path))
+            else:
+                path.unlink()
+        except OSError as exc:
+            logger.debug("matrix axis index prune skipped %s: %s", path, exc)
+    for _mtime, path in sorted(current, reverse=True)[_MATRIX_AXIS_INDEX_KEEP:]:
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.debug("matrix axis index prune skipped %s: %s", path, exc)
+
+
 def _matrix_axis_cache_path(
     cache_root: Path,
     parquet_root: Path,
@@ -2100,6 +2123,7 @@ def _load_or_build_matrix_axes(
                 int(previous.get("version", -1)) == _MATRIX_AXIS_INDEX_VERSION
                 and previous.get("source_partitions") == dict(source_partitions)
             ):
+                os.utime(path, None)
                 return (
                     [date.fromisoformat(value) for value in previous["dates"]],
                     [str(value) for value in previous["symbols"]],
@@ -2548,6 +2572,9 @@ def build_market_matrix_from_signals(
             signals.exit_signal_ids,
         )
         trigger_mask = signals.exit != 0
+        if exit_reference_price is None:
+            # The trigger line is the only reference known intraday; other exits keep the daily fill.
+            resolved_exit_reference[:] = np.nan
         resolved_exit_reference[trigger_mask] = trigger_reference[trigger_mask]
         minute_exit_line, minute_exit_line_code = _armed_minute_exit_lines(
             market, signals.exit_signal_ids,
@@ -2761,8 +2788,9 @@ class RealtimeMarketDataMatrix:
     """Mutable staging buffer for one live asset universe.
 
     Historical rows are built once. Repeated snapshots for the current bar only
-    overwrite the last row; a later timestamp appends one row. Strategies only
-    receive read-only views through :meth:`snapshot`.
+    overwrite the last row; a later timestamp of the same session appends one row,
+    and another session must rebuild the buffer. Strategies only receive read-only
+    views through :meth:`snapshot`.
     """
 
     def __init__(
@@ -2802,6 +2830,9 @@ class RealtimeMarketDataMatrix:
         if latest_timestamp < current_timestamp:
             raise ValueError("live matrix update timestamp is older than current snapshot")
 
+        if latest.timestamp_labels[0][:10] != self.market.timestamp_labels[-1][:10]:
+            # History rows are final and adjusted as of the session they were built for.
+            raise ValueError("live matrix update starts another session; rebuild required")
         if latest_timestamp == current_timestamp:
             _overwrite_latest_market_row(self.market, latest, target_ids)
         else:

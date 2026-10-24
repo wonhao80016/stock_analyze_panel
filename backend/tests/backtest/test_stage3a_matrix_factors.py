@@ -147,14 +147,14 @@ def test_live_quote_rows_take_raw_close_from_their_close():
     history = _filter_panel()
     live = RealtimeMarketDataMatrix(history, field_columns={"raw_close", "total_shares"})
     quote = history.filter(pl.col("date") == date(2024, 1, 3)).drop("raw_close").with_columns(
-        pl.lit(date(2024, 1, 4)).alias("date"), pl.lit(3.4).alias("close"),
+        pl.lit(3.4).alias("close"),
     )
 
     live.update(quote)
     snapshot = live.snapshot()
 
     assert float(snapshot.field("raw_close")[-1, 0]) == pytest.approx(3.4)
-    assert build_basic_filter_mask(snapshot, {"price_min": 3.0})[:, 0].tolist() == [True, True, True]
+    assert build_basic_filter_mask(snapshot, {"price_min": 3.0})[:, 0].tolist() == [True, True]
 
 
 def _write_enriched(root, days: list[date]) -> None:

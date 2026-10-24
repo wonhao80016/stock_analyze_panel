@@ -515,6 +515,41 @@ describe('策略回測工作區', () => {
     expect(screen.getByRole('cell', { name: /^5\s*→\s*20$/ })).toBeInTheDocument()
   })
 
+  it('期末未平倉的候選以中文標示並另列數量', async () => {
+    mockStrategies()
+    vi.mocked(api.strategyBacktestRun).mockResolvedValue({
+      error: null,
+      stats: {
+        total_return: 0.01,
+        n_trades: 0,
+        execution: { unclosed_at_end: 1 },
+        unclosed_at_end: { count: 1, avg_return: -0.1, pnl_amount: -100, valuation: 'last_close' },
+      },
+      trades: [{
+        symbol: '2330.TWSE',
+        entry_date: '2025-01-02',
+        exit_date: '2025-01-10',
+        entry_price: 1000,
+        exit_price: 900,
+        shares: 1000,
+        exit_shares: 1000,
+        lots: 1,
+        pnl_amount: -100,
+        pnl_pct: -0.1,
+        duration: 5,
+        exit_reason: 'end_unclosed',
+      }],
+      equity_curve: [],
+      drawdown_curve: [],
+    } as any)
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    submit()
+
+    expect(await screen.findByRole('cell', { name: '期末未平倉（以收盤估值）' })).toBeInTheDocument()
+    expect(screen.getByText(/1 筆候選到資料結尾仍未平倉/)).toBeInTheDocument()
+  })
+
   it('出場股數未變時股數與張數欄不顯示箭頭', async () => {
     mockStrategies()
     vi.mocked(api.strategyBacktestRun).mockResolvedValue({

@@ -27,7 +27,7 @@ import polars as pl
 logger = logging.getLogger(__name__)
 
 # 财务因子名 -> (metrics 表列名, 是否需要除以收盘价)
-# pb_latest 单列声明为 bps 倒数口径: 因子值 = close / bps。
+# pb_latest = raw_close / bps: bps is per share as reported, so it pairs with the raw price.
 FUNDAMENTAL_FACTORS: dict[str, dict[str, Any]] = {
     "pb_latest": {"column": "bps", "price_ratio": True},
     "roe_latest": {"column": "roe", "price_ratio": False},
@@ -100,19 +100,22 @@ def attach_fundamental_factors(
             for name in missing_columns
         ])
 
+    if _needs_raw_close(missing_columns) and "raw_close" not in panel.columns:
+        raise ValueError("pb_latest requires raw_close")
     columns = sorted(
         {FUNDAMENTAL_FACTORS[name]["column"] for name in missing_columns}
     )
     right = snapshot.select(["symbol", "_announce", *columns]).sort(["symbol", "_announce"])
+    # The latest report announced strictly before the session, as on the matrix path.
     joined = panel.join_asof(
         right,
         left_on="date",
         right_on="_announce",
         by="symbol",
         strategy="backward",
+        allow_exact_matches=False,
         check_sortedness=False,  # 双侧均已按 (symbol, key) 排序, 免除逐组检查开销
     )
-    announced = pl.col("_announce").is_not_null() & (pl.col("date") > pl.col("_announce"))
     expressions = []
     for name in missing_columns:
         spec = FUNDAMENTAL_FACTORS[name]
@@ -120,15 +123,17 @@ def attach_fundamental_factors(
         if spec["price_ratio"]:
             value = (
                 pl.when(source > 0)
-                .then(pl.col("close") / source)
+                .then(pl.col("raw_close") / source)
                 .otherwise(None)
             )
         else:
             value = source
-        expressions.append(
-            pl.when(announced).then(value).otherwise(None).alias(name)
-        )
+        expressions.append(value.alias(name))
     return joined.with_columns(expressions)
+
+
+def _needs_raw_close(names: list[str]) -> bool:
+    return any(FUNDAMENTAL_FACTORS[name]["price_ratio"] for name in names)
 
 
 def build_fundamental_matrices(
@@ -139,7 +144,7 @@ def build_fundamental_matrices(
     """为 MarketDataMatrix 构建财务因子 TxN float32 字段。
 
     与 attach_fundamental_factors 同一口径: 公告日次一交易日起前向填充,
-    无数据为 NaN。pb 类因子在矩阵侧用 close / bps 现算。
+    无数据为 NaN; 最新一期为空值时因子即为 NaN。pb 类因子在矩阵侧用 raw_close / bps 现算。
     """
     requested = [str(name) for name in names if str(name) in FUNDAMENTAL_FACTOR_NAMES]
     if not requested:
@@ -151,6 +156,9 @@ def build_fundamental_matrices(
         for name in requested:
             result[name] = np.full(shape, np.nan, dtype=np.float32)
         return result
+    raw_close = market.fields.get("raw_close")
+    if _needs_raw_close(requested) and raw_close is None:
+        raise ValueError("pb_latest requires raw_close")
 
     asset_index = {symbol: index for index, symbol in enumerate(market.symbols)}
     labels = market.timestamp_labels
@@ -160,12 +168,13 @@ def build_fundamental_matrices(
         FUNDAMENTAL_FACTORS[name]["column"]: np.full(shape, np.nan, dtype=np.float32)
         for name in requested
     }
-    announce_text = snapshot["announce_date"].str.slice(0, 10)
-    for row_index, symbol in enumerate(snapshot["symbol"].to_list()):
+    ordered = snapshot.sort(["symbol", "_announce"], maintain_order=True)
+    announce_dates = ordered["_announce"].to_list()
+    for row_index, symbol in enumerate(ordered["symbol"].to_list()):
         column_index = asset_index.get(symbol)
         if column_index is None:
             continue
-        announce = announce_text[row_index]
+        announce = announce_dates[row_index]
         if announce is None:
             continue
         # 公告日之后 (严格大于) 的首个时间行索引
@@ -173,17 +182,17 @@ def build_fundamental_matrices(
         if start >= shape[0]:
             continue
         for column, target in raw_columns.items():
-            value = snapshot[column][row_index]
-            if value is None or not np.isfinite(float(value)):
-                continue
-            target[start:, column_index] = float(value)
+            value = ordered[column][row_index]
+            target[start:, column_index] = (
+                float(value) if value is not None and np.isfinite(float(value)) else np.nan
+            )
 
     for name in requested:
         spec = FUNDAMENTAL_FACTORS[name]
         source = raw_columns[spec["column"]]
         if spec["price_ratio"]:
             with np.errstate(divide="ignore", invalid="ignore"):
-                matrix = (market.close / source).astype(np.float32)
+                matrix = (raw_close / source).astype(np.float32)
             matrix[~(source > 0)] = np.nan
             matrix[np.isinf(matrix)] = np.nan
         else:

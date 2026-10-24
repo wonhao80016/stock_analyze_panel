@@ -347,7 +347,7 @@ def test_market_matrix_derives_raw_close_only_for_live_quotes():
         panel.with_columns(pl.col("close").alias("raw_close")),
         field_columns={"raw_close"},
     )
-    live.update(panel.with_columns(pl.lit(date(2024, 1, 2)).alias("date")))
+    live.update(panel.with_columns(pl.col("close") + 0.5))
     snapshot = live.snapshot()
     np.testing.assert_array_equal(snapshot.field("raw_close")[-1], snapshot.close[-1])
 
@@ -1058,11 +1058,12 @@ def test_realtime_market_matrix_overwrites_last_row_and_appends_new_bar():
     assert buffer.update_count == 1
     assert not snapshot.close.flags.writeable
 
-    next_bar = same_bar.with_columns(pl.lit(date(2024, 1, 3)).alias("date"))
-    buffer.update(next_bar)
-    assert buffer.snapshot().shape == (3, 2)
+    next_session = same_bar.with_columns(pl.lit(date(2024, 1, 3)).alias("date"))
+    with pytest.raises(ValueError, match="rebuild"):
+        buffer.update(next_session)
+    assert buffer.snapshot().shape == (2, 2)
     assert buffer.build_count == 1
-    assert buffer.update_count == 2
+    assert buffer.update_count == 1
 
 
 def test_strategy_engine_runs_matrix_strategy_without_legacy_filter():

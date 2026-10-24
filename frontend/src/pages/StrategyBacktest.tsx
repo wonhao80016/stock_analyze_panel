@@ -39,6 +39,15 @@ function exactInstrumentMatches(input: string, results: InstrumentSearchResult[]
   return [...new Map(matches.map(result => [result.symbol, result])).values()]
 }
 
+const EXIT_REASON_LABELS: Record<string, string> = {
+  end_unclosed: '期末未平倉（以收盤估值）',
+}
+
+function exitReasonLabel(reason: string | undefined): string {
+  if (!reason) return '—'
+  return EXIT_REASON_LABELS[reason] ?? reason
+}
+
 function assetTypeLabel(assetType: string | undefined): string {
   if (assetType === 'stock') return '股票'
   if (assetType === 'etf') return 'ETF'
@@ -177,6 +186,8 @@ function Results({ result, lotMode }: { result: StrategyBacktestResult; lotMode:
   const riskFreeRate = finiteNumber(result.stats.risk_free_rate)
   const entryCandidates = finiteNumber(result.stats.selection?.entry_candidates)
   const lotSizeRejections = finiteNumber(result.stats.execution?.buy_lot_size)
+  const unclosedAtEnd = finiteNumber(result.stats.execution?.unclosed_at_end)
+  const unclosedPnl = finiteNumber(result.stats.unclosed_at_end?.pnl_amount)
   const benchmark = result.stats.benchmark
   const benchmarkReturn = finiteNumber(result.stats.benchmark_return)
   const excessReturn = finiteNumber(result.stats.excess)
@@ -202,6 +213,11 @@ function Results({ result, lotMode }: { result: StrategyBacktestResult; lotMode:
         {fieldCoverageNote && (
           <div role="status" className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-warning">
             {fieldCoverageNote}
+          </div>
+        )}
+        {unclosedAtEnd != null && unclosedAtEnd > 0 && (
+          <div role="status" className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] leading-relaxed text-warning">
+            另有 {formatNumber(unclosedAtEnd, 0)} 筆候選到資料結尾仍未平倉，以最後收盤價估值列於交易紀錄{unclosedPnl != null && `（估值損益 ${formatNumber(unclosedPnl)}）`}，不計入交易數、勝率與平均報酬。
           </div>
         )}
         {exchangeNotes.map(note => (
@@ -297,7 +313,7 @@ function Results({ result, lotMode }: { result: StrategyBacktestResult; lotMode:
                       )}
                       <td className={cn('px-2 py-2 text-right font-mono', pnl != null && (pnl >= 0 ? 'text-danger' : 'text-bear'))}>{formatNumber(pnl)}</td>
                       <td className={cn('px-2 py-2 text-right font-mono', returnValue != null && (returnValue >= 0 ? 'text-danger' : 'text-bear'))}>{formatPercent(returnValue)}</td>
-                      <td className="whitespace-nowrap px-2 py-2">{trade.exit_reason || '—'}</td>
+                      <td className="whitespace-nowrap px-2 py-2">{exitReasonLabel(trade.exit_reason)}</td>
                     </tr>
                   )
                 })}

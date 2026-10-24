@@ -429,6 +429,16 @@ class DataStore:
                 logger.debug("unified view %s skipped: %s", name, e)
 
 
+_MINUTE_FILL_COLUMNS = (
+    "symbol", "datetime", "open", "high", "low", "close", "volume", "amount", "unattributed_volume",
+)
+
+
+def _available_minute_columns(lf: pl.LazyFrame) -> list[str]:
+    available = set(lf.collect_schema().names())
+    return [name for name in _MINUTE_FILL_COLUMNS if name in available]
+
+
 # Stored enriched columns that cannot be recomputed from OHLCV; strategies score and filter on them.
 _STORED_STATE_COLUMNS = ("turnover_rate", "consecutive_limit_ups", "consecutive_limit_downs")
 
@@ -1836,27 +1846,25 @@ class KlineRepository:
         """多 symbol × 日期范围的分钟K查询 (分钟K精确回测用)。
 
         一次 scan_parquet + predicate pushdown 读多只股票在 [start, end] 内的所有分钟K。
-        返回列: symbol, datetime, open, high, low, close, volume, amount。
+        返回列: symbol, datetime, open, high, low, close, volume, amount, unattributed_volume。
+        无分钟K分区时返回空表; 分区不可读时抛出异常。
         """
         if not symbols:
             return pl.DataFrame()
-        try:
-            lf = self._scan_minute(self._minute_glob_for(asset_type))
-            available = set(lf.collect_schema().names())
-            select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
-            return (
-                lf.select(select_cols)
-                .filter(
-                    pl.col("symbol").is_in(symbols)
-                    & (pl.col("datetime").dt.date() >= start)
-                    & (pl.col("datetime").dt.date() <= end)
-                )
-                .sort(["symbol", "datetime"])
-                .collect(streaming=True)
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("分钟K范围查询失败: %s", e)
+        base = Path(self.store.data_dir) / ("kline_etf_minute" if asset_type == "etf" else "kline_minute")
+        if next(base.rglob("*.parquet"), None) is None:
             return pl.DataFrame()
+        lf = self._scan_minute(self._minute_glob_for(asset_type))
+        return (
+            lf.select(_available_minute_columns(lf))
+            .filter(
+                pl.col("symbol").is_in(symbols)
+                & (pl.col("datetime").dt.date() >= start)
+                & (pl.col("datetime").dt.date() <= end)
+            )
+            .sort(["symbol", "datetime"])
+            .collect(engine="streaming")
+        )
 
     def get_minute_by_dates(
         self,
@@ -1871,8 +1879,9 @@ class KlineRepository:
         对应的分区文件 (date=YYYY-MM-DD/part.parquet), 内存与回测区间长度解耦,
         只随触发日数量增长。
 
-        缺失的日期分区直接跳过 (该日无分钟K数据)。
-        返回列: symbol, datetime, open, high, low, close, volume, amount。
+        缺失的日期分区直接跳过 (该日无分钟K数据); 分区不可读时抛出异常。
+        返回列: symbol, datetime, open, high, low, close, volume, amount, unattributed_volume
+        (旧分区没有 unattributed_volume 时为空值)。
         """
         if not symbols or not dates:
             return pl.DataFrame()
@@ -1885,19 +1894,13 @@ class KlineRepository:
                 parts.append(str(p))
         if not parts:
             return pl.DataFrame()
-        try:
-            lf = self._scan_minute(parts)
-            available = set(lf.collect_schema().names())
-            select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
-            return (
-                lf.select(select_cols)
-                .filter(pl.col("symbol").is_in(symbols))
-                .sort(["symbol", "datetime"])
-                .collect(streaming=True)
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("分钟K按日期查询失败: %s", e)
-            return pl.DataFrame()
+        lf = self._scan_minute(parts)
+        return (
+            lf.select(_available_minute_columns(lf))
+            .filter(pl.col("symbol").is_in(symbols))
+            .sort(["symbol", "datetime"])
+            .collect(engine="streaming")
+        )
 
     # ================================================================
     # Polars 查询内部方法
