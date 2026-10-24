@@ -18,7 +18,10 @@ import asyncio
 from datetime import date, datetime, timedelta
 import logging
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
+
+import polars as pl
 
 from app.taiwan.detail_models import (
     SectionMeta,
@@ -35,10 +38,11 @@ from app.taiwan.detail_models import (
     TaiwanStockPriceLimit,
     TaiwanStockRealtime,
 )
-from app.taiwan.benchmarks import get_benchmark, is_benchmark
+from app.taiwan.benchmarks import TAIEX, TPEX_INDEX, get_benchmark, is_benchmark
 from app.taiwan.corporate_actions import TaiwanCorporateActionStore
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.index_daily import get_index_daily_service
+from app.taiwan.enrichment.factors import short_margin_ratio
 from app.taiwan.enrichment.index import TaiwanIndexProvider
 from app.taiwan.enrichment.institutional import TaiwanInstitutionalProvider
 from app.taiwan.enrichment.margin import TaiwanMarginProvider
@@ -55,7 +59,41 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STORE_LOOKBACK_DAYS = 20
+_INDEX_LOOKBACK_DAYS = 20
 _FLOW_FIELDS = ("foreign_net", "investment_trust_net", "dealer_net")
+_NOT_IN_MARGIN_TABLE = "symbol_not_in_margin_table"
+
+
+def _configured_data_dir():
+    """The configured data dir; raises instead of resolving a relative path against the working directory."""
+    from app.config import settings
+
+    if not settings.data_dir:
+        raise RuntimeError("settings.data_dir is not configured")
+    return settings.data_dir
+
+
+def _has_exchange(store: Any, day: date, canonical: str) -> bool:
+    """Whether the stored *day* holds a row of *canonical*'s exchange.
+
+    A date partition holds both exchanges, and the refresh can store one of them alone.
+    Only the symbol column is read, since the detail page polls this path.
+    """
+    suffix = "." + canonical.rsplit(".", 1)[-1]
+    data_dir = getattr(store, "_data_dir", None)
+    if data_dir is None:
+        symbols = store.read_range(None, day, day)
+        return not symbols.is_empty() and any(str(s).endswith(suffix) for s in symbols.get_column("symbol"))
+    part = Path(data_dir) / f"date={day.isoformat()}" / "part.parquet"
+    if not part.exists():
+        return False
+    return bool(
+        pl.scan_parquet(part).select(pl.col("symbol").cast(pl.String).str.ends_with(suffix).any()).collect().item()
+    )
+
+
+def _latest_with_exchange(store: Any, dates: list[date], canonical: str) -> date | None:
+    return next((d for d in reversed(dates) if _has_exchange(store, d, canonical)), None)
 
 
 class TaiwanStockDetailService:
@@ -470,19 +508,22 @@ class TaiwanStockDetailService:
             from app.taiwan.institutional_store import TaiwanInstitutionalStore
 
             store = TaiwanInstitutionalStore()
-            dates = sorted(store.available_dates())
-            if not dates:
+            lookback = sorted(store.available_dates())[-_STORE_LOOKBACK_DAYS:]
+            if not lookback:
                 return None
-            lookback = dates[-_STORE_LOOKBACK_DAYS:]
-            df = store.read_range([sym.canonical], lookback[0], lookback[-1])
+            latest = _latest_with_exchange(store, lookback, sym.canonical)
+            if latest is None:
+                return None
+            df = store.read_range([sym.canonical], latest, latest)
             if df.is_empty():
-                return None
-            r = df.sort("date").to_dicts()[-1]
+                r: dict[str, Any] = {"date": latest, **dict.fromkeys(_FLOW_FIELDS, 0), "computed_net": 0}
+            else:
+                r = df.to_dicts()[-1]
         except Exception as e:  # noqa: BLE001
             logger.debug("Institutional store fallback failed for %s: %s", sym.canonical, e)
             return None
 
-        flows_5d = self._institutional_5d(sym.canonical, r["date"])
+        flows_5d = self._institutional_5d(sym.canonical, latest)
         total = r.get("computed_net")
         if total is None:
             total = r.get("official_net")
@@ -508,8 +549,8 @@ class TaiwanStockDetailService:
         """Net flows summed over the five stored trading days ending at ``as_of``.
 
         T86 lists only securities the institutions traded that day, so a stored date
-        without a row for the symbol counts as zero. A window the store cannot fill
-        is reported as unknown, never summed short.
+        without a row for the symbol counts as zero. A window the store cannot fill,
+        or with a date lacking the symbol's exchange, is reported as unknown.
         """
         unknown: dict[str, int | None] = dict.fromkeys(_FLOW_FIELDS)
         try:
@@ -519,9 +560,11 @@ class TaiwanStockDetailService:
             window = [d for d in sorted(store.available_dates()) if d <= as_of][-5:]
             if len(window) < 5 or window[-1] != as_of:
                 return unknown
-            df = store.read_range([canonical], window[0], as_of)
-            if df.is_empty() or as_of not in df.get_column("date").to_list():
+            if not all(_has_exchange(store, d, canonical) for d in reversed(window)):
                 return unknown
+            df = store.read_range([canonical], window[0], as_of)
+            if df.is_empty():
+                return dict.fromkeys(_FLOW_FIELDS, 0)
             return {
                 field: None if df[field].null_count() else int(df[field].sum())
                 for field in _FLOW_FIELDS
@@ -551,25 +594,30 @@ class TaiwanStockDetailService:
         try:
             t_now = taipei_now()
             today = t_now.date()
-            margins = []
+            table = []
             trade_dt = today
             for offset in range(5):
                 check_d = today - timedelta(days=offset)
                 if check_d.weekday() >= 5:
                     continue
                 try:
-                    margins = self.margin_provider.fetch_live_day(
+                    # The whole table tells "not listed today" apart from "no table today".
+                    table = self.margin_provider.fetch_live_day(
                         exchange=sym.exchange.value.upper(),
                         trade_date=check_d,
-                        target_code=sym.code,
+                        target_code=None,
                         timeout=3.0,
                     )
-                    if margins:
+                    if table:
                         trade_dt = check_d
                         break
                 except Exception:
                     continue
 
+            margins = [m for m in table if m.symbol.split(".")[0] == sym.code]
+            if table and not margins:
+                source = table[0].meta.source if table[0].meta else "twse:mi_margn"
+                return self._margin_not_listed(source, trade_dt)
             if margins:
                 m = margins[0]
                 meta = SectionMeta(
@@ -585,7 +633,7 @@ class TaiwanStockDetailService:
                     margin_change=m.margin_change,
                     short_balance=m.short_balance,
                     short_change=m.short_change,
-                    short_margin_ratio=m.short_margin_ratio,
+                    short_margin_ratio=short_margin_ratio(m.short_balance, m.margin_balance),
                     meta=meta,
                 )
         except Exception as e:
@@ -606,14 +654,16 @@ class TaiwanStockDetailService:
             from app.taiwan.margin_store import TaiwanMarginStore
 
             store = TaiwanMarginStore()
-            dates = sorted(store.available_dates())
-            if not dates:
+            lookback = sorted(store.available_dates())[-_STORE_LOOKBACK_DAYS:]
+            if not lookback:
                 return None
-            lookback = dates[-_STORE_LOOKBACK_DAYS:]
-            df = store.read_range([sym.canonical], lookback[0], lookback[-1])
+            latest = _latest_with_exchange(store, lookback, sym.canonical)
+            if latest is None:
+                return None
+            df = store.read_range([sym.canonical], latest, latest)
             if df.is_empty():
-                return None
-            r = df.sort("date").to_dicts()[-1]
+                return self._margin_not_listed("taiwan_margin_store", latest)
+            r = df.to_dicts()[-1]
         except Exception as e:  # noqa: BLE001
             logger.debug("Margin store fallback failed for %s: %s", sym.canonical, e)
             return None
@@ -630,6 +680,20 @@ class TaiwanStockDetailService:
                 trade_date=str(r.get("date")),
                 status="stale",
                 is_stale=True,
+            ),
+        )
+
+    @staticmethod
+    def _margin_not_listed(source: str, trade_date: date) -> TaiwanMarginData:
+        """The margin table of *trade_date* lists every margin-eligible security, so a missing row has no balances."""
+        return TaiwanMarginData(
+            status="unavailable",
+            meta=SectionMeta(
+                source=source,
+                trade_date=trade_date.isoformat(),
+                status="unavailable",
+                is_stale=False,
+                fallback_reason=_NOT_IN_MARGIN_TABLE,
             ),
         )
 
@@ -665,38 +729,53 @@ class TaiwanStockDetailService:
         )
 
     def _aggregate_market_context(self, exchange: str) -> TaiwanMarketContext:
-        """Fetch benchmark index info for market context."""
+        """The benchmark's latest stored close, measured against the stored close of the session before it."""
         ex = exchange.upper()
         if ex == "TPEX":
+            bench = TPEX_INDEX
             symbol = "TPEX_INDEX"
             name = "櫃買指數"
         else:
+            bench = TAIEX
             symbol = "TAIEX"
             name = "發行量加權股價指數"
 
         try:
-            # Look up recent index series
-            if ex == "TPEX":
-                indices = self.index_provider.parse_tpex_rows([])
-            else:
-                indices = self.index_provider.parse_taiex_rows([])
-            if indices:
-                latest = indices[-1]
+            today = taipei_now().date()
+            bars = get_index_daily_service().store.scan_range(
+                [bench.symbol], today - timedelta(days=_INDEX_LOOKBACK_DAYS), today,
+            )
+            closes = sorted(
+                (row["date"], float(row["close"]))
+                for row in bars.select("date", "close").iter_rows(named=True)
+                if row["close"] is not None
+            )
+            if closes:
+                latest_day, close = closes[-1]
+                sessions = self.daily_store.available_dates()
+                change = change_pct = None
+                if len(closes) > 1:
+                    prev_day, prev_close = closes[-2]
+                    contiguous = not any(prev_day < d < latest_day for d in sessions)
+                    if contiguous and prev_close > 0:
+                        change = round(close - prev_close, 2)
+                        change_pct = round(change / prev_close * 100.0, 2)
+                is_stale = any(d > latest_day for d in sessions)
                 return TaiwanMarketContext(
                     benchmark_symbol=symbol,
                     benchmark_name=name,
-                    close=latest.close,
-                    change=latest.change,
-                    change_pct=latest.change_pct,
+                    close=close,
+                    change=change,
+                    change_pct=change_pct,
                     meta=SectionMeta(
-                        source=latest.meta.source if latest.meta else "twse:index",
-                        trade_date=latest.date.isoformat(),
-                        status="available",
-                        is_stale=False,
+                        source="taiwan_index_store",
+                        trade_date=latest_day.isoformat(),
+                        status="stale" if is_stale else "available",
+                        is_stale=is_stale,
                     ),
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Market context read failed for %s: %s", bench.symbol, e)
 
         return TaiwanMarketContext(
             benchmark_symbol=symbol,
@@ -717,15 +796,9 @@ class TaiwanStockDetailService:
         the rule specifically watches this symbol.
         """
         from app.strategy import monitor_rules as mr_store
-        from app.config import Settings
 
         try:
-            settings = Settings()
-            data_dir = settings.data_dir if hasattr(settings, "data_dir") else None
-            if not data_dir:
-                from pathlib import Path
-                data_dir = Path("data")
-
+            data_dir = _configured_data_dir()
             matched = [
                 r for r in mr_store.load_all(data_dir)
                 if (r.get("scope") == "symbols" and symbol_str in r.get("symbols", []))
@@ -753,39 +826,39 @@ class TaiwanStockDetailService:
             logger.warning("Monitor summary error for %s: %s", symbol_str, e)
             return TaiwanMonitorSummary()
 
+    @staticmethod
+    def _recent_alert(a: dict[str, Any]) -> TaiwanRecentAlert:
+        ts = a.get("ts", 0)
+        price = a.get("trigger_price", a.get("price"))
+        return TaiwanRecentAlert(
+            alert_id=str(a.get("alert_id", a.get("id", ""))),
+            rule_id=str(a.get("rule_id", "")),
+            rule_name=str(a.get("rule_name", a.get("name", ""))),
+            rule_type=str(a.get("rule_type", a.get("type", ""))),
+            severity=str(a.get("severity", "warning")),
+            trigger_price=float(price) if price is not None else None,
+            trigger_value=float(a.get("trigger_value") or 0.0),
+            message=str(a.get("message", "")),
+            triggered_at=datetime.fromtimestamp(ts / 1000.0).isoformat() if ts else "",
+        )
+
     def _aggregate_recent_alerts(self, symbol_str: str) -> list[TaiwanRecentAlert]:
         """Fetch recent alerts for this symbol."""
         from app.services import alert_store
-        from app.config import Settings
         alerts: list[TaiwanRecentAlert] = []
         try:
-            settings = Settings()
-            data_dir = settings.data_dir if hasattr(settings, "data_dir") else None
-            if not data_dir:
-                from pathlib import Path
-                data_dir = Path("data")
-            raw_alerts = alert_store.list_recent(data_dir, days=7, limit=200)
+            raw_alerts = alert_store.list_recent(_configured_data_dir(), days=7, limit=alert_store.MAX_RECORDS)
             for a in raw_alerts:
-                if a.get("symbol") == symbol_str or a.get("rule_symbol") == symbol_str:
-                    ts = a.get("ts", 0)
-                    dt_str = datetime.fromtimestamp(ts / 1000.0).isoformat() if ts else ""
-                    alerts.append(
-                        TaiwanRecentAlert(
-                            alert_id=str(a.get("alert_id", a.get("id", ""))),
-                            rule_id=str(a.get("rule_id", "")),
-                            rule_name=str(a.get("rule_name", a.get("name", ""))),
-                            rule_type=str(a.get("rule_type", a.get("type", ""))),
-                            severity=str(a.get("severity", "warning")),
-                            trigger_price=float(a.get("trigger_price", a.get("price", 0.0))),
-                            trigger_value=float(a.get("trigger_value", 0.0)),
-                            message=str(a.get("message", "")),
-                            triggered_at=dt_str,
-                        )
-                    )
+                if a.get("symbol") != symbol_str and a.get("rule_symbol") != symbol_str:
+                    continue
+                try:
+                    alerts.append(self._recent_alert(a))
+                except (TypeError, ValueError) as e:
+                    logger.warning("Skipping malformed alert %s for %s: %s", a.get("id"), symbol_str, e)
             # Limit to 10
             return alerts[:10]
         except Exception as e:
-            logger.debug("Recent alerts aggregation error for %s: %s", symbol_str, e)
+            logger.warning("Recent alerts aggregation error for %s: %s", symbol_str, e)
             return []
 
 

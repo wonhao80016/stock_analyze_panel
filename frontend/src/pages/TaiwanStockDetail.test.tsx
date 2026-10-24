@@ -332,3 +332,58 @@ describe('TaiwanStockDetail — depositary receipts', () => {
     expect(screen.queryByText('存託憑證')).not.toBeInTheDocument()
   })
 })
+
+describe('TaiwanStockDetail — benchmark card', () => {
+  it('shows the stored benchmark close with its session date', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...buildDetailResponse(),
+      market_context: {
+        benchmark_symbol: 'TAIEX',
+        benchmark_name: '發行量加權股價指數',
+        close: 22200,
+        change: 200,
+        change_pct: 0.91,
+        meta: { source: 'taiwan_index_store', trade_date: '2026-10-22', status: 'available', is_stale: false },
+      },
+    } as any)
+    renderAt(['/stocks/2330.TWSE'], 0)
+
+    expect(await screen.findByText('22200.00')).toBeInTheDocument()
+    expect(screen.getByText('+0.91%')).toBeInTheDocument()
+    expect(screen.getByText('2026-10-22')).toBeInTheDocument()
+  })
+})
+
+describe('TaiwanStockDetail — review fixes', () => {
+  it('marks a benchmark close older than the latest session', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...buildDetailResponse(),
+      market_context: {
+        benchmark_symbol: 'TAIEX',
+        benchmark_name: '發行量加權股價指數',
+        close: 22000,
+        meta: { source: 'taiwan_index_store', trade_date: '2026-10-21', status: 'stale', is_stale: true },
+      },
+    } as any)
+    renderAt(['/stocks/2330.TWSE'], 0)
+
+    expect(await screen.findByText('2026-10-21')).toBeInTheDocument()
+    expect(screen.getByText('非最新交易日')).toBeInTheDocument()
+  })
+
+  it('shows -- for an alert without a trigger price', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...buildDetailResponse(),
+      recent_alerts: [
+        { alert_id: 'a1', rule_id: 'r1', rule_name: '無價格規則', rule_type: 'price', severity: 'warning',
+          trigger_price: null, trigger_value: 0, message: 'm1', triggered_at: '2026-10-22T10:00:00' },
+        { alert_id: 'a2', rule_id: 'r2', rule_name: '有價格規則', rule_type: 'price', severity: 'warning',
+          trigger_price: 24.3, trigger_value: 0, message: 'm2', triggered_at: '2026-10-22T10:01:00' },
+      ],
+    } as any)
+    renderAt(['/stocks/2330.TWSE'], 0)
+
+    expect(await screen.findByText('觸發價 --')).toBeInTheDocument()
+    expect(screen.getByText('觸發價 24.30')).toBeInTheDocument()
+  })
+})

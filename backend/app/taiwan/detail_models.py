@@ -153,7 +153,7 @@ class TaiwanRecentAlert(BaseModel):
     rule_name: str
     rule_type: str
     severity: str
-    trigger_price: float
+    trigger_price: float | None = None
     trigger_value: float
     message: str
     triggered_at: str

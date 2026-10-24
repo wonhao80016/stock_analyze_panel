@@ -19,6 +19,7 @@ import urllib.request
 from datetime import date, datetime
 from typing import Any
 
+from app.taiwan.enrichment.institutional import stamped_for
 from app.taiwan.enrichment.models import (
     DatasetType,
     MarginTrading,
@@ -55,10 +56,13 @@ class TwseMarginAdapter:
         lot_multiplier: int = 1000,
     ) -> list[MarginTrading]:
         rows = payload.get("data")
+        stamps = [payload.get("date")]
         if not rows and "tables" in payload:
-            rows = next((table.get("data") for table in payload["tables"]
-                         if table.get("data") and len(table["data"][0]) >= 16), None)
-        if not rows:
+            table = next((table for table in payload["tables"]
+                          if table.get("data") and len(table["data"][0]) >= 16), {})
+            rows = table.get("data")
+            stamps.append(table.get("date"))
+        if not rows or not stamped_for(stamps, trade_date):
             return []
 
         fetched_at = datetime.now()
@@ -154,9 +158,11 @@ class TpexMarginAdapter:
         lot_multiplier: int = 1000,
     ) -> list[MarginTrading]:
         rows = payload.get("aaData")
+        stamps = [payload.get("date"), payload.get("reportDate")]
         if not rows and "tables" in payload and payload["tables"]:
             rows = payload["tables"][0].get("data")
-        if not rows:
+            stamps.append(payload["tables"][0].get("date"))
+        if not rows or not stamped_for(stamps, trade_date):
             return []
 
         fetched_at = datetime.now()

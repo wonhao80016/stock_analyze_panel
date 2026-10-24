@@ -502,6 +502,12 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                         : '--'}
                     </span>
                   </div>
+                  {data.market_context.meta?.trade_date && (
+                    <span className="mt-0.5 text-[10px] text-muted font-mono">{data.market_context.meta.trade_date}</span>
+                  )}
+                  {data.market_context.meta?.is_stale && (
+                    <span className="text-[10px] text-amber-500">非最新交易日</span>
+                  )}
                 </div>
 
                 {/* Embedded mode delegates to the host so no modal opens inside the dialog. */}
@@ -905,6 +911,9 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                         <span className="text-[10px] text-muted font-mono">{a.triggered_at?.slice(11, 19)}</span>
                       </div>
                       <p className="text-[11px] text-muted mt-1">{a.message}</p>
+                      <span className="text-[10px] text-muted font-mono">
+                        {`觸發價 ${a.trigger_price != null ? a.trigger_price.toFixed(2) : '--'}`}
+                      </span>
                     </div>
                   ))}
                 </div>

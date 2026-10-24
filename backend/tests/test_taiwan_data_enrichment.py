@@ -376,7 +376,7 @@ class TestMarketIndexEnrichment:
                 "ClosingIndex": "22,200.00",
             }
         ]
-        series = provider.parse_taiex_rows(rows)
+        series = provider.parse_taiex_rows(rows, previous_close=22000.0)
         assert len(series) == 1
         idx = series[0]
 

@@ -63,10 +63,16 @@ class TaiwanIndexProvider:
         self,
         rows: list[dict[str, Any]],
         source_url: str | None = None,
+        previous_close: float | None = None,
     ) -> list[MarketIndex]:
+        """The series' points from the second row on; *previous_close* also measures the first row.
+
+        MI_5MINS_HIST carries no previous close, so a row is measured against the row before it.
+        """
         results: list[MarketIndex] = []
         url = source_url or self.TWSE_INDEX_URL
         fetched_at = datetime.now()
+        last_close = previous_close
 
         for r in rows:
             raw_date = r.get("Date")
@@ -82,10 +88,10 @@ class TaiwanIndexProvider:
             low_idx = _clean_float(r.get("LowestIndex"))
             close_idx = _clean_float(r.get("ClosingIndex"))
 
-            # Calculate change against previous close if available in series
-            prev_close = open_idx
-            if results:
-                prev_close = results[-1].close
+            prev_close = last_close
+            last_close = close_idx
+            if prev_close is None:
+                continue
             change = round(close_idx - prev_close, 2)
             change_pct = round(change / prev_close * 100.0, 2) if prev_close > 0 else 0.0
 

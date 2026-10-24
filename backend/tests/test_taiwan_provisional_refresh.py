@@ -423,14 +423,16 @@ def test_a_one_sided_institutional_refetch_writes_nothing_and_stays_provisional(
     assert store.provisional_dates([D]) == [D]
 
 
-def test_a_one_sided_institutional_fetch_of_a_new_day_is_still_written(tmp_path):
+def test_a_one_sided_institutional_fetch_of_a_new_day_is_a_failure(tmp_path):
     store = _provisional_inst_store(tmp_path)
     svc, _ = _inst_service(store, outcome=250, tpex_outcome=None)
 
     stats = svc.refresh_dates(NEXT, NEXT)
 
-    assert stats["dates_fetched"] == 1
+    assert stats["dates_fetched"] == 0
     assert stats["repair_failed_dates"] == []
+    assert [f["date"] for f in stats["failed_dates"]] == [str(NEXT)]
+    assert NEXT not in store.available_dates()
 
 
 def _finalized_inst_store(tmp_path: Path, days: list[date]) -> TaiwanInstitutionalStore:
@@ -582,12 +584,13 @@ def test_a_one_sided_fetch_of_a_gap_day_inside_the_stored_range_is_not_written(t
     assert D not in store.available_dates()
 
 
-def test_a_one_sided_fetch_of_a_day_past_the_latest_stored_one_is_written(tmp_path):
+def test_a_one_sided_fetch_of_a_day_past_the_latest_stored_one_is_not_written(tmp_path):
     store = _finalized_inst_store(tmp_path, [date(2026, 9, 22)])
     svc, _ = _inst_service(store, outcome=250, tpex_outcome=None)
 
     stats = svc.refresh_dates(D, D)
 
-    assert stats["dates_fetched"] == 1
+    assert stats["dates_fetched"] == 0
     assert stats["repair_failed_dates"] == []
-    assert D in store.available_dates()
+    assert "TPEx" in stats["failed_dates"][0]["error"]
+    assert D not in store.available_dates()

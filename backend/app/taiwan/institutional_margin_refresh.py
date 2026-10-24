@@ -162,9 +162,10 @@ class TaiwanInstitutionalRefreshService:
         such day is listed there too, since moving on opens no new gap. Failures on
         later days, and every failure under force, go to failed_dates. Under force a
         stored provisional day with no rows from either exchange is also listed in
-        repair_failed_dates, and a single-exchange result is written as before. A failure on a
-        day after the latest stored one ends the run there, noted in stopped_at and
-        dates_not_attempted.
+        repair_failed_dates, and a single-exchange result is written as before. Without
+        force, a day after the latest stored one with rows from one exchange only is a
+        failure. A failure on a day after the latest stored one ends the run there,
+        noted in stopped_at and dates_not_attempted.
         """
         stored = self._store.available_dates()
         latest_stored = max(stored, default=None)
@@ -222,6 +223,8 @@ class TaiwanInstitutionalRefreshService:
                 all_flows = flows_twse + flows_tpex
                 within_stored = not force and latest_stored is not None and cur <= latest_stored
                 one_sided = within_stored and not (flows_twse and flows_tpex) and (cur in stored_set or bool(all_flows))
+                if not force and not within_stored and all_flows and not (flows_twse and flows_tpex):
+                    raise ValueError(f"no {'TWSE' if not flows_twse else 'TPEx'} institutional rows")
                 if one_sided:
                     # Writing half a day would move the mtime and leave the other exchange missing or frozen.
                     missing = "TWSE and TPEx" if not all_flows else ("TWSE" if not flows_twse else "TPEx")

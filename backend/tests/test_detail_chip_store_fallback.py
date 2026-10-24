@@ -140,6 +140,10 @@ class _RangeStore:
         return list(self._partition_dates)
 
     def read_range(self, symbols, start, end):
+        if not symbols:
+            # Every partition holds another TWSE row, so the exchange's table is present each day.
+            recs = [{"symbol": "1101.TWSE", "date": d} for d in self._partition_dates if start <= d <= end]
+            return pl.DataFrame(recs) if recs else pl.DataFrame()
         symbol = symbols[0]
         recs = [
             {"symbol": symbol, "date": d, **row}
@@ -149,7 +153,7 @@ class _RangeStore:
         return pl.DataFrame(recs) if recs else pl.DataFrame()
 
 
-def test_institutional_from_store_picks_latest_date_with_a_row(svc, monkeypatch):
+def test_institutional_from_store_counts_a_missing_latest_row_as_zero(svc, monkeypatch):
     d1, d2, d3, d4, d5, d6 = [date(2026, 9, n) for n in range(10, 16)]
     rows = {
         d1: {"foreign_net": 100, "investment_trust_net": 10, "dealer_net": 1, "computed_net": 111, "official_net": 111},
@@ -166,11 +170,11 @@ def test_institutional_from_store_picks_latest_date_with_a_row(svc, monkeypatch)
 
     assert out is not None
     assert out.status == "available"
-    assert out.meta.trade_date == str(d5)
-    assert out.foreign_net == 500
-    assert out.foreign_net_5d == 100 + 200 + 300 + 400 + 500
-    assert out.investment_trust_net_5d == 10 + 20 + 30 + 40 + 50
-    assert out.dealer_net_5d == 1 + 2 + 3 + 4 + 5
+    assert out.meta.trade_date == str(d6)
+    assert (out.foreign_net, out.total_net) == (0, 0)
+    assert out.foreign_net_5d == 200 + 300 + 400 + 500
+    assert out.investment_trust_net_5d == 20 + 30 + 40 + 50
+    assert out.dealer_net_5d == 2 + 3 + 4 + 5
 
 
 def test_institutional_from_store_5d_window_treats_missing_days_as_zero(svc, monkeypatch):
@@ -290,7 +294,7 @@ def test_aggregate_institutional_live_path_5d_none_when_store_lacks_today(svc, m
     assert out.dealer_net_5d is None
 
 
-def test_margin_from_store_picks_latest_date_with_a_row(svc, monkeypatch):
+def test_margin_from_store_reports_a_missing_latest_row_as_not_listed(svc, monkeypatch):
     d1, d2, d3 = [date(2026, 9, n) for n in range(10, 13)]
     rows = {
         d1: {"margin_balance": 1000, "margin_change": 10, "short_balance": 5, "short_change": 1, "short_margin_ratio": 0.5},
@@ -303,6 +307,7 @@ def test_margin_from_store_picks_latest_date_with_a_row(svc, monkeypatch):
     out = svc._margin_from_store(parse_symbol("2330.TWSE"))
 
     assert out is not None
-    assert out.status == "available"
-    assert out.margin_balance == 2000
-    assert out.meta.trade_date == str(d2)
+    assert out.status == "unavailable"
+    assert out.margin_balance is None
+    assert out.meta.trade_date == str(d3)
+    assert out.meta.fallback_reason == "symbol_not_in_margin_table"

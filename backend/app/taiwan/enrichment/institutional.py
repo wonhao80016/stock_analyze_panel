@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.request
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
@@ -25,22 +27,102 @@ from app.taiwan.enrichment.models import (
     SourceMeta,
     StalePolicy,
 )
-from app.taiwan.providers.taiwan_values import parse_integer
+from app.taiwan.providers.taiwan_values import parse_integer, parse_taiwan_date
 
 logger = logging.getLogger(__name__)
 
 
-def _required_int(val: Any, field: str) -> int:
+def _required_int(val: Any, name: str) -> int:
     parsed = parse_integer(val)
     if parsed is None:
-        raise ValueError(f"missing required institutional field {field}")
+        raise ValueError(f"missing required institutional field {name}")
     return parsed
+
+
+@dataclass(frozen=True)
+class InstitutionalDay:
+    """One day's institutional table.
+
+    The exchanges list only securities the institutions traded, so a present table
+    without the target's row means zero flows, while an absent table means no data.
+    """
+    table_present: bool
+    flows: list[InstitutionalFlow] = field(default_factory=list)
+
+
+_AVAILABLE_FIELDS = ("foreign", "investment_trust", "dealer", "dealer_proprietary", "dealer_hedge")
+
+
+_ROC_CHINESE_DATE = re.compile(r"^(\d{2,3})年(\d{1,2})月(\d{1,2})日$")
+
+
+def _stated_date(text: str) -> date:
+    """A response date stamp: ROC or CE digits, or the ROC Chinese form such as 115年10月21日."""
+    m = _ROC_CHINESE_DATE.match(text)
+    if m:
+        return date(int(m.group(1)) + 1911, int(m.group(2)), int(m.group(3)))
+    return parse_taiwan_date(text)
+
+
+def stamped_for(stamps: list[Any], trade_date: date) -> bool:
+    """Whether the response's stated dates are *trade_date*.
+
+    A response stating no date is accepted; one whose stamps all fail to parse is not.
+    """
+    texts = [str(stamp).strip() for stamp in stamps if stamp is not None and str(stamp).strip()]
+    parsed: list[date] = []
+    for text in texts:
+        try:
+            parsed.append(_stated_date(text))
+        except ValueError:
+            continue
+    if texts and not parsed:
+        return False
+    return all(d == trade_date for d in parsed)
+
+
+def _meta(source: str, provider: str, source_url: str, trade_date: date, fetched_at: datetime) -> SourceMeta:
+    is_stale = StalePolicy.is_stale(DatasetType.INSTITUTIONAL, trade_date, fetched_at)
+    return SourceMeta(
+        source=source,
+        source_url=source_url,
+        fetched_at=fetched_at,
+        trade_date=trade_date,
+        status="stale" if is_stale else "official",
+        provider=provider,
+        is_realtime=False,
+        available_fields=_AVAILABLE_FIELDS,
+        is_stale=is_stale,
+        source_type="official_open_data",
+        freshness_class="eod_snapshot",
+    )
+
+
+def _zero_flow(symbol: str, trade_date: date, meta: SourceMeta) -> InstitutionalFlow:
+    """The flows of a security missing from a present institutional table."""
+    return InstitutionalFlow(
+        symbol=symbol,
+        trade_date=trade_date,
+        foreign_buy=0,
+        foreign_sell=0,
+        foreign_net=0,
+        investment_trust_buy=0,
+        investment_trust_sell=0,
+        investment_trust_net=0,
+        dealer_buy=0,
+        dealer_sell=0,
+        dealer_net=0,
+        meta=meta,
+    )
 
 
 class TwseInstitutionalAdapter:
     """Parses TWSE T86 official institutional trading table."""
 
     BASE_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
+    SOURCE = "twse:t86"
+    PROVIDER = "twse"
+    SUFFIX = "TWSE"
 
     def build_url(self, trade_date: date) -> str:
         date_str = trade_date.strftime("%Y%m%d")
@@ -53,15 +135,25 @@ class TwseInstitutionalAdapter:
         source_url: str,
         target_code: str | None = None,
     ) -> list[InstitutionalFlow]:
+        return self.parse_day(payload, trade_date, source_url, target_code).flows
+
+    def parse_day(
+        self,
+        payload: dict[str, Any],
+        trade_date: date,
+        source_url: str,
+        target_code: str | None = None,
+    ) -> InstitutionalDay:
         # TWSE response contains 'data' or 'tables[0].data'
         rows = payload.get("data")
+        stamps = [payload.get("date")]
         if not rows and "tables" in payload and payload["tables"]:
             rows = payload["tables"][0].get("data")
-        if not rows:
-            return []
+            stamps.append(payload["tables"][0].get("date"))
+        if not rows or not stamped_for(stamps, trade_date):
+            return InstitutionalDay(table_present=False)
 
-        fetched_at = datetime.now()
-        is_stale = StalePolicy.is_stale(DatasetType.INSTITUTIONAL, trade_date, fetched_at)
+        meta = _meta(self.SOURCE, self.PROVIDER, source_url, trade_date, datetime.now())
         results: list[InstitutionalFlow] = []
 
         for r in rows:
@@ -95,27 +187,9 @@ class TwseInstitutionalAdapter:
             discrepancy = any((fn != fb - fs, tn != tb - ts, dpn != dpb - dps,
                                dhn != dhb - dhs, official_dealer_net != dn,
                                official_net != computed_net))
-            status = "stale" if is_stale else "official"
-
-            meta = SourceMeta(
-                source="twse:t86",
-                source_url=source_url,
-                fetched_at=fetched_at,
-                trade_date=trade_date,
-                status=status,
-                provider="twse",
-                is_realtime=False,
-                available_fields=(
-                    "foreign", "investment_trust", "dealer",
-                    "dealer_proprietary", "dealer_hedge",
-                ),
-                is_stale=is_stale,
-                source_type="official_open_data",
-                freshness_class="eod_snapshot",
-            )
 
             flow = InstitutionalFlow(
-                symbol=f"{code}.TWSE",
+                symbol=f"{code}.{self.SUFFIX}",
                 trade_date=trade_date,
                 foreign_buy=fb,
                 foreign_sell=fs,
@@ -139,13 +213,16 @@ class TwseInstitutionalAdapter:
             )
             results.append(flow)
 
-        return results
+        return InstitutionalDay(table_present=True, flows=results)
 
 
 class TpexInstitutionalAdapter:
     """Parses TPEx dailyTrade official institutional trading table."""
 
     BASE_URL = "https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade"
+    SOURCE = "tpex:daily_trade"
+    PROVIDER = "tpex"
+    SUFFIX = "TPEX"
 
     def build_url(self, trade_date: date) -> str:
         date_str = trade_date.strftime("%Y/%m/%d")
@@ -158,14 +235,24 @@ class TpexInstitutionalAdapter:
         source_url: str,
         target_code: str | None = None,
     ) -> list[InstitutionalFlow]:
+        return self.parse_day(payload, trade_date, source_url, target_code).flows
+
+    def parse_day(
+        self,
+        payload: dict[str, Any],
+        trade_date: date,
+        source_url: str,
+        target_code: str | None = None,
+    ) -> InstitutionalDay:
         rows = payload.get("aaData")
+        stamps = [payload.get("date"), payload.get("reportDate")]
         if not rows and "tables" in payload and payload["tables"]:
             rows = payload["tables"][0].get("data")
-        if not rows:
-            return []
+            stamps.append(payload["tables"][0].get("date"))
+        if not rows or not stamped_for(stamps, trade_date):
+            return InstitutionalDay(table_present=False)
 
-        fetched_at = datetime.now()
-        is_stale = StalePolicy.is_stale(DatasetType.INSTITUTIONAL, trade_date, fetched_at)
+        meta = _meta(self.SOURCE, self.PROVIDER, source_url, trade_date, datetime.now())
         results: list[InstitutionalFlow] = []
 
         for r in rows:
@@ -199,27 +286,9 @@ class TpexInstitutionalAdapter:
             discrepancy = any((fn != fb - fs, tn != tb - ts, dpn != dpb - dps,
                                dhn != dhb - dhs, official_dealer_net != dn,
                                official_net != computed_net))
-            status = "stale" if is_stale else "official"
-
-            meta = SourceMeta(
-                source="tpex:daily_trade",
-                source_url=source_url,
-                fetched_at=fetched_at,
-                trade_date=trade_date,
-                status=status,
-                provider="tpex",
-                is_realtime=False,
-                available_fields=(
-                    "foreign", "investment_trust", "dealer",
-                    "dealer_proprietary", "dealer_hedge",
-                ),
-                is_stale=is_stale,
-                source_type="official_open_data",
-                freshness_class="eod_snapshot",
-            )
 
             flow = InstitutionalFlow(
-                symbol=f"{code}.TPEX",
+                symbol=f"{code}.{self.SUFFIX}",
                 trade_date=trade_date,
                 foreign_buy=fb,
                 foreign_sell=fs,
@@ -243,7 +312,7 @@ class TpexInstitutionalAdapter:
             )
             results.append(flow)
 
-        return results
+        return InstitutionalDay(table_present=True, flows=results)
 
 
 class TaiwanInstitutionalProvider:
@@ -264,18 +333,21 @@ class TaiwanInstitutionalProvider:
         target_code: str | None = None,
         timeout: float = 10.0,
     ) -> list[InstitutionalFlow]:
+        """The day's flows; with *target_code*, zero flows when the day's table lacks it, empty without a table."""
         ex = exchange.upper()
+        adapter: TwseInstitutionalAdapter | TpexInstitutionalAdapter
         if ex == "TWSE":
-            url = self.twse.build_url(trade_date)
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return self.twse.parse_payload(data, trade_date, source_url=url, target_code=target_code)
+            adapter = self.twse
         elif ex == "TPEX":
-            url = self.tpex.build_url(trade_date)
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return self.tpex.parse_payload(data, trade_date, source_url=url, target_code=target_code)
+            adapter = self.tpex
         else:
             raise ValueError(f"Unsupported exchange for institutional flows: {exchange}")
+        url = adapter.build_url(trade_date)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        day = adapter.parse_day(data, trade_date, source_url=url, target_code=target_code)
+        if target_code and day.table_present and not day.flows:
+            meta = _meta(adapter.SOURCE, adapter.PROVIDER, url, trade_date, datetime.now())
+            return [_zero_flow(f"{target_code}.{adapter.SUFFIX}", trade_date, meta)]
+        return day.flows

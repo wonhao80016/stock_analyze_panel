@@ -15,12 +15,12 @@ Verifies:
 from __future__ import annotations
 
 from datetime import date, datetime
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
 
+from app.config import settings
 from app.strategy import monitor_rules as mr_store
 from app.taiwan.detail_models import TaiwanStockDetailResponse
 from app.taiwan.detail_service import TaiwanStockDetailService
@@ -204,7 +204,7 @@ class TestMonitorSummaryFromUnifiedEngine:
     """monitor_summary 现由 B 引擎的规则存储聚合 (Step 6 迁移, 取代已删除的引擎 A)。"""
 
     def test_symbol_scoped_rule_included(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        monkeypatch.setattr(settings, "data_dir", tmp_path)
         mr_store.save_one(tmp_path, _rule("r1", symbols=["2330.TWSE"]))
 
         svc = TaiwanStockDetailService()
@@ -214,7 +214,7 @@ class TestMonitorSummaryFromUnifiedEngine:
         assert summary.rules[0]["rule_id"] == "r1"
 
     def test_market_wide_rule_included_and_flagged(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        monkeypatch.setattr(settings, "data_dir", tmp_path)
         mr_store.save_one(tmp_path, _rule("r_all", scope="all", symbols=[]))
 
         svc = TaiwanStockDetailService()
@@ -224,7 +224,7 @@ class TestMonitorSummaryFromUnifiedEngine:
         assert summary.rules[0]["scope"] == "all"
 
     def test_watchlist_group_scoped_rule_excluded(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        monkeypatch.setattr(settings, "data_dir", tmp_path)
         mr_store.save_one(
             tmp_path,
             _rule("r_group", scope="watchlist_group", symbols=[], group_id="g1"),
@@ -236,7 +236,7 @@ class TestMonitorSummaryFromUnifiedEngine:
         assert summary.rule_count == 0
 
     def test_disabled_rule_counts_toward_rule_count_but_not_active_count(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("app.config.Settings", lambda: SimpleNamespace(data_dir=tmp_path))
+        monkeypatch.setattr(settings, "data_dir", tmp_path)
         mr_store.save_one(tmp_path, _rule("r_on", enabled=True))
         mr_store.save_one(tmp_path, _rule("r_off", enabled=False))
 

@@ -52,11 +52,19 @@ def compute_margin_factors(df: pl.DataFrame) -> pl.DataFrame:
 
     sorted_df = df.sort(["symbol", "trade_date"])
 
+    margin = pl.col("margin_balance")
+    short = pl.col("short_balance")
     return sorted_df.with_columns([
-        (pl.col("margin_balance") - pl.col("margin_previous_balance")).alias("margin_balance_change"),
-        pl.when(pl.col("margin_balance") > 0)
-        .then(pl.col("short_balance") / pl.col("margin_balance") * 100.0)
-        .otherwise(0.0)
-        .round(2)
+        (margin - pl.col("margin_previous_balance")).alias("margin_balance_change"),
+        pl.when(margin.is_not_null() & (margin > 0) & short.is_not_null())
+        .then((short / margin * 100.0).round(2))
+        .otherwise(pl.lit(None, dtype=pl.Float64))
         .alias("short_margin_ratio"),
     ])
+
+
+def short_margin_ratio(short_balance: int | None, margin_balance: int | None) -> float | None:
+    """Short balance over margin balance in percent, rounded to 2 places; None without a positive margin balance."""
+    if short_balance is None or margin_balance is None or margin_balance <= 0:
+        return None
+    return round(short_balance / margin_balance * 100.0, 2)
