@@ -26,6 +26,27 @@ class BacktestWorkerError(RuntimeError):
 
 
 _CANCEL_GRACE_SECONDS = 5.0
+_EXIT_DRAIN_SECONDS = 1.0
+_PARENT_GONE_EXITCODE = 3
+
+
+def _start_parent_watchdog(parent=None, exit_fn: Callable[[int], Any] = os._exit):
+    """Exit this worker as soon as its parent process dies; returns the watcher thread or None.
+
+    The multiprocessing parent sentinel is a process handle on Windows and a pipe that
+    reaches EOF on POSIX, so it fires on a hard kill and is immune to PID reuse.
+    """
+    parent = mp.parent_process() if parent is None else parent
+    if parent is None:
+        return None
+
+    def _watch() -> None:
+        parent.join()
+        exit_fn(_PARENT_GONE_EXITCODE)
+
+    thread = threading.Thread(target=_watch, name="worker-parent-watchdog", daemon=True)
+    thread.start()
+    return thread
 
 
 class _PeakRssSampler:
@@ -167,6 +188,7 @@ def _attach_worker_metrics(
 
 
 def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
+    _start_parent_watchdog()
     sampler = _PeakRssSampler()
     sampler.start()
     started = time.perf_counter()
@@ -295,6 +317,7 @@ def run_worker_task(
     failure: dict[str, Any] | None = None
     ipc_started = time.perf_counter()
     cancel_started: float | None = None
+    child_exited = False
 
     try:
         while result is None and failure is None:
@@ -308,11 +331,14 @@ def run_worker_task(
                     raise BacktestWorkerError(
                         "backtest worker did not stop within 5 seconds after cancellation"
                     )
+            # A child can flush its terminal message and exit between a timed-out get
+            # and is_alive, so read the queue once more after it is seen dead.
             try:
-                message = events.get(timeout=0.1)
+                message = events.get(timeout=_EXIT_DRAIN_SECONDS if child_exited else 0.1)
             except queue.Empty:
-                if not process.is_alive():
+                if child_exited:
                     break
+                child_exited = not process.is_alive()
                 continue
 
             message_type = message.get("type")

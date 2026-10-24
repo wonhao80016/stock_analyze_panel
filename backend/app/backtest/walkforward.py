@@ -32,6 +32,15 @@ class Fold:
     test_trading_days: int
 
 
+def validate_walkforward_windows(test_days: int, step_days: int) -> None:
+    """Reject a step shorter than the test window, which would make OOS windows overlap."""
+    if int(step_days) < int(test_days):
+        raise ValueError(
+            f"step_days ({int(step_days)}) 不能小于 test_days ({int(test_days)}): "
+            "样本外窗口会重叠, 复利收益与一致性会重复计入同一段区间"
+        )
+
+
 def generate_folds(
     trading_dates: Iterable[date],
     train_days: int,
@@ -41,10 +50,12 @@ def generate_folds(
     """Split rolling folds by position in the trading-date series.
 
     All three window sizes count sessions, not calendar days. A date missing from
-    the series is not a session, so windows stretch over it. Raises when no fold fits.
+    the series is not a session, so windows stretch over it. Raises when no fold fits
+    or when step_days < test_days would make test windows overlap.
     """
     if train_days <= 0 or test_days <= 0 or step_days <= 0:
         raise ValueError("train_days / test_days / step_days 必须为正")
+    validate_walkforward_windows(test_days, step_days)
 
     dates = sorted(set(trading_dates))
     folds: list[Fold] = []

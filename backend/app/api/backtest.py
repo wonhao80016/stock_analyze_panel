@@ -959,13 +959,18 @@ async def walkforward_stream(
     reports train_start/train_end/test_start/test_end with train_trading_days/test_trading_days.
     事件: job {key} / progress {type:walkforward_progress,done,total,fold} / done {result} / error {message}
     """
-    from app.backtest.walkforward import WalkForwardConfig, validate_walkforward_objective
+    from app.backtest.walkforward import (
+        WalkForwardConfig,
+        validate_walkforward_objective,
+        validate_walkforward_windows,
+    )
     from app.backtest.worker import make_worker_task, run_worker_task
 
     _reject_taiwan_stamp_tax_override(_split_symbols(symbols), stamp_tax_pct)
     _reject_unreasonable_risk_free_rate(risk_free_rate)
     try:
         validate_walkforward_objective(objective, train_days)
+        validate_walkforward_windows(test_days, step_days)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     direction = direction or None

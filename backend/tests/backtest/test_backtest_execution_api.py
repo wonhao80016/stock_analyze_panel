@@ -160,7 +160,7 @@ async def test_walkforward_guard_limits_fold_window_in_trading_sessions(
         end="2026-01-01",
         train_days=train_days,
         test_days=test_days,
-        step_days=63,
+        step_days=max(63, test_days),
     )
 
     body = await _consume(response)

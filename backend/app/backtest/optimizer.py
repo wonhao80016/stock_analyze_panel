@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 import threading
 import time
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -51,7 +52,9 @@ def _candidates_for(param_id: str, spec, pmeta: dict) -> list:
     elif isinstance(spec, dict):
         if p_type not in ("float", "int"):
             raise ValueError(f"参数 '{param_id}' 为 {p_type} 型, 不支持 min/max/step 展开, 请给候选值列表")
-        step = spec.get("step") or pmeta.get("step")
+        step = spec.get("step")
+        if step is None:
+            step = pmeta.get("step")
         if step is None or float(step) <= 0:
             raise ValueError(f"参数 '{param_id}' 的 step 必须为正数")
         lo = float(spec.get("min", pmeta.get("min", 0)))
@@ -60,8 +63,16 @@ def _candidates_for(param_id: str, spec, pmeta: dict) -> list:
             raise ValueError(f"参数 '{param_id}' 的 max < min")
         step = float(step)
         # 整数计数生成候选, 避免浮点累加误差丢端点 (如 0.1/0.1 步长)。
-        n_steps = round((hi - lo) / step)
-        raw = [round(lo + i * step, 10) for i in range(n_steps + 1)]
+        # Floor keeps every candidate <= max; the epsilon absorbs quotients like 0.6/0.1 = 5.999...
+        n_steps = math.floor((hi - lo) / step + 1e-9)
+        if n_steps + 1 > GRID_MAX_COMBINATIONS:
+            raise ValueError(
+                f"参数 '{param_id}' 的候选值数 {n_steps + 1} 超过上限 {GRID_MAX_COMBINATIONS}, "
+                "请增大 step 或缩小范围"
+            )
+        raw = [min(max(round(lo + i * step, 10), lo), hi) for i in range(n_steps + 1)]
+        if p_type == "int":
+            raw = [v for v in raw if lo <= round(v) <= hi]
     else:
         raise ValueError(f"参数 '{param_id}' 的网格 spec 必须是列表或 {{min,max,step}} 字典")
 
