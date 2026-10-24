@@ -157,7 +157,7 @@
 | 1 測試基線與隔離 | 已完成（2026-10-23） | B057：`c0587fc`；B223–B228、B231–B235、B238–B241：`99931b1`；B236、B237：`3ae2f62`；B229、B230：`e6fab1c`。不設環境變數的全套基線（在不含 data/ 的副本上）：4485 passed、7 xfailed、12 deselected，約 9.5 分鐘，峰值記憶體約 0.8 GB，無外連，正式 data/ 未被寫入。後續事項見下方 |
 | 2 部署與打包 | 程式已完成（2026-10-24），待實機驗證 | B004：`bfaf74e`；B069、B334：`de8086d`；B010：`7e5eff8`；B222：`cdab715`；B242、B243：`62d8e9b`；B332、B333：`e45ca41`；B335、B336：`76fd791`。本機沒有 Docker、PyInstaller 與 Inno Setup，打包與容器只做了靜態驗證，實機步驟見下方 |
 | 3 回測與挖掘可信度 | 已完成（2026-10-25）；第二輪 B097–B108、B111–B114 的提交見下方紀錄，B148 待使用者決定 | B006、B007、B008、B015、B016、B017、B036、B037、B109：`70725a3`；B009、B110、B145、B146、B147 與 D5：`7aab380`。合併驗證 1747 passed。正式 data 的 679 個日 K 分區都有 raw_close |
-| 4 資料寫入與一致性 | 未開始 | |
+| 4 資料寫入與一致性 | 已完成（2026-10-24） | B012：`8448d4c`；B024：`63ac041`；B031、B032：`efd63da`；B025、B060：`162a670`；B047、B048、B044：`19999ef`；B051、B052：`4f0ef75`。合併後的後端全套：4727 passed、7 xfailed、12 deselected，0 failed。上線步驟與後續事項見下方 |
 | 5 台股資料與分析 | 未開始 | 待 D8 |
 | 6 即時行情、監控與自訂訊號 | 未開始 | 待 D6 |
 | 7 前端顯示與狀態 | 未開始 | |
@@ -222,6 +222,24 @@
 4. 成交稀少的股票分鐘資料常被判為不完整而退回日線，結果偏保守。
 5. walk-forward 的 B113 父行程監看只在 Windows 實測；Linux 依標準庫機制推論。
 6. 階段 3 第一輪的 `70725a3` 讓關閉基本過濾的策略仍要求 raw_close，已在第二輪修正。
+
+### 階段 4 上線步驟與後續事項
+
+上線步驟：
+
+1. 上線前把 `data/kline_daily_enriched/`、`data/.matrix_generation_stock.json`、`data/.taiwan_enriched_factors.json` 備份到 repo 外，並避開 16:30 與 21:40 的排程。
+2. 上線後在設定頁按一次「回補」：已存在的單邊融資分區與舊的籌碼缺口不會自動修復。
+
+後續事項：
+
+1. `secrets_store.py`（約 40、59 行）、`strategy/custom_signals.py`（約 95 行）、`strategy/monitor_rules.py`（約 87 行）、`strategy/config.py`（約 80 行）仍以非原子的 `write_text` 寫檔。
+2. preferences 的寫入鎖只在同一個行程內有效；`set_financial_sync_time`、`api/strategy.py` 約 128 行、`services/mining_candidates.py` 約 349 行的「先 get 再 set」在鎖外，並行時仍可能遺失一筆清單或字典的更新。
+3. preferences.json 損壞時，寫入 API 回 503（`PREFERENCES_STORE_UNAVAILABLE`），前端沒有對應提示；讀取端仍回預設值。
+4. 部分發佈中途失敗會重試一次全量；重試也失敗時，讀取端會被擋到下一次成功發佈。全量接手未完成狀態時，判斷是否接手的讀取不在鎖內，有極窄的競態，要徹底修需改 `enriched_generation.py`。
+5. 籌碼 store 為空且第一天就失敗時，回補會中止；訊息已註明「未完成」與未嘗試的天數，再按一次回補即可。
+6. 即時推播（SSE）的告警沒有帶 id；之後若要從推播直接刪除，需在 `quote_service.py` 補上 id。
+7. `latest_enriched_date` 仍會採計沒有 `part.parquet` 的空分區目錄；B024 之前留下的空目錄還在。
+8. `services/detail_service.py` 約 762 行在取不到 data_dir 時退回相對路徑 `Path("data")`。
 
 ## 維護方式
 
