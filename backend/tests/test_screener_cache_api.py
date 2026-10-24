@@ -21,15 +21,10 @@ def _request(tmp_path, monitor_results=None):
 
 
 def test_cached_summary_omits_rows_and_counts_realtime_expirations(monkeypatch, tmp_path):
+    # No post-close result for strategy_a: one of the same session would take precedence over realtime.
     cached = {
         "as_of": "2026-07-20",
-        "results": {
-            "strategy_a": {
-                "as_of": "2026-07-20",
-                "total": 2,
-                "rows": [{"symbol": "000001.SZ"}, {"symbol": "000002.SZ"}],
-            },
-        },
+        "results": {},
         "today_ever_rows": {
             "strategy_a": {
                 "000001.SZ": {"symbol": "000001.SZ"},

@@ -283,17 +283,42 @@ def run_preset(req: PresetRequest, request: Request):
     return _result_with_ext(safe_data, ext_values)
 
 
+def _realtime_overrides(cached: dict, realtime_results: dict[str, dict]) -> dict[str, dict]:
+    """Pick the monitor results that are newer than the post-close cache entry of the same strategy.
+
+    Monitor results cover only the polling pool, so a post-close result of the same or a later
+    session must win; a strategy the cache has no result for is filled only from the same or a later session.
+    """
+    cached_results = cached.get("results") or {}
+    cached_as_of = cached.get("as_of")
+    picked: dict[str, dict] = {}
+    for sid, result in realtime_results.items():
+        realtime_as_of = result.get("as_of") if isinstance(result, dict) else None
+        cached_result = cached_results.get(sid)
+        if isinstance(cached_result, dict):
+            post_close_as_of = cached_result.get("as_of") or cached_as_of
+            newer = isinstance(realtime_as_of, str) and (
+                not isinstance(post_close_as_of, str) or realtime_as_of > post_close_as_of
+            )
+        else:
+            newer = not isinstance(cached_as_of, str) or (
+                isinstance(realtime_as_of, str) and realtime_as_of >= cached_as_of
+            )
+        if newer:
+            picked[sid] = result
+    return picked
+
+
 def _cached_with_realtime(request: Request) -> dict:
-    """读取盘后缓存，并用监控引擎的实时结果覆盖同策略。"""
+    """读取盘后缓存，并用监控引擎较新交易日的实时结果覆盖同策略。"""
     data_dir = request.app.state.repo.store.data_dir
     cached = strategy_cache.read_cache(data_dir)
     if cached is None:
         cached = {"as_of": None, "results": {}, "updated_at": None}
 
-    # 叠加监控引擎内存里的实时结果 (若有), 用新鲜数据覆盖同策略的盘后结果
     monitor_engine = getattr(request.app.state, "monitor_engine", None)
     if monitor_engine is not None:
-        realtime_results = monitor_engine.latest_strategy_results()
+        realtime_results = _realtime_overrides(cached, monitor_engine.latest_strategy_results() or {})
         if realtime_results:
             results = dict(cached.get("results") or {})
             results.update(realtime_results)
