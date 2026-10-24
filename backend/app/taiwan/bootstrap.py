@@ -283,8 +283,15 @@ def import_security_master(source: Path, dest: Path) -> bool:
     return True
 
 
-def _publish_default(only_if_behind: bool) -> bool:
-    return publish_enriched(only_if_behind=only_if_behind)
+def _publish_default(only_if_behind: bool, since: date | None = None) -> bool:
+    return publish_enriched(only_if_behind=only_if_behind, since=since)
+
+
+def _refresh_caches_default(label: str) -> None:
+    from app.jobs.daily_pipeline import refresh_enriched_cache, refresh_strategy_cache
+
+    refresh_enriched_cache(label)
+    refresh_strategy_cache(label)
 
 
 _CHIP_LABELS = {
@@ -319,17 +326,24 @@ class TaiwanBootstrapService:
         expected_sha256: str = EXPECTED_SHA256,
         store: TaiwanDailyStore | None = None,
         refresh_service: TaiwanDailyRefreshService | None = None,
-        publish: Callable[[bool], bool] | None = None,
+        publish: Callable[..., bool] | None = None,
         security_master: TaiwanSecurityMaster | None = None,
         chip_service: TaiwanDailyUpdateService | None = None,
+        refresh_caches: Callable[[str], None] | None = None,
     ) -> None:
         self.download_url = download_url
         self.expected_sha256 = expected_sha256.lower()
         self.store = store or TaiwanDailyStore()
         self.refresh_service = refresh_service or TaiwanDailyRefreshService(store=self.store)
         # The configured enriched table belongs to the default store; an injected store
-        # must not publish into it unless the caller supplies a publisher.
-        self._publish = publish or (_publish_default if store is None else (lambda _only_if_behind: False))
+        # must not publish into it unless the caller supplies a publisher. A publisher takes
+        # only_if_behind and, from the history bootstrap, since (the earliest imported day or None).
+        self._publish = publish or (
+            _publish_default if store is None else (lambda _only_if_behind, since=None: False)
+        )
+        self._refresh_caches = refresh_caches or (
+            _refresh_caches_default if store is None else (lambda _label: None)
+        )
         # Likewise the default security master is refreshed only when the default store is used.
         self._security_master = security_master
         self._uses_default_master = security_master is None and store is None
@@ -504,16 +518,19 @@ class TaiwanBootstrapService:
                 dest_daily.mkdir(parents=True, exist_ok=True)
 
                 extracted_partitions = sorted(daily_src.glob("date=*/part.parquet"))
+                imported: set[str] = set()
                 for p in extracted_partitions:
                     part_name = p.parent.name
                     target_part_dir = dest_daily / part_name
                     if not target_part_dir.exists():
                         target_part_dir.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(str(p), str(target_part_dir / "part.parquet"))
+                        imported.add(part_name)
                     else:
                         target_file = target_part_dir / "part.parquet"
                         if not target_file.exists():
                             shutil.copy2(str(p), str(target_file))
+                            imported.add(part_name)
 
                 # Step 6: Post-bootstrap incremental sync to latest trading day
                 self._update_job(
@@ -528,15 +545,29 @@ class TaiwanBootstrapService:
                 latest_stored = st.latest_date()
                 target_date = resolve_target_latest_trading_date()
 
+                fetched = 0
+                sync_start: date | None = None
                 if latest_stored and latest_stored < target_date:
                     sync_start = latest_stored + timedelta(days=1)
                     if sync_start <= target_date:
                         try:
                             refresh_svc = TaiwanDailyRefreshService(store=st)
                             res = refresh_svc.refresh_dates(start_date=sync_start, end_date=target_date)
+                            fetched = res.get("dates_fetched", 0)
                             logger.info("Post-bootstrap incremental sync: %s", res)
                         except Exception as sync_exc:
                             logger.warning("Post-bootstrap sync warning (non-fatal): %s", sync_exc)
+
+                # Screening, strategies and monitor signals read the enriched table, not these bars, and
+                # imported days can be older than the recent window a publish rewrites.
+                changed = bool(imported or fetched)
+                earliest = [d for d in st.available_dates() if f"date={d.isoformat()}" in imported]
+                if fetched and sync_start is not None:
+                    earliest.append(sync_start)
+                since = min(earliest, default=None)
+                published = self._publish(not changed, since=since)
+                if changed or published:
+                    self._refresh_caches("history bootstrap")
 
                 # Success!
                 final_dates = st.available_dates()
@@ -665,7 +696,7 @@ class TaiwanBootstrapService:
             raise RuntimeError(f"{failures[0][0]}: {failures[0][1]}")
         chip = self._refresh_chip_data(target, now)
         # Screening takes its basis day from these bars, so their indicators must be published too.
-        published = self._publish(not fetched and not republish)
+        published = self._publish(not fetched and not republish, since=start if fetched else None)
         message = f"成功更新 {fetched} 個交易日 (最新至 {target})"
         if failures:
             message = f"已更新 {fetched} 個交易日, {failures[0][0]}, 請稍後再試"

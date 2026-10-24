@@ -118,7 +118,7 @@ class _Setup:
         self.service = TaiwanBootstrapService(
             store=self.daily_store,
             refresh_service=self.daily_refresh,
-            publish=lambda _only_if_behind: self.order.append("publish") or False,
+            publish=lambda _only_if_behind, since=None: self.order.append("publish") or False,
             chip_service=self.updater,
         )
 

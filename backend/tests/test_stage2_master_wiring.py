@@ -654,7 +654,7 @@ def _button(tmp_path: Path, master, days: list[date], refresh_result: dict | Non
     svc = TaiwanBootstrapService(
         store=store,
         refresh_service=refresh,
-        publish=lambda only_if_behind: published.append(only_if_behind) or True,
+        publish=lambda only_if_behind, since=None: published.append(only_if_behind) or True,
         security_master=master,
     )
     return svc, refresh, published
@@ -956,7 +956,7 @@ def test_bootstrap_job_keeps_a_newer_local_master(tmp_path, monkeypatch):
         expected_sha256=hashlib.sha256(payload).hexdigest(),
         store=TaiwanDailyStore(data_dir=taiwan_dir / "daily"),
         refresh_service=MagicMock(),
-        publish=lambda _: False,
+        publish=lambda _only_if_behind, since=None: False,
         security_master=MagicMock(),
     )
 

@@ -187,7 +187,19 @@ class TaiwanEnrichedRefreshService:
             published_rules = {**limit_rules, **dict.fromkeys(unlisted, NO_LIMIT_RULE)}
             written = self._publish_all(enriched, factors, end, published_rules)
         else:
-            written = self._publish_partitions(enriched)
+            try:
+                written = self._publish_window(enriched)
+            except Exception as exc:
+                if not self.publication_incomplete():
+                    raise
+                logger.warning(
+                    "taiwan enriched: window publish failed midway, republishing every partition once: %s", str(exc)
+                )
+                written = None
+            if written is None:
+                # Retry outside the except block and log only the message: anything holding the traceback
+                # keeps the failed publication registered as active, and the retry would refuse to start.
+                return self.refresh(min(available), max(available))
             self._save_limit_rules(limit_rules, keep=unlisted)
         logger.info(
             "taiwan enriched refresh: %d rows across %s..%s%s",
@@ -228,16 +240,28 @@ class TaiwanEnrichedRefreshService:
                     )
             return pl.concat(frames) if frames else pl.DataFrame()
 
-    def _publish_partitions(self, enriched: pl.DataFrame, publication: EnrichedPublication | None = None) -> int:
+    def _publish_partitions(self, enriched: pl.DataFrame, publication: EnrichedPublication) -> int:
         written = 0
         for part_date in enriched["date"].unique().sort().to_list():
             group = enriched.filter(pl.col("date") == part_date)
-            partition = self._root / f"date={part_date.isoformat()}"
-            if publication is None:
-                written += self._write_partition(partition, group)
-            else:
-                publication.write_parquet(group, partition / "part.parquet")
-                written += group.height
+            publication.write_parquet(group, self._root / f"date={part_date.isoformat()}" / "part.parquet")
+            written += group.height
+        return written
+
+    def _publish_window(self, enriched: pl.DataFrame) -> int:
+        """Rewrite the partitions of *enriched* as one publication, which replaces the generation on commit.
+
+        A write failing midway leaves the publication incomplete, so readers fail instead of serving a
+        half-replaced window until a full republish (refresh retries one at once) commits.
+        """
+        publication = EnrichedPublication(self._root.parent, "stock")
+        publication.begin()
+        try:
+            written = self._publish_partitions(enriched, publication)
+            publication.commit()
+        except BaseException:
+            publication.abandon()
+            raise
         return written
 
     def _publish_all(
@@ -255,9 +279,13 @@ class TaiwanEnrichedRefreshService:
         A commit failing after the record is saved leaves event symbols' cached history
         unadjusted, an ex-rights gap in the daily K, until the next publication commits.
         """
+        recovering = self.publication_incomplete()
         publication = EnrichedPublication(self._root.parent, "stock", recover=True)
         publication.begin()
         try:
+            if recovering:
+                # Partitions of the unfinished publication may already differ, so abandoning must not restore its generation.
+                publication.mark_changed()
             written = self._publish_partitions(enriched, publication)
             self._record_factor_set(factors, through)
             self._record_limit_rules(limit_rules)

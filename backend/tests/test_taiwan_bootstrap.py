@@ -264,6 +264,8 @@ def test_user_data_safety_and_bootstrap_success(tmp_path: Path, monkeypatch):
         download_url="https://mock/valid_asset.zip",
         expected_sha256=real_sha256,
         refresh_service=mock_refresh_svc,
+        publish=lambda _only_if_behind, since=None: False,
+        refresh_caches=lambda _label: None,
     )
 
     job_id = svc.start_bootstrap()
@@ -345,7 +347,7 @@ def _service_with_publish(tmp_path: Path, refresh_result: dict):
     svc = TaiwanBootstrapService(
         store=TaiwanDailyStore(data_dir=daily_dir),
         refresh_service=mock_refresh,
-        publish=lambda only_if_behind: calls.append(only_if_behind) or True,
+        publish=lambda only_if_behind, since=None: calls.append(only_if_behind) or True,
     )
     return svc, calls
 
@@ -382,7 +384,7 @@ def _refresh_service_for(tmp_path: Path, *, written_on: datetime | None, both_ex
     mock_refresh = MagicMock()
     mock_refresh.refresh_dates.return_value = {"dates_fetched": 1}
     svc = TaiwanBootstrapService(
-        store=TaiwanDailyStore(data_dir=daily_dir), refresh_service=mock_refresh, publish=lambda _: True
+        store=TaiwanDailyStore(data_dir=daily_dir), refresh_service=mock_refresh, publish=lambda _only_if_behind, since=None: True
     )
     return svc, mock_refresh
 
