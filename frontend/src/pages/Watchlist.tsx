@@ -31,6 +31,8 @@ import { WatchlistGroupStatsBar } from '@/components/WatchlistGroupStatsBar'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 import { MIN_COMPARE_SYMBOLS, MAX_COMPARE_SYMBOLS } from '@/lib/taiwanCompareSymbols'
 import { DataQualityBadge } from '@/components/taiwan/TaiwanDataQuality'
+import { toast } from '@/components/Toast'
+import { useVolumeUnit } from '@/lib/volumeUnit'
 
 // 分時列開放排序 (StockDataTable 實例級白名單; 表頭眼睛/刷新按鈕已 stopPropagation)
 const INTRADAY_SORTABLE_KEYS = new Set(['intraday'])
@@ -52,6 +54,8 @@ import {
   loadColumnConfig,
   saveColumnConfig,
   buildExtColumnsParam,
+  filterBoundToRaw,
+  filterUnit,
 } from '@/lib/watchlist-columns'
 
 // ===== 板塊標識（篩選/卡片用） =====
@@ -63,6 +67,21 @@ function getBoardType(symbol: string): BoardType | null {
   if (symbol.endsWith('.TWSE')) return '上市'
   if (symbol.endsWith('.TPEX')) return '上櫃'
   return null
+}
+
+// ===== 盤後訊號的資料日期 =====
+
+// Signal flags and limit streaks come from the last published session, not from the live quote.
+const FLAG_COLUMN_KEYS = new Set(['signals', 'limit_ups', 'limit_downs'])
+
+function taipeiToday(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+}
+
+/** "MM-DD" when the flags belong to a session before today in Taipei, otherwise null. */
+function earlierSessionTag(indicatorDate: unknown): string | null {
+  if (typeof indicatorDate !== 'string' || !indicatorDate) return null
+  return indicatorDate < taipeiToday() ? indicatorDate.slice(5) : null
 }
 
 // ===== 換手率分檔色（卡片/表格用） =====
@@ -496,6 +515,7 @@ const StockCard = React.memo(function StockCard({
   const pct = r.rt_pct ?? r.change_pct
   const name = r.rt_name ?? r.name
   const signals = getSignals(r)
+  const flagTag = earlierSessionTag(r.indicator_date)
   const turnover = turnoverDisplay(r)
   const isUp = (pct ?? 0) > 0
   const isDown = (pct ?? 0) < 0
@@ -573,6 +593,9 @@ const StockCard = React.memo(function StockCard({
               {r.consecutive_limit_ups === 1 ? '首板' : `${r.consecutive_limit_ups}連`}
             </span>
           )}
+          {r.consecutive_limit_ups > 0 && flagTag && (
+            <span className="shrink-0 text-[9px] text-muted font-mono" title={`盤後資料 ${r.indicator_date}`}>{flagTag}</span>
+          )}
           {isMonitored && <span className="ml-auto"><RealtimeDot /></span>}
         </div>
 
@@ -638,6 +661,9 @@ const StockCard = React.memo(function StockCard({
               +{signals.length - 3}
             </span>
           )}
+          {flagTag && (
+            <span className="inline-block text-[9px] text-muted font-mono leading-tight" title={`盤後資料 ${r.indicator_date}`}>{flagTag}</span>
+          )}
         </div>
       )}
 
@@ -692,14 +718,19 @@ export function Watchlist() {
   const [columns, setColumns] = useState<ColumnConfig[]>([...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
-  const [searchParams] = useSearchParams()
-  const initialGroup = (searchParams.get('group') as WatchlistGroupFilter | null) ?? 'all'
-  const [selectedGroup, setSelectedGroup] = useState<WatchlistGroupFilter>(initialGroup)
-  // URL ?group= 變化時同步選中分組 (側邊欄二級菜單切換分組時觸發)
-  useEffect(() => {
-    const g = (searchParams.get('group') as WatchlistGroupFilter | null) ?? 'all'
-    setSelectedGroup(g)
-  }, [searchParams])
+  // ?group= is the selected group, so the sidebar links and in-page switches never disagree.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const selectedGroup = (searchParams.get('group') as WatchlistGroupFilter | null) ?? 'all'
+  const setSelectedGroup = useCallback((group: WatchlistGroupFilter, onlyIfSelected?: WatchlistGroupFilter) => {
+    setSearchParams(prev => {
+      const current = prev.get('group') ?? 'all'
+      if (onlyIfSelected !== undefined && current !== onlyIfSelected) return prev
+      const next = new URLSearchParams(prev)
+      if (group === 'all') next.delete('group')
+      else next.set('group', group)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
   const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null)
   const [ocrInstallHint, setOcrInstallHint] = useState('')
   const columnsLoaded = useRef(false)
@@ -707,7 +738,9 @@ export function Watchlist() {
   useEffect(() => {
     if (columnsLoaded.current) return
     columnsLoaded.current = true
-    loadColumnConfig().then(setColumns)
+    loadColumnConfig({
+      onUnsyncedDiscarded: () => toast('欄位設定上次未能存到後端，已改回後端儲存的版本'),
+    }).then(setColumns)
   }, [])
 
   useEffect(() => {
@@ -836,9 +869,9 @@ export function Watchlist() {
       && groupList.isSuccess
       && !groups.some(group => group.id === selectedGroup)
     ) {
-      setSelectedGroup('all')
+      setSelectedGroup('all', selectedGroup)
     }
-  }, [groupList.isSuccess, groups, selectedGroup])
+  }, [groupList.isSuccess, groups, selectedGroup, setSelectedGroup])
 
   // enriched 數據 — 傳入 ext_columns 參數
   const enriched = useQuery({
@@ -968,7 +1001,7 @@ export function Watchlist() {
     onSuccess: (data, groupId) => {
       qc.setQueryData(QK.watchlistGroups, { groups: data.groups })
       qc.setQueryData(QK.watchlist, { symbols: data.symbols })
-      if (selectedGroup === groupId) setSelectedGroup('all')
+      setSelectedGroup('all', groupId)
     },
   })
 
@@ -1003,15 +1036,18 @@ export function Watchlist() {
   const handleCardCancelRemove = useCallback(() => setConfirmRemove(null), [])
   const handleCardRequestRemove = useCallback((sym: string) => setConfirmRemove(sym), [])
   const handleToggleMember = useCallback((symbol: string, groupId: string, member: boolean) => {
-    if (member) addGroupMember.mutate({ symbol, groupId })
-    else removeGroupMember.mutate({ symbol, groupId })
+    const pending = member
+      ? addGroupMember.mutateAsync({ symbol, groupId })
+      : removeGroupMember.mutateAsync({ symbol, groupId })
+    // request() already toasts the failure.
+    return pending.then(() => undefined, () => undefined)
   }, [addGroupMember, removeGroupMember])
   // 分組卡片總覽下點擊分組 tab / 卡片頭 = 鑽取該分組: 關閉總覽並選中分組,
   // 個股視圖設置(table/card)保持用戶原選擇
   const handleGroupSelect = useCallback((group: WatchlistGroupFilter) => {
     setSelectedGroup(group)
     setGroupCardsOpen(false)
-  }, [])
+  }, [setSelectedGroup])
 
   const listEntries = list.data?.symbols ?? []
   const allSymbols = listEntries.map(s => s.symbol)
@@ -1073,6 +1109,7 @@ export function Watchlist() {
   // ===== 篩選 =====
   const [filterOpen, setFilterOpen] = useState(false)
   const [filters, setFilters] = useState<Record<string, { min?: string; max?: string; text?: string }>>({})
+  const [volumeUnit] = useVolumeUnit()
 
   // 板塊篩選（持久化）
   const [boardFilter, setBoardFilter] = useState<Set<string>>(() => {
@@ -1174,8 +1211,8 @@ export function Watchlist() {
           const val = getSortValue(r, col)
           if (val == null) return false
           if (typeof val === 'number') {
-            if (f.min && val < Number(f.min)) return false
-            if (f.max && val > Number(f.max)) return false
+            if (f.min && val < filterBoundToRaw(col, f.min, volumeUnit)) return false
+            if (f.max && val > filterBoundToRaw(col, f.max, volumeUnit)) return false
           } else {
             if (f.text && !String(val).includes(f.text)) return false
           }
@@ -1184,7 +1221,7 @@ export function Watchlist() {
       })
     }
     return result
-  }, [rowsInSelectedGroup, filters, columns, boardFilter, excludeST])
+  }, [rowsInSelectedGroup, filters, columns, boardFilter, excludeST, volumeUnit])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
   const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
@@ -1232,6 +1269,12 @@ export function Watchlist() {
   // "數據未就緒" 的個股數: 後端 LEFT JOIN 保證返回所有自選行,
   // 指標全為 null 的行屬於 enriched 緩存未覆蓋 (新股/冷門/新用戶未同步), 非篩選導致.
   // 用 close 是否為 null/undefined 判斷 "整行指標缺失" (close 是 enriched 最基礎字段).
+  // Newest flag date in the list; tagged on the headers only when it predates today in Taipei.
+  const flagHeaderTag = useMemo(() => {
+    const dates = sortedRows.map((r: any) => r.indicator_date).filter((d: unknown): d is string => typeof d === 'string' && !!d)
+    return dates.length > 0 ? earlierSessionTag(dates.reduce((a, b) => (a > b ? a : b))) : null
+  }, [sortedRows])
+
   const pendingCount = useMemo(
     () => sortedRows.filter((r: any) => r.close == null).length,
     [sortedRows],
@@ -1534,6 +1577,8 @@ export function Watchlist() {
                   {items.map(item => {
                     const f = filters[item.id] || {}
                     const hasFilter = !!f.min || !!f.max || !!f.text
+                    const unit = filterUnit(item.col, volumeUnit)?.label
+                    const unitSuffix = unit ? ` (${unit})` : ''
                     return (
                       <div key={item.id} className="flex items-center gap-0.5 text-[11px]">
                         <span className={`whitespace-nowrap ${hasFilter ? 'text-accent' : 'text-secondary'}`}>{item.label}</span>
@@ -1541,6 +1586,7 @@ export function Watchlist() {
                           type="number"
                           value={f.min ?? ''}
                           onChange={e => updateFilter(item.id, { min: e.target.value })}
+                          aria-label={`${item.label} 下限${unitSuffix}`}
                           placeholder="min"
                           className={`w-12 h-5 rounded border text-[10px] px-1 placeholder:text-muted focus:outline-none ${
                             hasFilter ? 'border-accent/30 bg-accent/5' : 'border-border bg-elevated'
@@ -1551,11 +1597,13 @@ export function Watchlist() {
                           type="number"
                           value={f.max ?? ''}
                           onChange={e => updateFilter(item.id, { max: e.target.value })}
+                          aria-label={`${item.label} 上限${unitSuffix}`}
                           placeholder="max"
                           className={`w-12 h-5 rounded border text-[10px] px-1 placeholder:text-muted focus:outline-none ${
                             hasFilter ? 'border-accent/30 bg-accent/5' : 'border-border bg-elevated'
                           } text-foreground focus:border-accent/50`}
                         />
+                        {unit && <span className="text-muted">{unit}</span>}
                       </div>
                     )
                   })}
@@ -1575,11 +1623,16 @@ export function Watchlist() {
       <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="px-5 py-3">
           {/* 列表 */}
+          {(list.isRefetchError || enriched.isRefetchError) && (
+            <div role="status" className="mb-2 rounded border border-warning/30 bg-warning/10 px-2 py-1 text-[11px] text-warning">
+              {list.isRefetchError ? '自選清單更新失敗' : '行情更新失敗'}，以下為上次取得的資料
+            </div>
+          )}
           {watchlistContentLoading ? (
             <div className="text-sm text-muted">載入中…</div>
-          ) : list.isError ? (
+          ) : list.isLoadingError ? (
             <div className="text-sm text-danger">讀取自選失敗</div>
-          ) : enriched.isError ? (
+          ) : enriched.isLoadingError ? (
             <div className="text-sm text-danger">讀取自選行情失敗</div>
           ) : allSymbols.length === 0 ? (
             <EmptyState
@@ -1616,6 +1669,14 @@ export function Watchlist() {
               rowClassName={() => 'border-t border-border hover:bg-elevated/50 transition-colors duration-150 ease-smooth'}
               // 日k列表頭：標籤 + 顯示/隱藏眼睛按鈕
               renderHeaderContent={(col) => {
+                if (col.source.type === 'builtin' && FLAG_COLUMN_KEYS.has(col.source.key) && flagHeaderTag) {
+                  return (
+                    <span className="inline-flex items-center justify-center gap-1">
+                      <span className="shrink-0 whitespace-nowrap">{col.label}</span>
+                      <span className="text-[9px] font-mono text-muted" title="訊號與連板為此日期的盤後資料，非今日">{flagHeaderTag}</span>
+                    </span>
+                  )
+                }
                 if (col.source.type === 'builtin' && col.source.key === 'candle') {
                   return (
                     <span className="inline-flex items-center justify-center gap-1.5">
@@ -1817,7 +1878,7 @@ export function Watchlist() {
                 if (key === 'signals') {
                   const signals = getSignals(r)
                   return (
-                    <td className="px-2 py-1.5">
+                    <td className="px-2 py-1.5" title={r.indicator_date ? `指標日期 ${r.indicator_date}` : undefined}>
                       {signals.length > 0 && (
                         <div className="flex flex-wrap gap-0.5">
                           {signals.slice(0, 3).map((s) => (

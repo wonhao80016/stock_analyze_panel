@@ -242,6 +242,8 @@ export interface AbnormalSignalDefinition {
   formula: string
   /** History the signal needs before it is evaluated at all; absent when it needs none. */
   dataRequirement?: string
+  /** Label per backend subtype, for signals that fire in either direction. */
+  subtypeNames?: Record<string, string>
 }
 
 /** Abnormal move and capital flow diagnostics.
@@ -273,6 +275,7 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     category: '價格',
     description: '單日漲跌幅絕對值達 5% 以上，槓桿型 ETF 會先除以槓桿倍數再判定。',
     formula: '|漲跌幅| ÷ |槓桿倍數| ≥ 5%',
+    subtypeNames: { UP: '大幅上漲', DOWN: '大幅下跌' },
   },
   {
     id: 'FOREIGN_FLOW_SPIKE',
@@ -281,6 +284,7 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     description: '外資買賣超達前 20 日平均的 3 倍，且絕對量至少 10 萬股。',
     formula: '|外資買賣超| ≥ 100,000 股　且　|外資買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
     dataRequirement: '前 20 日中至少 15 個已公布法人資料的交易日（未列出的日子視為 0），且該平均本身 ≥ 10,000 股',
+    subtypeNames: { BUY: '外資異常買超', SELL: '外資異常賣超' },
   },
   {
     id: 'TRUST_FLOW_SPIKE',
@@ -289,22 +293,25 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     description: '投信買賣超達前 20 日平均的 3 倍，且絕對量至少 5 萬股。',
     formula: '|投信買賣超| ≥ 50,000 股　且　|投信買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
     dataRequirement: '前 20 日中至少 15 個已公布法人資料的交易日（未列出的日子視為 0），且該平均本身 ≥ 5,000 股',
+    subtypeNames: { BUY: '投信異常買超', SELL: '投信異常賣超' },
   },
   {
     id: 'MARGIN_SURGE',
-    name: '融資激增',
+    name: '融資異常增減',
     category: '籌碼',
     description: '融資增減至少 50 萬股，且達前 20 日中位數的 3 倍；前 20 日中位數為 0 時，達 50 萬股即觸發（倍數無法計算）。',
     formula: '|融資增減| ≥ 500,000 股　且　|融資增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0（中位數為 0 時：|融資增減| ≥ 500,000 股）',
     dataRequirement: '前 20 日至少 15 日有融資融券資料',
+    subtypeNames: { INCREASE: '融資激增', DECREASE: '融資大減' },
   },
   {
     id: 'SHORT_SURGE',
-    name: '融券激增',
+    name: '融券異常增減',
     category: '籌碼',
     description: '融券增減至少 10 萬股，且達前 20 日中位數的 3 倍；前 20 日中位數為 0 時，達 10 萬股即觸發（倍數無法計算）。',
     formula: '|融券增減| ≥ 100,000 股　且　|融券增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0（中位數為 0 時：|融券增減| ≥ 100,000 股）',
     dataRequirement: '前 20 日至少 15 日有融資融券資料',
+    subtypeNames: { INCREASE: '融券激增', DECREASE: '融券大減' },
   },
   {
     id: 'SHORT_MARGIN_RATIO_SPIKE',
@@ -323,6 +330,7 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     formula:
       '|漲跌幅| ÷ |槓桿倍數| ≥ 3%　且　反向外資買賣超 ≥ 200,000 股　且　該買賣超達前 20 日 |買賣超| 平均的 2 倍',
     dataRequirement: '前 20 日中至少 15 個已公布法人資料的交易日（未列出的日子視為 0），且該平均本身 ≥ 10,000 股',
+    subtypeNames: { PRICE_UP_FOREIGN_SELL: '價漲外資賣', PRICE_DOWN_FOREIGN_BUY: '價跌外資買' },
   },
   {
     id: 'RELATIVE_STRENGTH_OUTLIER',
@@ -331,6 +339,7 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     description: '個股與所屬產業的 5 日報酬率差距達 10 個百分點以上。',
     formula: '|個股 5 日報酬率 − 所屬產業等權重 5 日報酬率| ≥ 10 個百分點',
     dataRequirement: 'ETF 結構性不適用（無所屬產業），不列入其觸發與未觸發統計',
+    subtypeNames: { LEADER: '強於產業', LAGGARD: '弱於產業' },
   },
 ]
 
@@ -339,6 +348,57 @@ export const ABNORMAL_SIGNAL_LABELS: Record<string, string> =
     acc[sig.id] = sig.name
     return acc
   }, {})
+
+/** Display label of one triggered abnormal signal; unknown types come back unchanged. */
+export function abnormalSignalLabel(type: string, subtype?: string | null): string {
+  const def = ABNORMAL_SIGNAL_DEFINITIONS.find(sig => sig.id === type)
+  if (!def) return type
+  return (subtype && def.subtypeNames?.[subtype]) || def.name
+}
+
+export interface AbnormalSignalEvidenceLike {
+  type: string
+  observed: number
+  baseline?: number | null
+  ratio?: number | null
+  delta?: number | null
+}
+
+const fmtShares = (v: number) => `${Math.round(v).toLocaleString('en-US')} 股`
+const fmtTwd = (v: number) => `${Math.round(v).toLocaleString('en-US')} 元`
+const fmtRatio = (v: number | null | undefined) => (v == null ? '倍數無法計算' : `倍數 ${v}`)
+
+/** Evidence in words. The backend's baseline field carries a different quantity per signal type. */
+export function abnormalSignalEvidence(sig: AbnormalSignalEvidenceLike): string {
+  const base = sig.baseline
+  switch (sig.type) {
+    case 'VOLUME_SPIKE':
+      return `成交量 ${fmtShares(sig.observed)}，前 5 個有成交日均量 ${base == null ? '—' : fmtShares(base)}，${fmtRatio(sig.ratio)}`
+    case 'TURNOVER_SPIKE':
+      return `成交金額 ${fmtTwd(sig.observed)}，前 5 個有成交日均額 ${base == null ? '—' : fmtTwd(base)}，${fmtRatio(sig.ratio)}`
+    case 'PRICE_MOVE':
+      return `漲跌幅 ${sig.observed}%`
+    case 'FOREIGN_FLOW_SPIKE':
+    case 'TRUST_FLOW_SPIKE': {
+      const who = sig.type === 'FOREIGN_FLOW_SPIKE' ? '外資' : '投信'
+      return `${who}買賣超 ${fmtShares(sig.observed)}，前 20 日 |買賣超| 平均 ${base == null ? '—' : fmtShares(base)}，${fmtRatio(sig.ratio)}`
+    }
+    case 'MARGIN_SURGE':
+    case 'SHORT_SURGE': {
+      const what = sig.type === 'MARGIN_SURGE' ? '融資' : '融券'
+      const median = sig.ratio == null ? '前 20 日 |增減| 中位數為 0' : `前 20 日 |增減| 中位數 ${base == null ? '—' : fmtShares(base)}`
+      return `${what}增減 ${fmtShares(sig.observed)}，${median}，${fmtRatio(sig.ratio)}`
+    }
+    case 'SHORT_MARGIN_RATIO_SPIKE':
+      return `券資比 ${sig.observed}%，前 20 日中位數 ${base ?? '—'}%，上升 ${sig.delta ?? '—'} 個百分點`
+    case 'PRICE_FLOW_DIVERGENCE':
+      return `漲跌幅 ${Number(sig.observed.toFixed(2))}%，外資買賣超 ${base == null ? '—' : fmtShares(base)}`
+    case 'RELATIVE_STRENGTH_OUTLIER':
+      return `個股與產業 5 日報酬率差 ${sig.observed} 個百分點，產業 5 日報酬率 ${base ?? '—'}%`
+    default:
+      return `觀測值 ${sig.observed}`
+  }
+}
 
 export interface VolumePatternDefinition {
   id: string

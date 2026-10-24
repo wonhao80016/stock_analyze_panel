@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, ChevronUp, FolderCog, FolderInput, Pencil, Plus, Trash2, X, Eraser } from 'lucide-react'
 import { Modal } from '@/components/Modal'
 import { api } from '@/lib/api'
@@ -60,7 +60,9 @@ export function WatchlistGroupBar({
   // 拖拽排序狀態: dragIndex = 拖動中的分組下標, dropIndex = 插入位置 (均相對 groups 數組)
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
-  const reorderable = !!onReorder && groups.length > 1
+  // The next order is computed from the groups prop, so a drag before the last save lands would reorder a stale list.
+  const [reorderPending, setReorderPending] = useState(false)
+  const reorderable = !!onReorder && groups.length > 1 && !reorderPending
   const tablistRef = useRef<HTMLDivElement>(null)
 
   const clearDrag = () => { setDragIndex(null); setDropIndex(null) }
@@ -81,8 +83,9 @@ export function WatchlistGroupBar({
     const [moved] = ids.splice(dragIndex, 1)
     if (moved) {
       ids.splice(dropIndex > dragIndex ? dropIndex - 1 : dropIndex, 0, moved)
-      if (ids.join(',') !== groups.map(group => group.id).join(',')) {
-        void onReorder?.(ids)
+      if (onReorder && ids.join(',') !== groups.map(group => group.id).join(',')) {
+        setReorderPending(true)
+        void onReorder(ids).catch(() => undefined).finally(() => setReorderPending(false))
       }
     }
     clearDrag()
@@ -292,6 +295,17 @@ function GroupManagerDialog({
 
   // 「顯示在側邊欄」偏好開關
   const qc = useQueryClient()
+  const rulesQuery = useQuery({
+    queryKey: QK.monitorRules,
+    queryFn: api.monitorRulesList,
+    enabled: deletingId != null,
+  })
+  // A rule bound to a deleted group stops firing for good: a recreated group gets a new id.
+  const boundRuleNames = deletingId
+    ? (rulesQuery.data?.rules ?? [])
+      .filter(rule => rule.scope === 'watchlist_group' && rule.group_id === deletingId)
+      .map(rule => `「${rule.name}」`)
+    : []
   const prefs = usePreferences()
   const groupsInNav = prefs.data?.watchlist_groups_in_nav ?? false
   const [navTogglePending, setNavTogglePending] = useState(false)
@@ -459,13 +473,20 @@ function GroupManagerDialog({
               </div>
             ) : deletingId === group.id ? (
               <>
-                <span className="min-w-0 flex-1 text-xs text-secondary">
+                <span className="min-w-0 flex-1 py-2 text-xs text-secondary">
                   刪除「{group.name}」？{(counts[group.id] ?? 0) > 0 ? ` ${counts[group.id]} 檔股票將回到未分組。` : ''}
+                  {rulesQuery.isLoading ? ' 正在檢查綁定的監控規則…' : ''}
+                  {rulesQuery.isError ? ' 無法確認是否有監控規則綁定此分組。' : ''}
+                  {boundRuleNames.length > 0 ? ` 監控規則${boundRuleNames.join('、')}綁定此分組，刪除後將停止觸發，需改綁其他分組。` : ''}
                 </span>
                 <button
                   type="button"
-                  disabled={pending}
-                  onClick={() => void run(async () => { await onDelete(group.id); setDeletingId(null) })}
+                  disabled={pending || rulesQuery.isLoading}
+                  onClick={() => void run(async () => {
+                    await onDelete(group.id)
+                    setDeletingId(null)
+                    void qc.invalidateQueries({ queryKey: QK.monitorRules })
+                  })}
                   className="rounded px-2 py-1 text-[11px] text-danger bg-danger/10 hover:bg-danger/20 disabled:opacity-50"
                 >
                   確認
@@ -540,12 +561,14 @@ interface GroupPickerProps {
   groupIds: string[]
   symbol: string
   disabled?: boolean
-  /** 勾選=加入該分組, 取消勾選=僅移出該分組 (標的保留在自選中) */
-  onToggleMember: (symbol: string, groupId: string, member: boolean) => void
+  /** 勾選=加入該分組, 取消勾選=僅移出該分組 (標的保留在自選中); 回傳 Promise 時完成前停用選項 */
+  onToggleMember: (symbol: string, groupId: string, member: boolean) => void | Promise<unknown>
 }
 
 export function WatchlistGroupPicker({ groups, groupIds, symbol, disabled, onToggleMember }: GroupPickerProps) {
   const [open, setOpen] = useState(false)
+  // Membership comes from props; a click before the last toggle lands would act on the stale state.
+  const [togglePending, setTogglePending] = useState(false)
   const [pos, setPos] = useState({ top: 0, left: 0, flipUp: false })
   const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
@@ -660,8 +683,15 @@ export function WatchlistGroupPicker({ groups, groupIds, symbol, disabled, onTog
                 type="button"
                 role="menuitemcheckbox"
                 aria-checked={member}
-                onClick={() => onToggleMember(symbol, group.id, !member)}
-                className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-elevated ${
+                disabled={togglePending}
+                onClick={() => {
+                  if (togglePending) return
+                  setTogglePending(true)
+                  void Promise.resolve(onToggleMember(symbol, group.id, !member))
+                    .catch(() => undefined)
+                    .finally(() => setTogglePending(false))
+                }}
+                className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-elevated disabled:opacity-50 ${
                   member ? color.text : 'text-secondary'
                 }`}
               >

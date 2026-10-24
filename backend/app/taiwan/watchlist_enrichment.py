@@ -58,6 +58,16 @@ _TAIWAN_INDICATOR_FIELDS = (
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
 )
 
+# Signal flags and limit streaks the watchlist shows, read from the partition that dates the indicators.
+_TAIWAN_SIGNAL_FIELDS = (
+    "consecutive_limit_ups", "consecutive_limit_downs",
+    "signal_limit_up", "signal_limit_down", "signal_volume_surge",
+    "signal_ma_golden_5_20", "signal_macd_golden", "signal_n_day_high",
+    "signal_boll_breakout_upper", "signal_ma20_breakout",
+    "signal_ma_dead_5_20", "signal_macd_dead", "signal_n_day_low",
+    "signal_boll_breakdown_lower", "signal_ma20_breakdown",
+)
+
 
 def _sanitize_float(value: Any) -> float | None:
     """NaN/Inf -> None; 其余原样返回 (与 api/watchlist.py 对 A 股列的处理口径一致)。"""
@@ -201,7 +211,8 @@ def _taiwan_indicator_map(symbols: list[str]) -> tuple[dict[str, dict], str | No
     """Indicators of the newest partition that carries them, plus that partition's date."""
     from app.taiwan.enriched_reader import read_latest_enriched
 
-    latest = read_latest_enriched(list(_TAIWAN_INDICATOR_FIELDS), symbols)
+    # A partition without the flag columns leaves them null rather than reading as untriggered.
+    latest = read_latest_enriched(list(_TAIWAN_INDICATOR_FIELDS), symbols, optional_columns=_TAIWAN_SIGNAL_FIELDS)
     if latest is None:
         return {}, None
     as_of, frame = latest
@@ -310,6 +321,7 @@ def enrich_taiwan_watchlist_rows(
             "live_date": _taiwan_live_date(q),
             "indicator_date": indicator_date if ind else None,
             **{f: _sanitize_float(ind.get(f)) for f in _TAIWAN_INDICATOR_FIELDS},
+            **{f: ind.get(f) for f in _TAIWAN_SIGNAL_FIELDS},
             "turnover_rate": turnover_rate,
             "turnover_rate_status": _turnover_rate_status(
                 turnover_rate, _turnover_not_applicable(asset_type, inst), board_lot

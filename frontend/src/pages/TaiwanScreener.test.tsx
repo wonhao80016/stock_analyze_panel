@@ -413,8 +413,8 @@ describe('Filter hierarchy — basic vs. advanced (Phase 8C-C)', () => {
     expect(screen.getByText('標的型態')).toBeInTheDocument()
     expect(screen.getByText('漲跌幅區間 (%)')).toBeInTheDocument()
     expect(screen.getByText('價格區間 (TWD)')).toBeInTheDocument()
-    expect(screen.getByText('最低成交量 (張)')).toBeInTheDocument()
-    expect(screen.getByText('最低成交金額 (百萬 TWD)')).toBeInTheDocument()
+    expect(screen.getByText('成交量區間 (張)')).toBeInTheDocument()
+    expect(screen.getByText('成交金額區間 (百萬 TWD)')).toBeInTheDocument()
   })
 
   it('advanced filters are collapsed by default (RSI/institutional/margin fields not shown)', async () => {
@@ -422,7 +422,7 @@ describe('Filter hierarchy — basic vs. advanced (Phase 8C-C)', () => {
     await screen.findByText('市場交易所')
     expect(screen.queryByText('RSI (14) 區間')).not.toBeInTheDocument()
     expect(screen.queryByText('外資買賣超區間 (張)')).not.toBeInTheDocument()
-    expect(screen.queryByText('券資比最低 (%)')).not.toBeInTheDocument()
+    expect(screen.queryByText('券資比區間 (%)')).not.toBeInTheDocument()
     const toggle = screen.getByRole('button', { name: /進階條件/ })
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
   })
@@ -438,7 +438,7 @@ describe('Filter hierarchy — basic vs. advanced (Phase 8C-C)', () => {
     expect(screen.getByText('籌碼與融資券')).toBeInTheDocument()
     expect(screen.getByText('RSI (14) 區間')).toBeInTheDocument()
     expect(screen.getByText('外資買賣超區間 (張)')).toBeInTheDocument()
-    expect(screen.getByText('券資比最低 (%)')).toBeInTheDocument()
+    expect(screen.getByText('券資比區間 (%)')).toBeInTheDocument()
 
     // 原本站上 MA20 按鈕行為未被破壞
     const ma20Button = screen.getByRole('button', { name: '站上 MA20 (月線)' })

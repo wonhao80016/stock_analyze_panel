@@ -39,3 +39,12 @@ describe('renderBuiltinDataCell indicator date', () => {
     expect(td.getAttribute('title')).toBeNull()
   })
 })
+
+describe('limit streak cells carry the indicator date', () => {
+  it('marks the consecutive limit-up and limit-down cells', () => {
+    for (const key of ['limit_ups', 'limit_downs']) {
+      const td = renderCell({ consecutive_limit_ups: 2, consecutive_limit_downs: 1, indicator_date: '2026-10-22' }, key)
+      expect(td.getAttribute('title'), key).toBe('指標日期 2026-10-22')
+    }
+  })
+})

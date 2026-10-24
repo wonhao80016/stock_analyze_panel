@@ -52,6 +52,7 @@ const INDICATOR_DATE_KEYS = new Set([
   'rsi6', 'rsi14', 'rsi24', 'macd_dif', 'macd_dea', 'macd_hist',
   'kdj_k', 'kdj_d', 'kdj_j', 'boll_upper', 'boll_lower', 'atr14', 'vol_ma5', 'vol_ma10',
   'momentum_5d', 'momentum_10d', 'momentum_20d', 'momentum_30d', 'momentum_60d',
+  'limit_ups', 'limit_downs',
 ])
 
 /**

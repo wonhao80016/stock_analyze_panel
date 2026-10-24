@@ -230,7 +230,8 @@ def _group_members_or_none(rule: dict) -> frozenset[str] | None:
         if key not in _warned_missing_groups:
             _warned_missing_groups.add(key)
             logger.warning(
-                "监控规则 %s 绑定的自选分组 %s 已删除, 本轮跳过 (fail-closed, 恢复分组后自动生效)",
+                "monitor rule %s is bound to deleted watchlist group %s and will not fire again (fail-closed); "
+                "a recreated group gets a new id, so rebind the rule",
                 rule.get("id"), group_id,
             )
     return members

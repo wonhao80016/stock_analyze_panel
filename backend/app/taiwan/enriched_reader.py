@@ -46,10 +46,13 @@ def _load_published(part: Path, wanted: list[str]) -> pl.DataFrame | None:
     return frame
 
 
-def _select(frame: pl.DataFrame, wanted: list[str], symbols: list[str] | None) -> pl.DataFrame:
+def _select(
+    frame: pl.DataFrame, wanted: list[str], symbols: list[str] | None, optional: tuple[str, ...] = ()
+) -> pl.DataFrame:
     if symbols is not None:
         frame = frame.filter(pl.col("symbol").is_in(symbols))
-    return frame.select(["symbol", *wanted])
+    present = [c for c in optional if c in frame.columns and c not in wanted]
+    return frame.select(["symbol", *wanted, *present])
 
 
 def read_enriched_partition(
@@ -66,8 +69,13 @@ def read_enriched_partition(
 def read_latest_enriched(
     columns: list[str],
     symbols: list[str] | None = None,
+    optional_columns: tuple[str, ...] = (),
 ) -> tuple[date, pl.DataFrame] | None:
-    """Rows of the newest partition that really carries the requested indicators."""
+    """Rows of the newest partition that really carries the requested indicators.
+
+    ``optional_columns`` are added from that same partition when present; they never decide
+    which partition is chosen.
+    """
     root = _enriched_root()
     if not root.is_dir():
         return None
@@ -80,5 +88,5 @@ def read_latest_enriched(
     for d in sorted(dated, reverse=True):
         frame = _load_published(root / f"date={d.isoformat()}" / "part.parquet", wanted)
         if frame is not None:
-            return d, _select(frame, wanted, symbols)
+            return d, _select(frame, wanted, symbols, optional_columns)
     return None

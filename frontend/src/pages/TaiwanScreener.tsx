@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState, useMemo, useEffect, useRef } from 'react'
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import {
   Filter,
@@ -39,8 +39,15 @@ import { QK } from '@/lib/queryKeys'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { Modal } from '@/components/Modal'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
-import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
-import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS, VOLUME_PATTERN_DEFINITIONS } from '@/lib/signals'
+import { loadLastCompareSymbols } from '@/lib/taiwanCompareSymbols'
+import { addToCompareList } from '@/lib/compareList'
+import {
+  ABNORMAL_SIGNAL_DEFINITIONS,
+  BUILTIN_SIGNAL_DEFINITIONS,
+  VOLUME_PATTERN_DEFINITIONS,
+  abnormalSignalEvidence,
+  abnormalSignalLabel,
+} from '@/lib/signals'
 import { breadthBasisNote } from '@/lib/marketBreadth'
 import { missingChipExchangesNote } from '@/lib/screenerDegraded'
 import { useStockPreview } from '@/components/StockPreviewProvider'
@@ -56,6 +63,126 @@ function DataQualityBadge({ status, provisionalText, incompleteText }: {
   ) : (
     <span className="px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400 font-medium text-[10px]">{incompleteText}</span>
   )
+}
+
+type NumericUnit = { toUi: (backend: number) => number; toBackend: (ui: number) => number }
+
+const SAME_UNIT: NumericUnit = { toUi: v => v, toBackend: v => v }
+// UI percent, backend decimal (5 -> 0.05).
+const PERCENT_UNIT: NumericUnit = { toUi: v => v * 100, toBackend: v => v / 100.0 }
+// UI lots (張), backend shares.
+const LOTS_UNIT: NumericUnit = { toUi: v => v / 1000, toBackend: v => v * 1000.0 }
+// UI millions of TWD, backend TWD.
+const MILLION_UNIT: NumericUnit = { toUi: v => v / 1_000_000, toBackend: v => v * 1_000_000.0 }
+
+const EMPTY_NUMERIC_INPUTS = {
+  priceMin: '', priceMax: '', changePctMin: '', changePctMax: '',
+  volumeMinLots: '', volumeMaxLots: '', amountMinMln: '', amountMaxMln: '',
+  rsiMin: '', rsiMax: '', momentumMin: '', momentumMax: '', volRatioMin: '', volRatioMax: '',
+  foreignNetMinLots: '', foreignNetMaxLots: '',
+  investmentTrustNetMinLots: '', investmentTrustNetMaxLots: '',
+  dealerNetMinLots: '', dealerNetMaxLots: '',
+  marginBalanceChangeMinLots: '', marginBalanceChangeMaxLots: '',
+  shortBalanceMinLots: '', shortBalanceMaxLots: '',
+  shortMarginRatioMin: '', shortMarginRatioMax: '',
+}
+type NumericInputs = typeof EMPTY_NUMERIC_INPUTS
+
+type NumericRequestField =
+  | 'price_min' | 'price_max' | 'change_pct_min' | 'change_pct_max'
+  | 'volume_min' | 'volume_max' | 'amount_min' | 'amount_max'
+  | 'rsi_14_min' | 'rsi_14_max' | 'momentum_5d_min' | 'momentum_5d_max'
+  | 'vol_ratio_5d_min' | 'vol_ratio_5d_max'
+  | 'foreign_net_min' | 'foreign_net_max'
+  | 'investment_trust_net_min' | 'investment_trust_net_max'
+  | 'dealer_net_min' | 'dealer_net_max'
+  | 'margin_balance_change_min' | 'margin_balance_change_max'
+  | 'short_balance_min' | 'short_balance_max'
+  | 'short_margin_ratio_min' | 'short_margin_ratio_max'
+
+const NUMERIC_FIELDS: ReadonlyArray<readonly [keyof NumericInputs, NumericRequestField, NumericUnit]> = [
+  ['priceMin', 'price_min', SAME_UNIT],
+  ['priceMax', 'price_max', SAME_UNIT],
+  ['changePctMin', 'change_pct_min', PERCENT_UNIT],
+  ['changePctMax', 'change_pct_max', PERCENT_UNIT],
+  ['volumeMinLots', 'volume_min', LOTS_UNIT],
+  ['volumeMaxLots', 'volume_max', LOTS_UNIT],
+  ['amountMinMln', 'amount_min', MILLION_UNIT],
+  ['amountMaxMln', 'amount_max', MILLION_UNIT],
+  ['rsiMin', 'rsi_14_min', SAME_UNIT],
+  ['rsiMax', 'rsi_14_max', SAME_UNIT],
+  ['momentumMin', 'momentum_5d_min', PERCENT_UNIT],
+  ['momentumMax', 'momentum_5d_max', PERCENT_UNIT],
+  ['volRatioMin', 'vol_ratio_5d_min', SAME_UNIT],
+  ['volRatioMax', 'vol_ratio_5d_max', SAME_UNIT],
+  ['foreignNetMinLots', 'foreign_net_min', LOTS_UNIT],
+  ['foreignNetMaxLots', 'foreign_net_max', LOTS_UNIT],
+  ['investmentTrustNetMinLots', 'investment_trust_net_min', LOTS_UNIT],
+  ['investmentTrustNetMaxLots', 'investment_trust_net_max', LOTS_UNIT],
+  ['dealerNetMinLots', 'dealer_net_min', LOTS_UNIT],
+  ['dealerNetMaxLots', 'dealer_net_max', LOTS_UNIT],
+  ['marginBalanceChangeMinLots', 'margin_balance_change_min', LOTS_UNIT],
+  ['marginBalanceChangeMaxLots', 'margin_balance_change_max', LOTS_UNIT],
+  ['shortBalanceMinLots', 'short_balance_min', LOTS_UNIT],
+  ['shortBalanceMaxLots', 'short_balance_max', LOTS_UNIT],
+  // The ratio is a percent value on both sides (10 = 10%).
+  ['shortMarginRatioMin', 'short_margin_ratio_min', SAME_UNIT],
+  ['shortMarginRatioMax', 'short_margin_ratio_max', SAME_UNIT],
+]
+
+function numericRequestFields(inputs: NumericInputs): Record<NumericRequestField, number | null> {
+  const out = {} as Record<NumericRequestField, number | null>
+  for (const [key, field, unit] of NUMERIC_FIELDS) {
+    out[field] = inputs[key] ? unit.toBackend(parseFloat(inputs[key])) : null
+  }
+  return out
+}
+
+// Translated request fields the form carries; any other non-null field is reported as not applied.
+const APPLIED_TRANSLATION_FIELDS = new Set<string>([
+  ...NUMERIC_FIELDS.map(([, field]) => field),
+  'exchange', 'instrument', 'industry', 'above_ma5', 'above_ma20',
+  'near_upper_limit', 'near_lower_limit', 'signals', 'sort_by', 'sort_order', 'page', 'page_size',
+])
+
+function unappliedTranslationFields(request: TaiwanScreenerTranslation['request']): string[] {
+  if (!request) return []
+  return Object.entries(request)
+    .filter(([field, value]) => value !== null && value !== undefined && !APPLIED_TRANSLATION_FIELDS.has(field))
+    .map(([field]) => field)
+}
+
+const NUMERIC_INPUT_DEBOUNCE_MS = 300
+
+// Bounds of backend/app/taiwan/screener.py TaiwanScreenerRequest in UI units; outside them the API answers 422.
+const NUMERIC_INPUT_LIMITS: Partial<Record<keyof NumericInputs, { min?: number; max?: number }>> = {
+  priceMin: { min: 0 }, priceMax: { min: 0 },
+  changePctMin: { min: -100, max: 100 }, changePctMax: { min: -100, max: 100 },
+  volumeMinLots: { min: 0 }, volumeMaxLots: { min: 0 },
+  amountMinMln: { min: 0 }, amountMaxMln: { min: 0 },
+  rsiMin: { min: 0, max: 100 }, rsiMax: { min: 0, max: 100 },
+  volRatioMin: { min: 0 }, volRatioMax: { min: 0 },
+  shortBalanceMinLots: { min: 0 }, shortBalanceMaxLots: { min: 0 },
+  shortMarginRatioMin: { min: 0 }, shortMarginRatioMax: { min: 0 },
+}
+
+function invalidInput(key: keyof NumericInputs, value: string): boolean {
+  if (!value) return false
+  const n = parseFloat(value)
+  if (!Number.isFinite(n)) return true
+  const limit = NUMERIC_INPUT_LIMITS[key]
+  return (limit?.min !== undefined && n < limit.min) || (limit?.max !== undefined && n > limit.max)
+}
+
+function limitText(key: keyof NumericInputs): string {
+  const limit = NUMERIC_INPUT_LIMITS[key]
+  if (limit?.min !== undefined && limit.max !== undefined) return `需介於 ${limit.min} 至 ${limit.max}`
+  if (limit?.min !== undefined) return `需 ≥ ${limit.min}`
+  return '需為數字'
+}
+
+function sameInputs(a: NumericInputs, b: NumericInputs): boolean {
+  return (Object.keys(a) as (keyof NumericInputs)[]).every(key => a[key] === b[key])
 }
 
 export function TaiwanScreener() {
@@ -81,7 +208,8 @@ export function TaiwanScreener() {
     },
   })
   const handleAddToCompare = (symbol: string) => {
-    const merged = mergeSymbolIntoCompare(loadLastCompareSymbols(), symbol)
+    const merged = addToCompareList(loadLastCompareSymbols(), symbol)
+    if (!merged) return
     navigate(`/stocks/compare?symbols=${encodeURIComponent(merged.join(','))}`)
   }
   const [monitorSymbol, setMonitorSymbol] = useState<string | null>(null)
@@ -90,16 +218,8 @@ export function TaiwanScreener() {
   const [exchange, setExchange] = useState<'ALL' | 'TWSE' | 'TPEX'>('ALL')
   const [instrument, setInstrument] = useState<'ALL' | 'stock' | 'etf'>('ALL')
   const [industry, setIndustry] = useState<string>('ALL')
-  const [priceMin, setPriceMin] = useState<string>('')
-  const [priceMax, setPriceMax] = useState<string>('')
-  const [changePctMin, setChangePctMin] = useState<string>('')
-  const [changePctMax, setChangePctMax] = useState<string>('')
-  const [volumeMinLots, setVolumeMinLots] = useState<string>('') // UI in lots (張) -> backend in shares (x1000)
-  const [amountMinMln, setAmountMinMln] = useState<string>('') // UI in 百萬 TWD -> backend in TWD (x10^6)
-  const [rsiMin, setRsiMin] = useState<string>('')
-  const [rsiMax, setRsiMax] = useState<string>('')
-  const [momentumMin, setMomentumMin] = useState<string>('')
-  const [volRatioMin, setVolRatioMin] = useState<string>('')
+  const [inputs, setInputs] = useState<NumericInputs>(EMPTY_NUMERIC_INPUTS)
+  const [settledInputs, setSettledInputs] = useState<NumericInputs>(EMPTY_NUMERIC_INPUTS)
   const { openPreview } = useStockPreview()
   const [selectedSignals, setSelectedSignals] = useState<string[]>([])
   const [selectedVolumePatterns, setSelectedVolumePatterns] = useState<string[]>([])
@@ -108,16 +228,24 @@ export function TaiwanScreener() {
   const [nearUpperLimit, setNearUpperLimit] = useState<boolean>(false)
   const [nearLowerLimit, setNearLowerLimit] = useState<boolean>(false)
 
-  // Institutional filters (UI in 張 -> backend in shares x1000)
-  const [foreignNetMinLots, setForeignNetMinLots] = useState<string>('')
-  const [foreignNetMaxLots, setForeignNetMaxLots] = useState<string>('')
-  const [investmentTrustNetMinLots, setInvestmentTrustNetMinLots] = useState<string>('')
-  const [dealerNetMinLots, setDealerNetMinLots] = useState<string>('')
+  const hasInvalidInput = (Object.keys(inputs) as (keyof NumericInputs)[]).some(key => invalidInput(key, inputs[key]))
+  useEffect(() => {
+    if (hasInvalidInput || sameInputs(inputs, settledInputs)) return
+    const timer = setTimeout(() => {
+      setSettledInputs(inputs)
+      setPage(1)
+    }, NUMERIC_INPUT_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [inputs, settledInputs, hasInvalidInput])
 
-  // Margin filters (UI in 張 -> backend in shares x1000, ratio: 10 = 10%)
-  const [marginBalanceChangeMinLots, setMarginBalanceChangeMinLots] = useState<string>('')
-  const [shortBalanceMinLots, setShortBalanceMinLots] = useState<string>('')
-  const [shortMarginRatioMin, setShortMarginRatioMin] = useState<string>('')
+  const setInput = (key: keyof NumericInputs, value: string) => {
+    setInputs(prev => ({ ...prev, [key]: value }))
+  }
+  // Programmatic changes skip the debounce so the scan never mixes them with stale typed values.
+  const setInputsNow = (patch: Partial<NumericInputs>) => {
+    setInputs(prev => ({ ...prev, ...patch }))
+    setSettledInputs(prev => ({ ...prev, ...patch }))
+  }
 
   // Phase 8C-C: 進階條件預設收合, 只在使用者展開後才顯示技術面/法人/籌碼與融資券
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -135,18 +263,20 @@ export function TaiwanScreener() {
   const [nlTranslating, setNlTranslating] = useState<boolean>(false)
   const [nlTranslation, setNlTranslation] = useState<TaiwanScreenerTranslation | null>(null)
   const [nlError, setNlError] = useState<string | null>(null)
+  const nlRequestSeq = useRef(0)
 
   const handleTranslate = async () => {
-    if (!nlQuery.trim()) return
+    if (nlTranslating || !nlQuery.trim()) return
+    const seq = ++nlRequestSeq.current
     setNlTranslating(true)
     setNlError(null)
     try {
       const res = await api.taiwanScreenerTranslate(nlQuery.trim())
-      setNlTranslation(res)
+      if (seq === nlRequestSeq.current) setNlTranslation(res)
     } catch (e: any) {
-      setNlError(e?.message || '翻譯解析失敗，請確認 AI 模組設定')
+      if (seq === nlRequestSeq.current) setNlError(e?.message || '翻譯解析失敗，請確認 AI 模組設定')
     } finally {
-      setNlTranslating(false)
+      if (seq === nlRequestSeq.current) setNlTranslating(false)
     }
   }
 
@@ -156,27 +286,20 @@ export function TaiwanScreener() {
     if (req.exchange) setExchange(req.exchange)
     if (req.instrument) setInstrument(req.instrument)
     if (req.industry !== undefined) setIndustry(req.industry || 'ALL')
-    if (req.price_min !== undefined) setPriceMin(req.price_min !== null ? String(req.price_min) : '')
-    if (req.price_max !== undefined) setPriceMax(req.price_max !== null ? String(req.price_max) : '')
-    if (req.change_pct_min !== undefined) setChangePctMin(req.change_pct_min !== null ? String(req.change_pct_min * 100) : '')
-    if (req.change_pct_max !== undefined) setChangePctMax(req.change_pct_max !== null ? String(req.change_pct_max * 100) : '')
-    if (req.volume_min !== undefined) setVolumeMinLots(req.volume_min !== null ? String(req.volume_min / 1000) : '')
-    if (req.amount_min !== undefined) setAmountMinMln(req.amount_min !== null ? String(req.amount_min / 1_000_000) : '')
-    if (req.rsi_14_min !== undefined) setRsiMin(req.rsi_14_min !== null ? String(req.rsi_14_min) : '')
-    if (req.rsi_14_max !== undefined) setRsiMax(req.rsi_14_max !== null ? String(req.rsi_14_max) : '')
-    if (req.momentum_5d_min !== undefined) setMomentumMin(req.momentum_5d_min !== null ? String(req.momentum_5d_min * 100) : '')
-    if (req.vol_ratio_5d_min !== undefined) setVolRatioMin(req.vol_ratio_5d_min !== null ? String(req.vol_ratio_5d_min) : '')
+    const patch: Partial<NumericInputs> = {}
+    for (const [key, field, unit] of NUMERIC_FIELDS) {
+      const value = req[field]
+      if (value !== undefined) patch[key] = value !== null ? String(unit.toUi(value)) : ''
+    }
+    setInputsNow(patch)
     if (req.above_ma5 !== undefined) setAboveMa5(req.above_ma5)
     if (req.above_ma20 !== undefined) setAboveMa20(req.above_ma20)
     if (req.near_upper_limit !== undefined) setNearUpperLimit(Boolean(req.near_upper_limit))
     if (req.near_lower_limit !== undefined) setNearLowerLimit(Boolean(req.near_lower_limit))
-    if (req.foreign_net_min !== undefined) setForeignNetMinLots(req.foreign_net_min !== null ? String(req.foreign_net_min / 1000) : '')
-    if (req.foreign_net_max !== undefined) setForeignNetMaxLots(req.foreign_net_max !== null ? String(req.foreign_net_max / 1000) : '')
-    if (req.investment_trust_net_min !== undefined) setInvestmentTrustNetMinLots(req.investment_trust_net_min !== null ? String(req.investment_trust_net_min / 1000) : '')
-    if (req.dealer_net_min !== undefined) setDealerNetMinLots(req.dealer_net_min !== null ? String(req.dealer_net_min / 1000) : '')
-    if (req.margin_balance_change_min !== undefined) setMarginBalanceChangeMinLots(req.margin_balance_change_min !== null ? String(req.margin_balance_change_min / 1000) : '')
-    if (req.short_balance_min !== undefined) setShortBalanceMinLots(req.short_balance_min !== null ? String(req.short_balance_min / 1000) : '')
-    if (req.short_margin_ratio_min !== undefined) setShortMarginRatioMin(req.short_margin_ratio_min !== null ? String(req.short_margin_ratio_min) : '')
+    if (req.signals !== undefined) setSelectedSignals(req.signals ?? [])
+    setSelectedVolumePatterns([])
+    if (req.sort_by) setSortBy(req.sort_by)
+    if (req.sort_order) setSortOrder(req.sort_order)
     setPage(1)
     setNlTranslation(null)
   }
@@ -185,27 +308,12 @@ export function TaiwanScreener() {
     setExchange('ALL')
     setInstrument('ALL')
     setIndustry('ALL')
-    setPriceMin('')
-    setPriceMax('')
-    setChangePctMin('')
-    setChangePctMax('')
-    setVolumeMinLots('')
-    setAmountMinMln('')
-    setRsiMin('')
-    setRsiMax('')
-    setMomentumMin('')
-    setVolRatioMin('')
+    setInputsNow(EMPTY_NUMERIC_INPUTS)
     setAboveMa5(null)
     setAboveMa20(null)
     setNearUpperLimit(false)
     setNearLowerLimit(false)
-    setForeignNetMinLots('')
-    setForeignNetMaxLots('')
-    setInvestmentTrustNetMinLots('')
-    setDealerNetMinLots('')
-    setMarginBalanceChangeMinLots('')
-    setShortBalanceMinLots('')
-    setShortMarginRatioMin('')
+    setSelectedSignals([])
     setSelectedVolumePatterns([])
     setSortBy('symbol')
     setSortOrder('asc')
@@ -218,31 +326,11 @@ export function TaiwanScreener() {
       exchange,
       instrument,
       industry: industry !== 'ALL' ? industry : null,
-      price_min: priceMin ? parseFloat(priceMin) : null,
-      price_max: priceMax ? parseFloat(priceMax) : null,
-      // change_pct: UI percent to decimal (e.g. 5% -> 0.05)
-      change_pct_min: changePctMin ? parseFloat(changePctMin) / 100.0 : null,
-      change_pct_max: changePctMax ? parseFloat(changePctMax) / 100.0 : null,
-      // volume: UI lots (張) -> backend shares (x 1000)
-      volume_min: volumeMinLots ? parseFloat(volumeMinLots) * 1000.0 : null,
-      amount_min: amountMinMln ? parseFloat(amountMinMln) * 1_000_000.0 : null,
-      rsi_14_min: rsiMin ? parseFloat(rsiMin) : null,
-      rsi_14_max: rsiMax ? parseFloat(rsiMax) : null,
-      momentum_5d_min: momentumMin ? parseFloat(momentumMin) / 100.0 : null,
-      vol_ratio_5d_min: volRatioMin ? parseFloat(volRatioMin) : null,
+      ...numericRequestFields(settledInputs),
       above_ma5: aboveMa5,
       above_ma20: aboveMa20,
       near_upper_limit: nearUpperLimit || null,
       near_lower_limit: nearLowerLimit || null,
-      // Institutional: UI lots (張) -> backend shares (x 1000)
-      foreign_net_min: foreignNetMinLots ? parseFloat(foreignNetMinLots) * 1000.0 : null,
-      foreign_net_max: foreignNetMaxLots ? parseFloat(foreignNetMaxLots) * 1000.0 : null,
-      investment_trust_net_min: investmentTrustNetMinLots ? parseFloat(investmentTrustNetMinLots) * 1000.0 : null,
-      dealer_net_min: dealerNetMinLots ? parseFloat(dealerNetMinLots) * 1000.0 : null,
-      // Margin: UI lots (張) -> backend shares (x 1000), ratio: 10.0 = 10%
-      margin_balance_change_min: marginBalanceChangeMinLots ? parseFloat(marginBalanceChangeMinLots) * 1000.0 : null,
-      short_balance_min: shortBalanceMinLots ? parseFloat(shortBalanceMinLots) * 1000.0 : null,
-      short_margin_ratio_min: shortMarginRatioMin ? parseFloat(shortMarginRatioMin) : null,
       signals: selectedSignals.length ? selectedSignals : null,
       volume_patterns: selectedVolumePatterns.length ? selectedVolumePatterns : null,
       sort_by: sortBy,
@@ -252,20 +340,18 @@ export function TaiwanScreener() {
     }
     return p
   }, [
-    exchange, instrument, industry, priceMin, priceMax, changePctMin, changePctMax,
-    volumeMinLots, amountMinMln, rsiMin, rsiMax, momentumMin, volRatioMin,
+    exchange, instrument, industry, settledInputs,
     aboveMa5, aboveMa20, nearUpperLimit, nearLowerLimit,
     selectedSignals, selectedVolumePatterns,
-    foreignNetMinLots, foreignNetMaxLots, investmentTrustNetMinLots, dealerNetMinLots,
-    marginBalanceChangeMinLots, shortBalanceMinLots, shortMarginRatioMin,
     sortBy, sortOrder, page,
   ])
 
   // Screener query
-  const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['taiwanScreener', payload],
-    queryFn: () => api.taiwanScreenerRun(payload),
+  const { data, isLoading, isError, error, isPlaceholderData } = useQuery({
+    queryKey: QK.taiwanScreener(payload),
+    queryFn: ({ signal }) => api.taiwanScreenerRun(payload, signal),
     staleTime: 10_000,
+    placeholderData: keepPreviousData,
   })
 
   // Taiwan Data Freshness & Automation Status query (5-minute staleTime, no rapid polling)
@@ -274,14 +360,14 @@ export function TaiwanScreener() {
     isLoading: isStatusLoading,
     isError: isStatusError,
   } = useQuery({
-    queryKey: ['taiwanDataStatus'],
+    queryKey: QK.taiwanDataStatus,
     queryFn: () => api.taiwanDataStatus(),
     staleTime: 5 * 60 * 1000,
   })
 
   // Taiwan Market Intelligence Snapshot query (Phase 7A)
   const { data: intelData } = useQuery({
-    queryKey: ['taiwanMarketIntelligence'],
+    queryKey: QK.taiwanMarketIntelligence,
     queryFn: () => api.taiwanMarketIntelligence(),
     staleTime: 5 * 60 * 1000,
   })
@@ -292,7 +378,7 @@ export function TaiwanScreener() {
   // Phase 8C-C: 34 檔預設收合只顯示前 10 檔, 避免一次全部展開
   const [showAllIndustries, setShowAllIndustries] = useState(false)
   const { data: indData } = useQuery({
-    queryKey: ['taiwanIndustryIntelligence', indSortBy, indOrder],
+    queryKey: QK.taiwanIndustryIntelligence(indSortBy, indOrder),
     queryFn: () => api.taiwanIndustryIntelligence({ sort_by: indSortBy, order: indOrder }),
     staleTime: 5 * 60 * 1000,
   })
@@ -302,7 +388,7 @@ export function TaiwanScreener() {
   const [showAbnormalGuide, setShowAbnormalGuide] = useState(false)
   const selectedAbnormalSignal = ABNORMAL_SIGNAL_DEFINITIONS.find(s => s.id === abnormalFilter)
   const { data: abnormalData, isLoading: isAbnormalLoading, isError: isAbnormalError } = useQuery({
-    queryKey: ['taiwanAbnormalDiagnostics', abnormalFilter],
+    queryKey: QK.taiwanAbnormalDiagnostics(abnormalFilter),
     queryFn: () => api.taiwanAbnormalDiagnostics({
       signal_type: abnormalFilter !== 'ALL' ? abnormalFilter : undefined,
     }),
@@ -395,6 +481,44 @@ export function TaiwanScreener() {
     return <span className="text-zinc-300 font-mono">{ratio.toFixed(2)}%</span>
   }
 
+  const rangeField = (label: string, name: string, unit: string, minKey: keyof NumericInputs, maxKey: keyof NumericInputs) => (
+    <div>
+      <label className="text-xs font-semibold text-zinc-400 block mb-1.5">{label}</label>
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          placeholder={unit ? `最小 (${unit})` : '最小'}
+          aria-label={unit ? `${name}下限 (${unit})` : `${name}下限`}
+          value={inputs[minKey]}
+          min={NUMERIC_INPUT_LIMITS[minKey]?.min}
+          max={NUMERIC_INPUT_LIMITS[minKey]?.max}
+          aria-invalid={invalidInput(minKey, inputs[minKey])}
+          onChange={e => setInput(minKey, e.target.value)}
+          className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
+        />
+        <span className="text-zinc-500">~</span>
+        <input
+          type="number"
+          placeholder={unit ? `最大 (${unit})` : '最大'}
+          aria-label={unit ? `${name}上限 (${unit})` : `${name}上限`}
+          value={inputs[maxKey]}
+          min={NUMERIC_INPUT_LIMITS[maxKey]?.min}
+          max={NUMERIC_INPUT_LIMITS[maxKey]?.max}
+          aria-invalid={invalidInput(maxKey, inputs[maxKey])}
+          onChange={e => setInput(maxKey, e.target.value)}
+          className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
+        />
+      </div>
+      {(invalidInput(minKey, inputs[minKey]) || invalidInput(maxKey, inputs[maxKey])) && (
+        <p role="alert" className="mt-1 text-[10px] text-red-400">
+          {name}{limitText(invalidInput(minKey, inputs[minKey]) ? minKey : maxKey)}，此條件尚未送出
+        </p>
+      )}
+    </div>
+  )
+
+  const unappliedFields = unappliedTranslationFields(nlTranslation?.request ?? null)
+
   // Phase 8C-C: 常用意圖快速篩選 — 只組合現有 filter capability, 不建立第二套
   // screener 邏輯。每個 preset 的 active 狀態直接由現有 filter state 推導(而非
   // 額外存一個 activePreset flag), 使用者手動調整任一相關欄位時會自然「退出」
@@ -404,37 +528,37 @@ export function TaiwanScreener() {
     {
       id: 'strong',
       label: '強勢股',
-      active: aboveMa20 === true && momentumMin === '2',
-      apply: () => { setAboveMa20(true); setMomentumMin('2'); setPage(1) },
-      clear: () => { setAboveMa20(null); setMomentumMin(''); setPage(1) },
+      active: aboveMa20 === true && inputs.momentumMin === '2',
+      apply: () => { setAboveMa20(true); setInputsNow({ momentumMin: '2' }); setPage(1) },
+      clear: () => { setAboveMa20(null); setInputsNow({ momentumMin: '' }); setPage(1) },
     },
     {
       id: 'volume',
       label: '放量股',
-      active: volRatioMin === '2',
-      apply: () => { setVolRatioMin('2'); setPage(1) },
-      clear: () => { setVolRatioMin(''); setPage(1) },
+      active: inputs.volRatioMin === '2',
+      apply: () => { setInputsNow({ volRatioMin: '2' }); setPage(1) },
+      clear: () => { setInputsNow({ volRatioMin: '' }); setPage(1) },
     },
     {
       id: 'institutional',
       label: '法人買超',
-      active: foreignNetMinLots === '1000',
-      apply: () => { setForeignNetMinLots('1000'); setPage(1) },
-      clear: () => { setForeignNetMinLots(''); setPage(1) },
+      active: inputs.foreignNetMinLots === '1000',
+      apply: () => { setInputsNow({ foreignNetMinLots: '1000' }); setPage(1) },
+      clear: () => { setInputsNow({ foreignNetMinLots: '' }); setPage(1) },
     },
     {
       id: 'breakout',
       label: '突破轉強',
-      active: aboveMa5 === true && aboveMa20 === true && changePctMin === '0',
-      apply: () => { setAboveMa5(true); setAboveMa20(true); setChangePctMin('0'); setPage(1) },
-      clear: () => { setAboveMa5(null); setAboveMa20(null); setChangePctMin(''); setPage(1) },
+      active: aboveMa5 === true && aboveMa20 === true && inputs.changePctMin === '0',
+      apply: () => { setAboveMa5(true); setAboveMa20(true); setInputsNow({ changePctMin: '0' }); setPage(1) },
+      clear: () => { setAboveMa5(null); setAboveMa20(null); setInputsNow({ changePctMin: '' }); setPage(1) },
     },
     {
       id: 'hot',
       label: '熱門股',
-      active: amountMinMln === '500',
-      apply: () => { setAmountMinMln('500'); setPage(1) },
-      clear: () => { setAmountMinMln(''); setPage(1) },
+      active: inputs.amountMinMln === '500',
+      apply: () => { setInputsNow({ amountMinMln: '500' }); setPage(1) },
+      clear: () => { setInputsNow({ amountMinMln: '' }); setPage(1) },
     },
   ]
 
@@ -987,18 +1111,9 @@ export function TaiwanScreener() {
                           <span
                             key={idx}
                             className="px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 border border-zinc-700 text-zinc-300"
-                            title={`${sig.formula} (觀測值: ${sig.observed}, 基期: ${sig.baseline})`}
+                            title={`${abnormalSignalEvidence(sig)}（${sig.formula}）`}
                           >
-                            {sig.type === 'VOLUME_SPIKE' && '爆量'}
-                            {sig.type === 'TURNOVER_SPIKE' && '成交額倍增'}
-                            {sig.type === 'PRICE_MOVE' && (sig.subtype === 'UP' ? '大幅上漲' : '大幅下跌')}
-                            {sig.type === 'FOREIGN_FLOW_SPIKE' && (sig.subtype === 'BUY' ? '外資爆量買超' : '外資爆量賣超')}
-                            {sig.type === 'TRUST_FLOW_SPIKE' && (sig.subtype === 'BUY' ? '投信爆量買超' : '投信爆量賣超')}
-                            {sig.type === 'MARGIN_SURGE' && (sig.subtype === 'INCREASE' ? '融資激增' : '融資大減')}
-                            {sig.type === 'SHORT_SURGE' && '融券激增'}
-                            {sig.type === 'SHORT_MARGIN_RATIO_SPIKE' && '券資比驟升'}
-                            {sig.type === 'PRICE_FLOW_DIVERGENCE' && '價量背離'}
-                            {sig.type === 'RELATIVE_STRENGTH_OUTLIER' && '產業強弱極端'}
+                            {abnormalSignalLabel(sig.type, sig.subtype)}
                           </span>
                         ))}
                       </div>
@@ -1135,6 +1250,12 @@ export function TaiwanScreener() {
               </div>
             )}
 
+            {unappliedFields.length > 0 && (
+              <div className="text-amber-300 bg-amber-950/40 rounded p-2 text-[11px] border border-amber-900/60">
+                以下條件無法套用至表單，套用後不會生效：<span className="font-mono">{unappliedFields.join('、')}</span>
+              </div>
+            )}
+
             {/* Clarification Message */}
             {nlTranslation.clarification_message && (
               <div className="text-zinc-400 bg-zinc-900/60 rounded p-2 text-[11px] border border-zinc-800">
@@ -1210,72 +1331,33 @@ export function TaiwanScreener() {
             </div>
           </div>
 
-          <div>
-            <label className="text-xs font-semibold text-zinc-400 block mb-1.5">漲跌幅區間 (%)</label>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                placeholder="最小 %"
-                value={changePctMin}
-                onChange={e => { setChangePctMin(e.target.value); setPage(1) }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-              />
-              <span className="text-zinc-500">~</span>
-              <input
-                type="number"
-                placeholder="最大 %"
-                value={changePctMax}
-                onChange={e => { setChangePctMax(e.target.value); setPage(1) }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-              />
-            </div>
-          </div>
+          {rangeField('漲跌幅區間 (%)', '漲跌幅', '%', 'changePctMin', 'changePctMax')}
 
-          <div>
-            <label className="text-xs font-semibold text-zinc-400 block mb-1.5">價格區間 (TWD)</label>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                placeholder="最低價"
-                value={priceMin}
-                onChange={e => { setPriceMin(e.target.value); setPage(1) }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-              />
-              <span className="text-zinc-500">~</span>
-              <input
-                type="number"
-                placeholder="最高價"
-                value={priceMax}
-                onChange={e => { setPriceMax(e.target.value); setPage(1) }}
-                className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-              />
-            </div>
-          </div>
+          {rangeField('價格區間 (TWD)', '價格', '元', 'priceMin', 'priceMax')}
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="text-xs font-semibold text-zinc-400 block mb-1.5">最低成交量 (張)</label>
-            <input
-              type="number"
-              placeholder="例: 1000 張"
-              value={volumeMinLots}
-              onChange={e => { setVolumeMinLots(e.target.value); setPage(1) }}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs font-semibold text-zinc-400 block mb-1.5">最低成交金額 (百萬 TWD)</label>
-            <input
-              type="number"
-              placeholder="例: 50 百萬"
-              value={amountMinMln}
-              onChange={e => { setAmountMinMln(e.target.value); setPage(1) }}
-              className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-            />
-          </div>
+          {rangeField('成交量區間 (張)', '成交量', '張', 'volumeMinLots', 'volumeMaxLots')}
+          {rangeField('成交金額區間 (百萬 TWD)', '成交金額', '百萬', 'amountMinMln', 'amountMaxMln')}
         </div>
+
+        {industry !== 'ALL' && (
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-zinc-400">已套用：</span>
+            <span className="inline-flex items-center gap-1 rounded-full border border-purple-500/40 bg-purple-500/10 pl-2.5 pr-1 py-0.5 text-purple-200">
+              <span>產業：{industryLabel(industry)}</span>
+              <button
+                type="button"
+                onClick={() => { setIndustry('ALL'); setPage(1) }}
+                aria-label="清除產業篩選"
+                title="清除產業篩選"
+                className="rounded-full px-1 text-purple-300 hover:bg-purple-500/20 hover:text-white"
+              >
+                ✕
+              </button>
+            </span>
+          </div>
+        )}
 
         {/* Advanced Filters Toggle — Phase 8C-C: 進階條件預設收合, 一般使用者
             不需要一開始就看到 17 個技術/籌碼欄位。 */}
@@ -1298,46 +1380,10 @@ export function TaiwanScreener() {
             <div>
               <h3 className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wide mb-2">技術面</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">RSI (14) 區間</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      placeholder="最小"
-                      value={rsiMin}
-                      onChange={e => { setRsiMin(e.target.value); setPage(1) }}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                    />
-                    <span className="text-zinc-500">~</span>
-                    <input
-                      type="number"
-                      placeholder="最大"
-                      value={rsiMax}
-                      onChange={e => { setRsiMax(e.target.value); setPage(1) }}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                    />
-                  </div>
-                </div>
+                {rangeField('RSI (14) 區間', 'RSI', '', 'rsiMin', 'rsiMax')}
 
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">5日動量 / 量比條件</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      placeholder="5日動量 (%)"
-                      value={momentumMin}
-                      onChange={e => { setMomentumMin(e.target.value); setPage(1) }}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                    />
-                    <input
-                      type="number"
-                      placeholder="5日量比"
-                      value={volRatioMin}
-                      onChange={e => { setVolRatioMin(e.target.value); setPage(1) }}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                    />
-                  </div>
-                </div>
+                {rangeField('5日動量區間 (%)', '5日動量', '%', 'momentumMin', 'momentumMax')}
+                {rangeField('5日量比區間 (倍)', '5日量比', '倍', 'volRatioMin', 'volRatioMax')}
 
                 <div className="sm:col-span-2 md:col-span-4">
                   <div className="flex items-center justify-between mb-1.5">
@@ -1466,48 +1512,10 @@ export function TaiwanScreener() {
             <div>
               <h3 className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wide mb-2">法人</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">外資買賣超區間 (張)</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      placeholder="最小 (張)"
-                      value={foreignNetMinLots}
-                      onChange={e => { setForeignNetMinLots(e.target.value); setPage(1) }}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                    />
-                    <span className="text-zinc-500">~</span>
-                    <input
-                      type="number"
-                      placeholder="最大 (張)"
-                      value={foreignNetMaxLots}
-                      onChange={e => { setForeignNetMaxLots(e.target.value); setPage(1) }}
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                    />
-                  </div>
-                </div>
+                {rangeField('外資買賣超區間 (張)', '外資買賣超', '張', 'foreignNetMinLots', 'foreignNetMaxLots')}
 
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">投信最低買超 (張)</label>
-                  <input
-                    type="number"
-                    placeholder="例: 500 張"
-                    value={investmentTrustNetMinLots}
-                    onChange={e => { setInvestmentTrustNetMinLots(e.target.value); setPage(1) }}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">自營商最低買超 (張)</label>
-                  <input
-                    type="number"
-                    placeholder="例: 100 張"
-                    value={dealerNetMinLots}
-                    onChange={e => { setDealerNetMinLots(e.target.value); setPage(1) }}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                  />
-                </div>
+                {rangeField('投信買賣超區間 (張)', '投信買賣超', '張', 'investmentTrustNetMinLots', 'investmentTrustNetMaxLots')}
+                {rangeField('自營商買賣超區間 (張)', '自營商買賣超', '張', 'dealerNetMinLots', 'dealerNetMaxLots')}
               </div>
             </div>
 
@@ -1515,38 +1523,9 @@ export function TaiwanScreener() {
             <div>
               <h3 className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wide mb-2">籌碼與融資券</h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">融資餘額最低增加 (張)</label>
-                  <input
-                    type="number"
-                    placeholder="例: 100 張"
-                    value={marginBalanceChangeMinLots}
-                    onChange={e => { setMarginBalanceChangeMinLots(e.target.value); setPage(1) }}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">最低融券餘額 (張)</label>
-                  <input
-                    type="number"
-                    placeholder="例: 100 張"
-                    value={shortBalanceMinLots}
-                    onChange={e => { setShortBalanceMinLots(e.target.value); setPage(1) }}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs font-semibold text-zinc-400 block mb-1.5">券資比最低 (%)</label>
-                  <input
-                    type="number"
-                    placeholder="例: 10 (%)"
-                    value={shortMarginRatioMin}
-                    onChange={e => { setShortMarginRatioMin(e.target.value); setPage(1) }}
-                    className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-purple-500"
-                  />
-                </div>
+                {rangeField('融資餘額增減區間 (張)', '融資餘額增減', '張', 'marginBalanceChangeMinLots', 'marginBalanceChangeMaxLots')}
+                {rangeField('融券餘額區間 (張)', '融券餘額', '張', 'shortBalanceMinLots', 'shortBalanceMaxLots')}
+                {rangeField('券資比區間 (%)', '券資比', '%', 'shortMarginRatioMin', 'shortMarginRatioMax')}
               </div>
             </div>
           </div>
@@ -1599,8 +1578,18 @@ export function TaiwanScreener() {
             {missingChipExchangesNote(data?.degraded_sections)}
           </div>
         )}
+        {isPlaceholderData && (
+          <div role="status" className="px-4 py-2 text-[11px] text-purple-300 bg-purple-500/10 border-b border-zinc-800 flex items-center gap-1.5">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            更新中…以下為上一個條件的結果
+          </div>
+        )}
         {/* Table View */}
-        <div id="screener-results-table" className="overflow-x-auto">
+        <div
+          id="screener-results-table"
+          aria-busy={isPlaceholderData}
+          className={`overflow-x-auto transition-opacity ${isPlaceholderData ? 'opacity-50' : ''}`}
+        >
           <table className="w-full text-left text-xs text-zinc-300">
             <thead className="bg-zinc-800/90 text-zinc-400 border-b border-zinc-700/80 sticky top-0">
               <tr>
@@ -1715,7 +1704,7 @@ export function TaiwanScreener() {
               ) : !data || data.items.length === 0 ? (
                 <tr>
                   <td colSpan={resultColSpan} className="py-12 text-center text-zinc-500">
-                    <span>沒有符合當前條件的台股標的</span>
+                    <span>{isPlaceholderData ? '正在依新條件掃描…' : '沒有符合當前條件的台股標的'}</span>
                   </td>
                 </tr>
               ) : (
@@ -1932,6 +1921,7 @@ export function TaiwanScreener() {
               <button
                 onClick={() => setPage(p => Math.max(p - 1, 1))}
                 disabled={page <= 1}
+                aria-label="上一頁"
                 className="p-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-300 transition-colors"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -1944,6 +1934,7 @@ export function TaiwanScreener() {
               <button
                 onClick={() => setPage(p => Math.min(p + 1, totalPages))}
                 disabled={page >= totalPages}
+                aria-label="下一頁"
                 className="p-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed text-zinc-300 transition-colors"
               >
                 <ChevronRight className="w-4 h-4" />

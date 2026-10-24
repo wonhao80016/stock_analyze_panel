@@ -3188,10 +3188,11 @@ export const api = {
       `/api/taiwan/stocks/${encodeURIComponent(symbol)}/margin-history?days=${days}`,
     ),
 
-  taiwanScreenerRun: (payload: TaiwanScreenerRunRequest) =>
+  taiwanScreenerRun: (payload: TaiwanScreenerRunRequest, signal?: AbortSignal) =>
     request<TaiwanScreenerResponse>('/api/taiwan/screener/run', {
       method: 'POST',
       body: JSON.stringify(payload),
+      signal,
     }),
 
   taiwanDataStatus: () =>
