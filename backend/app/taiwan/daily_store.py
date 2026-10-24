@@ -260,6 +260,48 @@ class TaiwanDailyStore:
             latest = latest.filter(pl.col("symbol").is_in(symbols))
         return latest
 
+    def read_dates(self, dates: list[date], symbols: list[str] | None = None) -> pl.DataFrame:
+        """Rows of the partitions for *dates* only, sorted by symbol and date.
+
+        Absent and unreadable partitions are skipped, as in read_range.
+        """
+        frames: list[pl.DataFrame] = []
+        for d in sorted(set(dates)):
+            path = self._data_dir / f"date={d.isoformat()}" / "part.parquet"
+            if not path.exists():
+                continue
+            try:
+                lf = pl.scan_parquet(path, missing_columns="insert", extra_columns="ignore")
+                lf = lf.filter(pl.col("date").is_not_null())
+                if symbols is not None:
+                    lf = lf.filter(pl.col("symbol").is_in(symbols))
+                frame = lf.collect()
+            except Exception as exc:
+                logger.warning("read_dates skipped %s: %s", path, exc)
+                continue
+            if not frame.is_empty():
+                frames.append(frame)
+        if not frames:
+            return pl.DataFrame(schema=_schema())
+        return pl.concat(frames, how="diagonal_relaxed").select(TAIWAN_DAILY_COLUMNS).sort(["symbol", "date"])
+
+    def symbol_suffix_counts(self, d: date, suffixes: list[str]) -> dict[str, int]:
+        """Rows of the partition for *d* whose symbol ends with each of *suffixes*.
+
+        Only the symbol column is read. Zeros when the partition is absent; an unreadable one raises.
+        """
+        path = self._data_dir / f"date={d.isoformat()}" / "part.parquet"
+        if not path.exists():
+            return dict.fromkeys(suffixes, 0)
+        symbol = pl.col("symbol").cast(pl.String)
+        counts = (
+            pl.scan_parquet(path)
+            .select([symbol.str.ends_with(s).sum().alias(s) for s in suffixes])
+            .collect()
+            .row(0, named=True)
+        )
+        return {s: int(counts[s] or 0) for s in suffixes}
+
     def read_latest(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """Deprecated: use :meth:`read_latest_per_symbol` instead."""
         return self.read_latest_per_symbol(symbols)

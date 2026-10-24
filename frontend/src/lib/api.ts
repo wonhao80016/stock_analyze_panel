@@ -1308,6 +1308,7 @@ export interface TaiwanScreenerResponse {
   sort_order: string
   data_dates: {
     daily_as_of?: string | null
+    daily_unlisted_count?: number
     institutional_as_of?: string | null
     margin_as_of?: string | null
   }

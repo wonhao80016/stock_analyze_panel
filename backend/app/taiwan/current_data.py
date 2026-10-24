@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.data_providers.registry import get_provider
 from app.taiwan.providers.hybrid_provider import TaiwanHybridProvider
 from app.taiwan.symbol import parse_symbol
 from app.taiwan.universe import get_security_master
@@ -181,7 +182,7 @@ class TaiwanCurrentDataService:
     ETF_DATASETS = ("profile", "snapshot")
 
     def __init__(self, provider: TaiwanHybridProvider | None = None, security_master=None) -> None:
-        self.provider = provider or TaiwanHybridProvider()
+        self.provider = provider or get_provider("taiwan")
         self.security_master = security_master or get_security_master()
 
     def get_current_data(

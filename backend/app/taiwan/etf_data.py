@@ -1,6 +1,7 @@
 """Official Taiwan ETF structured data, separate from company fundamentals."""
 from __future__ import annotations
 
+import atexit
 import json
 import threading
 from collections.abc import Iterable
@@ -26,6 +27,7 @@ def _official_client() -> httpx.Client:
     with _shared_client_lock:
         if _shared_client is None:
             _shared_client = httpx.Client(timeout=30.0)
+            atexit.register(_shared_client.close)
         return _shared_client
 
 

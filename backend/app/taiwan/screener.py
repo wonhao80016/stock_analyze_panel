@@ -4,7 +4,7 @@ POST /api/taiwan/screener/run
 
 Architecture:
   TaiwanSecurityMaster (Universe)
-  -> TaiwanDailyStore.read_latest_per_symbol() (Batch daily snapshot)
+  -> TaiwanDailyStore.read_dates() of each exchange's newest partition among the last five
   -> Published enriched partition for indicators (MA5/10/20, RSI14, Momentum5d, VolRatio5d, change_pct)
   -> Batch MarketProfile price limits off the session's raw-scale reference price
   -> Batch Institutional & Margin joins
@@ -57,6 +57,8 @@ _LIMIT_REFERENCE_SOURCE_COLUMNS = ["prev_close", "close", "raw_close", REF_PREV_
 _LIMIT_REFERENCE_COLUMNS = ["_limit_ref_price", "_official_limit_up", "_official_limit_down"]
 _CHIP_EXCHANGES = ("TWSE", "TPEX")
 _CHIP_SET = frozenset(_CHIP_EXCHANGES)
+_DAILY_LOOKBACK = 5
+_DAILY_MIN_SHARE = 0.5
 _FLOW_COLUMNS = ["foreign_net", "investment_trust_net", "dealer_net"]
 _INSTITUTIONAL_COLUMNS = [
     *_FLOW_COLUMNS, "foreign_net_5d", "investment_trust_net_5d", "institutional_date", "institutional_status",
@@ -193,6 +195,8 @@ class ScreenerResultItem(BaseModel):
 
 class DataDatesInfo(BaseModel):
     daily_as_of: str | None = None
+    # Universe symbols of a served exchange with no row in that exchange's daily partition.
+    daily_unlisted_count: int = 0
     institutional_as_of: str | None = None
     margin_as_of: str | None = None
 
@@ -235,13 +239,14 @@ class TaiwanScreenerService:
 
         valid_symbols = universe_df["symbol"].to_list()
 
-        # Step 2: Batch read latest per symbol from TaiwanDailyStore
-        latest_daily = self.daily_store.read_latest_per_symbol(valid_symbols)
+        latest_daily, daily_degraded, unlisted = self._latest_daily(
+            valid_symbols, self._exchange_scope(universe_df)
+        )
         if latest_daily.is_empty():
             return TaiwanScreenerResponse(
                 items=[], total=0, page=req.page, page_size=req.page_size,
                 sort_by=req.sort_by, sort_order=req.sort_order,
-                data_dates=DataDatesInfo(),
+                data_dates=DataDatesInfo(), degraded_sections=daily_degraded,
             )
 
         daily_as_of = str(latest_daily["date"].max()) if not latest_daily.is_empty() else None
@@ -269,6 +274,7 @@ class TaiwanScreenerService:
         combined, inst_date, margin_date, degraded = self._join_institutional_margin(
             combined, valid_symbols, daily_as_of
         )
+        degraded = [*daily_degraded, *degraded]
         if df_indicators is None:
             degraded = ["indicators", *degraded]
         if not patterns_published:
@@ -303,6 +309,7 @@ class TaiwanScreenerService:
                 daily_as_of=daily_as_of,
                 institutional_as_of=inst_date,
                 margin_as_of=margin_date,
+                daily_unlisted_count=unlisted,
             ),
             degraded_sections=degraded,
         )
@@ -328,6 +335,61 @@ class TaiwanScreenerService:
             df = df.filter(pl.col("instrument_type") == "etf")
 
         return df.select(["symbol", "name", "exchange", "instrument_type", "industry"]).unique(subset=["symbol"])
+
+    def _exchange_rows(self, d: date, cache: dict[date, dict[str, int]]) -> dict[str, int]:
+        """Rows per exchange of the partition for *d*; an unreadable partition counts as empty."""
+        if d not in cache:
+            suffixes = [f".{ex}" for ex in _CHIP_EXCHANGES]
+            try:
+                found = self.daily_store.symbol_suffix_counts(d, suffixes)
+            except Exception as exc:
+                logger.warning("daily partition %s unreadable in screener: %s", d, exc)
+                found = {}
+            cache[d] = {ex: found.get(f".{ex}", 0) for ex in _CHIP_EXCHANGES}
+        return cache[d]
+
+    def _latest_daily(
+        self, symbols: list[str], scope: set[str]
+    ) -> tuple[pl.DataFrame, list[str], int]:
+        """Each exchange's rows from the newest of the last _DAILY_LOOKBACK partitions that holds it.
+
+        A partition can hold one exchange alone, or a few of its symbols after a partial refresh.
+        It holds an exchange when its rows of that exchange reach _DAILY_MIN_SHARE of the largest
+        count among the _DAILY_LOOKBACK stored partitions before it; with no earlier rows, any row
+        counts. Flags name exchanges served from an older partition (daily_stale_*) or found in
+        none (daily_missing_*). Symbols of a served exchange absent from its partition are not
+        listed; the int counts them.
+        """
+        stored = self.daily_store.available_dates()[-(2 * _DAILY_LOOKBACK):]
+        if not stored:
+            return self.daily_store.read_dates([], symbols), [], 0
+        cache: dict[date, dict[str, int]] = {}
+        frames: list[pl.DataFrame] = []
+        flags: list[str] = []
+        unlisted = 0
+        for exchange in _CHIP_EXCHANGES:
+            if exchange not in scope:
+                continue
+            day = None
+            for i in range(len(stored) - 1, max(len(stored) - 1 - _DAILY_LOOKBACK, -1), -1):
+                rows = self._exchange_rows(stored[i], cache)[exchange]
+                earlier = stored[max(i - _DAILY_LOOKBACK, 0):i]
+                floor = _DAILY_MIN_SHARE * max((self._exchange_rows(d, cache)[exchange] for d in earlier), default=0)
+                if rows and rows >= floor:
+                    day = stored[i]
+                    break
+            if day is None:
+                flags.append(f"daily_missing_{exchange.lower()}")
+                continue
+            if day != stored[-1]:
+                flags.append(f"daily_stale_{exchange.lower()}")
+            wanted = [s for s in symbols if s.endswith(f".{exchange}")]
+            part = self.daily_store.read_dates([day], wanted)
+            unlisted += len(set(wanted)) - part.height
+            frames.append(part)
+        if not frames:
+            return self.daily_store.read_dates([], symbols), flags, 0
+        return pl.concat(frames, how="diagonal_relaxed").sort(["symbol", "date"]), flags, unlisted
 
     @staticmethod
     def _join_limit_reference(

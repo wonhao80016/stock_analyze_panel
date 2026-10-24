@@ -49,7 +49,7 @@ import {
   abnormalSignalLabel,
 } from '@/lib/signals'
 import { breadthBasisNote } from '@/lib/marketBreadth'
-import { missingChipExchangesNote } from '@/lib/screenerDegraded'
+import { dailyExchangesNote, missingChipExchangesNote, staleQuoteDate } from '@/lib/screenerDegraded'
 import { useStockPreview } from '@/components/StockPreviewProvider'
 
 function DataQualityBadge({ status, provisionalText, incompleteText }: {
@@ -580,7 +580,12 @@ export function TaiwanScreener() {
         {data && (
           <div className="flex flex-wrap items-center gap-2 text-xs bg-zinc-900 border border-zinc-800 px-3 py-2 rounded-lg text-zinc-400">
             <Database className="w-4 h-4 text-purple-400 shrink-0" />
-            <span>日線: <strong className="text-zinc-200">{data.data_dates.daily_as_of || '—'}</strong></span>
+            <span>
+              日線: <strong className="text-zinc-200">{data.data_dates.daily_as_of || '—'}</strong>
+              {(data.data_dates.daily_unlisted_count ?? 0) > 0 && (
+                <span className="ml-1 text-amber-400">（{data.data_dates.daily_unlisted_count} 檔無日線資料）</span>
+              )}
+            </span>
             <span className="text-zinc-600">|</span>
             <span>法人: <strong className="text-zinc-200">{data.data_dates.institutional_as_of || '—'}</strong></span>
             <span className="text-zinc-600">|</span>
@@ -1573,6 +1578,11 @@ export function TaiwanScreener() {
             當日缺少漲跌停參考價，「逼近漲停／跌停」暫無法判斷
           </div>
         )}
+        {dailyExchangesNote(data?.degraded_sections) && (
+          <div role="status" className="px-4 py-2 text-[11px] text-amber-400 bg-amber-500/10 border-b border-zinc-800">
+            {dailyExchangesNote(data?.degraded_sections)}
+          </div>
+        )}
         {missingChipExchangesNote(data?.degraded_sections) && (
           <div role="status" className="px-4 py-2 text-[11px] text-amber-400 bg-amber-500/10 border-b border-zinc-800">
             {missingChipExchangesNote(data?.degraded_sections)}
@@ -1737,6 +1747,11 @@ export function TaiwanScreener() {
                     {/* Price */}
                     <td className="py-3 px-3 text-right font-mono text-zinc-100 font-semibold whitespace-nowrap">
                       {formatPrice(item.close)}
+                      {staleQuoteDate(item.quote_date, data.data_dates.daily_as_of) && (
+                        <span className="block text-[10px] font-normal text-amber-400" title="此列為較早交易日的日線">
+                          {staleQuoteDate(item.quote_date, data.data_dates.daily_as_of)}
+                        </span>
+                      )}
                     </td>
 
                     {/* Change Pct */}

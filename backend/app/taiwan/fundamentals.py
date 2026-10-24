@@ -7,6 +7,7 @@ verifiable publication time.  Such live records are retained with provenance but
 # ruff: noqa: RUF001 -- official field names contain full-width punctuation.
 from __future__ import annotations
 
+import atexit
 import json
 import re
 import threading
@@ -197,6 +198,7 @@ def _official_client() -> httpx.Client:
     with _shared_client_lock:
         if _shared_client is None:
             _shared_client = httpx.Client(timeout=30.0)
+            atexit.register(_shared_client.close)
         return _shared_client
 
 

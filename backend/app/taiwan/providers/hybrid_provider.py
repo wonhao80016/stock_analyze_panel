@@ -24,7 +24,7 @@ from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 
 logger = logging.getLogger(__name__)
 
-# Provider instances are built per request; one fundamentals source keeps its per-day list cache across them.
+# Every provider instance shares one fundamentals source, so its per-day list cache outlives any instance.
 _official_fundamentals_provider = None
 _official_fundamentals_lock = threading.Lock()
 
@@ -88,6 +88,9 @@ class TaiwanHybridProvider:
         self.yahoo = YahooFinanceAdapter()
         self.official = _RetryingOfficialAdapter()
         self.primary = primary.lower()
+
+    def close(self) -> None:
+        self.official.close()
 
     def get_fundamentals(
         self,

@@ -73,7 +73,13 @@ class OfficialTaiwanAdapter:
 
     def __init__(self, timeout: int = 15, client: httpx.Client | None = None) -> None:
         self.timeout = timeout
+        self._owns_client = client is None
         self.client = client or httpx.Client(timeout=timeout)
+
+    def close(self) -> None:
+        """Close the client this adapter built; an injected client stays with its owner."""
+        if self._owns_client:
+            self.client.close()
 
     def _json(self, url: str) -> object:
         response = self.client.get(
