@@ -63,8 +63,14 @@ except ImportError:
 
     prange = range
 
-_MATRIX_CACHE_VERSION = 2
-_DIRECT_MATRIX_LOADER_VERSION = 9
+# Basic-filter bounds on a price or a market value; app.strategy.engine.RAW_PRICE_BOUND_KEYS.
+_RAW_PRICE_BOUND_KEYS = (
+    "price_min", "price_max",
+    "market_cap_min", "market_cap_max",
+    "float_cap_min", "float_cap_max",
+)
+_MATRIX_CACHE_VERSION = 3
+_DIRECT_MATRIX_LOADER_VERSION = 10
 _MATRIX_AXIS_INDEX_VERSION = 1
 _PUBLISHED_LIMIT_SIGNALS = (
     ("signal_limit_up", "limit_up_locked"),
@@ -576,6 +582,9 @@ class MarketMatrix:
     exit_signal_code: np.ndarray
     entry_signal_ids: tuple[str, ...]
     exit_signal_ids: tuple[str, ...]
+    # Minute-replay sell line armed by the prior session's state, NaN when no exit signal can fire.
+    minute_exit_line: np.ndarray | None = None
+    minute_exit_line_code: np.ndarray | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -594,8 +603,13 @@ def build_market_data_matrix(
     panel: pl.DataFrame,
     *,
     field_columns: set[str] | frozenset[str] | None = None,
+    live_quotes: bool = False,
 ) -> MarketDataMatrix:
-    """Encode a long base panel into immutable ``time x asset`` arrays."""
+    """Encode a long base panel into immutable ``time x asset`` arrays.
+
+    live_quotes marks a panel of live quote rows, whose close is the traded price, so a requested
+    raw_close missing from it is taken from close; any other panel without it raises.
+    """
     if panel.is_empty():
         raise ValueError("cannot build MarketDataMatrix from an empty panel")
 
@@ -630,7 +644,10 @@ def build_market_data_matrix(
         "signal_limit_up",
         "signal_limit_down",
     }
+    # Absolute price bounds and vwap_bias read raw_close, so it is kept whenever the panel has it.
     wanted_fields = set(field_columns or ()) - core_columns
+    if "raw_close" in panel.columns:
+        wanted_fields.add("raw_close")
     fields: dict[str, np.ndarray] = {}
     for column in sorted(wanted_fields):
         if column == "price_limit_pct":
@@ -641,9 +658,8 @@ def build_market_data_matrix(
         ):
             fields[column] = float_matrix(column)
         elif column == "raw_close":
-            # A live quote is already an unadjusted price when no separate raw
-            # field is supplied. Keep this explicit compatibility contract for
-            # strategies that estimate market value from historical raw prices.
+            if not live_quotes:
+                raise ValueError("market data lacks raw_close, which the requested fields need")
             fields[column] = np.array(close, copy=True)
 
     names = [""] * len(symbol_values)
@@ -763,6 +779,9 @@ def load_market_data_matrix_from_parquet(
         partitioning=partitioning,
     )
     _validate_matrix_dataset_schema(dataset)
+    if "raw_close" in dataset.schema.names:
+        requested_fields = frozenset(requested_fields | {"raw_close"})
+        build_fields = frozenset(build_fields | {"raw_close"})
 
     if cache_root is None:
         return _build_market_data_matrix_from_dataset(
@@ -2520,6 +2539,7 @@ def build_market_matrix_from_signals(
     resolved_exit_reference = _resolve_reference(exit_reference_price, exit_delay_bars)
     raw_scale = _raw_scale_matrix(market)
 
+    minute_exit_line = minute_exit_line_code = None
     if minute_exit_trigger:
         trigger_reference = build_minute_exit_reference(
             market.close,
@@ -2529,6 +2549,9 @@ def build_market_matrix_from_signals(
         )
         trigger_mask = signals.exit != 0
         resolved_exit_reference[trigger_mask] = trigger_reference[trigger_mask]
+        minute_exit_line, minute_exit_line_code = _armed_minute_exit_lines(
+            market, signals.exit_signal_ids,
+        )
 
     _make_read_only(
         entry,
@@ -2568,7 +2591,60 @@ def build_market_matrix_from_signals(
         exit_signal_code=exit_signal_code,
         entry_signal_ids=signals.entry_signal_ids,
         exit_signal_ids=signals.exit_signal_ids,
+        minute_exit_line=minute_exit_line,
+        minute_exit_line_code=minute_exit_line_code,
     )
+
+
+# Each replayable crossing signal fires only when the left series was at or above the right one
+# on the previous bar, as in app.indicators.pipeline.
+_MINUTE_EXIT_ARMING = {
+    "signal_ma5_breakdown": ("close", "ma5"),
+    "signal_ma10_breakdown": ("close", "ma10"),
+    "signal_ma20_breakdown": ("close", "ma20"),
+    "signal_ma_dead_5_20": ("ma5", "ma20"),
+}
+
+
+def _armed_minute_exit_lines(
+    market: MarketDataMatrix,
+    exit_signal_ids: tuple[str, ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Highest sell line among the exit signals armed at each bar's open, and its signal code.
+
+    The arming state uses only the previous bar, so choosing a replay day never reads the close.
+    """
+    shape = market.shape
+    line = np.full(shape, np.nan, dtype=np.float32)
+    codes = np.full(shape, -1, dtype=np.int16)
+    present = np.isfinite(market.close)
+
+    def _series(name: str) -> np.ndarray | None:
+        return market.close if name == "close" else market.fields.get(name)
+
+    for code, signal_id in enumerate(exit_signal_ids):
+        arming = _MINUTE_EXIT_ARMING.get(signal_id)
+        if arming is None:
+            continue
+        left, right = (_series(name) for name in arming)
+        if left is None or right is None:
+            continue
+        previous_left = _previous_bar_values(left, present)
+        previous_right = _previous_bar_values(right, present)
+        with np.errstate(invalid="ignore"):
+            armed = previous_left >= previous_right
+        candidate = build_minute_exit_reference(
+            market.close,
+            market.fields,
+            np.full(shape, code, dtype=np.int16),
+            exit_signal_ids,
+        )
+        with np.errstate(invalid="ignore"):
+            use = armed & np.isfinite(candidate) & ~(line >= candidate)
+        line[use] = candidate[use]
+        codes[use] = code
+    _make_read_only(line, codes)
+    return line, codes
 
 
 def build_market_matrix(
@@ -2696,7 +2772,9 @@ class RealtimeMarketDataMatrix:
         field_columns: set[str] | frozenset[str],
         build_count: int = 1,
     ) -> None:
-        self.field_columns = frozenset(field_columns)
+        self.field_columns = frozenset(field_columns) | (
+            {"raw_close"} if "raw_close" in panel.columns else frozenset()
+        )
         self.market = _writable_market_copy(
             build_market_data_matrix(panel, field_columns=self.field_columns)
         )
@@ -2716,6 +2794,7 @@ class RealtimeMarketDataMatrix:
         latest = build_market_data_matrix(
             latest_panel,
             field_columns=self.field_columns,
+            live_quotes=True,
         )
         target_ids = _live_target_asset_ids(self.market.symbols, latest.symbols)
         latest_timestamp = int(latest.timestamps[0])
@@ -4021,7 +4100,11 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
         return np.ones(market.shape, dtype=bool)
 
     mask = np.ones(market.shape, dtype=bool)
-    close = market.close
+    # Absolute bounds compare the price traded that day, so they need raw_close.
+    close = market.fields.get("raw_close")
+    raw_bounds = sorted(key for key in _RAW_PRICE_BOUND_KEYS if config.get(key) is not None)
+    if raw_bounds and close is None:
+        raise ValueError(f"basic filter bounds {raw_bounds} need field raw_close, which the market data lacks")
     if config.get("price_min") is not None:
         mask &= close >= float(config["price_min"])
     if config.get("price_max") is not None:
@@ -4221,6 +4304,24 @@ def _traded_amount(market: MarketDataMatrix) -> np.ndarray:
     return np.where(estimated > 0.5, np.float32(np.nan), amount).astype(np.float32, copy=False)
 
 
+def _previous_bar_values(values: np.ndarray, present: np.ndarray) -> np.ndarray:
+    """Value on each asset's previous present bar, NaN where that bar's value is missing."""
+    time_count, asset_count = values.shape
+    rows = np.repeat(np.arange(time_count, dtype=np.float32)[:, None], asset_count, axis=1)
+    previous_row = valid_shift(rows, 1, present)
+    out = np.full(values.shape, np.nan, dtype=np.float32)
+    has_previous = np.isfinite(previous_row)
+    out[has_previous] = values[previous_row[has_previous].astype(np.int64), np.nonzero(has_previous)[1]]
+    return out
+
+
+def _window_has_missing(values: np.ndarray, present: np.ndarray, window: int) -> np.ndarray:
+    """True where the last *window* present bars hold a missing value, as Polars rolling nulls do."""
+    missing = (present & ~np.isfinite(values)).astype(np.float32)
+    share = valid_rolling_mean(missing, present, window)
+    return np.isfinite(share) & (share > 0)
+
+
 def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     close_valid = np.isfinite(market.close)
     if name == "prev_close":
@@ -4289,12 +4390,13 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         )
     if name == "turnover_ratio_5d":
         turnover = market.field("turnover_rate")
-        valid = close_valid & np.isfinite(turnover)
-        previous = valid_shift(turnover, 1, valid)
-        return _matrix_relative(
-            turnover,
+        previous = _previous_bar_values(turnover, close_valid)
+        mean = np.where(
+            _window_has_missing(previous, close_valid, 5),
+            np.float32(np.nan),
             valid_rolling_mean(previous, np.isfinite(previous), 5),
-        )
+        ).astype(np.float32, copy=False)
+        return _matrix_relative(turnover, mean)
     if name == "log_amount":
         amount = market.field("amount")
         out = np.full(market.shape, np.nan, dtype=np.float32)
@@ -4401,13 +4503,13 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         )
     if name == "turnover_z_60d":
         turnover = market.field("turnover_rate")
-        valid = close_valid & np.isfinite(turnover)
-        previous = valid_shift(turnover, 1, valid)
+        previous = _previous_bar_values(turnover, close_valid)
         baseline_valid = np.isfinite(previous)
         mean = valid_rolling_mean(previous, baseline_valid, 60)
         std = valid_rolling_std(previous, baseline_valid, 60, ddof=1)
         deviation = _matrix_ratio(turnover - mean, std)
         deviation[np.isfinite(std) & (std <= 0)] = np.nan
+        deviation[_window_has_missing(previous, close_valid, 60)] = np.nan
         return deviation
     if name == "vol_price_corr_20d":
         daily = matrix_feature(market, "change_pct")
@@ -4422,7 +4524,12 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         valid = close_valid & np.isfinite(amount) & (market.volume > 0) & (amount > 0)
         vwap = np.full(market.shape, np.nan, dtype=np.float32)
         np.divide(amount, shares, out=vwap, where=valid)
-        return _matrix_relative(market.close, vwap)
+        # amount is unadjusted, so the VWAP is compared with the raw close, never the adjusted one.
+        # Volume restated by a later share-count event still shifts the VWAP by that event's ratio.
+        raw_close = market.fields.get("raw_close")
+        if raw_close is None:
+            return np.full(market.shape, np.nan, dtype=np.float32)
+        return _matrix_relative(raw_close, vwap)
 
     if name == "vol_trend_5_60":
         volume_valid = close_valid & np.isfinite(market.volume)

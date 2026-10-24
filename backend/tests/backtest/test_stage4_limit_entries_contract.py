@@ -35,6 +35,7 @@ def _market(sessions: int = 3) -> MarketDataMatrix:
             "high": close,
             "low": close,
             "close": close,
+            "raw_close": close,
             "volume": 1_000.0,
         }
         for t in range(sessions)

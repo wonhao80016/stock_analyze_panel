@@ -37,6 +37,7 @@ def _single_symbol_panel(n_days: int = 70) -> pl.DataFrame:
             "high": close * 1.02,
             "low": close * 0.97,
             "close": close,
+            "raw_close": close,
             "volume": volume,
             "amount": volume * 100.0 * close,
             "turnover_rate": 1.0 + (offset % 7) * 0.3,
@@ -114,6 +115,7 @@ def test_vwap_bias_uses_market_volume_unit():
         "symbol": ["2330.TWSE", "600000.SH"],
         "date": [date(2026, 8, 28)] * 2,
         "close": [100.0, 100.0],
+        "raw_close": [100.0, 100.0],
         "volume": [1_000_000.0, 10_000.0],
         "amount": [100_000_000.0, 100_000_000.0],
     })

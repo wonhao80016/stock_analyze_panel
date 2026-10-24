@@ -44,7 +44,7 @@ VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = {
     "amihud_20d": frozenset({"close", "amount"}),
     "turnover_z_60d": frozenset({"turnover_rate"}),
     "vol_price_corr_20d": frozenset({"close", "volume"}),
-    "vwap_bias": frozenset({"close", "volume", "amount"}),
+    "vwap_bias": frozenset({"raw_close", "volume", "amount"}),
     "vol_trend_5_60": frozenset({"volume"}),
     "limit_up_count_20d": frozenset({"consecutive_limit_ups"}),
     "limit_up_count_60d": frozenset({"consecutive_limit_ups"}),
@@ -282,8 +282,10 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
             .over("symbol")
         )
     if name == "vwap_bias":
+        # amount is unadjusted, so the VWAP is compared with the raw close, never the adjusted one.
+        # Volume restated by a later share-count event still shifts the VWAP by that event's ratio.
         vwap = _ratio(pl.col("amount"), volume_shares_expr())
-        return _relative(pl.col("close"), vwap)
+        return _relative(pl.col("raw_close"), vwap)
     if name == "vol_trend_5_60":
         fast = pl.col("volume").rolling_mean(5)
         slow = pl.col("volume").rolling_mean(60)

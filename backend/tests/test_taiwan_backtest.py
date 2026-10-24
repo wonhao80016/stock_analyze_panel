@@ -46,6 +46,7 @@ class TestVolumeScalingRegression:
             "high": [2445.0],
             "low": [2410.0],
             "close": [close_price],
+            "raw_close": [close_price],
             "volume": [input_volume],
             "amount": [input_amount],
             "tradable": [True],

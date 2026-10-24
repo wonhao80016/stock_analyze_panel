@@ -51,6 +51,22 @@ def _confirmed_swings(
     return np.where(valid, last, np.nan), np.where(valid, previous, np.nan)
 
 
+def _traded_volume(market: MarketDataMatrix) -> np.ndarray:
+    """Volume on each bar's own share basis, so a later split or capital reduction cannot move it.
+
+    Share-unit (Taiwan) volume is restated by later share events; amount / raw_close is that day's.
+    Duplicated in pullback_resume: the engine loads strategy files outside their package.
+    """
+    if market.volume_unit != "shares":
+        return market.volume
+    raw_close = market.field("raw_close")
+    shares = np.full(market.shape, np.nan, dtype=np.float64)
+    np.divide(
+        market.field("amount"), raw_close, out=shares, where=np.isfinite(raw_close) & (raw_close > 0)
+    )
+    return shares
+
+
 def _liquid(market: MarketDataMatrix, params: dict) -> np.ndarray:
     liquid = np.ones(market.shape, dtype=bool)
     min_amount = float(params.get("min_amount", 100_000_000.0))
@@ -59,7 +75,7 @@ def _liquid(market: MarketDataMatrix, params: dict) -> np.ndarray:
     # A share-count minimum saved before the traded-value rule still applies on top of it.
     min_volume = float(params.get("min_volume", 0.0))
     if min_volume > 0:
-        liquid &= market.volume >= min_volume
+        liquid &= _traded_volume(market) >= min_volume
     return liquid
 
 
@@ -135,7 +151,7 @@ MAX_HOLD_DAYS = 20
 
 class SwingTrendConfirmationMatrixStrategy:
     def required_fields(self) -> frozenset[str]:
-        return frozenset({"high", "low", "close", "volume", "amount"})
+        return frozenset({"high", "low", "close", "volume", "amount", "raw_close"})
 
     def required_warmup_bars(self, params: dict) -> int:
         del params

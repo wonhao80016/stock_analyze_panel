@@ -236,6 +236,7 @@ def _macd_panel(n_days: int = 600, n_symbols: int = 160, seed: int = 11) -> pl.D
                     "high": close * 1.01,
                     "low": close * 0.99,
                     "close": close,
+                    "raw_close": close,
                     "volume": rng.uniform(5e5, 3e6, n_days),
                     "amount": np.full(n_days, 1e9),
                 }

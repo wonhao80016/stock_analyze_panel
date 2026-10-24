@@ -208,14 +208,14 @@ def test_an_estimated_row_left_in_the_buffer_is_skipped_by_later_windows(tmp_pat
     """Like a missing bar, an estimated amount drops out of later 5- and 20-bar windows."""
     engine, panel, days, context = _realtime_setup(tmp_path)
     engine.prepare_realtime_matrix(context, ["amount_scored"])
-    next_day = dataclasses.replace(
-        context, as_of=days[-1], current=_live(panel, days[-1], {ESTIMATED: False, QUOTED: False})
-    )
+    # The engine rebuilds on a new session; append to its buffer to keep the estimated row.
+    buffer = engine._realtime_matrices["test:amount"].buffer
+    buffer.update(_live(panel, days[-1], {ESTIMATED: False, QUOTED: False}))
 
-    snapshot = engine.prepare_realtime_matrix(next_day, ["amount_scored"])
+    snapshot = buffer.snapshot()
 
     assert snapshot.timestamp_labels[-1][:10] == days[-1].isoformat()
-    assert engine.realtime_matrix_stats("test:amount")["update_count"] == 1
+    assert buffer.update_count == 1
     asset = snapshot.symbols.index(ESTIMATED)
     skipped = build_market_data_matrix(
         _with_amount(panel, days[-2], ESTIMATED, pl.lit(None, dtype=pl.Float64)),

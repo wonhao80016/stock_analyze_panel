@@ -81,6 +81,7 @@ def _frame(days) -> pl.DataFrame:
                     "high": 55.0,
                     "low": 49.0,
                     "close": 55.0,
+                    "raw_close": 55.0,
                     "volume": 1_000_000.0,
                     "amount": 1e9,
                     # Recomputed flags the published ones must replace.

@@ -437,6 +437,13 @@ HISTORY_WARMUP_SESSIONS = 60
 _PUBLISHED_DAILY_CACHE_ENTRIES = 64
 
 
+def _index_with_raw_close(df: pl.DataFrame) -> pl.DataFrame:
+    """Index bars carry no forward adjustment, so raw_close is their close."""
+    if df.is_empty() or "raw_close" in df.columns or "close" not in df.columns:
+        return df
+    return df.with_columns(pl.col("close").alias("raw_close"))
+
+
 class KlineRepository:
     """日 K / 分钟 K 的读写入口。"""
 
@@ -1217,10 +1224,12 @@ class KlineRepository:
                 .collect()
             )
             if df_hist.is_empty():
-                self._index_enriched_cache = df_latest.sort(["symbol"])
+                self._index_enriched_cache = _index_with_raw_close(df_latest.sort(["symbol"]))
             else:
                 df_full = self._compute_index_enriched_range(df_hist)
-                self._index_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
+                self._index_enriched_cache = _index_with_raw_close(
+                    df_full.filter(pl.col("date") == latest).sort(["symbol"])
+                )
             self._index_enriched_cache_date = latest
         except Exception as e:  # noqa: BLE001
             logger.debug("指数 enriched 缓存刷新跳过: %s", e)
@@ -1707,13 +1716,15 @@ class KlineRepository:
         # falls back to the full path below, wasting only that scan.
         if columns:
             df = self._scan_index_daily_symbol(symbol, start, end, columns)
+            if "raw_close" in columns:
+                df = _index_with_raw_close(df)
             if not df.is_empty() and all(c in df.columns for c in columns):
                 return df
 
         warmup_start = start - timedelta(days=indicator_warmup_days())
         df = self._scan_index_daily_symbol(symbol, warmup_start, end, None)
         if not df.is_empty():
-            df = self._compute_index_enriched_range(df)
+            df = _index_with_raw_close(self._compute_index_enriched_range(df))
             df = df.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if columns and not df.is_empty():
             existing = [c for c in columns if c in df.columns]

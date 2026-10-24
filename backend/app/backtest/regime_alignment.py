@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
@@ -73,7 +74,10 @@ def align_regime_t_minus_one(
     *,
     first_day_boundary_ok: bool = False,
 ) -> list[RegimePoint | None]:
-    """Align each label with the preceding label's regime without any I/O.
+    """Align each label with the regime of the market session before it, without any I/O.
+
+    The market calendar is the union of the labels and the regime dates, so labels that
+    skip sessions (a universe without rows on some days) still read the true T-1.
 
     first_day_boundary_ok: 统计类调用方 (因子环境分组) 允许首日无前驱环境 ——
     数据边界即正式首日 (本地数据从正式首日开始) 时首日没有 T-1 环境属正常,
@@ -99,9 +103,10 @@ def align_regime_t_minus_one(
                 f"市场环境数据覆盖不完整: 正式首日 {first_label} 缺少前一交易日环境, "
                 "请把前一交易日行情包含在预热区间"
             )
+    calendar = sorted(set(regime_map) | {_date_text(label) for label in labels})
     for index in range(1, len(labels)):
         current_label = _date_text(labels[index])
-        previous_label = _date_text(labels[index - 1])
+        previous_label = calendar[bisect_left(calendar, current_label) - 1]
         point = regime_map.get(previous_label)
         if point is not None:
             aligned[index] = point

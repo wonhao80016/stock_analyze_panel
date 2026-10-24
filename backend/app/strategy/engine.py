@@ -21,6 +21,8 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from app.config import settings
+from app.enriched_generation import EnrichedGenerationUnavailableError, get_enriched_generation
 from app.strategy.field_labels import field_label, whole_percent
 from app.strategy.listing_age import eligible_from, exclude_new_days
 from app.strategy.scoring import (
@@ -66,6 +68,12 @@ _BOUNDED_FIELDS: tuple[tuple[str, str], ...] = (
     *_SHARE_CAP_BOUNDS,
     ("amount", "amount"),
     ("turnover", "turnover_rate"),
+)
+# Basic-filter bounds on a price or a market value, which compare raw_close.
+RAW_PRICE_BOUND_KEYS = (
+    "price_min", "price_max",
+    "market_cap_min", "market_cap_max",
+    "float_cap_min", "float_cap_max",
 )
 
 STRATEGY_ASSET_TYPES = frozenset({"stock", "etf", "index"})
@@ -200,6 +208,19 @@ class StrategyDataContext:
     # Symbol -> values published for as_of; they replace the same keys on that symbol's result rows.
     published_row_fields: Mapping[str, Mapping[str, Any]] | None = None
 
+    def __post_init__(self) -> None:
+        # Index bars are never adjusted, so their close is the raw price absolute bounds compare.
+        if self.asset_type == "index":
+            self.current = index_with_raw_close(self.current)
+            self.history = index_with_raw_close(self.history)
+
+
+def index_with_raw_close(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+    """Index bars with raw_close set to close; only for index data, which carries no adjustment."""
+    if frame is None or "raw_close" in frame.columns or "close" not in frame.columns:
+        return frame
+    return frame.with_columns(pl.col("close").alias("raw_close"))
+
 
 @dataclass(frozen=True)
 class CompositeChild:
@@ -260,6 +281,15 @@ class StrategyResult:
 class _RealtimeMatrixEntry:
     fingerprint: tuple[Any, ...]
     buffer: Any
+    enriched_generation: str | None = None
+
+
+def _published_enriched_generation(asset_type: str) -> str | None:
+    """The ready enriched generation, or None while it is being published or was never marked."""
+    try:
+        return get_enriched_generation(settings.data_dir, asset_type, initialize=False)
+    except EnrichedGenerationUnavailableError:
+        return None
 
 
 class _AssetScope(Mapping[str, str]):
@@ -936,16 +966,26 @@ class StrategyEngine:
         if not isinstance(as_of, date):
             raise ValueError("realtime matrix timestamp cannot be converted to date")
         symbols = tuple(current["symbol"].cast(pl.Utf8).unique().sort().to_list())
+        # A new session or enriched publication replaces the history rows, so the buffer is rebuilt.
         fingerprint = (
             tuple(sorted(field_columns)),
             max_warmup,
             symbols,
+            as_of,
         )
+        generation = _published_enriched_generation(context.asset_type)
 
         with self._realtime_matrix_lock:
             cache_key = context.cache_key or f"{context.asset_type}:{context.timeframe}"
             entry = self._realtime_matrices.get(cache_key)
-            if entry is not None and entry.fingerprint == fingerprint:
+            if entry is not None and generation is None:
+                # Keep serving the consistent prior history while a publication is in progress.
+                generation = entry.enriched_generation
+            if (
+                entry is not None
+                and entry.fingerprint == fingerprint
+                and entry.enriched_generation == generation
+            ):
                 try:
                     entry.buffer.update(current)
                     return entry.buffer.snapshot()
@@ -971,6 +1011,7 @@ class StrategyEngine:
             self._realtime_matrices[cache_key] = _RealtimeMatrixEntry(
                 fingerprint=fingerprint,
                 buffer=buffer,
+                enriched_generation=generation,
             )
             return buffer.snapshot()
 
@@ -1314,6 +1355,8 @@ class StrategyEngine:
                 or basic_filter.get(f"{prefix}_max") is not None
             ):
                 fields.add(field_name)
+        if any(basic_filter.get(key) is not None for key in RAW_PRICE_BOUND_KEYS):
+            fields.add("raw_close")
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         fields.update(scoring_dependencies(scoring))
         order_by = strategy.meta.get("order_by")
@@ -1671,10 +1714,15 @@ class StrategyEngine:
         A bound excludes rows whose value is missing and raises when its column is absent.
         """
         exprs: list[pl.Expr] = []
+        # Absolute bounds compare the price traded that day, so they need raw_close.
+        raw_bounds = sorted(key for key in RAW_PRICE_BOUND_KEYS if bf.get(key) is not None)
+        if raw_bounds and "raw_close" not in df.columns:
+            raise ValueError(f"basic filter bounds {raw_bounds} need column raw_close, which the data lacks")
+        raw_close = finite_or_null(pl.col("raw_close"))
         if bf.get("price_min") is not None:
-            exprs.append(pl.col("close") >= bf["price_min"])
+            exprs.append((raw_close >= bf["price_min"]).fill_null(False))
         if bf.get("price_max") is not None:
-            exprs.append(pl.col("close") <= bf["price_max"])
+            exprs.append((raw_close <= bf["price_max"]).fill_null(False))
         for prefix, field_name in _BOUNDED_FIELDS:
             minimum = bf.get(f"{prefix}_min")
             maximum = bf.get(f"{prefix}_max")
@@ -1686,7 +1734,7 @@ class StrategyEngine:
                 )
             value = finite_or_null(pl.col(field_name))
             if field_name in {"total_shares", "float_shares"}:
-                value = pl.col("close") * value
+                value = raw_close * value
             if minimum is not None:
                 exprs.append((value >= minimum).fill_null(False))
             if maximum is not None:

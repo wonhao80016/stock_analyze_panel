@@ -96,6 +96,7 @@ def test_research_factor_catalog_matches_matrix_features():
                 "high": close + 0.35 + asset_id * 0.03,
                 "low": close - 0.3,
                 "close": close,
+                "raw_close": close,
                 "volume": volume,
                 "amount": volume * close,
                 "turnover_rate": 1.0 + asset_id * 0.2 + (offset % 7) * 0.05,
@@ -329,7 +330,7 @@ def test_builtin_matrix_strategies_use_their_declared_formula_modules():
         assert strategy.filter_history_fn is None
 
 
-def test_market_matrix_derives_live_raw_close_when_requested():
+def test_market_matrix_derives_raw_close_only_for_live_quotes():
     panel = pl.DataFrame({
         "symbol": ["000001.SZ", "600000.SH"],
         "date": [date(2024, 1, 1)] * 2,
@@ -339,12 +340,11 @@ def test_market_matrix_derives_live_raw_close_when_requested():
         "close": [10.1, 20.1],
         "volume": [1_000.0, 2_000.0],
     })
-    market = build_market_data_matrix(panel, field_columns={"raw_close"})
-
-    np.testing.assert_array_equal(market.field("raw_close"), market.close)
+    with pytest.raises(ValueError, match="raw_close"):
+        build_market_data_matrix(panel, field_columns={"raw_close"})
 
     live = RealtimeMarketDataMatrix(
-        panel,
+        panel.with_columns(pl.col("close").alias("raw_close")),
         field_columns={"raw_close"},
     )
     live.update(panel.with_columns(pl.lit(date(2024, 1, 2)).alias("date")))
@@ -376,6 +376,7 @@ def test_direct_parquet_matrix_uses_taiwan_share_volume_for_turnover(tmp_path):
         "high": [100.0],
         "low": [100.0],
         "close": [100.0],
+        "raw_close": [100.0],
         "volume": [1_000_000.0],
         "amount": [100_000_000.0],
         "signal_limit_up": [False],
@@ -1081,6 +1082,7 @@ def test_strategy_engine_runs_matrix_strategy_without_legacy_filter():
                 "high": close * 1.01,
                 "low": close * 0.99,
                 "close": close,
+                "raw_close": close,
                 "volume": 1_000_000.0,
                 "amount": 100_000_000.0,
                 "total_shares": 1_000_000_000.0,
@@ -1125,6 +1127,7 @@ def test_strategy_engine_run_all_builds_one_shared_matrix():
             "high": close * 1.01,
             "low": close * 0.99,
             "close": close,
+            "raw_close": close,
             "volume": 1_000_000.0,
             "amount": 100_000_000.0,
             "total_shares": 1_000_000_000.0,

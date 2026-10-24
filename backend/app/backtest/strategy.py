@@ -53,6 +53,7 @@ from app.indicators.pipeline import (
 )
 from app.price_limits import TAIWAN_SYMBOL_SUFFIXES
 from app.strategy.engine import (
+    RAW_PRICE_BOUND_KEYS,
     StrategyDataContext,
     StrategyDef,
     StrategyEngine,
@@ -520,6 +521,8 @@ def _basic_filter_dependencies(config: dict) -> set[str]:
     if not config or not config.get("enabled", True):
         return set()
     dependencies = {"symbol", "close"}
+    if any(config.get(key) is not None for key in RAW_PRICE_BOUND_KEYS):
+        dependencies.add("raw_close")
     if any(config.get(key) is not None for key in ("amount_min", "amount_max")):
         dependencies.add("amount")
     if any(config.get(key) is not None for key in ("turnover_min", "turnover_max")):

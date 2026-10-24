@@ -39,6 +39,7 @@ def _frame() -> pl.DataFrame:
             "high": [10.0] * count,
             "low": [10.0] * count,
             "close": [10.0] * count,
+            "raw_close": [10.0] * count,
             "volume": [1_000.0] * count,
             "amount": [1e9] * count,
         }

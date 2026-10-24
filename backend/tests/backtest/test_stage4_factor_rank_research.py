@@ -37,6 +37,7 @@ def _market(factors: dict[str, list[list[float | None]]], closes: list[float] | 
                     "high": closes[i] * 1.01,
                     "low": closes[i] * 0.99,
                     "close": closes[i],
+                    "raw_close": closes[i],
                     "volume": 1_000.0,
                     **{name: values[t][i] for name, values in factors.items()},
                 }

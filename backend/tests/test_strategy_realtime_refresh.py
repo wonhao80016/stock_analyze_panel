@@ -121,6 +121,7 @@ def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row():
                 "high": close * 1.01,
                 "low": close * 0.99,
                 "close": close,
+                "raw_close": close,
                 "volume": 1_000_000.0,
                 "amount": 100_000_000.0,
                 "total_shares": 1_000_000_000.0,

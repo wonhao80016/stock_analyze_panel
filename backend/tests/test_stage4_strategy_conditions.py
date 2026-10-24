@@ -48,6 +48,7 @@ def _frame(bars_by_symbol: dict[str, list[dict]]) -> pl.DataFrame:
                     "name": symbol,
                     "date": day,
                     "amount": bar["close"] * bar["volume"],
+                    "raw_close": bar["close"],
                     **bar,
                 }
             )
@@ -255,6 +256,7 @@ def _random_walk(symbols: tuple[str, ...], sessions: int = 160, seed: int = 2026
                     "high": high,
                     "low": low,
                     "close": close,
+                    "raw_close": close,
                     "volume": volume,
                     "amount": close * volume,
                 }
@@ -302,7 +304,9 @@ def test_liquidity_minimum_is_ntd_100m_traded_by_default(name):
 def test_saved_min_volume_override_is_still_honoured(name):
     bars, at = _liquid_entry(name)
     traded_value = _market(name, _with_liquidity(bars, at, volume=1_000_000.0, amount=2e8))
-    saved = {"params": {"min_volume": 2_000_000.0}}
+    # Shares traded at a raw price, as pullback_resume derives them; the fixture has no adjustment.
+    traded_shares = max(1_000_000.0, 2e8 / float(bars["close"][at]))
+    saved = {"params": {"min_volume": 2.0 * traded_shares}}
     params = StrategyEngine.resolve_params(ENGINE.get(name), LIQUIDITY_CASES[name], saved)
 
     signals = _module(name).MATRIX_STRATEGY.compute_signals(traded_value, params)
@@ -418,6 +422,7 @@ def _scored_panel(scoring: dict, varied: dict[str, str]) -> pl.DataFrame:
                 "high": 50.5,
                 "low": 49.5,
                 "close": 50.0,
+                "raw_close": 50.0,
                 "volume": 1_000_000.0,
                 "amount": 5e7,
                 "signal_limit_up": False,

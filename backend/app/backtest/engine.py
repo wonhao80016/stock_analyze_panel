@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import logging
 import math
@@ -217,6 +218,94 @@ def _trigger_fill(
     else:
         raw_fill = min(raw_fill, round(float(matrix.high[time_id, asset_id]) * scale, 2))
     return raw_fill / scale
+
+
+def _exit_signal_code(matrix: MarketMatrix, time_id: int, asset_id: int) -> int:
+    """Daily exit signal code, else the code of the armed minute-replay line."""
+    code = int(matrix.exit_signal_code[time_id, asset_id])
+    if code < 0 and matrix.minute_exit_line_code is not None:
+        code = int(matrix.minute_exit_line_code[time_id, asset_id])
+    return code
+
+
+class _MinuteBars:
+    """Minute bars of the cells a fill may read, held for one scope (a session or an asset) at a time.
+
+    A cell is needed when it is an entry or exit trigger cell (the price-refinement contract) or
+    carries an armed minute-replay sell line; release() drops every bar read so far.
+    """
+
+    def __init__(
+        self,
+        engine: BacktestEngine,
+        matrix: MarketMatrix,
+        asset_type: str,
+        enabled: bool,
+        exit_line: np.ndarray | None,
+    ) -> None:
+        self._engine = engine
+        self._matrix = matrix
+        self._asset_type = asset_type
+        self.enabled = enabled
+        triggers = (matrix.entry != 0) | (matrix.exit != 0)
+        self._trigger_times = triggers.any(axis=1)
+        self._trigger_assets = triggers.any(axis=0)
+        self._armed = None if exit_line is None else np.isfinite(exit_line) & (exit_line > 0)
+        self._rows: dict[tuple[int, int], np.ndarray] = {}
+        self._read: set[tuple[int, int]] = set()
+
+    def refinable(self, time_id: int, asset_id: int) -> bool:
+        return bool(self._trigger_times[time_id] and self._trigger_assets[asset_id])
+
+    def _needed(self, time_id: int, asset_id: int) -> bool:
+        if not self.enabled:
+            return False
+        armed = self._armed is not None and bool(self._armed[time_id, asset_id])
+        return armed or self.refinable(time_id, asset_id)
+
+    def release(self) -> None:
+        self._rows.clear()
+        self._read.clear()
+
+    def load(self, time_id: int, asset_ids) -> None:
+        """Read one session for every needed asset in one repository call."""
+        assets = sorted({
+            int(asset) for asset in asset_ids
+            if (int(asset), time_id) not in self._read and self._needed(time_id, int(asset))
+        })
+        if not assets:
+            return
+        day = self._matrix.timestamp_labels[time_id][:10]
+        symbols = [self._matrix.symbols[asset] for asset in assets]
+        loaded = self._engine._load_minute_for_fills(self._engine.repo, symbols, {day}, self._asset_type)
+        for asset, symbol in zip(assets, symbols, strict=True):
+            self._read.add((asset, time_id))
+            rows = loaded.get((symbol, day))
+            if rows is not None and len(rows) > 0:
+                self._rows[(asset, time_id)] = rows
+
+    def load_asset(self, asset_id: int, time_ids) -> None:
+        """Read every needed session of one asset in one repository call."""
+        times = sorted({
+            int(t) for t in time_ids
+            if (asset_id, int(t)) not in self._read and self._needed(int(t), asset_id)
+        })
+        if not times:
+            return
+        symbol = self._matrix.symbols[asset_id]
+        days = {int(t): self._matrix.timestamp_labels[int(t)][:10] for t in times}
+        loaded = self._engine._load_minute_for_fills(
+            self._engine.repo, [symbol], set(days.values()), self._asset_type,
+        )
+        for time_id, day in days.items():
+            self._read.add((asset_id, time_id))
+            rows = loaded.get((symbol, day))
+            if rows is not None and len(rows) > 0:
+                self._rows[(asset_id, time_id)] = rows
+
+    def get(self, time_id: int, asset_id: int) -> np.ndarray | None:
+        self.load(time_id, (asset_id,))
+        return self._rows.get((asset_id, time_id))
 
 
 # ================================================================
@@ -803,6 +892,10 @@ class BacktestEngine:
         )
         if df.is_empty():
             return df
+        if asset_type == "index":
+            from app.strategy.engine import index_with_raw_close
+
+            df = index_with_raw_close(df)
 
         from app.backtest.fundamentals import (
             attach_fundamental_factors,
@@ -1128,19 +1221,16 @@ class BacktestEngine:
             "pending_exit": 0,
         }
 
-        minute_cache: dict = {}
-        if config.minute_fill:
-            trigger_times, trigger_assets = np.nonzero(matrix.entry | matrix.exit)
-            dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
-            symbols = {matrix.symbols[int(a)] for a in trigger_assets}
-            if dates and symbols:
-                loaded = self._load_minute_for_fills(
-                    self.repo,
-                    list(symbols),
-                    dates,
-                    config.asset_type,
-                )
-                minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
+        minute_exit_line = matrix.minute_exit_line if config.exit_fill == "signal_next_minute" else None
+        # Candidates run asset by asset: each asset's estimated held sessions are read in one
+        # call, others on first use, and all are released before the next asset.
+        minute_bars = _MinuteBars(
+            self, matrix, config.asset_type, bool(config.minute_fill), minute_exit_line,
+        )
+        held_sessions = (
+            self._independent_held_sessions(matrix, raw_candidates, config)
+            if minute_bars.enabled else {}
+        )
 
         def _count(key: str) -> None:
             execution_stats[key] = execution_stats.get(key, 0) + 1
@@ -1161,13 +1251,11 @@ class BacktestEngine:
             return matrix.timestamp_labels[signal_time][:10] if signal_time >= 0 else fallback
 
         def _refill(time_id: int, asset_id: int, side: str, daily_price: float) -> float:
-            if not config.minute_fill or not minute_cache:
-                return daily_price
             if side == "buy" and config.entry_fill != "open_t+1":
                 return daily_price
             if side == "sell" and config.exit_fill == "close_t":
                 return daily_price
-            rows = minute_cache.get((matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10]))
+            rows = minute_bars.get(time_id, asset_id) if minute_bars.refinable(time_id, asset_id) else None
             if rows is None:
                 return daily_price
             reference_matrix = (
@@ -1184,17 +1272,26 @@ class BacktestEngine:
             return precise / scale if precise is not None else daily_price
 
         def _minute_trigger_price(time_id: int, asset_id: int) -> float | None:
-            if not config.minute_fill or not minute_cache:
-                return None
-            rows = minute_cache.get((matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10]))
+            rows = minute_bars.get(time_id, asset_id)
             if rows is None:
                 return None
             reference = float(matrix.exit_reference_price[time_id, asset_id])
+            if minute_exit_line is not None and _valid_price(minute_exit_line[time_id, asset_id]):
+                reference = float(minute_exit_line[time_id, asset_id])
             scale = float(matrix.raw_scale[time_id, asset_id])
             if not _valid_price(reference) or not _valid_price(scale):
                 return None
             trigger = self._resolve_minute_exit_trigger(rows, reference * scale)
             return trigger / scale if trigger is not None else None
+
+        def _armed_minute_exit(time_id: int, asset_id: int) -> float | None:
+            if (
+                minute_exit_line is None
+                or not minute_bars.enabled
+                or not _valid_price(minute_exit_line[time_id, asset_id])
+            ):
+                return None
+            return _minute_trigger_price(time_id, asset_id)
 
         def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
             if not matrix.tradable[time_id, asset_id]:
@@ -1278,7 +1375,7 @@ class BacktestEngine:
                     pos["pending_exit_signal_date"] = signal_date
                     pos["pending_exit_signal_id"] = (
                         _signal_id(
-                            int(matrix.exit_signal_code[time_id, asset_id]),
+                            _exit_signal_code(matrix, time_id, asset_id),
                             matrix.exit_signal_ids,
                         )
                         if reason == "signal" else None
@@ -1288,7 +1385,7 @@ class BacktestEngine:
                 _count("sell_minimum_holding")
                 return False
             signal_id = (
-                _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
+                _signal_id(_exit_signal_code(matrix, time_id, asset_id), matrix.exit_signal_ids)
                 if reason == "signal" else None
             )
             minute_trigger = config.exit_fill == "signal_next_minute" and reason == "signal"
@@ -1367,9 +1464,14 @@ class BacktestEngine:
 
         entry_times, entry_assets = np.nonzero(matrix.entry)
         order = np.lexsort((entry_times, entry_assets))
+        minute_asset = -1
         for seq, order_pos in enumerate(order, start=1):
             time_id = int(entry_times[order_pos])
             asset_id = int(entry_assets[order_pos])
+            if asset_id != minute_asset:
+                minute_bars.release()
+                minute_bars.load_asset(asset_id, held_sessions.get(asset_id, ()))
+                minute_asset = asset_id
             if cancel_event is not None and cancel_event.is_set():
                 break
             if progress_cb is not None and (seq == 1 or seq % 500 == 0):
@@ -1418,7 +1520,11 @@ class BacktestEngine:
                 "pending_exit_next_open": False,
                 "blocked_exit_days": 0,
             }
-            if matrix.exit[time_id, asset_id]:
+            entry_trigger = _armed_minute_exit(time_id, asset_id) if config.entry_fill == "open_t+1" else None
+            if entry_trigger is not None:
+                if _try_close(pos, time_id, asset_id, "signal", entry_date, entry_trigger):
+                    continue
+            elif matrix.exit[time_id, asset_id]:
                 signal_date = _signal_date(
                     int(matrix.exit_signal_time[time_id, asset_id]),
                     entry_date,
@@ -1441,10 +1547,14 @@ class BacktestEngine:
                     closed = True
                     break
                 reason = None
+                override = None
                 signal_date = date_text
                 if pos.get("pending_exit_reason"):
                     reason = str(pos["pending_exit_reason"])
                     signal_date = str(pos.get("pending_exit_signal_date") or date_text)
+                elif (minute_exit := _armed_minute_exit(future, asset_id)) is not None:
+                    reason = "signal"
+                    override = minute_exit
                 elif matrix.exit[future, asset_id]:
                     reason = "signal"
                     signal_date = _signal_date(int(matrix.exit_signal_time[future, asset_id]), date_text)
@@ -1452,7 +1562,7 @@ class BacktestEngine:
                     reason = "max_hold"
                 elif future == future_times[-1]:
                     reason = "end"
-                if reason and _try_close(pos, future, asset_id, reason, signal_date):
+                if reason and _try_close(pos, future, asset_id, reason, signal_date, override):
                     closed = True
                     break
                 high_price = float(matrix.high[future, asset_id])
@@ -1476,6 +1586,45 @@ class BacktestEngine:
         result.stats["market_matrix_shape"] = list(matrix.shape)
         result.stats["market_matrix_bytes"] = matrix.nbytes
         return result
+
+    def _independent_held_sessions(
+        self,
+        matrix: MarketMatrix,
+        raw_candidates: int,
+        config: MatcherConfig,
+    ) -> dict[int, set[int]]:
+        """Sessions each asset is held in a pass without minute bars, to prefetch minute bars.
+
+        This is a read-ahead estimate, not a bound: a minute entry fill moves the stop line, so the
+        minute pass may hold longer, and _MinuteBars.get() reads any session missing here.
+        """
+        daily = self._simulate_independent_matrix(
+            matrix,
+            raw_candidates,
+            dataclasses.replace(config, minute_fill=False),
+            None,
+            None,
+            SimulationOptions(
+                include_monte_carlo=False,
+                include_curves=False,
+                include_per_symbol_stats=False,
+                include_return_distribution=False,
+            ),
+        )
+        asset_ids = {symbol: index for index, symbol in enumerate(matrix.symbols)}
+        time_ids = {label[:10]: index for index, label in enumerate(matrix.timestamp_labels)}
+        held: dict[int, set[int]] = {}
+        closed: set[tuple[int, int]] = set()
+        for trade in daily.trades:
+            asset = asset_ids[trade.symbol]
+            start, stop = time_ids[trade.entry_date], time_ids[trade.exit_date]
+            held.setdefault(asset, set()).update(range(start, stop + 1))
+            closed.add((asset, start))
+        last = matrix.shape[0] - 1
+        for time_id, asset in zip(*np.nonzero(matrix.entry), strict=True):
+            if (int(asset), int(time_id)) not in closed:
+                held.setdefault(int(asset), set()).update(range(int(time_id), last + 1))
+        return held
 
     def simulate_independent_market_matrix(
         self,
@@ -1720,16 +1869,15 @@ class BacktestEngine:
             "pending_exit": 0,
         }
 
-        minute_cache: dict = {}
-        if config.minute_fill:
-            trigger_times, trigger_assets = np.nonzero(matrix.entry | matrix.exit)
-            trigger_dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
-            trigger_symbols = {matrix.symbols[int(a)] for a in trigger_assets}
-            if trigger_dates and trigger_symbols:
-                loaded = self._load_minute_for_fills(
-                    self.repo, list(trigger_symbols), trigger_dates, config.asset_type,
-                )
-                minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
+        minute_exit_line = matrix.minute_exit_line if config.exit_fill == "signal_next_minute" else None
+        # Each session reads the minute bars of its held and selected assets, then releases them.
+        minute_bars = _MinuteBars(
+            self, matrix, config.asset_type, bool(config.minute_fill), minute_exit_line,
+        )
+        # An open_t+1 buy sees only what is known at the open; later same-bar exits free their
+        # slot, cash and exposure from the next bar.
+        defer_late_releases = config.entry_fill == "open_t+1"
+        late_release = {"slots": 0, "cash": 0.0, "value": 0.0}
 
         def _count(key: str) -> None:
             execution_stats[key] = execution_stats.get(key, 0) + 1
@@ -1743,52 +1891,76 @@ class BacktestEngine:
         def _signal_date(signal_time: int, fallback: str) -> str:
             return matrix.timestamp_labels[signal_time][:10] if signal_time >= 0 else fallback
 
-        def _market_value() -> float:
-            total = 0.0
-            for asset, pos in positions.items():
-                mark = last_close[asset]
-                if not _valid_price(mark):
-                    mark = pos["entry_price"]
-                total += pos["adjusted_units"] * mark
-            return total
+        def _mark(asset: int, pos: dict) -> float:
+            mark = last_close[asset]
+            return float(mark) if _valid_price(mark) else float(pos["entry_price"])
 
-        def _refill_price(time_id: int, asset_id: int, side: str, daily_price: float) -> float:
-            if not config.minute_fill or not minute_cache:
-                return daily_price
+        def _market_value() -> float:
+            return sum(pos["adjusted_units"] * _mark(asset, pos) for asset, pos in positions.items())
+
+        def _open_cash() -> float:
+            return cash - (late_release["cash"] if defer_late_releases else 0.0)
+
+        def _open_market_value() -> float:
+            return _market_value() + (late_release["value"] if defer_late_releases else 0.0)
+
+        def _open_slots_used() -> int:
+            return len(positions) + (late_release["slots"] if defer_late_releases else 0)
+
+        def _refill_price(
+            time_id: int, asset_id: int, side: str, daily_price: float,
+        ) -> tuple[float, bool]:
+            """Fill price and whether it trades at the session open."""
+            at_open = (config.entry_fill if side == "buy" else config.exit_fill) == "open_t+1"
             if side == "buy" and config.entry_fill != "open_t+1":
-                return daily_price
+                return daily_price, at_open
             if side == "sell" and config.exit_fill == "close_t":
-                return daily_price
-            key = (matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10])
-            minute_rows = minute_cache.get(key)
+                return daily_price, at_open
+            minute_rows = (
+                minute_bars.get(time_id, asset_id) if minute_bars.refinable(time_id, asset_id) else None
+            )
             if minute_rows is None:
-                return daily_price
+                return daily_price, at_open
             reference_matrix = (
                 matrix.entry_reference_price if side == "buy" else matrix.exit_reference_price
             )
             reference = float(reference_matrix[time_id, asset_id])
             scale = float(matrix.raw_scale[time_id, asset_id])
             if not _valid_price(reference) or not _valid_price(scale):
-                return daily_price
+                return daily_price, at_open
             # Minute bars are raw prices; the reference line is adjusted.
             precise = self._resolve_minute_fill(
                 minute_rows, reference * scale, side,
             )
-            return precise / scale if precise is not None else daily_price
+            if precise is None:
+                return daily_price, at_open
+            first_open = float(minute_rows[0, 0])
+            crossed_at_open = np.isfinite(first_open) and (
+                first_open <= reference * scale if side == "sell" else first_open >= reference * scale
+            )
+            return precise / scale, at_open and bool(crossed_at_open)
 
         def _minute_trigger_price(time_id: int, asset_id: int) -> float | None:
-            if not config.minute_fill or not minute_cache:
-                return None
-            key = (matrix.symbols[asset_id], matrix.timestamp_labels[time_id][:10])
-            minute_rows = minute_cache.get(key)
+            minute_rows = minute_bars.get(time_id, asset_id)
             if minute_rows is None:
                 return None
             reference = float(matrix.exit_reference_price[time_id, asset_id])
+            if minute_exit_line is not None and _valid_price(minute_exit_line[time_id, asset_id]):
+                reference = float(minute_exit_line[time_id, asset_id])
             scale = float(matrix.raw_scale[time_id, asset_id])
             if not _valid_price(reference) or not _valid_price(scale):
                 return None
             trigger = self._resolve_minute_exit_trigger(minute_rows, reference * scale)
             return trigger / scale if trigger is not None else None
+
+        def _armed_minute_exit(time_id: int, asset_id: int) -> float | None:
+            if (
+                minute_exit_line is None
+                or not minute_bars.enabled
+                or not _valid_price(minute_exit_line[time_id, asset_id])
+            ):
+                return None
+            return _minute_trigger_price(time_id, asset_id)
 
         def _one_price_limit(time_id: int, asset_id: int, direction: str) -> bool:
             if not matrix.tradable[time_id, asset_id]:
@@ -1850,12 +2022,16 @@ class BacktestEngine:
             signal_date: str,
             sold_today: set[int],
             override: float | None = None,
+            at_open: bool = False,
         ) -> None:
             nonlocal cash
             pos = positions.pop(asset_id)
-            exit_price = float(override) if override is not None else _refill_price(
-                time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
-            )
+            if override is None:
+                exit_price, at_open = _refill_price(
+                    time_id, asset_id, "sell", float(exit_prices[time_id, asset_id])
+                )
+            else:
+                exit_price = float(override)
             symbol = matrix.symbols[asset_id]
             exit_date = matrix.timestamp_labels[time_id][:10]
             traded_exit = _traded_price(matrix, time_id, asset_id, exit_price)
@@ -1868,6 +2044,11 @@ class BacktestEngine:
                 is_day_trade=pos["entry_date"] == exit_date,
             )
             cash += exit_value
+            if not at_open:
+                open_mark = pos["entry_price"] if pos["entry_date"] == exit_date else _mark(asset_id, pos)
+                late_release["slots"] += 1
+                late_release["cash"] += exit_value
+                late_release["value"] += pos["adjusted_units"] * open_mark
             pnl_amount = exit_value - pos["entry_value"]
             pnl_pct = pnl_amount / pos["entry_value"] if pos["entry_value"] > 0 else 0.0
             sold_today.add(asset_id)
@@ -1897,7 +2078,7 @@ class BacktestEngine:
                 entry_signal_id=pos["entry_signal_id"],
                 exit_signal_id=(
                     pos.get("pending_exit_signal_id")
-                    or _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
+                    or _signal_id(_exit_signal_code(matrix, time_id, asset_id), matrix.exit_signal_ids)
                 ) if reason == "signal" else None,
             ))
 
@@ -1908,6 +2089,7 @@ class BacktestEngine:
             signal_date: str,
             sold_today: set[int],
             override: float | None = None,
+            at_open: bool = False,
         ) -> bool:
             pos = positions[asset_id]
             symbol = matrix.symbols[asset_id]
@@ -1916,7 +2098,7 @@ class BacktestEngine:
                 _count("sell_minimum_holding")
                 return False
             signal_id = (
-                _signal_id(int(matrix.exit_signal_code[time_id, asset_id]), matrix.exit_signal_ids)
+                _signal_id(_exit_signal_code(matrix, time_id, asset_id), matrix.exit_signal_ids)
                 if reason == "signal" else None
             )
             minute_trigger = config.exit_fill == "signal_next_minute" and reason == "signal"
@@ -1924,8 +2106,10 @@ class BacktestEngine:
                 pos = positions[asset_id]
                 if pos.get("pending_exit_next_open"):
                     override = float(matrix.open[time_id, asset_id])
+                    at_open = True
                 else:
                     override = _minute_trigger_price(time_id, asset_id)
+                    at_open = False
                     if override is None:
                         _mark_pending(asset_id, reason, signal_date, signal_id, next_open=True)
                         _count("sell_minute_trigger_fallback")
@@ -1941,7 +2125,7 @@ class BacktestEngine:
                 )
                 _count(blocked)
                 return False
-            _sell(time_id, asset_id, reason, signal_date, sold_today, override)
+            _sell(time_id, asset_id, reason, signal_date, sold_today, override, at_open)
             return True
 
         for time_id, date_label in enumerate(matrix.timestamp_labels):
@@ -1962,6 +2146,9 @@ class BacktestEngine:
                         pass
 
             sold_today: set[int] = set()
+            late_release.update(slots=0, cash=0.0, value=0.0)
+            minute_bars.release()
+            minute_bars.load(time_id, positions)
             for pos in positions.values():
                 pos["hold_days"] += 1
 
@@ -1990,17 +2177,18 @@ class BacktestEngine:
                 if valid_lines:
                     stop_price, reason = max(valid_lines, key=lambda item: item[0])
                     override = None
-                    if _valid_price(open_price) and open_price <= stop_price:
+                    gap_open = _valid_price(open_price) and open_price <= stop_price
+                    if gap_open:
                         override = open_price
                     elif _valid_price(low_price) and low_price <= stop_price:
                         override = _trigger_fill(config, matrix, time_id, asset_id, stop_price, "floor")
                     if override is not None:
-                        _try_sell(time_id, asset_id, reason, date_text, sold_today, override)
+                        _try_sell(time_id, asset_id, reason, date_text, sold_today, override, gap_open)
                         continue
                 if config.take_profit_pct is not None:
                     take_profit = entry_price * (1 + abs(float(config.take_profit_pct)))
                     if _valid_price(open_price) and open_price >= take_profit:
-                        _try_sell(time_id, asset_id, "take_profit", date_text, sold_today, open_price)
+                        _try_sell(time_id, asset_id, "take_profit", date_text, sold_today, open_price, True)
                     elif _valid_price(high_price) and high_price >= take_profit:
                         _try_sell(
                             time_id,
@@ -2016,10 +2204,14 @@ class BacktestEngine:
                 if pos is None:
                     continue
                 reason = ""
+                override = None
                 signal_date = date_text
                 if pos.get("pending_exit_reason"):
                     reason = str(pos["pending_exit_reason"])
                     signal_date = str(pos.get("pending_exit_signal_date") or date_text)
+                elif (minute_exit := _armed_minute_exit(time_id, asset_id)) is not None:
+                    reason = "signal"
+                    override = minute_exit
                 elif matrix.exit[time_id, asset_id]:
                     reason = "signal"
                     signal_date = _signal_date(int(matrix.exit_signal_time[time_id, asset_id]), date_text)
@@ -2028,7 +2220,7 @@ class BacktestEngine:
                 elif time_id == time_count - 1:
                     reason = "end"
                 if reason:
-                    _try_sell(time_id, asset_id, reason, signal_date, sold_today)
+                    _try_sell(time_id, asset_id, reason, signal_date, sold_today, override)
 
             if time_id < time_count - 1 and max_positions > 0:
                 candidates: list[tuple[int, float]] = []
@@ -2057,13 +2249,14 @@ class BacktestEngine:
                         matrix.symbols[item[0]],
                     )
                 )
-                slots = max_positions - len(positions)
+                slots = max_positions - _open_slots_used()
                 if slots <= 0:
                     execution_stats["buy_no_slot"] += len(candidates)
                 elif candidates:
                     selected = candidates[:slots]
-                    market_value_before = _market_value()
-                    equity_before = cash + market_value_before
+                    minute_bars.load(time_id, (asset for asset, _ in selected))
+                    market_value_before = _open_market_value()
+                    equity_before = _open_cash() + market_value_before
                     target_value = equity_before * max_exposure_pct / max_positions
                     exposure_capacity = equity_before * max_exposure_pct - market_value_before
                     if equity_before <= 0 or exposure_capacity <= 0 or max_exposure_pct <= 0:
@@ -2076,19 +2269,20 @@ class BacktestEngine:
                             )
                             if raw_weights.sum() > 0:
                                 weights = raw_weights / raw_weights.sum()
-                        total_budget = min(cash, exposure_capacity, target_value * len(selected))
+                        total_budget = min(_open_cash(), exposure_capacity, target_value * len(selected))
                         for (asset_id, entry_score), weight in zip(selected, weights):
-                            if len(positions) >= max_positions:
+                            if _open_slots_used() >= max_positions:
                                 _count("buy_no_slot")
                                 break
-                            market_value = _market_value()
-                            equity = cash + market_value
+                            market_value = _open_market_value()
+                            spendable = _open_cash()
+                            equity = spendable + market_value
                             capacity = equity * max_exposure_pct - market_value
-                            allocation = min(total_budget * float(weight), target_value, cash, capacity)
+                            allocation = min(total_budget * float(weight), target_value, spendable, capacity)
                             if allocation <= 0:
                                 _count("buy_exposure")
                                 continue
-                            entry_price = _refill_price(
+                            entry_price, _ = _refill_price(
                                 time_id, asset_id, "buy", float(entry_prices[time_id, asset_id])
                             )
                             symbol = matrix.symbols[asset_id]
@@ -2100,7 +2294,7 @@ class BacktestEngine:
                             if shares <= 0:
                                 _count("buy_lot_size")
                                 continue
-                            if entry_value > cash + 1e-6:
+                            if entry_value > spendable + 1e-6:
                                 _count("buy_cash")
                                 continue
                             if entry_value > capacity + 1e-6:
@@ -2131,10 +2325,13 @@ class BacktestEngine:
                                 "pending_exit_next_open": False,
                                 "blocked_exit_days": 0,
                             }
-                            if (
-                                config.minimum_holding_sessions == 0
-                                and matrix.exit[time_id, asset_id]
-                            ):
+                            entry_trigger = (
+                                _armed_minute_exit(time_id, asset_id)
+                                if config.entry_fill == "open_t+1" else None
+                            )
+                            if entry_trigger is not None:
+                                _try_sell(time_id, asset_id, "signal", date_text, sold_today, entry_trigger)
+                            elif matrix.exit[time_id, asset_id]:
                                 _try_sell(
                                     time_id,
                                     asset_id,
