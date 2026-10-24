@@ -1,6 +1,7 @@
 """Production mining runtime executed only inside a spawned worker."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -30,7 +31,9 @@ from app.backtest.fundamentals import (
     load_fundamental_snapshot,
 )
 from app.backtest.mining import (
+    MAX_CANDIDATE_NAME_LENGTH,
     MAX_FINALISTS,
+    MINING_DEFAULT_SLIPPAGE_BPS,
     CandidateEvaluation,
     FactorMetric,
     MiningBudget,
@@ -41,6 +44,7 @@ from app.backtest.mining import (
     benchmark_candidate,
     compute_rank_correlation,
     generate_nested_folds,
+    mining_trading_costs,
     required_outer_folds,
     required_trading_bars,
     validation_config_for_profile,
@@ -299,10 +303,10 @@ class MatcherCandidateEvaluator:
             matching="open_t+1",
             entry_fill="open_t+1",
             exit_fill="open_t+1",
-            fees_pct=0.0002,
-            commission_pct=self.request.commission_pct,
-            stamp_tax_pct=None,
-            slippage_bps=self.request.slippage_bps,
+            **mining_trading_costs(
+                self.request.commission_pct,
+                self.request.slippage_bps,
+            ),
             max_positions=10,
             max_exposure_pct=1.0,
             initial_capital=1_000_000.0,
@@ -334,6 +338,7 @@ def _load_compact_factor_panel(
         "high",
         "low",
         "close",
+        "raw_close",
         "volume",
         "amount",
         "turnover_rate",
@@ -907,7 +912,7 @@ def _decode_runtime_request(
     if request.get("stamp_tax_pct") is not None:
         raise ValueError(TAIWAN_STAMP_TAX_OVERRIDE_ERROR)
     slippage_bps = _bounded_float(
-        request.get("slippage_bps", 5.0), "slippage_bps", 0.0, 1000.0
+        request.get("slippage_bps", MINING_DEFAULT_SLIPPAGE_BPS), "slippage_bps", 0.0, 1000.0
     )
     symbols_value = request.get("symbols")
     symbols = None
@@ -1448,8 +1453,17 @@ def _candidate_artifact_rank(
 
 def _candidate_name(candidate: MiningCandidate) -> str:
     if candidate.kind == "existing_strategy":
-        return f"已有策略 · {candidate.strategy_id}"
-    return "因子组合 · " + " + ".join(candidate.factor_names)
+        name = f"已有策略 · {candidate.strategy_id}"
+    else:
+        name = "因子组合 · " + " + ".join(candidate.factor_names)
+    if len(name) <= MAX_CANDIDATE_NAME_LENGTH:
+        return name
+    # Truncated names keep a signature digest so two long combinations never share a name.
+    digest = hashlib.blake2b(
+        candidate.candidate_id.encode("utf-8"), digest_size=4
+    ).hexdigest()
+    suffix = f"… #{digest}"
+    return name[: MAX_CANDIDATE_NAME_LENGTH - len(suffix)].rstrip(" +·") + suffix
 
 
 def _empty_candidates_frame() -> pl.DataFrame:

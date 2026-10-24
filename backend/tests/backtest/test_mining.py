@@ -795,7 +795,7 @@ def test_existing_strategies_are_benchmarked_on_every_outer_fold():
     assert len(evaluated_strategy_kinds) == 6
 
 
-def test_winner_definitions_are_cross_evaluated_on_all_outer_folds():
+def test_winner_definitions_are_cross_evaluated_only_on_later_outer_folds():
     panel = _panel(days=20)
     request = MiningRequest(
         factor_names=("good", "noise"),
@@ -826,13 +826,14 @@ def test_winner_definitions_are_cross_evaluated_on_all_outer_folds():
     )
 
     assert len(result.folds) == 2
-    winners = {fold.selected_candidate_id for fold in result.folds}
-    assert len(winners) == 2
-    for fold in result.folds:
-        cross_ids = [candidate_id for candidate_id, _ in fold.cross_evaluations]
-        assert cross_ids == sorted(winners - {fold.selected_candidate_id})
-        for _, evaluation in fold.cross_evaluations:
-            assert evaluation.error is None
+    first, second = result.folds
+    assert first.selected_candidate_id != second.selected_candidate_id
+    assert first.cross_evaluations == ()
+    assert [candidate_id for candidate_id, _ in second.cross_evaluations] == [
+        first.selected_candidate_id
+    ]
+    for _, evaluation in second.cross_evaluations:
+        assert evaluation.error is None
 
 
 def test_benchmarks_run_even_when_factor_track_fails_on_a_fold():

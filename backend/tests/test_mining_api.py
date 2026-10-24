@@ -16,6 +16,7 @@ from app.api.mining import router
 from app.backtest.mining import compute_candidate_signature
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.services.mining_jobs import MiningRunStore
+from app.services.mining_schedule import MINING_ALGORITHM_VERSION
 from app.strategy.engine import StrategyEngine
 
 _FACTOR_DEFINITION = {
@@ -191,7 +192,7 @@ def _successful_run(store: MiningRunStore, run_id: str = "result-run"):
         "elapsed_ms": 123.4,
         "data_as_of": "2026-01-09",
         "methodology_version": "factor_v2",
-        "algorithm_version": "mining-v1",
+        "algorithm_version": MINING_ALGORITHM_VERSION,
         "panel_scans": 1,
         "matrix_bytes": 4096,
         "phase_ms": {"panel": 1.0, "total": 123.4},

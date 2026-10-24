@@ -29,6 +29,10 @@ GATE_MIN_OOS_SHARPE = 0.5
 GATE_MAX_DRAWDOWN = -0.25
 GATE_MIN_TRADES = 60
 
+MAX_CANDIDATE_NAME_LENGTH = 80
+MINING_DEFAULT_SLIPPAGE_BPS = 5.0
+_MINING_FEES_PCT = 0.0002
+
 MiningProfile = Literal["exploratory", "balanced", "strict"]
 
 
@@ -227,6 +231,24 @@ def evaluate_candidate_gate(
     if n_trades is None or n_trades < GATE_MIN_TRADES:
         reasons.append(f"requires at least {GATE_MIN_TRADES} OOS trades")
     return CandidateGateResult(qualified=not reasons, reasons=tuple(reasons))
+
+
+def mining_trading_costs(
+    commission_pct: float | None,
+    slippage_bps: float,
+) -> dict[str, Any]:
+    """Return the cost settings shared by mining evaluation and candidate replays.
+
+    ``commission_pct=None`` selects the Taiwan simulation commission, stamp tax always follows
+    per-instrument Taiwan rules, and mining applies no minimum commission.
+    """
+    return {
+        "fees_pct": _MINING_FEES_PCT,
+        "commission_pct": commission_pct,
+        "minimum_commission": 0.0,
+        "stamp_tax_pct": None,
+        "slippage_bps": slippage_bps,
+    }
 
 
 @dataclass(frozen=True)
@@ -1222,7 +1244,8 @@ class MiningService:
 
         if not cancelled and evaluator is not None:
             winner_union: dict[str, MiningCandidate] = {}
-            for fold in fold_results:
+            winner_origin: dict[str, ValidationFold] = {}
+            for nested, fold in zip(nested_folds, fold_results, strict=False):
                 if fold.selected_candidate_id is None:
                     continue
                 if fold.selected_candidate_id in winner_union:
@@ -1237,12 +1260,18 @@ class MiningService:
                 )
                 if winner is not None:
                     winner_union[winner.candidate_id] = winner
+                    winner_origin[winner.candidate_id] = nested.outer
             if len(winner_union) > 1:
                 extended_folds: list[FoldMiningResult] = []
                 for nested, fold in zip(nested_folds, fold_results, strict=False):
                     cross: list[tuple[str, CandidateEvaluation]] = []
                     for candidate_id, candidate in winner_union.items():
                         if candidate_id == fold.selected_candidate_id:
+                            continue
+                        if not _scores_after_selection(
+                            nested.outer,
+                            winner_origin[candidate_id],
+                        ):
                             continue
                         if trials_used >= request.budget.max_trials:
                             cross.append((
@@ -1529,6 +1558,15 @@ def _make_validation_fold(
         test_labels=labels[test_start:test_stop],
         embargo_labels=labels[test_stop:embargo_stop],
     )
+
+
+def _scores_after_selection(test_fold: ValidationFold, origin: ValidationFold) -> bool:
+    """Whether ``test_fold`` is out-of-sample for a winner first selected on ``origin``.
+
+    The winner was chosen from ``origin``'s train window, so only test windows that start
+    no earlier than ``origin``'s own test window keep its purge gap and stay unseen.
+    """
+    return test_fold.test_start >= origin.test_start
 
 
 def _train_panel_for_fold(

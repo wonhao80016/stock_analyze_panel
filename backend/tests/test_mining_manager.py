@@ -28,8 +28,8 @@ def _wait_for_status(
     *,
     timeout: float = 2.0,
 ) -> dict[str, Any]:
-    # The manager writes the manifest status before appending the matching event,
-    # so the status alone does not mean the event log is complete.
+    # The manager appends the matching event before the manifest status, so a run can
+    # briefly show the event while the status still lags behind.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         manifest = manager.store.get(run_id)

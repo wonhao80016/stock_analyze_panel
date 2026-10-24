@@ -14,6 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from app.taiwan.universe.service import write_atomically
+
 MiningRunStatus = Literal[
     "queued",
     "running",
@@ -191,6 +193,29 @@ class MiningRunStore:
             manifest = self._required_manifest(safe_run_id)
             return self._transition_locked(manifest, status, error=error)
 
+    def transition_with_event(
+        self,
+        run_id: str,
+        status: MiningRunStatus,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply a validated transition, writing its event before the manifest status.
+
+        Readers holding the store lock see both or neither; any other reader may see the
+        event first but never a status whose event is still missing.
+        """
+        if status not in RUN_STATUSES:
+            raise MiningRunValidationError(f"unsupported mining run status: {status!r}")
+        safe_run_id = self._validate_run_id(run_id)
+        with _STORE_LOCK:
+            manifest = self._required_manifest(safe_run_id)
+            _validate_transition(manifest["status"], status)
+            self.append_event(safe_run_id, event_type, payload)
+            return self._transition_locked(manifest, status, error=error)
+
     def write_summary(self, run_id: str, summary: Mapping[str, Any]) -> dict[str, Any]:
         """Atomically replace a run's scalar or compact aggregate summary."""
         if not isinstance(summary, Mapping):
@@ -328,10 +353,7 @@ class MiningRunStore:
             if not _RUN_ID_PATTERN.fullmatch(run_id):
                 continue
             try:
-                manifest = self._read_manifest_path(
-                    self._run_dir(run_id) / "manifest.json",
-                    run_id,
-                )
+                manifest = self._read_scanned_manifest(run_id)
             except MiningRunStoreError:
                 continue
             if manifest is None:
@@ -355,8 +377,8 @@ class MiningRunStore:
         if allowed_statuses is not None and not allowed_statuses <= RUN_STATUSES:
             raise MiningRunValidationError("statuses contains an unsupported mining run status")
 
-        # Directory enumeration and manifest reads stay outside the write lock. Atomic replacements
-        # make each individual read coherent while avoiding a lock around a potentially slow scan.
+        # Directory enumeration stays outside the lock; each manifest read takes it briefly so an
+        # in-process writer never replaces a manifest this scan holds open (WinError 5 on Windows).
         try:
             paths = list(self.runs_root.glob("*/manifest.json"))
         except OSError as exc:
@@ -367,8 +389,7 @@ class MiningRunStore:
             if not _RUN_ID_PATTERN.fullmatch(run_id):
                 continue
             try:
-                manifest_path = self._run_dir(run_id) / "manifest.json"
-                manifest = self._read_manifest_path(manifest_path, run_id)
+                manifest = self._read_scanned_manifest(run_id)
             except MiningRunStoreError:
                 continue
             if manifest is None or manifest.get("run_signature") != run_signature:
@@ -391,8 +412,7 @@ class MiningRunStore:
             if not _RUN_ID_PATTERN.fullmatch(run_id):
                 continue
             try:
-                manifest_path = self._run_dir(run_id) / "manifest.json"
-                manifest = self._read_manifest_path(manifest_path, run_id)
+                manifest = self._read_scanned_manifest(run_id)
             except MiningRunStoreError:
                 continue
             if manifest is not None and manifest.get("status") in ACTIVE_RUN_STATUSES:
@@ -415,13 +435,9 @@ class MiningRunStore:
         *,
         error: str | None,
     ) -> dict[str, Any]:
-        previous = manifest["status"]
-        if previous == status:
+        if manifest["status"] == status:
             return manifest
-        if status not in _ALLOWED_TRANSITIONS[previous]:
-            raise InvalidMiningStatusTransitionError(
-                f"cannot transition from {previous} to {status}"
-            )
+        _validate_transition(manifest["status"], status)
 
         now = _now_iso()
         manifest["status"] = status
@@ -436,6 +452,10 @@ class MiningRunStore:
             manifest["error"] = str(error)
         _atomic_write_json(self._run_dir(manifest["run_id"]) / "manifest.json", manifest)
         return manifest
+
+    def _read_scanned_manifest(self, run_id: str) -> dict[str, Any] | None:
+        with _STORE_LOCK:
+            return self._read_manifest_path(self._run_dir(run_id) / "manifest.json", run_id)
 
     def _required_manifest(self, run_id: str) -> dict[str, Any]:
         manifest = self._read_manifest_path(self._run_dir(run_id) / "manifest.json", run_id)
@@ -547,6 +567,13 @@ class MiningRunStore:
             raise MiningRunValidationError(f"unsupported artifact name: {name!r}")
 
 
+def _validate_transition(previous: str, status: str) -> None:
+    if previous != status and status not in _ALLOWED_TRANSITIONS[previous]:
+        raise InvalidMiningStatusTransitionError(
+            f"cannot transition from {previous} to {status}"
+        )
+
+
 def _canonicalize_json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -596,16 +623,15 @@ def _atomic_write_json(path: Path, value: Any) -> None:
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
+    def write(temporary: Path) -> None:
         with temporary.open("w", encoding="utf-8", newline="\n") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+
+    try:
+        write_atomically(path, write)
     except OSError as exc:
-        temporary.unlink(missing_ok=True)
         raise MiningRunStoreError(f"failed to write file: {path}") from exc
 
 

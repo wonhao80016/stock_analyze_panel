@@ -366,6 +366,82 @@ def publish_candidate(run_id: str, signature: str, request: Request) -> dict[str
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/published/reevaluate")
+def reevaluate_published(request: Request, retry_review: bool = False) -> dict[str, Any]:
+    """Advance the re-evaluation of every outdated mined publication by one step.
+
+    Delisting moves the strategy source into data/research/mining/reevaluation/delisted and
+    clears only its candidate backlink; ``POST /published/{strategy_id}/restore`` undoes it.
+    """
+    if settings.allow_user_python_strategies and not _is_local_request(request):
+        raise HTTPException(status_code=403, detail=USER_STRATEGIES_LOCAL_ONLY_DETAIL)
+    try:
+        return _reevaluator(request).run(retry_review=retry_review)
+    except (MiningRunStoreError, RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/published/{strategy_id}/restore")
+def restore_published(strategy_id: str, request: Request) -> dict[str, Any]:
+    """Move a delisted mined strategy back and re-link only its own candidate row."""
+    if settings.allow_user_python_strategies and not _is_local_request(request):
+        raise HTTPException(status_code=403, detail=USER_STRATEGIES_LOCAL_ONLY_DETAIL)
+    try:
+        return _reevaluator(request).restore(strategy_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="mining run not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (MiningRunStoreError, RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _reevaluator(request: Request):
+    from app.services.mining_reevaluation import PublishedStrategyReevaluator
+
+    manager = _manager(request)
+    return PublishedStrategyReevaluator(
+        _candidate_service(request),
+        lambda origin_request: _start_reevaluation_run(request, manager, origin_request),
+    )
+
+
+def _start_reevaluation_run(
+    request: Request,
+    manager: Any,
+    origin_request: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Queue the stored worker request unchanged; the worker applies its own validation."""
+    from app.services.mining_reevaluation import RerunUnavailableError
+
+    worker_request = dict(origin_request)
+    asset_type = str(worker_request.get("asset_type") or "stock")
+    try:
+        _validate_selected_strategies(
+            request.app.state.strategy_engine,
+            list(worker_request.get("strategy_ids") or []),
+            asset_type,
+        )
+    except KeyError as exc:
+        raise ValueError(f"selected strategy is not registered: {exc}") from exc
+    require_mining_availability(
+        request.app.state.repo.store.data_dir,
+        asset_type=asset_type,
+        budget_profile=str(worker_request.get("budget_profile") or "balanced"),
+        start=_optional_iso_date(worker_request.get("start")),
+        end=_optional_iso_date(worker_request.get("end")),
+    )
+    try:
+        fingerprint = build_data_fingerprint(
+            request.app.state.repo,
+            request.app.state,
+            worker_request,
+        )
+    except (ValueError, EnrichedGenerationUnavailableError) as exc:
+        raise RerunUnavailableError(f"enriched data is being updated: {exc}") from exc
+    return manager.start(worker_request, fingerprint, source="reevaluation")
+
+
 @router.get("/config")
 def get_config() -> dict[str, Any]:
     return preferences.get_mining_schedule()
@@ -415,6 +491,7 @@ def _candidate_service(request: Request):
             if monitor_engine is not None
             else None
         ),
+        monitor_rules_reloader=getattr(monitor_engine, "set_rules", None),
     )
     request.app.state.mining_candidate_service = service
     return service
@@ -687,6 +764,14 @@ def _validate_selected_strategies(
             raise ValueError(f"mining strategy is not daily-compatible: {strategy_id}")
         if asset_type not in strategy.meta.get("asset_types", ["stock"]):
             raise ValueError(f"mining strategy does not support {asset_type}: {strategy_id}")
+
+
+def _optional_iso_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 def _event_cursor(value: str | None) -> int:

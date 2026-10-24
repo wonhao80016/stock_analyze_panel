@@ -15,6 +15,7 @@ from app.services.mining_candidates import (
     _published_strategy_id,
 )
 from app.services.mining_jobs import MiningRunStore
+from app.services.mining_schedule import MINING_ALGORITHM_VERSION
 from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyEngine
 
@@ -109,7 +110,7 @@ def _create_run(
     store.register_artifact(run_id, "candidates")
     store.write_summary(run_id, {
         "data_as_of": "2026-01-09",
-        "algorithm_version": "mining-v1",
+        "algorithm_version": MINING_ALGORITHM_VERSION,
         "methodology_version": "factor_v2",
     })
     if status != "queued":

@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
+import shutil
 import threading
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +23,16 @@ import pyarrow.parquet as pq
 
 from app.backtest.candidates import CandidateStore
 from app.backtest.factor import FACTOR_COLUMNS
-from app.backtest.mining import compute_candidate_signature, evaluate_candidate_gate
+from app.backtest.mining import (
+    MAX_CANDIDATE_NAME_LENGTH,
+    MINING_DEFAULT_SLIPPAGE_BPS,
+    CandidateGateResult,
+    compute_candidate_signature,
+    evaluate_candidate_gate,
+    mining_trading_costs,
+)
 from app.services.mining_jobs import SUCCESS_RUN_STATUSES, MiningRunStore
+from app.services.mining_schedule import MINING_ALGORITHM_VERSION
 from app.strategy.ai_generator import AIStrategyGenerator
 from app.strategy.engine import StrategyEngine
 
@@ -56,6 +67,11 @@ _ARTIFACT_SCHEMA = {
     "published_strategy_id": pl.String,
 }
 _LOCK = threading.RLock()
+logger = logging.getLogger(__name__)
+
+
+class DelistingDeferredError(ValueError):
+    """The publication cannot be withdrawn safely yet and needs a manual decision."""
 
 
 class MiningCandidateService:
@@ -68,6 +84,7 @@ class MiningCandidateService:
         *,
         strategy_cache_invalidator: Callable[[Path], None] | None = None,
         monitor_state_invalidator: Callable[[], None] | None = None,
+        monitor_rules_reloader: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
         self.data_dir = Path(data_dir).resolve()
         self.run_store = run_store
@@ -79,6 +96,7 @@ class MiningCandidateService:
             strategy_cache_invalidator = clear_cache
         self._strategy_cache_invalidator = strategy_cache_invalidator
         self._monitor_state_invalidator = monitor_state_invalidator
+        self._monitor_rules_reloader = monitor_rules_reloader
 
     def promote(self, run_id: str, signature: str) -> dict[str, Any]:
         with _LOCK:
@@ -114,14 +132,12 @@ class MiningCandidateService:
             manifest, summary, path, frame, row, definition = self._load_candidate(
                 run_id, signature
             )
-            gate = evaluate_candidate_gate(
-                confidence=row.get("confidence"),
-                valid_folds=row.get("valid_folds"),
-                positive_fold_ratio=row.get("oos_positive_fold_ratio"),
-                sharpe=row.get("oos_sharpe"),
-                max_drawdown=row.get("oos_max_drawdown"),
-                n_trades=row.get("oos_n_trades"),
-            )
+            if summary["algorithm_version"] != MINING_ALGORITHM_VERSION:
+                raise ValueError(
+                    f"candidate was mined by algorithm {summary['algorithm_version']}; "
+                    f"rerun mining with {MINING_ALGORITHM_VERSION} before publishing"
+                )
+            gate = candidate_gate(row)
             if not gate.qualified:
                 raise ValueError(
                     "candidate does not meet the promotion gate: "
@@ -186,6 +202,201 @@ class MiningCandidateService:
                     published_id,
                 )
             return {"ok": True, "strategy_id": published_id}
+
+    def read_candidate_rows(self, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Return every row of a run's registered, schema-checked candidates artifact."""
+        path = self._registered_candidates_path(manifest)
+        return self._read_artifact(path).to_dicts()
+
+    def delist_publication(
+        self,
+        run_id: str,
+        signature: str,
+        *,
+        reasons: Sequence[str],
+        rerun_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Withdraw one publication without deleting any file; None means it is not published.
+
+        The candidates artifact is copied and a mined strategy source is moved into a new
+        quarantine directory before the publication backlink is cleared.
+        """
+        with _LOCK:
+            manifest = self.run_store.get(run_id)
+            if manifest is None:
+                raise KeyError(run_id)
+            path = self._registered_candidates_path(manifest)
+            frame = self._read_artifact(path)
+            matches = frame.filter(pl.col("signature") == signature)
+            if matches.height != 1:
+                raise ValueError("mining candidate backlink target is no longer unique")
+            row = matches.row(0, named=True)
+            strategy_id = _optional_string(row.get("published_strategy_id"))
+            if strategy_id is None:
+                return None
+            source_path = None
+            if row.get("kind") == "factor_combination":
+                source_path = self._custom_strategy_path(
+                    self._validate_published_id(strategy_id)
+                )
+                if source_path.is_symlink():
+                    raise ValueError("published strategy source must not be a symlink")
+                dependents = self.strategy_engine.find_dependents(strategy_id)
+                if dependents:
+                    raise DelistingDeferredError(
+                        f"composite strategies {sorted(dependents)} still reference "
+                        f"{strategy_id}; remove those references before delisting"
+                    )
+            quarantine = self._new_quarantine_dir(strategy_id)
+            shutil.copy2(path, quarantine / "candidates.parquet")
+            moved = None
+            if source_path is not None and source_path.is_file():
+                moved = quarantine / source_path.name
+                os.replace(source_path, moved)
+            monitoring = (
+                self._disable_strategy_monitoring(strategy_id)
+                if source_path is not None
+                else {
+                    "removed_from_monitor_ids": False,
+                    "disabled_monitor_rules": [],
+                    "cleanup_warnings": [],
+                }
+            )
+            record = {
+                "strategy_id": strategy_id,
+                "origin_run_id": run_id,
+                "candidate_signature": signature,
+                "candidate_kind": row.get("kind"),
+                "reasons": list(reasons),
+                "rerun_id": rerun_id,
+                "algorithm_version": MINING_ALGORITHM_VERSION,
+                "delisted_at": datetime.now(UTC).isoformat(),
+                "quarantine": quarantine.relative_to(self.data_dir).as_posix(),
+                "original_source": (
+                    source_path.relative_to(self.data_dir).as_posix() if moved else None
+                ),
+                "moved_source": moved.name if moved else None,
+                **monitoring,
+            }
+            (quarantine / "delisting.json").write_text(
+                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self._write_backlink(path, frame, signature, "published_strategy_id", None)
+            logger.warning(
+                "Delisted mined strategy %s from run %s (%s); files kept in %s",
+                strategy_id,
+                run_id,
+                "; ".join(reasons),
+                record["quarantine"],
+            )
+            if moved is not None:
+                self._refresh_strategy_runtime(strategy_id)
+            return record
+
+    def restore_publication(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Undo one delisting: move its source back and re-link only its own candidate row.
+
+        Monitoring disabled by the delisting stays disabled; the owner re-enables it explicitly.
+        """
+        with _LOCK:
+            strategy_id = str(record["strategy_id"])
+            run_id = str(record["origin_run_id"])
+            signature = str(record["candidate_signature"])
+            quarantine = (self.data_dir / str(record["quarantine"])).resolve()
+            root = (self.data_dir / "research" / "mining" / "reevaluation" / "delisted").resolve()
+            if not quarantine.is_relative_to(root) or not quarantine.is_dir():
+                raise ValueError("delisting quarantine directory is unavailable")
+            manifest = self.run_store.get(run_id)
+            if manifest is None:
+                raise KeyError(run_id)
+            path = self._registered_candidates_path(manifest)
+            frame = self._read_artifact(path)
+            matches = frame.filter(pl.col("signature") == signature)
+            if matches.height != 1:
+                raise ValueError("mining candidate backlink target is no longer unique")
+            if _optional_string(matches.row(0, named=True).get("published_strategy_id")):
+                raise ValueError(f"candidate of {strategy_id} is already published")
+            target = None
+            moved_source = record.get("moved_source")
+            if moved_source:
+                source = quarantine / str(moved_source)
+                target = self._custom_strategy_path(self._validate_published_id(strategy_id))
+                if source.parent != quarantine or not source.is_file():
+                    raise ValueError("quarantined strategy source is missing")
+                if target.exists() or target.is_symlink():
+                    raise ValueError(f"strategy source already exists: {target.name}")
+                os.replace(source, target)
+            self._write_backlink(path, frame, signature, "published_strategy_id", strategy_id)
+            restored = {**record, "restored_at": datetime.now(UTC).isoformat()}
+            (quarantine / "restored.json").write_text(
+                json.dumps(restored, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            logger.warning("Restored delisted mined strategy %s from %s", strategy_id, quarantine)
+            if target is not None:
+                self._refresh_strategy_runtime(strategy_id)
+            return restored
+
+    def _disable_strategy_monitoring(self, strategy_id: str) -> dict[str, Any]:
+        """Best-effort monitor cleanup matching strategy deletion; failures are recorded."""
+        from app.services import preferences
+        from app.strategy import monitor_rules
+
+        warnings: list[str] = []
+        removed = False
+        disabled: list[str] = []
+        try:
+            monitored = preferences.get_strategy_monitor_ids()
+            if strategy_id in monitored:
+                preferences.set_realtime_monitor_config({
+                    "strategy_monitor_ids": [sid for sid in monitored if sid != strategy_id],
+                })
+                removed = True
+        except Exception as exc:
+            warnings.append(f"monitor preference cleanup failed: {exc}")
+        try:
+            for rule in monitor_rules.load_all(self.data_dir):
+                if (
+                    rule.get("type") == "strategy"
+                    and rule.get("strategy_id") == strategy_id
+                    and rule.get("enabled", True)
+                ):
+                    monitor_rules.save_one(self.data_dir, {**rule, "enabled": False})
+                    disabled.append(str(rule["id"]))
+            if disabled and self._monitor_rules_reloader is not None:
+                self._monitor_rules_reloader(monitor_rules.load_all(self.data_dir))
+        except Exception as exc:
+            warnings.append(f"monitor rule cleanup failed: {exc}")
+        for warning in warnings:
+            logger.warning("delist strategy %s: %s", strategy_id, warning)
+        return {
+            "removed_from_monitor_ids": removed,
+            "disabled_monitor_rules": disabled,
+            "cleanup_warnings": warnings,
+        }
+
+    def _new_quarantine_dir(self, strategy_id: str) -> Path:
+        root = (self.data_dir / "research" / "mining" / "reevaluation" / "delisted").resolve()
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        quarantine = (root / strategy_id / f"{stamp}-{uuid.uuid4().hex[:8]}").resolve()
+        if not quarantine.is_relative_to(self.data_dir) or quarantine.parent.parent != root:
+            raise ValueError("delisting quarantine path escapes data_dir")
+        quarantine.mkdir(parents=True)
+        return quarantine
+
+    def _refresh_strategy_runtime(self, strategy_id: str) -> None:
+        # The source is already quarantined, so a refresh failure must not undo the delisting.
+        try:
+            self.strategy_engine.reload()
+            self._strategy_cache_invalidator(self.data_dir)
+            if self._monitor_state_invalidator is not None:
+                self._monitor_state_invalidator()
+        except Exception:
+            logger.exception(
+                "Strategy runtime refresh failed after delisting %s; restart the backend",
+                strategy_id,
+            )
 
     def _load_candidate(
         self,
@@ -310,7 +521,7 @@ class MiningCandidateService:
         if (
             not isinstance(row.get("name"), str)
             or not row["name"]
-            or len(row["name"]) > 80
+            or len(row["name"]) > MAX_CANDIDATE_NAME_LENGTH
             or row.get("regime_state") != "overall"
         ):
             raise ValueError("mining candidate row metadata is invalid")
@@ -424,16 +635,15 @@ class MiningCandidateService:
             "matching": "open_t+1",
             "entry_fill": "open_t+1",
             "exit_fill": "open_t+1",
-            "commission_pct": request.get("commission_pct", 0.0002),
-            # Mining simulates without a commission floor; replays must not pick up the API default.
-            "minimum_commission": 0.0,
-            "stamp_tax_pct": request.get("stamp_tax_pct", 0.0005),
-            "slippage_bps": request.get("slippage_bps", 5.0),
+            **mining_trading_costs(
+                request.get("commission_pct"),
+                request.get("slippage_bps", MINING_DEFAULT_SLIPPAGE_BPS),
+            ),
             "mode": "position",
             "minute_fill": False,
             **provenance,
         }
-        name = str(row.get("name") or signature)[:80]
+        name = str(row.get("name") or signature)[:MAX_CANDIDATE_NAME_LENGTH]
         if definition["kind"] == "existing_strategy":
             strategy_id = str(definition["strategy_id"])
             return "strategy", name, strategy_id, {
@@ -766,7 +976,7 @@ class MiningCandidateService:
         frame: pl.DataFrame,
         signature: str,
         field: str,
-        value: str,
+        value: str | None,
     ) -> None:
         if field not in _BACKLINK_FIELDS:
             raise ValueError("unsupported mining candidate backlink")
@@ -775,7 +985,7 @@ class MiningCandidateService:
             raise ValueError("mining candidate backlink target is no longer unique")
         updated = frame.with_columns(
             pl.when(pl.col("signature") == signature)
-            .then(pl.lit(value))
+            .then(pl.lit(value, dtype=pl.String))
             .otherwise(pl.col(field))
             .alias(field)
         )
@@ -789,6 +999,18 @@ class MiningCandidateService:
         except Exception as exc:
             temporary.unlink(missing_ok=True)
             raise RuntimeError("failed to update mining candidate artifact") from exc
+
+
+def candidate_gate(row: Mapping[str, Any]) -> CandidateGateResult:
+    """Apply the publication gate to one candidates-artifact row."""
+    return evaluate_candidate_gate(
+        confidence=row.get("confidence"),
+        valid_folds=row.get("valid_folds"),
+        positive_fold_ratio=row.get("oos_positive_fold_ratio"),
+        sharpe=row.get("oos_sharpe"),
+        max_drawdown=row.get("oos_max_drawdown"),
+        n_trades=row.get("oos_n_trades"),
+    )
 
 
 def _published_strategy_id(run_id: str, signature: str) -> str:
