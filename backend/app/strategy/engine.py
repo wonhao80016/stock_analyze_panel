@@ -1344,6 +1344,8 @@ class StrategyEngine:
         basic_filter = dict(strategy.basic_filter or {})
         if (overrides or {}).get("basic_filter"):
             basic_filter.update(overrides["basic_filter"])
+        if not basic_filter.get("enabled", True):
+            basic_filter = {}
         for prefix, field_name in (
             ("market_cap", "total_shares"),
             ("float_cap", "float_shares"),
