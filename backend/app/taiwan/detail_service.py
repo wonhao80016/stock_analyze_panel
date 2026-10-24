@@ -15,11 +15,15 @@ Orchestrates:
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 import logging
 import math
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Any, Optional
+import urllib.error
 
 import polars as pl
 
@@ -44,8 +48,9 @@ from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.index_daily import get_index_daily_service
 from app.taiwan.enrichment.factors import short_margin_ratio
 from app.taiwan.enrichment.index import TaiwanIndexProvider
-from app.taiwan.enrichment.institutional import TaiwanInstitutionalProvider
+from app.taiwan.enrichment.institutional import TaiwanInstitutionalProvider, flow_of
 from app.taiwan.enrichment.margin import TaiwanMarginProvider
+from app.taiwan.enrichment.models import DatasetType, StalePolicy
 from app.taiwan.universe.models import TDR_SECURITY_CLASS, MarketProfileBridge
 from app.taiwan.providers.hybrid_provider import TaiwanHybridProvider
 from app.taiwan.realtime.calendar import TAIPEI_TZ, taipei_now
@@ -62,6 +67,11 @@ _STORE_LOOKBACK_DAYS = 20
 _INDEX_LOOKBACK_DAYS = 20
 _FLOW_FIELDS = ("foreign_net", "investment_trust_net", "dealer_net")
 _NOT_IN_MARGIN_TABLE = "symbol_not_in_margin_table"
+_EXCHANGES = ("TWSE", "TPEX")
+_UNPUBLISHED_TTL = timedelta(minutes=5)
+_BACKOFF_FIRST = timedelta(seconds=30)
+_BACKOFF_MAX = timedelta(minutes=5)
+_LIVE_TABLE_LIMIT = 32
 
 
 def _configured_data_dir():
@@ -74,7 +84,7 @@ def _configured_data_dir():
 
 
 def _has_exchange(store: Any, day: date, canonical: str) -> bool:
-    """Whether the stored *day* holds a row of *canonical*'s exchange.
+    """Whether the stored *day* holds a row of *canonical*'s exchange; a bare exchange code also works.
 
     A date partition holds both exchanges, and the refresh can store one of them alone.
     Only the symbol column is read, since the detail page polls this path.
@@ -94,6 +104,130 @@ def _has_exchange(store: Any, day: date, canonical: str) -> bool:
 
 def _latest_with_exchange(store: Any, dates: list[date], canonical: str) -> date | None:
     return next((d for d in reversed(dates) if _has_exchange(store, d, canonical)), None)
+
+
+def _recent_weekdays(today: date) -> list[date]:
+    """The weekdays among the five calendar days ending at *today*, newest first."""
+    return [d for d in (today - timedelta(days=offset) for offset in range(5)) if d.weekday() < 5]
+
+
+def _stored_session_check(store_cls: Callable[[], Any]) -> Callable[[date], bool]:
+    """Whether the store holds a day for both exchanges, so a live fetch of it would only repeat the store."""
+    try:
+        store = store_cls()
+        stored = set(store.available_dates())
+    except Exception as e:
+        logger.debug("Chip store check failed: %s", e)
+        return lambda day: False
+
+    def complete(day: date) -> bool:
+        try:
+            return day in stored and all(_has_exchange(store, day, ex) for ex in _EXCHANGES)
+        except Exception as e:
+            logger.debug("Chip store check failed for %s: %s", day, e)
+            return False
+
+    return complete
+
+
+class _TableBackoffError(RuntimeError):
+    """The official table of one day failed recently and is not asked again until its backoff ends."""
+
+
+class _SourceBackoffError(RuntimeError):
+    """The exchange was unreachable recently and none of its tables is asked until its backoff ends."""
+
+
+def _unreachable(exc: BaseException) -> bool:
+    """Whether *exc* says the exchange cannot be reached (timeout, connection, 5xx) rather than a bad table."""
+    if isinstance(exc, _SourceBackoffError):
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500
+    return isinstance(exc, (TimeoutError, ConnectionError, urllib.error.URLError))
+
+
+def _backoff_until(now: datetime, failures: int) -> datetime:
+    return now + min(_BACKOFF_FIRST * 2 ** (failures - 1), _BACKOFF_MAX)
+
+
+class _LiveTableCache:
+    """Official day tables keyed by (dataset, exchange, trade_date), shared by all detail requests.
+
+    A published table is kept until the Taipei day ends and an unpublished (empty) one for a few
+    minutes. A failure is not cached: a bad table backs off its own key exponentially, and an
+    unreachable exchange backs off every table of its (dataset, exchange) source.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._tables: OrderedDict[tuple[str, str, date], tuple[datetime, list]] = OrderedDict()
+        self._failures: OrderedDict[tuple[str, str, date], tuple[datetime, int]] = OrderedDict()
+        self._outages: dict[tuple[str, str], tuple[datetime, int]] = {}
+        self._inflight: dict[tuple[str, str, date], threading.Event] = {}
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._tables)
+
+    def get(self, key: tuple[str, str, date], fetch: Callable[[], list]) -> list:
+        """The cached table of *key*, or *fetch*'s; concurrent misses of one key share a single fetch."""
+        while True:
+            with self._lock:
+                now = taipei_now()
+                cached = self._tables.get(key)
+                if cached is not None and now < cached[0]:
+                    self._tables.move_to_end(key)
+                    return cached[1]
+                outage = self._outages.get(key[:2])
+                if outage is not None and now < outage[0]:
+                    raise _SourceBackoffError(f"{key[:2]} is backing off until {outage[0]}")
+                failure = self._failures.get(key)
+                if failure is not None and now < failure[0]:
+                    raise _TableBackoffError(f"{key} is backing off until {failure[0]}")
+                pending = self._inflight.get(key)
+                if pending is None:
+                    done = self._inflight[key] = threading.Event()
+                    break
+            pending.wait()
+
+        table: list = []
+        fetched = False
+        error: BaseException | None = None
+        try:
+            table = fetch()
+            fetched = True
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            with self._lock:
+                now = taipei_now()
+                if fetched:
+                    self._failures.pop(key, None)
+                    self._outages.pop(key[:2], None)
+                    day_end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    self._tables[key] = (day_end if table else now + _UNPUBLISHED_TTL, table)
+                    self._tables.move_to_end(key)
+                    while len(self._tables) > _LIVE_TABLE_LIMIT:
+                        self._tables.popitem(last=False)
+                elif error is not None and _unreachable(error):
+                    count = min(self._outages.get(key[:2], (now, 0))[1] + 1, 5)
+                    self._outages[key[:2]] = (_backoff_until(now, count), count)
+                else:
+                    count = min(self._failures.pop(key, (now, 0))[1] + 1, 5)
+                    self._failures[key] = (_backoff_until(now, count), count)
+                    while len(self._failures) > _LIVE_TABLE_LIMIT:
+                        self._failures.popitem(last=False)
+                del self._inflight[key]
+                done.set()
+        return table
+
+
+def _published_stale(dataset: DatasetType, trade_date: date) -> bool:
+    """StalePolicy for a stored session, judged on the Taipei clock it compares naive trade dates with."""
+    now = taipei_now().replace(tzinfo=None)
+    return StalePolicy.is_stale(dataset, trade_date, now, now=now)
 
 
 class TaiwanStockDetailService:
@@ -118,6 +252,7 @@ class TaiwanStockDetailService:
         self.index_provider = index_provider or TaiwanIndexProvider()
         self.security_master = get_security_master()
         self.realtime_service = get_realtime_service()
+        self._live_tables = _LiveTableCache()
 
     def get_stock_detail(
         self,
@@ -439,40 +574,47 @@ class TaiwanStockDetailService:
         }
 
     def _aggregate_institutional(self, sym: TaiwanSymbol) -> TaiwanInstitutionalData:
-        """Fetch institutional data for latest trading day, with safe timeout."""
+        """Flows of the latest session: from the store when it holds the day, else fetched with a short timeout."""
         try:
-            # Look up recent days
-            t_now = taipei_now()
-            today = t_now.date()
-            flows = []
-            trade_dt = today
-            # Scan back up to 5 days for latest trading day
-            for offset in range(5):
-                check_d = today - timedelta(days=offset)
-                if check_d.weekday() >= 5:  # Saturday/Sunday
-                    continue
-                try:
-                    flows = self.institutional_provider.fetch_live_day(
-                        exchange=sym.exchange.value.upper(),
-                        trade_date=check_d,
-                        target_code=sym.code,
-                        timeout=3.0,
-                    )
-                    if flows:
-                        trade_dt = check_d
-                        break
-                except Exception:
-                    continue
+            from app.taiwan.institutional_store import TaiwanInstitutionalStore
 
-            if flows:
-                f = flows[0]
+            exchange = sym.exchange.value.upper()
+            days = _recent_weekdays(taipei_now().date())
+            stored = _stored_session_check(TaiwanInstitutionalStore)
+            f = None
+            newer_failed = False
+            for check_d in days:
+                if stored(check_d) and (
+                    published := self._institutional_from_store(sym, check_d, superseded=newer_failed)
+                ) is not None:
+                    return published
+                try:
+                    # The whole table is cached, so every symbol of the exchange shares one download.
+                    table = self._live_tables.get(
+                        ("institutional", exchange, check_d),
+                        lambda d=check_d: self.institutional_provider.fetch_live_day(
+                            exchange=exchange, trade_date=d, target_code=None, timeout=3.0,
+                        ),
+                    )
+                except Exception as e:
+                    newer_failed = True
+                    # An unreachable exchange would only time out again on the earlier sessions.
+                    if _unreachable(e):
+                        break
+                    continue
+                f = flow_of(table, sym.code)
+                if f is not None:
+                    trade_dt = check_d
+                    break
+
+            if f is not None:
                 total = f.computed_net if f.computed_net is not None else f.official_net
                 meta = SectionMeta(
                     source=f.meta.source if f.meta else "twse:t86",
                     trade_date=trade_dt.isoformat(),
                     fetched_at=f.meta.fetched_at.isoformat() if f.meta and f.meta.fetched_at else None,
-                    status="available" if not f.meta.is_stale else "stale",
-                    is_stale=f.meta.is_stale if f.meta else False,
+                    status="stale" if newer_failed or f.meta.is_stale else "available",
+                    is_stale=newer_failed or (f.meta.is_stale if f.meta else False),
                 )
                 flows_5d = self._institutional_5d(sym.canonical, trade_dt)
                 return TaiwanInstitutionalData(
@@ -498,8 +640,12 @@ class TaiwanStockDetailService:
             meta=SectionMeta(source="twse:t86", status="unavailable", is_stale=False),
         )
 
-    def _institutional_from_store(self, sym: TaiwanSymbol) -> TaiwanInstitutionalData | None:
-        """Backfilled rows already on disk, used when the live fetch comes back empty.
+    def _institutional_from_store(
+        self, sym: TaiwanSymbol, day: date | None = None, superseded: bool = False,
+    ) -> TaiwanInstitutionalData | None:
+        """Stored flows of the published session *day*; without it, the latest stored session as a stale fallback.
+
+        *superseded* marks *day* stale because a newer session failed to fetch rather than being unpublished.
 
         The exchange throttles bursts of requests, and a blocked live call must not
         make a card that has local history render as "no data".
@@ -508,12 +654,14 @@ class TaiwanStockDetailService:
             from app.taiwan.institutional_store import TaiwanInstitutionalStore
 
             store = TaiwanInstitutionalStore()
-            lookback = sorted(store.available_dates())[-_STORE_LOOKBACK_DAYS:]
-            if not lookback:
-                return None
-            latest = _latest_with_exchange(store, lookback, sym.canonical)
+            latest = day
             if latest is None:
-                return None
+                lookback = sorted(store.available_dates())[-_STORE_LOOKBACK_DAYS:]
+                if not lookback:
+                    return None
+                latest = _latest_with_exchange(store, lookback, sym.canonical)
+                if latest is None:
+                    return None
             df = store.read_range([sym.canonical], latest, latest)
             if df.is_empty():
                 r: dict[str, Any] = {"date": latest, **dict.fromkeys(_FLOW_FIELDS, 0), "computed_net": 0}
@@ -527,6 +675,7 @@ class TaiwanStockDetailService:
         total = r.get("computed_net")
         if total is None:
             total = r.get("official_net")
+        is_stale = day is None or superseded or _published_stale(DatasetType.INSTITUTIONAL, latest)
         return TaiwanInstitutionalData(
             status="available",
             foreign_net=r.get("foreign_net"),
@@ -539,8 +688,8 @@ class TaiwanStockDetailService:
             meta=SectionMeta(
                 source="taiwan_institutional_store",
                 trade_date=str(r.get("date")),
-                status="stale",
-                is_stale=True,
+                status="stale" if is_stale else "available",
+                is_stale=is_stale,
             ),
         )
 
@@ -590,29 +739,37 @@ class TaiwanStockDetailService:
         )
 
     def _aggregate_margin(self, sym: TaiwanSymbol) -> TaiwanMarginData:
-        """Fetch margin data for latest trading day, with safe timeout."""
+        """Margin of the latest session: from the store when it holds the day, else fetched with a short timeout."""
         try:
-            t_now = taipei_now()
-            today = t_now.date()
+            from app.taiwan.margin_store import TaiwanMarginStore
+
+            exchange = sym.exchange.value.upper()
+            days = _recent_weekdays(taipei_now().date())
+            stored = _stored_session_check(TaiwanMarginStore)
             table = []
-            trade_dt = today
-            for offset in range(5):
-                check_d = today - timedelta(days=offset)
-                if check_d.weekday() >= 5:
-                    continue
+            newer_failed = False
+            for check_d in days:
+                if stored(check_d) and (
+                    published := self._margin_from_store(sym, check_d, superseded=newer_failed)
+                ) is not None:
+                    return published
                 try:
                     # The whole table tells "not listed today" apart from "no table today".
-                    table = self.margin_provider.fetch_live_day(
-                        exchange=sym.exchange.value.upper(),
-                        trade_date=check_d,
-                        target_code=None,
-                        timeout=3.0,
+                    table = self._live_tables.get(
+                        ("margin", exchange, check_d),
+                        lambda d=check_d: self.margin_provider.fetch_live_day(
+                            exchange=exchange, trade_date=d, target_code=None, timeout=3.0,
+                        ),
                     )
-                    if table:
-                        trade_dt = check_d
+                except Exception as e:
+                    newer_failed = True
+                    # An unreachable exchange would only time out again on the earlier sessions.
+                    if _unreachable(e):
                         break
-                except Exception:
                     continue
+                if table:
+                    trade_dt = check_d
+                    break
 
             margins = [m for m in table if m.symbol.split(".")[0] == sym.code]
             if table and not margins:
@@ -624,8 +781,8 @@ class TaiwanStockDetailService:
                     source=m.meta.source if m.meta else "twse:mi_margn",
                     trade_date=trade_dt.isoformat(),
                     fetched_at=m.meta.fetched_at.isoformat() if m.meta and m.meta.fetched_at else None,
-                    status="available" if not m.meta.is_stale else "stale",
-                    is_stale=m.meta.is_stale if m.meta else False,
+                    status="stale" if newer_failed or m.meta.is_stale else "available",
+                    is_stale=newer_failed or (m.meta.is_stale if m.meta else False),
                 )
                 return TaiwanMarginData(
                     status="available",
@@ -648,18 +805,25 @@ class TaiwanStockDetailService:
             meta=SectionMeta(source="twse:mi_margn", status="unavailable", is_stale=False),
         )
 
-    def _margin_from_store(self, sym: TaiwanSymbol) -> TaiwanMarginData | None:
-        """Backfilled rows already on disk, used when the live fetch comes back empty."""
+    def _margin_from_store(
+        self, sym: TaiwanSymbol, day: date | None = None, superseded: bool = False,
+    ) -> TaiwanMarginData | None:
+        """Stored margin of the published session *day*; without it, the latest stored session as a stale fallback.
+
+        *superseded* marks *day* stale because a newer session failed to fetch rather than being unpublished.
+        """
         try:
             from app.taiwan.margin_store import TaiwanMarginStore
 
             store = TaiwanMarginStore()
-            lookback = sorted(store.available_dates())[-_STORE_LOOKBACK_DAYS:]
-            if not lookback:
-                return None
-            latest = _latest_with_exchange(store, lookback, sym.canonical)
+            latest = day
             if latest is None:
-                return None
+                lookback = sorted(store.available_dates())[-_STORE_LOOKBACK_DAYS:]
+                if not lookback:
+                    return None
+                latest = _latest_with_exchange(store, lookback, sym.canonical)
+                if latest is None:
+                    return None
             df = store.read_range([sym.canonical], latest, latest)
             if df.is_empty():
                 return self._margin_not_listed("taiwan_margin_store", latest)
@@ -668,6 +832,7 @@ class TaiwanStockDetailService:
             logger.debug("Margin store fallback failed for %s: %s", sym.canonical, e)
             return None
 
+        is_stale = day is None or superseded or _published_stale(DatasetType.MARGIN, latest)
         return TaiwanMarginData(
             status="available",
             margin_balance=r.get("margin_balance"),
@@ -678,8 +843,8 @@ class TaiwanStockDetailService:
             meta=SectionMeta(
                 source="taiwan_margin_store",
                 trade_date=str(r.get("date")),
-                status="stale",
-                is_stale=True,
+                status="stale" if is_stale else "available",
+                is_stale=is_stale,
             ),
         )
 

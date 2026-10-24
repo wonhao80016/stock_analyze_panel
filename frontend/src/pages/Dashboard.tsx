@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -6,13 +6,17 @@ import { Activity, ArrowUpRight, BellRing, Database, Eye, HelpCircle, Layers, Lo
 import { api, industryLabel, type AlertEvent, type IndustryMetrics, type StrategyDetail } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtBigNum, fmtPct } from '@/lib/format'
-import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { cn } from '@/lib/cn'
 import { StrategyRule } from '@/components/StrategyRule'
 import { MarketFilterNote, PickGradeBadge } from '@/components/PickGrade'
 import { cnSignal } from '@/lib/signals'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
+
+// The dialog pulls in the stock detail page and ECharts, so it stays out of the first-screen bundle.
+const StockPreviewDialog = lazy(() =>
+  import('@/components/StockPreviewDialog').then(m => ({ default: m.StockPreviewDialog })),
+)
 
 function n(v: number | null | undefined) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -692,6 +696,12 @@ function usePublicationRefresh() {
 
 export function Dashboard() {
   const [previewStock, setPreviewStock] = useState<{symbol: string; name?: string; alert?: AlertEvent} | null>(null)
+  // Stays mounted after the first open so the close animation still plays.
+  const [previewRequested, setPreviewRequested] = useState(false)
+  const openPreview = (stock: {symbol: string; name?: string; alert?: AlertEvent}) => {
+    setPreviewRequested(true)
+    setPreviewStock(stock)
+  }
   usePublicationRefresh()
 
   return (
@@ -704,10 +714,10 @@ export function Dashboard() {
 
       <div className="mb-1.5 grid grid-cols-1 gap-1.5 lg:grid-cols-2">
         <IndustryStrengthCard />
-        <WatchlistQuickGlance onStockClick={(symbol, name) => setPreviewStock({ symbol, name })} />
+        <WatchlistQuickGlance onStockClick={(symbol, name) => openPreview({ symbol, name })} />
       </div>
 
-      <StrategyPicksCard onStockClick={(symbol, name) => setPreviewStock({ symbol, name })} />
+      <StrategyPicksCard onStockClick={(symbol, name) => openPreview({ symbol, name })} />
 
       <section className="mb-1.5 rounded-card border border-border bg-surface/80 p-1.5 shadow-[0_1px_2px_hsl(var(--border)/0.4)] backdrop-blur-sm transition-shadow hover:shadow-[0_2px_8px_hsl(var(--border)/0.5)]">
         <div className="mb-2 flex items-center justify-between gap-2">
@@ -721,25 +731,29 @@ export function Dashboard() {
           </Link>
         </div>
         <MonitorWidget onStockClick={(event) => {
-          if (event.symbol) setPreviewStock({ symbol: event.symbol, name: event.name ?? undefined, alert: event })
+          if (event.symbol) openPreview({ symbol: event.symbol, name: event.name ?? undefined, alert: event })
         }} />
       </section>
 
       {/* 台股資料狀態(資料新鮮度) — 最下層, 不再是首頁第一眼內容。 */}
       <TaiwanOverviewCard />
 
-      <StockPreviewDialog
-        symbol={previewStock?.symbol ?? null}
-        name={previewStock?.name}
-        triggerInfo={previewStock?.alert ? {
-          price: previewStock.alert.price ?? null,
-          changePct: previewStock.alert.change_pct ?? null,
-          ts: previewStock.alert.ts,
-          signals: previewStock.alert.signals,
-          message: previewStock.alert.message,
-        } : null}
-        onClose={() => setPreviewStock(null)}
-      />
+      {previewRequested && (
+        <Suspense fallback={null}>
+          <StockPreviewDialog
+            symbol={previewStock?.symbol ?? null}
+            name={previewStock?.name}
+            triggerInfo={previewStock?.alert ? {
+              price: previewStock.alert.price ?? null,
+              changePct: previewStock.alert.change_pct ?? null,
+              ts: previewStock.alert.ts,
+              signals: previewStock.alert.signals,
+              message: previewStock.alert.message,
+            } : null}
+            onClose={() => setPreviewStock(null)}
+          />
+        </Suspense>
+      )}
     </div>
   )
 }

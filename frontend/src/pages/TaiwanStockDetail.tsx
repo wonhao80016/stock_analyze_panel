@@ -42,6 +42,7 @@ import { TaiwanReferenceData } from '@/components/taiwan/TaiwanReferenceData'
 import { DataQualityBadge, formatQuoteSource } from '@/components/taiwan/TaiwanDataQuality'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useSafeBack } from '@/lib/useSafeBack'
+import { taipeiSessionOpen, useMinuteClock } from '@/lib/taipeiSession'
 
 const DAILY_CHART_HEIGHT = 520
 const INDEX_CHART_HEIGHT = 400
@@ -57,6 +58,29 @@ const RANGE_OPTIONS = [
   { label: '1 年', days: 245 },
 ]
 const DEFAULT_RANGE_DAYS = 126
+const DETAIL_REFRESH_MS = 10_000
+const PUBLICATION_POLL_MS = 60_000
+
+/** Reloads the detail when a post-close run publishes bars or chip data, since polling stops after the close. */
+function useDetailPublicationRefresh(symbol: string) {
+  const qc = useQueryClient()
+  const status = useQuery({
+    queryKey: QK.taiwanDataStatus,
+    queryFn: api.taiwanDataStatus,
+    staleTime: PUBLICATION_POLL_MS,
+    refetchInterval: PUBLICATION_POLL_MS,
+  })
+  const datasetDates = status.data
+    ? [status.data.daily_as_of, status.data.institutional_as_of, status.data.margin_as_of].join('|')
+    : null
+  const seen = useRef<string | null>(null)
+  useEffect(() => {
+    if (datasetDates == null) return
+    const moved = seen.current != null && seen.current !== datasetDates
+    seen.current = datasetDates
+    if (moved) void qc.invalidateQueries({ queryKey: QK.taiwanStockDetail(symbol).slice(0, 2) })
+  }, [qc, symbol, datasetDates])
+}
 
 const ALERT_TIME_PARTS = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Taipei',
@@ -174,12 +198,19 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
     },
   })
 
+  const sessionClock = useMinuteClock()
+  useDetailPublicationRefresh(symbol)
+
   // Query unified stock detail
   const detailQuery = useQuery({
     queryKey: QK.taiwanStockDetail(symbol, selectedRange),
     // Only a refresh over data already shown stays quiet; the page shows that failure itself.
     queryFn: ({ queryKey }) => api.taiwanStockDetail(symbol, selectedRange, qc.getQueryData(queryKey) != null),
-    refetchInterval: 10_000,
+    // Only the quote moves intraday; the chip and daily sections change once per day.
+    refetchInterval: query =>
+      taipeiSessionOpen(sessionClock, query.state.data?.realtime?.market_status, query.state.dataUpdatedAt)
+        ? DETAIL_REFRESH_MS
+        : false,
   })
 
   const currentDataQuery = useQuery({

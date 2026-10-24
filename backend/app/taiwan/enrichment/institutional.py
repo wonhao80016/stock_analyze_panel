@@ -116,6 +116,17 @@ def _zero_flow(symbol: str, trade_date: date, meta: SourceMeta) -> Institutional
     )
 
 
+def flow_of(table: list[InstitutionalFlow], code: str) -> InstitutionalFlow | None:
+    """*code*'s flow in one exchange's full day table: zero flows when the table lacks it, None without a table."""
+    if not table:
+        return None
+    match = next((flow for flow in table if flow.symbol.split(".")[0] == code), None)
+    if match is not None:
+        return match
+    first = table[0]
+    return _zero_flow(f"{code}.{first.symbol.rsplit('.', 1)[-1]}", first.trade_date, first.meta)
+
+
 class TwseInstitutionalAdapter:
     """Parses TWSE T86 official institutional trading table."""
 
