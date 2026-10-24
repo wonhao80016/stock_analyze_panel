@@ -155,15 +155,15 @@ def _persist_last_fetch(fetched_at_ms: float) -> None:
     """把"最后获取"时间戳持久化到 preferences, 使进程重启后仍可显示。
 
     放在锁外调用 (IO); 失败不影响主流程 (内存值已更新, 下次 fetch 再写)。
-    距上次成功落盘不足 30s 时跳过 (节流只影响落盘频率, 内存值不受影响)。
+    距上次落盘尝试不足 30s 时跳过 (失败也计入, 避免每轮重试; 节流只影响落盘频率, 内存值不受影响)。
     """
     global _last_fetch_written_at_ms
     if (fetched_at_ms - _last_fetch_written_at_ms) < _LAST_FETCH_WRITE_INTERVAL_MS:
         return
+    _last_fetch_written_at_ms = fetched_at_ms
     try:
         from app.services import preferences
         preferences.save({"last_fetch_ms": round(fetched_at_ms, 0)})
-        _last_fetch_written_at_ms = fetched_at_ms
     except Exception as e:  # noqa: BLE001
         logger.debug("last_fetch_ms 持久化失败 (不影响行情): %s", e)
 
@@ -1426,7 +1426,10 @@ class QuoteService:
     @staticmethod
     def _save_enabled(enabled: bool) -> None:
         from app.services import preferences
-        preferences.save({"realtime_quotes_enabled": enabled})
+        try:
+            preferences.save({"realtime_quotes_enabled": enabled})
+        except preferences.PreferencesStoreError:
+            logger.error("实时行情开关未持久化: preferences.json 损坏或无法读取, 保留原文件")
 
     # ================================================================
     # 策略监控

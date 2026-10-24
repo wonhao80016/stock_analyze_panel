@@ -9,14 +9,46 @@ import copy
 import json
 import logging
 import re
+import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+PREFERENCES_STORE_UNAVAILABLE_DETAIL = (
+    "偏好设置文件(数据目录下的 user_data/preferences.json)已损坏或无法读取,本次设置未保存。"
+    "请修复该文件的内容或权限后重试"
+)
+
+
+class PreferencesStoreError(RuntimeError):
+    """preferences.json exists but cannot be used as the base of a write."""
+
+
+class PreferencesCorruptError(PreferencesStoreError):
+    """preferences.json is not valid JSON or not a JSON object."""
+
+
+class PreferencesUnreadableError(PreferencesStoreError):
+    """preferences.json exists but cannot be opened or read, e.g. permission denied."""
+
+
 # 进程内缓存: 行情轮询线程一轮会调用 8~12 次 getter, 每次读盘+parse 是纯重复;
 # 文件仅在用户改设置时变化, 以 (mtime_ns, size) 签名判断是否重读。
-_cache: dict | None = None
-_cache_sig: tuple[int, int] | None = None
+# A malformed file is remembered per signature too, so it is neither re-read nor re-logged.
+# Unreadable files are not: a transient lock (e.g. antivirus) leaves the signature unchanged.
+_cache_entry: tuple[tuple[int, int], dict] | None = None
+_failure_entry: tuple[tuple[int, int], PreferencesCorruptError] | None = None
+# Bumped by every save; a reader stores its result only if no save ran while it was reading,
+# because the new file can carry the same (mtime_ns, size) signature as the one it read.
+_version = 0
+_state_lock = threading.Lock()
+# Serializes every read-modify-write of preferences.json within this process.
+_write_lock = threading.RLock()
+_READ_ATTEMPTS = 5
+_READ_RETRY_SECONDS = 0.01
+_UNREADABLE_LOG_INTERVAL_SECONDS = 60.0
+_unreadable_logged_at: dict[str, float] = {}
 
 
 def _path() -> Path:
@@ -27,42 +59,120 @@ def _path() -> Path:
 
 
 def _invalidate_cache() -> None:
-    global _cache, _cache_sig
-    _cache = None
-    _cache_sig = None
+    global _cache_entry, _failure_entry, _version
+    with _state_lock:
+        _cache_entry = None
+        _failure_entry = None
+        _version += 1
+
+
+def _read_text(p: Path) -> str:
+    # Windows denies opening a file while os.replace swaps it in, so a reader racing a save retries briefly.
+    for attempt in range(1, _READ_ATTEMPTS):
+        try:
+            return p.read_text(encoding="utf-8")
+        except PermissionError:
+            time.sleep(_READ_RETRY_SECONDS * attempt)
+    return p.read_text(encoding="utf-8")
+
+
+def _unreadable(p: Path, kind: str, e: OSError) -> PreferencesUnreadableError:
+    now = time.monotonic()
+    with _state_lock:
+        last = _unreadable_logged_at.get(kind)
+        should_log = last is None or now - last >= _UNREADABLE_LOG_INTERVAL_SECONDS
+        if should_log:
+            _unreadable_logged_at[kind] = now
+    if should_log:
+        logger.error("preferences.json at %s cannot be read: %s (%s)", p, kind, e)
+    return PreferencesUnreadableError(str(e))
+
+
+def _read_file(p: Path) -> dict | None:
+    """Parse *p*; None when it does not exist. Raises a PreferencesStoreError subclass otherwise."""
+    try:
+        text = _read_text(p)
+    except FileNotFoundError:
+        return None
+    except PermissionError as e:
+        raise _unreadable(p, "permission denied", e) from e
+    except OSError as e:
+        raise _unreadable(p, "os error", e) from e
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        logger.error("preferences.json at %s is malformed: %s", p, e)
+        raise PreferencesCorruptError(str(e)) from e
+    if not isinstance(data, dict):
+        logger.error("preferences.json at %s is malformed: not a JSON object", p)
+        raise PreferencesCorruptError("not a JSON object")
+    return data
+
+
+def _load_cached() -> dict:
+    global _cache_entry, _failure_entry
+    p = _path()
+    with _state_lock:
+        version = _version
+        entry = _cache_entry
+        failure = _failure_entry
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        return {}
+    except OSError as e:
+        raise _unreadable(p, "stat failed", e) from e
+    sig = (st.st_mtime_ns, st.st_size)
+    if entry is not None and entry[0] == sig:
+        return copy.deepcopy(entry[1])
+    if failure is not None and failure[0] == sig:
+        raise type(failure[1])(str(failure[1]))
+    try:
+        data = _read_file(p)
+    except PreferencesCorruptError as e:
+        with _state_lock:
+            if _version == version:
+                _failure_entry = (sig, e)
+        raise
+    if data is None:
+        return {}
+    with _state_lock:
+        if _version == version:
+            _cache_entry = (sig, data)
+            _failure_entry = None
+    return copy.deepcopy(data)
 
 
 def load() -> dict:
-    """读取 preferences.json (带 mtime 签名缓存)。返回深拷贝, 调用方可自由修改。"""
-    global _cache, _cache_sig
-    p = _path()
+    """读取 preferences.json (带 mtime 签名缓存)。返回深拷贝, 调用方可自由修改。
+
+    An unreadable or corrupt file reads as {} so getters fall back to defaults; save() refuses it.
+    """
     try:
-        sig = (p.stat().st_mtime_ns, p.stat().st_size)
-    except OSError:
+        return _load_cached()
+    except PreferencesStoreError:
         return {}
-    if _cache is not None and sig == _cache_sig:
-        return copy.deepcopy(_cache)
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        logger.warning("preferences.json malformed: %s", e)
-        return {}
-    _cache = data
-    _cache_sig = sig
-    return copy.deepcopy(_cache)
+
+
+def _write(data: dict) -> None:
+    from app.taiwan.universe.service import write_atomically
+
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+    write_atomically(_path(), lambda tmp: tmp.write_text(text, encoding="utf-8"))
+    _invalidate_cache()
 
 
 def save(updates: dict) -> dict:
-    """合并写入。返回新内容。"""
-    current = load()
-    current.update(updates)
-    _path().write_text(
-        json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
-    _invalidate_cache()
-    return current
+    """合并写入。返回新内容。
+
+    Always re-reads the file rather than the cache. Raises a PreferencesStoreError subclass,
+    leaving the file untouched, when the stored file cannot be read or parsed.
+    """
+    with _write_lock:
+        current = _read_file(_path()) or {}
+        current.update(updates)
+        _write(current)
+        return current
 
 
 def get_realtime_quotes_enabled() -> bool:
@@ -113,12 +223,7 @@ def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:  # noqa: AR
 
 def set_realtime_quote_interval(interval: float) -> float:
     """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。"""
-    current = load()
-    current["realtime_quote_interval"] = interval
-    _path().write_text(
-        json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
-    _invalidate_cache()
+    save({"realtime_quote_interval": interval})
     return interval
 
 

@@ -48,7 +48,7 @@ def test_write_resumes_after_window(save_counter):
     assert save_counter["values"][1] == {"last_fetch_ms": 1_700_000_030_000.0}
 
 
-def test_write_failure_does_not_propagate_and_retries(monkeypatch):
+def test_write_failure_does_not_propagate_and_retries_after_the_interval(monkeypatch):
     calls = {"n": 0}
 
     def _flaky(updates: dict) -> dict:
@@ -60,5 +60,7 @@ def test_write_failure_does_not_propagate_and_retries(monkeypatch):
     monkeypatch.setattr(preferences, "save", _flaky)
     t0 = 1_700_000_000_000.0
     quote_service._persist_last_fetch(t0)          # 失败但不抛出
-    quote_service._persist_last_fetch(t0 + 1_000.0)  # 未成功过 -> 立即重试
+    quote_service._persist_last_fetch(t0 + 1_000.0)  # 失败也计入节流, 不立即重试
+    assert calls["n"] == 1
+    quote_service._persist_last_fetch(t0 + 31_000.0)
     assert calls["n"] == 2

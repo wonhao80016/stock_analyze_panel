@@ -45,6 +45,7 @@ from app.jobs import daily_pipeline
 from app.services.auth import AuthStoreCorruptError
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
+from app.services.preferences import PREFERENCES_STORE_UNAVAILABLE_DETAIL, PreferencesStoreError
 from app.services.quote_service import QuoteService
 from app.taiwan.universe.service import SecurityMasterUnavailableError
 from app.tickflow import client as tf_client
@@ -474,6 +475,14 @@ async def security_master_unavailable_handler(
 @app.exception_handler(AuthStoreCorruptError)
 async def auth_store_corrupt_handler(request: Request, exc: AuthStoreCorruptError) -> JSONResponse:
     return auth_api.auth_store_corrupt_response(exc)
+
+
+@app.exception_handler(PreferencesStoreError)
+async def preferences_store_error_handler(request: Request, exc: PreferencesStoreError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": PREFERENCES_STORE_UNAVAILABLE_DETAIL, "code": "PREFERENCES_STORE_UNAVAILABLE"},
+    )
 
 # 生产期静态文件(前端 dist)
 _static = Path(settings.static_dir)
