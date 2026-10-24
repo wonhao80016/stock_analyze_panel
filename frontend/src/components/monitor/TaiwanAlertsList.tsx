@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { api, type AlertEvent, type TaiwanAlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { useStockPreview } from '@/components/StockPreviewProvider'
 
 import { cn } from '@/lib/cn'
 import { fmtPct } from '@/lib/format'
@@ -49,25 +50,31 @@ const SEVERITY_CONFIG: Record<string, { bar: string; icon: any; iconCls: string;
   },
 }
 
+const TAIPEI_ALERT_TIME = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Taipei',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+})
+
+/** MM/DD HH:mm:ss in Asia/Taipei; the list spans seven days, so the date is always shown. */
 function formatAlertTime(ts: number | string | undefined): string {
   if (!ts) return '--'
-  try {
-    const d = typeof ts === 'number' ? new Date(ts) : new Date(ts)
-    if (isNaN(d.getTime())) return String(ts)
-    const hh = String(d.getHours()).padStart(2, '0')
-    const mm = String(d.getMinutes()).padStart(2, '0')
-    const ss = String(d.getSeconds()).padStart(2, '0')
-    return `${hh}:${mm}:${ss}`
-  } catch {
-    return String(ts)
-  }
+  const d = new Date(ts)
+  if (isNaN(d.getTime())) return String(ts)
+  const p = Object.fromEntries(TAIPEI_ALERT_TIME.formatToParts(d).map(part => [part.type, part.value]))
+  return `${p.month}/${p.day} ${p.hour}:${p.minute}:${p.second}`
 }
 
 export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListProps) {
   const qc = useQueryClient()
+  const { openPreview } = useStockPreview()
   const deleteMut = useMutation({
     mutationFn: (id: string) => api.alertDelete(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: QK.alerts(undefined) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.alertsAll }),
   })
 
   if (!alerts || alerts.length === 0) {
@@ -106,13 +113,16 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
               {/* 頂部: 時間、標的、嚴重等級、來源 */}
               <div className="flex flex-wrap items-center justify-between gap-1.5">
                 <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-1 font-mono text-[11px] text-muted">
+                  <span className="flex items-center gap-1 font-mono text-[11px] text-muted" title="台灣時間 (Asia/Taipei)">
                     <Clock className="h-3 w-3" />
-                    {formatAlertTime((alert as any).triggered_at || alert.ts)}
+                    {formatAlertTime(alert.ts ?? (alert as TaiwanAlertEvent).triggered_at)}
                   </span>
                   {alert.symbol && (
                     <button
-                      onClick={() => onSelectSymbol?.(alert.symbol!)}
+                      type="button"
+                      onClick={() => onSelectSymbol
+                        ? onSelectSymbol(alert.symbol!)
+                        : openPreview(alert.symbol!, alert.name ?? undefined)}
                       className="font-mono font-bold text-accent hover:underline flex items-center gap-0.5 cursor-pointer"
                     >
                       {alert.symbol}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AlertCircle,
@@ -13,6 +13,8 @@ import { api, BOARD_LOT_VOLUME_NOTE, type TaiwanRealtimeQuote } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { useStockPreview } from '@/components/StockPreviewProvider'
+import { usePreferences } from '@/lib/useSharedQueries'
+import { useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { DataQualityBadge, formatQuoteTime } from '@/components/taiwan/TaiwanDataQuality'
 
 interface TaiwanQuotePanelProps {
@@ -32,6 +34,81 @@ const PRESET_SYMBOLS = [
 
 // The quote strip queries every symbol on each refresh, so keep it bounded.
 const MAX_PANEL_SYMBOLS = 12
+
+// Same cadence as the stock detail page's polling.
+const FALLBACK_REFRESH_MS = 10_000
+
+// Mon-Fri 08:30 trial matching until just after the 13:30 closing auction, Asia/Taipei.
+const SESSION_OPEN_MINUTE = 8 * 60 + 30
+const SESSION_CLOSE_MINUTE = 13 * 60 + 35
+
+const TAIPEI_CLOCK = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Taipei',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  weekday: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+})
+
+function taipeiClock(ms: number) {
+  const p = Object.fromEntries(TAIPEI_CLOCK.formatToParts(new Date(ms)).map(part => [part.type, part.value]))
+  return {
+    date: `${p.year}-${p.month}-${p.day}`,
+    weekend: p.weekday === 'Sat' || p.weekday === 'Sun',
+    minute: Number(p.hour) * 60 + Number(p.minute),
+  }
+}
+
+/**
+ * Whether the Taiwan session may be trading at `now`.
+ * A same-day non_trading_day from the exchange calendar (holiday, typhoon closure) overrides the clock.
+ */
+export function taipeiSessionOpen(now: number, lastStatus?: string, lastFetchedAt?: number): boolean {
+  const clock = taipeiClock(now)
+  if (clock.weekend || clock.minute < SESSION_OPEN_MINUTE || clock.minute > SESSION_CLOSE_MINUTE) return false
+  return !(lastStatus === 'non_trading_day' && lastFetchedAt && taipeiClock(lastFetchedAt).date === clock.date)
+}
+
+function useMinuteClock(): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000)
+    return () => clearInterval(id)
+  }, [])
+  return now
+}
+
+export interface MonitorQuoteRefresh {
+  realtimeEnabled: boolean
+  sseDriven: boolean
+  now: number
+}
+
+/** Shared by the monitor quote strip and index bar so both refresh on the same terms. */
+export function useMonitorQuoteRefresh(): MonitorQuoteRefresh {
+  const { data: prefs } = usePreferences()
+  const streamStatus = useQuoteStreamStatus()
+  const now = useMinuteClock()
+  const realtimeEnabled = prefs?.realtime_quotes_enabled === true
+  // useQuoteStream invalidates taiwan-quotes only with realtime on, the stream open and the page not opted out.
+  const sseDriven = realtimeEnabled
+    && streamStatus === 'connected'
+    && prefs?.sse_refresh_pages?.['taiwan-quotes'] !== false
+  return { realtimeEnabled, sseDriven, now }
+}
+
+/** refetchInterval for a taiwanQuotes query: none while SSE refreshes it or outside the session. */
+export function monitorQuoteInterval(
+  refresh: MonitorQuoteRefresh,
+  state: { data?: { quotes?: TaiwanRealtimeQuote[] }; dataUpdatedAt: number },
+): number | false {
+  if (refresh.sseDriven) return false
+  const open = taipeiSessionOpen(refresh.now, state.data?.quotes?.[0]?.market_status, state.dataUpdatedAt)
+  return open ? FALLBACK_REFRESH_MS : false
+}
 
 /** 格式化金額為易讀的 萬 / 億 或原始數值 */
 function formatAmount(amt: number | null | undefined): string {
@@ -198,20 +275,23 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
     return mine.length ? mine.slice(0, MAX_PANEL_SYMBOLS) : PRESET_SYMBOLS
   }, [watchlistQuery.data])
 
-  // 1. 即時行情 Query (受 QK.taiwanQuotes 驅動，SSE 廣播時自動 Invalidate)
+  const refresh = useMonitorQuoteRefresh()
+  const { realtimeEnabled, sseDriven } = refresh
+
   const quotesQuery = useQuery({
     queryKey: QK.taiwanQuotes(panelSymbols.join(',')),
     queryFn: () => api.taiwanQuotes(panelSymbols),
     staleTime: 3000,
+    refetchInterval: query => monitorQuoteInterval(refresh, query.state),
   })
 
-
   const quotes = quotesQuery.data?.quotes || []
+  const sessionOpen = taipeiSessionOpen(refresh.now, quotes[0]?.market_status, quotesQuery.dataUpdatedAt)
   // Removing the selected symbol from the watchlist must not blank the panel.
   const activeSymbol = selectedSymbol && panelSymbols.includes(selectedSymbol)
     ? selectedSymbol
     : panelSymbols[0]
-  const currentQuote = quotes.find(q => q.symbol === activeSymbol) || quotes[0]
+  const currentQuote = quotes.find(q => q.symbol === activeSymbol)
   const boardLot = currentQuote?.source_meta?.is_realtime === true
 
   const isUp = (currentQuote?.change || 0) > 0
@@ -381,7 +461,15 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
             {/* 底部操作快捷鍵 */}
             <div className="mt-3 pt-3 border-t border-border/40 flex items-center justify-between">
               <span className="text-[11px] text-muted">
-                {currentQuote.source_meta?.is_stale ? '⚠️ 目前顯示過期快照，請確認網路連線' : '即時行情自動同步中 (SSE)'}
+                {currentQuote.source_meta?.is_stale
+                  ? '⚠️ 目前顯示過期快照，請確認網路連線'
+                  : !sessionOpen
+                    ? '非交易時段'
+                    : sseDriven
+                      ? '即時行情自動同步中 (SSE)'
+                      : realtimeEnabled
+                        ? '即時串流未連線，每 10 秒更新一次'
+                        : '即時行情未開啟，每 10 秒更新一次'}
               </span>
               <button
                 onClick={() => onAddRuleForSymbol?.(currentQuote)}
@@ -415,7 +503,9 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
       ) : (
         <div className="flex flex-col items-center justify-center p-8 rounded-xl border border-dashed border-border text-center text-muted">
           <AlertCircle className="h-8 w-8 text-muted mb-2" />
-          <p className="text-sm">尚未載入即時報價，請稍候或檢查後端服務</p>
+          <p className="text-sm">
+            {quotesQuery.data ? '此標的暫無報價' : '尚未載入即時報價，請稍候或檢查後端服務'}
+          </p>
         </div>
       )}
     </div>

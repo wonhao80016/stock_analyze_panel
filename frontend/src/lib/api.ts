@@ -385,6 +385,8 @@ export interface ScreenerCachedSummary {
   results: Record<string, ScreenerResultSummary>
   today_ever_counts: Record<string, number>
   updated_at: number | null
+  /** When the post-close cache file was written; unlike updated_at, realtime overlays never move it. */
+  cache_updated_at?: number | null
 }
 
 export interface ScreenerCachedResult {

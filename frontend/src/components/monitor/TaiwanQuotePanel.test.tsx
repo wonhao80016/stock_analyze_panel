@@ -1,15 +1,24 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { api, type TaiwanRealtimeQuote } from '@/lib/api'
+import { useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { TaiwanQuotePanel } from './TaiwanQuotePanel'
 
 vi.mock('@/lib/api', () => ({
-  api: { watchlistList: vi.fn(), taiwanQuotes: vi.fn() },
+  api: { watchlistList: vi.fn(), taiwanQuotes: vi.fn(), preferences: vi.fn() },
   BOARD_LOT_VOLUME_NOTE: '盤中為整股量（不含零股、鉅額、盤後定價）',
 }))
 
+vi.mock('@/lib/useQuoteStream', () => ({ useQuoteStreamStatus: vi.fn() }))
+
+beforeEach(() => {
+  vi.mocked(api.preferences).mockResolvedValue({ realtime_quotes_enabled: true } as never)
+  vi.mocked(useQuoteStreamStatus).mockReturnValue('connected')
+})
+
 afterEach(() => {
+  vi.useRealTimers()
   vi.clearAllMocks()
 })
 
@@ -35,15 +44,19 @@ function quote(overrides: Partial<TaiwanRealtimeQuote>): TaiwanRealtimeQuote {
   } as TaiwanRealtimeQuote
 }
 
-async function renderPanel(row: TaiwanRealtimeQuote) {
-  vi.mocked(api.watchlistList).mockResolvedValue({ symbols: [{ symbol: row.symbol }] } as never)
-  vi.mocked(api.taiwanQuotes).mockResolvedValue({ quotes: [row], count: 1 } as never)
+function mountPanel(onAddRuleForSymbol?: (q: TaiwanRealtimeQuote) => void) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={qc}>
-      <TaiwanQuotePanel />
+      <TaiwanQuotePanel onAddRuleForSymbol={onAddRuleForSymbol} />
     </QueryClientProvider>,
   )
+}
+
+async function renderPanel(row: TaiwanRealtimeQuote) {
+  vi.mocked(api.watchlistList).mockResolvedValue({ symbols: [{ symbol: row.symbol }] } as never)
+  vi.mocked(api.taiwanQuotes).mockResolvedValue({ quotes: [row], count: 1 } as never)
+  mountPanel()
   await screen.findByText(row.symbol)
 }
 
@@ -98,5 +111,135 @@ describe('TaiwanQuotePanel intraday volume', () => {
 
     expect(screen.queryByText('盤中為整股量（不含零股、鉅額、盤後定價）')).not.toBeInTheDocument()
     expect(screen.getByText('成交金額').nextElementSibling).toHaveTextContent('520.00 萬')
+  })
+})
+
+describe('TaiwanQuotePanel selected symbol without a quote (B276)', () => {
+  it('shows an empty state instead of another symbol and offers no rule for it', async () => {
+    vi.mocked(api.watchlistList).mockResolvedValue({ symbols: [{ symbol: '2330.TWSE' }, { symbol: '2454.TWSE' }] } as never)
+    vi.mocked(api.taiwanQuotes).mockResolvedValue({ quotes: [quote({})], count: 1 } as never)
+    const onAdd = vi.fn()
+    mountPanel(onAdd)
+
+    expect(await screen.findByText('此標的暫無報價')).toBeInTheDocument()
+    expect(screen.queryByTitle('開啟個股視窗')).not.toBeInTheDocument()
+    expect(screen.queryByText('針對此標的建立監控規則')).not.toBeInTheDocument()
+  })
+
+  it('builds the rule for the symbol on screen', async () => {
+    vi.mocked(api.watchlistList).mockResolvedValue({ symbols: [{ symbol: '2330.TWSE' }, { symbol: '2454.TWSE' }] } as never)
+    vi.mocked(api.taiwanQuotes).mockResolvedValue({
+      quotes: [quote({ symbol: '2330.TWSE', name: '台積電' }), quote({})],
+      count: 2,
+    } as never)
+    const onAdd = vi.fn()
+    mountPanel(onAdd)
+
+    fireEvent.click(await screen.findByRole('button', { name: /聯發科/ }))
+    fireEvent.click(await screen.findByText('針對此標的建立監控規則'))
+
+    expect(onAdd).toHaveBeenCalledTimes(1)
+    expect(onAdd.mock.calls[0][0].symbol).toBe('2454.TWSE')
+  })
+})
+
+// Thursday 2026-10-22 10:00 in Taipei.
+const IN_SESSION = new Date('2026-10-22T02:00:00Z')
+
+function setClock(at: Date) {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  vi.setSystemTime(at)
+}
+
+async function advance(ms: number) {
+  await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+}
+
+describe('TaiwanQuotePanel refresh without SSE (B275, B277)', () => {
+  it('polls every 10 s and says so while realtime quotes are off', async () => {
+    setClock(IN_SESSION)
+    vi.mocked(api.preferences).mockResolvedValue({ realtime_quotes_enabled: false } as never)
+    await renderPanel(quote({}))
+    const before = vi.mocked(api.taiwanQuotes).mock.calls.length
+
+    await advance(10_500)
+
+    await vi.waitFor(() => expect(vi.mocked(api.taiwanQuotes).mock.calls.length).toBeGreaterThan(before))
+    expect(screen.getByText('即時行情未開啟，每 10 秒更新一次')).toBeInTheDocument()
+    expect(screen.queryByText('即時行情自動同步中 (SSE)')).not.toBeInTheDocument()
+  })
+
+  it('polls while the stream is disconnected even with realtime quotes on', async () => {
+    setClock(IN_SESSION)
+    vi.mocked(useQuoteStreamStatus).mockReturnValue('reconnecting')
+    await renderPanel(quote({}))
+    const before = vi.mocked(api.taiwanQuotes).mock.calls.length
+
+    await advance(10_500)
+
+    await vi.waitFor(() => expect(vi.mocked(api.taiwanQuotes).mock.calls.length).toBeGreaterThan(before))
+    expect(screen.getByText('即時串流未連線，每 10 秒更新一次')).toBeInTheDocument()
+  })
+
+  it('leaves refreshing to SSE while realtime quotes are on and connected', async () => {
+    setClock(IN_SESSION)
+    await renderPanel(quote({}))
+    await screen.findByText('即時行情自動同步中 (SSE)')
+    const before = vi.mocked(api.taiwanQuotes).mock.calls.length
+
+    await advance(30_000)
+
+    expect(vi.mocked(api.taiwanQuotes).mock.calls.length).toBe(before)
+  })
+})
+
+describe('TaiwanQuotePanel outside the Taiwan session (P3-c)', () => {
+  async function expectNoPolling() {
+    const before = vi.mocked(api.taiwanQuotes).mock.calls.length
+    await advance(60_000)
+    expect(vi.mocked(api.taiwanQuotes).mock.calls.length).toBe(before)
+    expect(screen.getByText('非交易時段')).toBeInTheDocument()
+    expect(screen.queryByText(/每 10 秒更新一次/)).not.toBeInTheDocument()
+  }
+
+  it('does not poll after the close', async () => {
+    // Thursday 15:00 in Taipei.
+    setClock(new Date('2026-10-22T07:00:00Z'))
+    vi.mocked(api.preferences).mockResolvedValue({ realtime_quotes_enabled: false } as never)
+    await renderPanel(quote({ market_status: 'closed' }))
+
+    await expectNoPolling()
+  })
+
+  it('does not poll on a weekend', async () => {
+    // Saturday 10:00 in Taipei.
+    setClock(new Date('2026-10-24T02:00:00Z'))
+    vi.mocked(api.preferences).mockResolvedValue({ realtime_quotes_enabled: false } as never)
+    await renderPanel(quote({ market_status: 'non_trading_day' }))
+
+    await expectNoPolling()
+  })
+
+  it('does not poll a weekday the exchange reports as closed', async () => {
+    setClock(IN_SESSION)
+    vi.mocked(api.preferences).mockResolvedValue({ realtime_quotes_enabled: false } as never)
+    await renderPanel(quote({ market_status: 'non_trading_day' }))
+
+    await expectNoPolling()
+  })
+
+  it('starts polling once the session opens', async () => {
+    // Thursday 08:29 in Taipei.
+    setClock(new Date('2026-10-22T00:29:00Z'))
+    vi.mocked(api.preferences).mockResolvedValue({ realtime_quotes_enabled: false } as never)
+    await renderPanel(quote({ market_status: 'closed' }))
+    await advance(30_000)
+    const beforeOpen = vi.mocked(api.taiwanQuotes).mock.calls.length
+
+    await advance(60_000)
+    await advance(10_500)
+
+    expect(vi.mocked(api.taiwanQuotes).mock.calls.length).toBeGreaterThan(beforeOpen)
+    expect(screen.getByText('即時行情未開啟，每 10 秒更新一次')).toBeInTheDocument()
   })
 })

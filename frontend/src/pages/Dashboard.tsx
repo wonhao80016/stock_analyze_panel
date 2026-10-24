@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { Activity, ArrowUpRight, BellRing, Database, Eye, HelpCircle, Layers, Loader2, Target, TrendingUp } from 'lucide-react'
 import { api, industryLabel, type AlertEvent, type IndustryMetrics, type StrategyDetail } from '@/lib/api'
@@ -63,11 +63,13 @@ const _SEVERITY_BAR: Record<string, string> = {
   info: 'bg-accent/40', warn: 'bg-warning', critical: 'bg-danger',
 }
 
+const DASHBOARD_ALERTS_PARAMS = { days: 7, limit: 10 }
+
 function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => void }) {
   const navigate = useNavigate()
   const alerts = useQuery({
-    queryKey: ['alerts', ''],
-    queryFn: () => api.alertsList({ days: 7, limit: 10 }),
+    queryKey: QK.alerts(DASHBOARD_ALERTS_PARAMS),
+    queryFn: () => api.alertsList(DASHBOARD_ALERTS_PARAMS),
     refetchInterval: 10000,
   })
   const events: AlertEvent[] = alerts.data?.alerts ?? []
@@ -225,7 +227,7 @@ function TaiwanBreadthBar({ advance, decline, flat }: { advance: number; decline
 
 function MarketStrengthCard() {
   const intel = useQuery({
-    queryKey: ['taiwanMarketIntelligence'],
+    queryKey: QK.taiwanMarketIntelligence,
     queryFn: () => api.taiwanMarketIntelligence(),
     staleTime: 5 * 60 * 1000,
   })
@@ -322,7 +324,7 @@ function IndustryStrengthList({ title, rows, tone }: { title: string; rows: Indu
 
 function IndustryStrengthCard() {
   const ind = useQuery({
-    queryKey: ['taiwanIndustryIntelligence', 'turnover', 'desc'],
+    queryKey: QK.taiwanIndustryIntelligence('turnover', 'desc'),
     queryFn: () => api.taiwanIndustryIntelligence({ sort_by: 'turnover', order: 'desc' }),
     staleTime: 5 * 60 * 1000,
   })
@@ -450,7 +452,7 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
     .filter(([, r]) => (r?.rows?.length ?? 0) > 0)
     .sort((a, b) => (b[1].total ?? 0) - (a[1].total ?? 0))
   const shown = hits.slice(0, STRATEGY_CARD_LIMIT)
-  const totalPicks = hits.reduce((sum, [, r]) => sum + (r.total ?? 0), 0)
+  const pickedStocks = new Set(hits.flatMap(([, r]) => r.rows.map((row: any) => row.symbol))).size
   const failedNames = Object.keys(cached.data?.failures ?? {}).map(sid => nameById.get(sid) ?? sid)
 
   return (
@@ -458,7 +460,7 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
       <SectionTitle
         icon={Target}
         title="策略當日推薦"
-        hint={cached.data?.as_of ? `${cached.data.as_of} · ${totalPicks} 檔` : undefined}
+        hint={cached.data?.as_of ? `${cached.data.as_of} · ${pickedStocks} 檔` : undefined}
       />
       {cached.data && (
         <MarketFilterNote
@@ -560,7 +562,7 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
             </div>
           ))}
           {hits.length > shown.length && (
-            <Link to="/taiwan-screener" className="block pt-0.5 text-center text-[11px] text-accent hover:text-accent/80 transition-colors">
+            <Link to="/strategies" className="block pt-0.5 text-center text-[11px] text-accent hover:text-accent/80 transition-colors">
               還有 {hits.length - shown.length} 個策略有選股結果 →
             </Link>
           )}
@@ -642,8 +644,55 @@ function TaiwanOverviewCard() {
   )
 }
 
+const PUBLICATION_POLL_MS = 60_000
+
+/**
+ * Refetches the published-data cards when a post-close run lands.
+ * Dataset dates move when bars or chip data are written; the strategy cache write
+ * closes both the 16:30 run and the evening run that finalizes provisional bars.
+ */
+function usePublicationRefresh() {
+  const qc = useQueryClient()
+  const status = useQuery({
+    queryKey: QK.taiwanDataStatus,
+    queryFn: api.taiwanDataStatus,
+    staleTime: 60_000,
+    refetchInterval: PUBLICATION_POLL_MS,
+  })
+  const summary = useQuery({
+    queryKey: QK.screenerCachedSummary,
+    queryFn: api.screenerCachedSummary,
+    refetchInterval: PUBLICATION_POLL_MS,
+  })
+  const datasetDates = status.data
+    ? [status.data.daily_as_of, status.data.institutional_as_of, status.data.margin_as_of].join('|')
+    : null
+  // undefined until the summary loads; null means no cache file has been written yet.
+  const cacheWrittenAt = summary.data ? (summary.data.cache_updated_at ?? null) : undefined
+
+  const seen = useRef<{ datasetDates: string | null; cacheWrittenAt: number | null | undefined }>({
+    datasetDates: null,
+    cacheWrittenAt: undefined,
+  })
+  useEffect(() => {
+    const prev = seen.current
+    const datesMoved = datasetDates != null && prev.datasetDates != null && datasetDates !== prev.datasetDates
+    const cacheRewritten = cacheWrittenAt != null && prev.cacheWrittenAt !== undefined && cacheWrittenAt !== prev.cacheWrittenAt
+    if (datasetDates != null) prev.datasetDates = datasetDates
+    if (cacheWrittenAt !== undefined) prev.cacheWrittenAt = cacheWrittenAt
+    if (!datesMoved && !cacheRewritten) return
+    void qc.invalidateQueries({ queryKey: QK.taiwanMarketIntelligence })
+    void qc.invalidateQueries({ queryKey: QK.taiwanIndustryIntelligence('turnover', 'desc').slice(0, 1) })
+    if (cacheRewritten) {
+      void qc.invalidateQueries({ queryKey: QK.screenerCached().slice(0, 2) })
+      void qc.invalidateQueries({ queryKey: QK.taiwanDataStatus })
+    }
+  }, [qc, datasetDates, cacheWrittenAt])
+}
+
 export function Dashboard() {
   const [previewStock, setPreviewStock] = useState<{symbol: string; name?: string; alert?: AlertEvent} | null>(null)
+  usePublicationRefresh()
 
   return (
     <div className="min-h-full bg-base p-1.5">

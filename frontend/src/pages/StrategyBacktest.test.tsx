@@ -467,7 +467,7 @@ describe('策略回測工作區', () => {
     expect(screen.getAllByText('1 筆')).toHaveLength(2)
     expect(screen.getByTestId('equity-chart')).toBeInTheDocument()
     expect(screen.getByRole('cell', { name: '2330.TWSE' })).toBeInTheDocument()
-    expect(screen.getByText('signal')).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: '訊號出場' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: '張數' })).toBeInTheDocument()
     expect(screen.getByText(/年化報酬依回測期間的實際日曆天數以複利換算/)).toBeInTheDocument()
     expect(screen.getByText(/Sharpe 先從每期報酬扣除無風險利率/)).toBeInTheDocument()

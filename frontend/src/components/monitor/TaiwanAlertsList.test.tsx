@@ -10,6 +10,11 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 
+const openPreview = vi.fn()
+vi.mock('@/components/StockPreviewProvider', () => ({
+  useStockPreview: () => ({ openPreview, closePreview: vi.fn() }),
+}))
+
 const TS = 1_792_800_000_000
 
 function makeAlert(id: string, symbol: string): AlertEvent {
@@ -36,6 +41,7 @@ function renderList(alerts: AlertEvent[]) {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.mocked(api.alertDelete).mockClear()
+  openPreview.mockClear()
 })
 
 describe('TaiwanAlertsList alerts sharing one ts', () => {
@@ -60,5 +66,25 @@ describe('TaiwanAlertsList alerts sharing one ts', () => {
 
     await waitFor(() => expect(api.alertDelete).toHaveBeenCalledTimes(1))
     expect(vi.mocked(api.alertDelete).mock.calls[0][0]).toBe('a2')
+  })
+})
+
+describe('TaiwanAlertsList trigger time (B273)', () => {
+  it('shows the date and time in Asia/Taipei', () => {
+    // 2026-10-19 17:02:03 UTC is 2026-10-20 01:02:03 in Taipei.
+    renderList([{ ...makeAlert('a1', '2330.TWSE'), ts: Date.UTC(2026, 9, 19, 17, 2, 3) }])
+
+    const time = screen.getByText('10/20 01:02:03')
+    expect(time.closest('[title]')).toHaveAttribute('title', '台灣時間 (Asia/Taipei)')
+  })
+})
+
+describe('TaiwanAlertsList symbol button (B274)', () => {
+  it('opens the stock preview for the clicked alert', () => {
+    renderList([{ ...makeAlert('a1', '2330.TWSE'), name: '台積電' }])
+
+    fireEvent.click(screen.getByRole('button', { name: /2330\.TWSE/ }))
+
+    expect(openPreview).toHaveBeenCalledWith('2330.TWSE', '台積電')
   })
 })

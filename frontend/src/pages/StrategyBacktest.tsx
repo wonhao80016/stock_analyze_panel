@@ -39,13 +39,22 @@ function exactInstrumentMatches(input: string, results: InstrumentSearchResult[]
   return [...new Map(matches.map(result => [result.symbol, result])).values()]
 }
 
+// Keys mirror the exit reasons recorded by backend/app/backtest/engine.py.
 const EXIT_REASON_LABELS: Record<string, string> = {
+  signal: '訊號出場',
+  stop_loss: '停損',
+  take_profit: '停利',
+  trailing_stop: '移動停損',
+  trailing_take_profit: '移動停利',
+  max_hold: '達最長持有天數',
+  end: '回測結束平倉',
   end_unclosed: '期末未平倉（以收盤估值）',
 }
 
-function exitReasonLabel(reason: string | undefined): string {
+function exitReasonLabel(reason: string | undefined, signalId?: string | null): string {
   if (!reason) return '—'
-  return EXIT_REASON_LABELS[reason] ?? reason
+  const label = EXIT_REASON_LABELS[reason] ?? cnSignal(reason)
+  return reason === 'signal' && signalId ? `${label}：${cnSignal(signalId)}` : label
 }
 
 function assetTypeLabel(assetType: string | undefined): string {
@@ -313,7 +322,7 @@ function Results({ result, lotMode }: { result: StrategyBacktestResult; lotMode:
                       )}
                       <td className={cn('px-2 py-2 text-right font-mono', pnl != null && (pnl >= 0 ? 'text-danger' : 'text-bear'))}>{formatNumber(pnl)}</td>
                       <td className={cn('px-2 py-2 text-right font-mono', returnValue != null && (returnValue >= 0 ? 'text-danger' : 'text-bear'))}>{formatPercent(returnValue)}</td>
-                      <td className="whitespace-nowrap px-2 py-2">{exitReasonLabel(trade.exit_reason)}</td>
+                      <td className="whitespace-nowrap px-2 py-2">{exitReasonLabel(trade.exit_reason, trade.exit_signal_id)}</td>
                     </tr>
                   )
                 })}

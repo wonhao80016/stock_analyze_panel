@@ -7,6 +7,7 @@ import { cn } from '@/lib/cn'
 import { BENCHMARK_SYMBOLS } from '@/lib/benchmarks'
 import { useStockPreview } from '@/components/StockPreviewProvider'
 import { DataQualityBadge, formatQuoteTime } from '@/components/taiwan/TaiwanDataQuality'
+import { monitorQuoteInterval, useMonitorQuoteRefresh } from '@/components/monitor/TaiwanQuotePanel'
 
 // MIS channel codes for the two benchmarks: tse_t00.tw and otc_o00.tw.
 const INDEX_SYMBOLS = [...BENCHMARK_SYMBOLS]
@@ -66,10 +67,12 @@ function IndexCard({ symbol, quote }: { symbol: string; quote?: TaiwanRealtimeQu
 }
 
 export function TaiwanIndexBar() {
+  const refresh = useMonitorQuoteRefresh()
   const indicesQuery = useQuery({
     queryKey: QK.taiwanQuotes(INDEX_SYMBOLS.join(',')),
     queryFn: () => api.taiwanQuotes(INDEX_SYMBOLS),
     staleTime: 3000,
+    refetchInterval: query => monitorQuoteInterval(refresh, query.state),
   })
 
   const quotes = indicesQuery.data?.quotes || []

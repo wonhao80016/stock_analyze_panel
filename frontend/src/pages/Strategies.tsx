@@ -89,6 +89,8 @@ export function Strategies() {
 
   const results = cached.data?.results ?? {}
   const failures = cached.data?.failures
+  // Without the cache every strategy would look unrun, so run states wait for it.
+  const resultsKnown = cached.data != null
 
   const rows = useMemo(() => {
     const presets = (strategies.data?.presets ?? []) as StrategyDetail[]
@@ -187,7 +189,7 @@ export function Strategies() {
                   : 'border-border text-muted hover:text-foreground',
               )}
             >
-              {f.label} {counts[f.key]}
+              {f.label}{resultsKnown && ` ${counts[f.key]}`}
             </button>
           ))}
         </div>}
@@ -382,6 +384,22 @@ export function Strategies() {
         </div>
       ) : strategies.isError ? (
         <p className="py-6 text-xs text-muted">目前無法讀取策略清單。</p>
+      ) : cached.isPending ? (
+        <div className="flex items-center gap-2 py-6 text-xs text-muted">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />正在讀取策略選股結果…
+        </div>
+      ) : !resultsKnown ? (
+        <div role="alert" className="flex items-center gap-2 py-6 text-xs text-muted">
+          <span>目前無法讀取策略選股結果。</span>
+          <button
+            type="button"
+            onClick={() => cached.refetch()}
+            disabled={cached.isFetching}
+            className="rounded border border-border px-2 py-0.5 text-[11px] text-secondary transition-colors hover:text-foreground enabled:cursor-pointer disabled:opacity-50"
+          >
+            重試
+          </button>
+        </div>
       ) : shown.length === 0 ? (
         <p className="py-6 text-center text-xs text-muted">此分類沒有策略。</p>
       ) : (

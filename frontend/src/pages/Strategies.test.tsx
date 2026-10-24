@@ -6,7 +6,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter, useSearchParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Strategies } from './Strategies'
-import { api } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import { INVESTMENT_DISCLAIMER } from '@/lib/disclaimer'
 
 vi.mock('@/lib/api', async () => {
@@ -475,7 +475,7 @@ describe('策略庫 — 事後統計分頁', () => {
       zero_signal_runs: 0, failures: [], error: null } as const
     vi.mocked(api.screenerPickBackfill).mockResolvedValue({ ...running, dates: [...running.dates], failures: [] })
     vi.mocked(api.screenerPickBackfillStatus)
-      .mockRejectedValueOnce(new Error('job unavailable'))
+      .mockRejectedValueOnce(new ApiError('job unavailable', 404, undefined, '/api/screener/pick-performance/backfill/history-error'))
       .mockResolvedValue({ ...running, status: 'completed', completed_days: 1, dates: [...running.dates], failures: [] })
     renderPage('/strategies?tab=performance')
     await screen.findByText('布林突破')

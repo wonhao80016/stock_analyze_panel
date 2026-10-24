@@ -49,6 +49,31 @@ def test_cached_summary_omits_rows_and_counts_realtime_expirations(monkeypatch, 
     assert "rows" not in payload["results"]["strategy_a"]
 
 
+
+def test_cached_summary_reports_the_cache_write_time_apart_from_realtime_overlays(monkeypatch, tmp_path):
+    cached = {
+        "as_of": "2026-07-20",
+        "results": {"strategy_b": {"as_of": "2026-07-20", "total": 1, "rows": [{"symbol": "2330.TWSE"}]}},
+        "updated_at": 1_000,
+    }
+    realtime = {"strategy_a": {"as_of": "2026-07-20", "total": 1, "rows": [{"symbol": "2317.TWSE"}]}}
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_args: cached)
+
+    overlaid = screener_api.get_cached_summary(_request(tmp_path, realtime))
+    plain = screener_api.get_cached_summary(_request(tmp_path))
+
+    assert overlaid["updated_at"] != 1_000
+    assert overlaid["cache_updated_at"] == 1_000
+    assert plain["cache_updated_at"] == 1_000
+
+
+def test_cached_summary_without_a_cache_file_has_no_write_time(monkeypatch, tmp_path):
+    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_args: None)
+
+    payload = screener_api.get_cached_summary(_request(tmp_path))
+
+    assert payload["cache_updated_at"] is None
+
 def test_cached_result_returns_only_requested_rows_with_ext_and_strategy_membership(monkeypatch, tmp_path):
     cached = {
         "as_of": "2026-07-20",

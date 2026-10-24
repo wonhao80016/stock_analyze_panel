@@ -312,7 +312,10 @@ def _realtime_overrides(cached: dict, realtime_results: dict[str, dict]) -> dict
 def _cached_with_realtime(request: Request) -> dict:
     """读取盘后缓存，并用监控引擎较新交易日的实时结果覆盖同策略。"""
     data_dir = request.app.state.repo.store.data_dir
-    cached = strategy_cache.read_cache(data_dir)
+    return _overlay_realtime(request, strategy_cache.read_cache(data_dir))
+
+
+def _overlay_realtime(request: Request, cached: dict | None) -> dict:
     if cached is None:
         cached = {"as_of": None, "results": {}, "updated_at": None}
 
@@ -435,7 +438,8 @@ def get_cached(
 @router.get("/cached-summary")
 def get_cached_summary(request: Request):
     """返回策略卡片所需的轻量摘要，不序列化股票明细。"""
-    cached = _cached_with_realtime(request)
+    on_disk = strategy_cache.read_cache(request.app.state.repo.store.data_dir)
+    cached = _overlay_realtime(request, on_disk)
     results = cached.get("results") or {}
     summary = {
         sid: {
@@ -463,6 +467,9 @@ def get_cached_summary(request: Request):
         "results": summary,
         "today_ever_counts": ever_counts,
         "updated_at": cached.get("updated_at"),
+        # Changes whenever the cache file is rewritten: the scheduled post-close runs, run_all and
+        # single-strategy runs. Realtime overlays restamp updated_at on every read but never this.
+        "cache_updated_at": on_disk.get("updated_at") if on_disk else None,
     }
 
 

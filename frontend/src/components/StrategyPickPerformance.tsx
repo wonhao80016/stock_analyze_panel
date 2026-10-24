@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Loader2 } from 'lucide-react'
 import {
   api,
+  ApiError,
   type PickHorizon,
   type PickHorizonReturn,
   type PickPerformanceSummary,
@@ -240,6 +241,10 @@ function MethodNote({ data }: { data: PickPerformanceSummary }) {
   )
 }
 
+function isJobGone(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404
+}
+
 function HistoricalBackfill() {
   const client = useQueryClient()
   const [days, setDays] = useState('5')
@@ -256,7 +261,10 @@ function HistoricalBackfill() {
     queryKey: QK.screenerPickBackfill(jobId ?? ''),
     queryFn: () => api.screenerPickBackfillStatus(jobId!),
     enabled: jobId !== null,
-    refetchInterval: query => query.state.data?.status === 'running' ? 1500 : false,
+    // Jobs live in backend memory, so after a restart the last "running" snapshot only ever returns 404.
+    retry: (failureCount, error) => !isJobGone(error) && failureCount < 3,
+    refetchInterval: query =>
+      !isJobGone(query.state.error) && query.state.data?.status === 'running' ? 1500 : false,
   })
   const job = status.data ?? (jobId ? mutation.data : undefined)
   const active = mutation.isPending || (job?.status === 'running' && !status.isError)

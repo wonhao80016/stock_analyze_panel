@@ -7,6 +7,15 @@
 
 // ===== Query Key 工廠 =====
 
+/** Mirrors the api.alertsList parameters; every one changes the response. */
+export interface AlertsKeyParams {
+  days?: number
+  limit?: number
+  source?: string
+  type?: string
+  extColumns?: string
+}
+
 export const QK = {
   // 全局 / 共享 (Layout 預取)
   capabilities:   ['capabilities'] as const,
@@ -96,7 +105,14 @@ export const QK = {
   // Monitor (監控規則 + 觸發記錄)
   monitorRules:         ['monitor-rules'] as const,
   monitorRuleOptions:   ['monitor-rule-options'] as const,
-  alerts:               (source?: string) => ['alerts', source ?? ''] as const,
+  alertsAll:            ['alerts'] as const,
+  alerts:               (params: AlertsKeyParams) => ['alerts', {
+                           days: params.days ?? null,
+                           limit: params.limit ?? null,
+                           source: params.source ?? null,
+                           type: params.type ?? null,
+                           extColumns: params.extColumns ?? null,
+                         }] as const,
   taiwanQuotes:         (symbols: string) => ['taiwan-quotes', symbols] as const,
   taiwanSearch:         (q: string) => ['taiwan-search', q] as const,
   taiwanStockDetail:    (symbol: string, days?: number) => ['taiwan-stock-detail', symbol, days ?? 120] as const,
