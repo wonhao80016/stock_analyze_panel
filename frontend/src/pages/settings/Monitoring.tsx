@@ -15,9 +15,11 @@ import {
   useQuoteInterval,
 } from '@/lib/useSharedQueries'
 import { useUpdateQuoteInterval, useToggleRealtimeQuotes } from '@/lib/useSharedMutations'
-import { api } from '@/lib/api'
+import { api, type Preferences } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
+
+const DEFAULT_CHANNELS_MUTATION_KEY = ['webhook-default-channels'] as const
 
 // 頁面 → 顯示名
 const PAGE_LABELS: Record<string, string> = {
@@ -106,13 +108,25 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
   }, [qc])
 
-  // 勾選/取消勾選某個預設推播渠道 (LINE / Telegram 各自獨立)
-  const toggleDefaultChannel = useCallback(async (ch: string, enabled: boolean) => {
-    const cur = prefs?.webhook_default_channels ?? []
-    const next = enabled ? [...cur, ch] : cur.filter(c => c !== ch)
-    await api.updateWebhookDefaultChannels(next)
-    qc.invalidateQueries({ queryKey: QK.preferences })
-  }, [qc, prefs])
+  // Saves run one at a time and each sends the full list built from the optimistic cache,
+  // so ticking LINE and Telegram in quick succession keeps both.
+  const saveDefaultChannels = useMutation({
+    mutationKey: DEFAULT_CHANNELS_MUTATION_KEY,
+    scope: { id: 'webhook-default-channels' },
+    mutationFn: (channels: string[]) => api.updateWebhookDefaultChannels(channels),
+    onSettled: () => {
+      if (qc.isMutating({ mutationKey: DEFAULT_CHANNELS_MUTATION_KEY }) <= 1) {
+        qc.invalidateQueries({ queryKey: QK.preferences })
+      }
+    },
+  })
+  const toggleDefaultChannel = (ch: string, enabled: boolean) => {
+    const cur = qc.getQueryData<Preferences>(QK.preferences)?.webhook_default_channels ?? prefs?.webhook_default_channels ?? []
+    const next = enabled ? [...cur.filter(c => c !== ch), ch] : cur.filter(c => c !== ch)
+    qc.cancelQueries({ queryKey: QK.preferences })
+    qc.setQueryData<Preferences>(QK.preferences, prev => (prev ? { ...prev, webhook_default_channels: next } : prev))
+    saveDefaultChannels.mutate(next)
+  }
 
   const saveSystemNotify = useCallback(async (enabled: boolean) => {
     try {

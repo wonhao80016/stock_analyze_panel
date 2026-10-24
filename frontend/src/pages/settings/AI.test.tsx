@@ -10,6 +10,7 @@ vi.mock('@/lib/api', () => ({
     saveAiSettings: vi.fn().mockResolvedValue({ ok: true, ai_provider: 'openai_compat' }),
     clearAiSettings: vi.fn().mockResolvedValue({ ok: true }),
     strategyAiTest: vi.fn().mockResolvedValue({ ok: true }),
+    testAiSettings: vi.fn().mockResolvedValue({ ok: false, error: 'AI 服务请求失败(401): invalid key' }),
   },
 }))
 
@@ -137,5 +138,106 @@ describe('SettingsAIPanel empty API address', () => {
     fireEvent.change(baseUrlInput, { target: { value: 'https://api.deepseek.com/v1' } })
     expect(screen.queryByText(/請填寫 API 位址/)).not.toBeInTheDocument()
     expect(api.saveAiSettings).not.toHaveBeenCalled()
+  })
+})
+
+describe('SettingsAIPanel connection test', () => {
+  const configured = () => settings({
+    ai_base_url: 'https://api.example.com/v1',
+    ai_model: 'saved-model',
+    ai_api_key_masked: 'sk-1......k1',
+    has_ai_key: true,
+    ai_configured: true,
+  })
+
+  it('tests an unsaved key without writing it to the saved settings', async () => {
+    renderPanel(configured())
+    await waitFor(() => expect(screen.getByPlaceholderText('your-model-id')).toHaveValue('saved-model'))
+
+    fireEvent.change(screen.getByPlaceholderText(/留空不修改/), { target: { value: 'sk-new-key-2' } })
+    const keyField = screen.getByPlaceholderText(/留空不修改/).closest('div.flex.gap-2')!
+    fireEvent.click(within(keyField as HTMLElement).getByRole('button', { name: '測試' }))
+
+    await waitFor(() => expect(screen.getByText(/invalid key/)).toBeInTheDocument())
+    expect(api.saveAiSettings).not.toHaveBeenCalled()
+    expect(api.testAiSettings).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(api.testAiSettings).mock.calls[0][0]).toMatchObject({
+      base_url: 'https://api.example.com/v1',
+      model: 'saved-model',
+      api_key: 'sk-new-key-2',
+    })
+    expect(screen.getByText('saved-model · sk-1......k1')).toBeInTheDocument()
+  })
+
+  it('tests the saved configuration from the status card without saving the form', async () => {
+    renderPanel(configured())
+    await waitFor(() => expect(screen.getByPlaceholderText('your-model-id')).toHaveValue('saved-model'))
+
+    fireEvent.change(screen.getByPlaceholderText('your-model-id'), { target: { value: 'draft-model' } })
+    const statusCard = screen.getByText('連線狀態').closest('section')!
+    fireEvent.click(within(statusCard).getByRole('button', { name: '測試' }))
+
+    await waitFor(() => expect(api.strategyAiTest).toHaveBeenCalledTimes(1))
+    expect(api.saveAiSettings).not.toHaveBeenCalled()
+    expect(api.testAiSettings).not.toHaveBeenCalled()
+  })
+})
+
+describe('SettingsAIPanel changed API address', () => {
+  it('asks for a new key instead of saving the saved key against a new address', async () => {
+    renderPanel(settings({
+      ai_base_url: 'https://api.example.com/v1',
+      ai_model: 'saved-model',
+      ai_api_key_masked: 'sk-1......k1',
+      has_ai_key: true,
+      ai_configured: true,
+    }))
+    await waitFor(() => expect(screen.getByPlaceholderText('your-model-id')).toHaveValue('saved-model'))
+
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value: 'https://other.example/v1' } })
+
+    expect(screen.getByText(/變更 API 位址後請填入該服務的 API Key/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '儲存設定' })).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText(/留空不修改/), { target: { value: 'sk-other' } })
+    expect(screen.getByRole('button', { name: '儲存設定' })).toBeEnabled()
+  })
+})
+
+describe('SettingsAIPanel API address comparison', () => {
+  const renderSaved = (savedUrl: string) => renderPanel(settings({
+    ai_base_url: savedUrl,
+    ai_model: 'saved-model',
+    ai_api_key_masked: 'sk-1......k1',
+    has_ai_key: true,
+    ai_configured: true,
+  }))
+  const typeUrl = (value: string) =>
+    fireEvent.change(screen.getByPlaceholderText('https://api.example.com/v1'), { target: { value } })
+
+  it.each([
+    ['https://api.example.com', 'https://api.example.com/v1/'],
+    ['https://api.example.com/v1', 'https://api.example.com/v1/chat/completions'],
+    ['https://open.example.com/api/paas/v4', ' https://open.example.com/api/paas/v4/ '],
+  ])('treats %s and %s as the same address, like the backend', async (saved, typed) => {
+    renderSaved(saved)
+    await waitFor(() => expect(screen.getByPlaceholderText('your-model-id')).toHaveValue('saved-model'))
+
+    typeUrl(typed)
+
+    expect(screen.queryByText(/變更 API 位址後請填入該服務的 API Key/)).toBeNull()
+    expect(screen.getByRole('button', { name: '儲存設定' })).toBeEnabled()
+  })
+
+  it.each([
+    ['https://api.example.com/v1', 'https://api.example.com/V1'],
+    ['https://api.example.com/v1', 'https://API.example.com/v1'],
+  ])('treats %s and %s as different addresses, like the backend', async (saved, typed) => {
+    renderSaved(saved)
+    await waitFor(() => expect(screen.getByPlaceholderText('your-model-id')).toHaveValue('saved-model'))
+
+    typeUrl(typed)
+
+    expect(screen.getByText(/變更 API 位址後請填入該服務的 API Key/)).toBeInTheDocument()
   })
 })

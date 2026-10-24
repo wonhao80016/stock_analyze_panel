@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsMutating, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Download,
   RefreshCw,
@@ -18,6 +18,10 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
+import { JOB_POLL_INTERVAL_MS, JOB_POLL_MAX_FAILURES, JOB_POLL_RETRY_MS, isMissingJobError } from './jobPolling'
+
+// The mutation cache outlives this card, so a remounted card still sees an update in flight.
+const UPDATE_LATEST_MUTATION_KEY = ['taiwan-update-latest'] as const
 
 export function TaiwanHistoryDataCard() {
   const qc = useQueryClient()
@@ -39,6 +43,7 @@ export function TaiwanHistoryDataCard() {
   const bootstrapMutation = useMutation({
     mutationFn: api.taiwanBootstrapRun,
     onSuccess: (res) => {
+      setActiveJob(null)
       setActiveJobId(res.job_id)
       toast('台股歷史日 K 下載任務已啟動', 'success')
     },
@@ -49,6 +54,7 @@ export function TaiwanHistoryDataCard() {
 
   // 3. 觸發「更新到最新」增量補齊
   const updateLatestMutation = useMutation({
+    mutationKey: UPDATE_LATEST_MUTATION_KEY,
     mutationFn: api.taiwanUpdateLatest,
     onSuccess: (res) => {
       toast(res.message || '更新完成', 'success')
@@ -78,11 +84,13 @@ export function TaiwanHistoryDataCard() {
 
     let cancelled = false
     let timerId: any = null
+    let failures = 0
 
     const checkProgress = async () => {
       try {
-        const job = await api.taiwanBootstrapJob(activeJobId)
+        const job = await api.taiwanBootstrapJob(activeJobId, { quiet: true })
         if (cancelled) return
+        failures = 0
         setActiveJob(job)
 
         if (job.status === 'success') {
@@ -99,11 +107,20 @@ export function TaiwanHistoryDataCard() {
           return
         }
 
-        timerId = setTimeout(checkProgress, 800)
+        timerId = setTimeout(checkProgress, JOB_POLL_INTERVAL_MS)
       } catch (err: any) {
-        if (!cancelled) {
-          timerId = setTimeout(checkProgress, 2000)
+        if (cancelled) return
+        if (isMissingJobError(err)) {
+          toast('下載任務已遺失（後端可能已重新啟動），請重新檢查資料狀態', 'error')
+        } else if (++failures >= JOB_POLL_MAX_FAILURES) {
+          toast(`無法取得下載進度: ${err?.message || err}`, 'error')
+        } else {
+          timerId = setTimeout(checkProgress, JOB_POLL_RETRY_MS)
+          return
         }
+        setActiveJob(null)
+        setActiveJobId(null)
+        qc.invalidateQueries({ queryKey: QK.taiwanHistoryStatus })
       }
     }
 
@@ -120,6 +137,7 @@ export function TaiwanHistoryDataCard() {
     (activeJob !== null &&
       activeJob.status !== 'success' &&
       activeJob.status !== 'failed')
+  const isUpdatingLatest = useIsMutating({ mutationKey: UPDATE_LATEST_MUTATION_KEY }) > 0
 
   const assetInfo = historyStatus?.asset_info
   const approxSize = assetInfo?.approx_size_mb ?? 31
@@ -158,16 +176,16 @@ export function TaiwanHistoryDataCard() {
           {historyStatus?.has_data && (
             <button
               type="button"
-              disabled={updateLatestMutation.isPending || isJobRunning}
+              disabled={isUpdatingLatest || isJobRunning}
               onClick={() => updateLatestMutation.mutate()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent text-white text-xs font-medium hover:bg-accent/90 transition-colors disabled:opacity-50"
             >
               <RefreshCw
                 className={`h-3.5 w-3.5 ${
-                  updateLatestMutation.isPending ? 'animate-spin' : ''
+                  isUpdatingLatest ? 'animate-spin' : ''
                 }`}
               />
-              {updateLatestMutation.isPending ? '正在更新行情...' : '更新到最新'}
+              {isUpdatingLatest ? '正在更新行情...' : '更新到最新'}
             </button>
           )}
 
@@ -252,7 +270,7 @@ export function TaiwanHistoryDataCard() {
             </span>
             <button
               type="button"
-              disabled={bootstrapMutation.isPending || isJobRunning}
+              disabled={bootstrapMutation.isPending || isJobRunning || isUpdatingLatest}
               onClick={() => {
                 if (
                   window.confirm(
@@ -262,7 +280,7 @@ export function TaiwanHistoryDataCard() {
                   bootstrapMutation.mutate()
                 }
               }}
-              className="text-[11px] text-muted hover:text-accent underline transition-colors"
+              className="text-[11px] text-muted hover:text-accent underline transition-colors disabled:opacity-50 disabled:no-underline"
             >
               重新下載完整歷史資料包
             </button>

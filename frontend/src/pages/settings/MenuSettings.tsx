@@ -19,7 +19,7 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { Eye, EyeOff, ExternalLink, GripVertical, Bell } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { api } from '@/lib/api'
+import { api, type Preferences } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { CORE_NAV } from '@/lib/navigation'
@@ -38,6 +38,8 @@ interface NavEntry {
 const BUILTIN_PAGES: NavEntry[] = CORE_NAV.map(n => ({
   id: n.to, label: n.label, type: 'builtin' as const, visible: true,
 }))
+
+const NAV_HIDDEN_MUTATION_KEY = ['nav-hidden'] as const
 
 // ── Sortable row ──
 
@@ -213,9 +215,17 @@ export function SettingsMenuSettingsPanel() {
     },
   })
 
+  // Saves run one at a time and each sends the full list built from the optimistic cache,
+  // so a quick second toggle can neither be built from a stale snapshot nor overtaken.
   const saveNavHidden = useMutation({
+    mutationKey: NAV_HIDDEN_MUTATION_KEY,
+    scope: { id: 'nav-hidden' },
     mutationFn: (hidden: string[]) => api.saveNavHidden(hidden),
-    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
+    onSettled: () => {
+      if (qc.isMutating({ mutationKey: NAV_HIDDEN_MUTATION_KEY }) <= 1) {
+        qc.invalidateQueries({ queryKey: QK.preferences })
+      }
+    },
   })
 
   const sensors = useSensors(
@@ -236,10 +246,11 @@ export function SettingsMenuSettingsPanel() {
   }
 
   const toggleHidden = (id: string) => {
-    const next = new Set(hiddenSet)
-    if (next.has(id)) next.delete(id)
-    else next.add(id)
-    saveNavHidden.mutate([...next])
+    const current = qc.getQueryData<Preferences>(QK.preferences)?.nav_hidden ?? prefs?.nav_hidden ?? []
+    const next = current.includes(id) ? current.filter(h => h !== id) : [...current, id]
+    qc.cancelQueries({ queryKey: QK.preferences })
+    qc.setQueryData<Preferences>(QK.preferences, prev => (prev ? { ...prev, nav_hidden: next } : prev))
+    saveNavHidden.mutate(next)
   }
 
   // 監控中心徽標開關 (localStorage)

@@ -25,7 +25,7 @@ def test_create_singleflight_dedupes_pending_window(monkeypatch, tmp_path):
 
     jid1, new1 = store.create()
     assert new1 is True
-    assert store.get(jid1)["timeout_s"] == 3600
+    assert store.get(jid1)["timeout_s"] == pipeline_jobs.DEFAULT_JOB_TIMEOUT_S
 
     # 尚未 start(), job 仍是 pending —— 旧实现会在此另起新 job(并发双跑根因)
     jid2, new2 = store.create()
@@ -44,7 +44,7 @@ def test_create_new_after_terminal(monkeypatch, tmp_path):
     monkeypatch.setattr(preferences, "load", lambda: {"data_source_long_job_timeout_s": 5400})
     store = JobStore(store_dir=tmp_path / "jobs")
     jid1, _ = store.create(long_running=True)
-    assert store.get(jid1)["timeout_s"] == 5400
+    assert store.get(jid1)["timeout_s"] == pipeline_jobs.LONG_JOB_TIMEOUT_S
     store.start(jid1)
     store.succeed(jid1, {"ok": True})
 

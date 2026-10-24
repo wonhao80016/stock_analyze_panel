@@ -104,7 +104,7 @@ datasets:
 
 | 內部字段 | 含義 |
 | --- | --- |
-| `symbol` | 標準代碼,如 `000001.SZ` |
+| `symbol` | 標準代碼,如 `2330.TWSE` |
 | `date` | 交易日 |
 | `open` / `high` / `low` / `close` | 不復權 OHLC |
 | `volume` | 成交量 |
@@ -155,7 +155,7 @@ datasets:
 
 - `daily` / `adj_factor` 會按 `batch` 切分 symbols。
 - POST 請求會發送 JSON body: `symbols`、`start_time`、`end_time`。
-- GET 請求會發送 query 參數: `symbols=000001.SZ,600000.SH`。
+- GET 請求會發送 query 參數: `symbols=2330.TWSE,6488.TPEX`。
 - `realtime` 必須是全市場快照接口,不支持逐個 symbol 拉實時行情。
 
 可通過這些字段改參數名:
@@ -235,9 +235,8 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
 
 5. 保存數據源選擇:
 
-- 日K: `mock_source`
-- 除權因子: `same_as_daily` 或 `mock_source`
-- 實時行情: `mock_source`
+- 實時行情: `mock_source`(分鐘K 同理,前提是該源配置了 `minute`)
+- 日K 與除權因子在台股模式固定使用台灣官方資料源,不能切換到自訂源; 後端讀取時一律回傳官方值,`PUT /api/settings/preferences/data-providers` 收到自訂值會回 400。上面試拉 `daily` / `adj_factor` 只用來核對欄位映射。
 
 6. 觸發同步或開啟實時行情。
 
@@ -279,7 +278,7 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
 內部字段對照表:
 
 日K (daily):
-  symbol = 股票代碼, 格式 000001.SZ / 600000.SH
+  symbol = 股票代碼, 格式 2330.TWSE / 6488.TPEX
   date = 交易日期
   open / high / low / close = OHLC
   volume = 成交量

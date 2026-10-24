@@ -18,6 +18,7 @@ daily_pipeline.py 的 start_scheduler() 读取排程时间)等底层能力完全
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -223,6 +224,21 @@ class AiSettingsIn(BaseModel):
     context_window: int | None = None      # 输入上下文窗口上限 (约 token)
 
 
+_NEW_URL_NEEDS_KEY = "變更 API 位址時必須同時填入該服務的 API Key, 已儲存的 Key 不會送往新位址"
+
+
+def _moves_saved_key_to_new_url(req: AiSettingsIn) -> bool:
+    """True when the request changes base_url but would reuse the saved key there."""
+    from app.services import ai_provider
+
+    if req.api_key is not None or not req.base_url.strip() or not secrets_store.get_ai_key():
+        return False
+    saved = ai_provider.current_ai_base_url()
+    if not saved:
+        return False
+    return ai_provider.normalize_openai_base_url(req.base_url.strip()) != ai_provider.normalize_openai_base_url(saved)
+
+
 @router.post("/ai")
 def save_ai_settings(req: AiSettingsIn) -> dict:
     """保存 AI 配置（全部持久化到 secrets.json）"""
@@ -243,6 +259,9 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         normalize_codex_model,
         normalize_codex_reasoning_effort,
     )
+
+    if req.provider != "codex_cli" and _moves_saved_key_to_new_url(req):
+        raise HTTPException(status_code=400, detail=_NEW_URL_NEEDS_KEY)
 
     updates: dict = {}
     if req.provider:
@@ -310,6 +329,65 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     }
 
 
+@router.post("/ai/test")
+async def probe_ai_settings(req: AiSettingsIn) -> dict:
+    """Send one short prompt with a candidate AI configuration; nothing is persisted.
+
+    Blank fields fall back to the saved values exactly as POST /ai would keep them.
+    """
+    from openai import AsyncOpenAI
+
+    from app.config import settings
+    from app.services import ai_provider
+
+    if req.provider == ai_provider.CODEX_CLI_PROVIDER:
+        raise HTTPException(status_code=400, detail="Codex CLI 不支援測試未儲存的設定")
+    for value, label in ((req.max_output_tokens, "输出上限"), (req.context_window, "上下文窗口")):
+        if value is not None and value <= 0:
+            raise HTTPException(status_code=400, detail=f"{label}必须为正整数")
+    if _moves_saved_key_to_new_url(req):
+        raise HTTPException(status_code=400, detail=_NEW_URL_NEEDS_KEY)
+
+    base_url = (req.base_url or ai_provider.current_ai_base_url()).strip()
+    api_key = secrets_store.get_ai_key() if req.api_key is None else req.api_key
+    model = (req.model or ai_provider.current_openai_model()).strip()
+    if not base_url:
+        return {"ok": False, "error": "未設定 AI 服務: 請填寫 API 位址"}
+    if not api_key:
+        return {"ok": False, "error": "AI API Key 未配置, 请在设置页配置"}
+    if not model:
+        return {"ok": False, "error": "未設定 AI 模型: 請填寫模型"}
+
+    max_output_tokens = req.max_output_tokens or ai_provider.current_ai_max_output_tokens()
+    kwargs: dict = {"max_tokens": min(8, max_output_tokens), "temperature": 0}
+    if req.provider == ai_provider.OPENAI_PROVIDER and req.reasoning_effort.strip():
+        kwargs["reasoning_effort"] = req.reasoning_effort.strip()
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=ai_provider.normalize_openai_base_url(base_url),
+        timeout=15,
+        max_retries=0,
+        default_headers={"User-Agent": req.user_agent or settings.ai_user_agent},
+    )
+    messages = [{"role": "user", "content": "Reply exactly: OK"}]
+    try:
+        async with client:
+            while True:
+                try:
+                    resp = await client.chat.completions.create(model=model, messages=messages, **kwargs)
+                    break
+                except Exception as exc:
+                    retry_kwargs = ai_provider._openai_retry_kwargs(exc, kwargs)
+                    if retry_kwargs is None:
+                        raise
+                    kwargs = retry_kwargs
+    except Exception as exc:
+        error = ai_provider._format_openai_error(exc) if ai_provider._is_openai_transport_error(exc) else str(exc)
+        return {"ok": False, "error": error or repr(exc), "error_type": type(exc).__name__}
+    text = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+    return {"ok": True, "model": model, "response": text[:80]}
+
+
 @router.delete("/ai")
 def clear_ai_settings() -> dict:
     """一键清空 AI 配置(provider / base_url / api_key / model)。
@@ -357,6 +435,11 @@ class MinuteSyncPrefs(BaseModel):
     minute_sync_segment_days: int | None = None
 
 
+_OFFICIAL_PROVIDERS = {"taiwan", "tickflow"}
+# Routing values and settings-page keys that a custom source name must not shadow.
+_RESERVED_SOURCE_NAMES = _OFFICIAL_PROVIDERS | {"same_as_daily", "__new__"}
+
+
 class DataProvidersIn(BaseModel):
     daily_data_provider: str | None = None
     adj_factor_provider: str | None = None
@@ -368,11 +451,6 @@ class DataProvidersIn(BaseModel):
 class PluginKeyIn(BaseModel):
     plugin: str
     api_key: str
-
-
-class DataSourceJobTimeoutPrefs(BaseModel):
-    data_source_job_timeout_s: int = Field(ge=60)
-    data_source_long_job_timeout_s: int = Field(ge=60)
 
 
 class DatasetFieldMapItem(BaseModel):
@@ -448,8 +526,6 @@ def get_preferences() -> dict:
         "minute_data_provider": preferences.get_minute_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
-        "data_source_job_timeout_s": preferences.get_data_source_job_timeout_s(),
-        "data_source_long_job_timeout_s": preferences.get_data_source_long_job_timeout_s(),
         "realtime_watchlist_symbols": preferences.get_realtime_watchlist_symbols(),
         **preferences.get_realtime_quote_scope(),
         "pipeline_pull_a_share": preferences.get_pipeline_pull_a_share(),
@@ -614,15 +690,88 @@ def get_data_source(name: str) -> dict:
 
 @router.post("/data-sources")
 def save_data_source(req: CustomSourceIn) -> dict:
-    """创建或更新一个自定义数据源 yaml, 保存后自动 reload。"""
+    """新建一个自定义数据源 yaml; 名称已被占用时回 409, 不覆盖既有设定。"""
     from app.data_providers import custom as custom_sources
+    name = _checked_source_name(req.name)
+    base = custom_sources.data_sources_dir()
+    if (
+        name in _RESERVED_SOURCE_NAMES
+        or custom_sources.is_builtin(name)
+        or name in custom_sources.names()
+        or _source_files_declaring(name)
+        or (base / f"{name}.yaml").exists()
+        or (base / f"{name}.yml").exists()
+    ):
+        raise HTTPException(status_code=409, detail=f"資料來源名稱「{name}」已被使用")
+    return _write_data_source(req, base / f"{name}.yaml")
+
+
+@router.put("/data-sources/{name}")
+def update_data_source(name: str, req: CustomSourceIn) -> dict:
+    """更新一个既有的自定义数据源 yaml(含载入失败的), 保存后自动 reload。"""
+    from app.data_providers import custom as custom_sources
+    name = _checked_source_name(name)
+    if (req.name or "").lower() != name:
+        raise HTTPException(status_code=400, detail="不能在編輯時更改資料來源名稱")
+    existing = [] if custom_sources.is_builtin(name) else _source_files_declaring(name)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"数据源 '{name}' 不存在")
+    if len(existing) > 1:
+        files = ", ".join(p.name for p in existing)
+        raise HTTPException(status_code=409, detail=f"有多個設定檔宣告了資料來源「{name}」({files}), 請先手動合併或刪除多餘的檔案")
+    return _write_data_source(req, existing[0])
+
+
+def _checked_source_name(raw: str | None) -> str:
+    """Lowercased source name; rejected before any path is built from it."""
+    from app.data_providers.custom.loader import _NAME_RE
+
+    name = (raw or "").lower()
+    if not _NAME_RE.match(name):
+        raise HTTPException(status_code=400, detail=f"資料來源名稱「{raw}」只能使用小寫字母、數字與底線")
+    return name
+
+
+def _source_files_declaring(name: str) -> list[Path]:
+    """Config files whose content declares *name*, whatever their file name or suffix.
+
+    A file that cannot be parsed counts as declaring its stem, the name the loader would give it.
+    """
+    from app.data_providers import custom as custom_sources
+    from app.data_providers.custom.config import load_config
+
+    base = custom_sources.data_sources_dir()
+    found: list[Path] = []
+    for file in sorted([*base.glob("*.yaml"), *base.glob("*.yml")]):
+        try:
+            declared = load_config(file).name
+        except Exception:
+            declared = file.stem.lower()
+        if declared == name:
+            found.append(file.resolve())
+    return found
+
+
+def _write_data_source(req: CustomSourceIn, target: Path) -> dict:
+    """Validate the config and atomically write it to *target* inside the data source directory."""
+    import yaml
+
+    from app.data_providers import custom as custom_sources
+    from app.data_providers.custom.loader import _sanitize_for_yaml
+    from app.taiwan.universe.service import write_atomically
+
     config = req.model_dump()
     config["name"] = (config.get("name") or "").lower()
+    base = custom_sources.data_sources_dir().resolve()
+    target = target.resolve()
+    if target.parent != base:
+        raise HTTPException(status_code=400, detail="invalid data source path")
     try:
         errors = custom_sources.validate_config(config)
         if errors:
             raise ValueError("資料來源設定無法載入, 未儲存: " + "; ".join(errors))
-        custom_sources.save_config(config["name"], config)
+        text = yaml.safe_dump(_sanitize_for_yaml(config), allow_unicode=True, sort_keys=False)
+        write_atomically(target, lambda tmp: tmp.write_text(text, encoding="utf-8"))
         custom_sources.load_all()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -690,6 +839,10 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
+    if updates.get("daily_data_provider", "taiwan").lower() not in _OFFICIAL_PROVIDERS:
+        raise HTTPException(status_code=400, detail="台股日K固定由台灣官方資料源提供, 不能切換")
+    if updates.get("adj_factor_provider", "same_as_daily").lower() not in _OFFICIAL_PROVIDERS | {"same_as_daily"}:
+        raise HTTPException(status_code=400, detail="台股除權因子固定來自公司行動表, 不能切換")
     if updates:
         preferences.save(updates)
     # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
@@ -701,14 +854,6 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
     }
-
-
-@router.put("/preferences/data-source-job-timeouts")
-def update_data_source_job_timeouts(req: DataSourceJobTimeoutPrefs) -> dict:
-    """保存普通与长数据后台任务的卡死判定时间。"""
-    from app.services import preferences
-    preferences.save(req.model_dump())
-    return req.model_dump()
 
 
 @router.put("/preferences/mining-schedule")

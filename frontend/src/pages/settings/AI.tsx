@@ -33,6 +33,14 @@ const PRESETS: AiPreset[] = [
 
 const findPreset = (provider: string) => PRESETS.find(p => p.provider === provider) ?? PRESETS[0]
 
+// Mirrors normalize_openai_base_url in backend/app/services/ai_provider.py; keep both in step.
+const VERSION_SEGMENT_RE = /\/v\d+(?:\.\d+)?$/i
+function normalizeOpenAIBaseUrl(url: string): string {
+  let base = url.trim().replace(/\/+$/, '')
+  if (base.endsWith('/chat/completions')) base = base.slice(0, -'/chat/completions'.length).replace(/\/+$/, '')
+  return VERSION_SEGMENT_RE.test(base) ? base : `${base}/v1`
+}
+
 export function SettingsAIPanel() {
   const qc = useQueryClient()
   const settings = useSettings()
@@ -63,7 +71,10 @@ export function SettingsAIPanel() {
   const configured = s?.ai_configured ?? s?.has_ai_key
   const selectedPreset = PRESETS.find(p => p.label === selectedPresetLabel) ?? PRESETS[0]
   const configTitle = isOpenAIProvider ? 'OpenAI 設定' : '自訂設定'
-  const canSave = !!baseUrl.trim() && !!model.trim()
+  // The backend refuses to reuse the saved key at a different address, so a new address needs its key.
+  const urlNeedsNewKey = !!s?.has_ai_key && !!s?.ai_base_url?.trim() && !!baseUrl.trim() && !apiKey
+    && normalizeOpenAIBaseUrl(baseUrl) !== normalizeOpenAIBaseUrl(s.ai_base_url)
+  const canSave = !!baseUrl.trim() && !!model.trim() && !urlNeedsNewKey
 
   useEffect(() => {
     if (!s) return
@@ -209,15 +220,16 @@ export function SettingsAIPanel() {
     if (isOpenAIProvider) directDrafts.current.openai.model = value
   }
 
-  const handleTest = async () => {
+  // Neither test writes settings: the status card probes the saved configuration, the form probes its draft.
+  const runTest = async (target: 'saved' | 'draft') => {
     setTesting(true)
     setTestResult(null)
+    const label = target === 'saved' ? '已儲存設定' : '目前表單(未儲存)'
     try {
-      if (canSave) await api.saveAiSettings(payload())
-      const r = await api.strategyAiTest()
-      setTestResult({ ok: r.ok, msg: r.ok ? `連線成功 · ${r.model ?? provider}` : (r.error ?? '未知錯誤') })
+      const r = target === 'saved' ? await api.strategyAiTest() : await api.testAiSettings(payload())
+      setTestResult({ ok: r.ok, msg: `${label}:${r.ok ? `連線成功 · ${r.model ?? provider}` : (r.error ?? '未知錯誤')}` })
     } catch (e: any) {
-      setTestResult({ ok: false, msg: String(e?.message ?? '測試失敗') })
+      setTestResult({ ok: false, msg: `${label}:${String(e?.message ?? '測試失敗')}` })
     } finally {
       setTesting(false)
     }
@@ -227,7 +239,7 @@ export function SettingsAIPanel() {
     <div className="space-y-5 max-w-2xl">
       <Card icon={Plug} title="連線狀態" right={
         configured && (
-          <button onClick={handleTest} disabled={testing}
+          <button onClick={() => runTest('saved')} disabled={testing}
             className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-btn bg-elevated hover:bg-elevated/80 text-xs text-secondary transition-colors duration-150 ease-smooth disabled:opacity-50">
             {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wifi className="h-3 w-3" />}
             {testing ? '測試中' : '測試'}
@@ -315,7 +327,7 @@ export function SettingsAIPanel() {
             </div>
           )}
 
-          <Field label="API Key">
+          <Field label="API Key" hint={urlNeedsNewKey ? '變更 API 位址後請填入該服務的 API Key,已儲存的 Key 不會送往新位址' : undefined}>
             <div className="flex gap-2">
               <div className="flex-1 relative">
                 <input type={showKey ? 'text' : 'password'} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={configured ? `${s?.ai_api_key_masked} · 留空不修改` : 'sk-...'} className={`${INPUT_CLS} pr-9`} />
@@ -323,7 +335,7 @@ export function SettingsAIPanel() {
                   {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                 </button>
               </div>
-              <button onClick={handleTest} disabled={testing || !apiKey} className="h-9 px-3 rounded-lg border border-border/50 text-xs text-secondary hover:text-accent hover:border-accent/30 disabled:opacity-40 transition-all flex items-center gap-1.5 shrink-0">
+              <button onClick={() => runTest('draft')} disabled={testing || !apiKey} className="h-9 px-3 rounded-lg border border-border/50 text-xs text-secondary hover:text-accent hover:border-accent/30 disabled:opacity-40 transition-all flex items-center gap-1.5 shrink-0">
                 {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wifi className="h-3 w-3" />}
                 測試
               </button>

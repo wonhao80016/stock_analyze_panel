@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { CustomSourceConfig } from '@/lib/api'
 import { DataSourceEditor } from './DataSourceEditor'
@@ -8,6 +8,7 @@ vi.mock('@/lib/api', () => ({
   api: {
     dataSource: vi.fn(),
     saveDataSource: vi.fn(),
+    updateDataSource: vi.fn(),
     testDataSource: vi.fn(),
   },
 }))
@@ -90,5 +91,168 @@ describe('DataSourceEditor ratio units', () => {
     fireEvent.click(screen.getByText('測試'))
 
     expect(await screen.findByText(/turnover_rate = 0.0015/)).toBeInTheDocument()
+  })
+})
+
+describe('DataSourceEditor new source name', () => {
+  const renderNew = (takenNames: string[]) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <DataSourceEditor
+          initial={null}
+          takenNames={takenNames}
+          onCancel={() => {}}
+          onSaved={() => {}}
+          activeName=""
+          onActivate={() => {}}
+        />
+      </QueryClientProvider>,
+    )
+  }
+
+  it.each(['mysrc', 'MySrc ', 'taiwan', 'tickflow', '__new__'])('refuses to create a source named %j', async (name) => {
+    const { api } = await import('@/lib/api')
+    vi.mocked(api.saveDataSource).mockClear()
+    renderNew(['mysrc'])
+
+    fireEvent.change(screen.getByPlaceholderText('my_tushare'), { target: { value: name } })
+    fireEvent.click(screen.getByRole('button', { name: /儲存/ }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('已被使用')
+    expect(api.saveDataSource).not.toHaveBeenCalled()
+  })
+})
+
+describe('DataSourceEditor dataset list', () => {
+  it('keeps the enable toggles outside the row buttons and labels them', () => {
+    const { container } = renderEditor({ name: 'demo', display_name: 'demo', auth: { type: 'none' }, datasets: {} })
+
+    expect(container.querySelectorAll('button button')).toHaveLength(0)
+    expect(screen.getByRole('button', { name: '日K 啟用' })).toBeInTheDocument()
+  })
+
+  it('describes Taiwan symbols and the built-in fallback', () => {
+    renderEditor({
+      name: 'demo',
+      display_name: 'demo',
+      auth: { type: 'none' },
+      datasets: { daily: { url: 'http://example.test/daily', method: 'GET', response_path: '', field_map: { code: 'symbol' } } },
+    })
+
+    const option = screen.getAllByRole('option').find(item => item.getAttribute('value') === 'symbol')!
+    expect(option.textContent).toContain('2330.TWSE')
+    expect(option.textContent).not.toMatch(/\.SZ|\.SH/)
+    expect(screen.queryByText('回退 TF')).toBeNull()
+    expect(screen.getAllByText('回退內建').length).toBeGreaterThan(0)
+    expect(screen.getByPlaceholderText('測試標的,逗號分隔')).toHaveValue('2330.TWSE,6488.TPEX')
+  })
+})
+
+describe('DataSourceEditor field map rows', () => {
+  it('gives an added row its own identity when there are more mappings than target fields', () => {
+    const fieldMap = Object.fromEntries(
+      Array.from({ length: 9 }, (_, i) => [`src${i + 1}`, i === 8 ? 'amount' : 'close']),
+    )
+    renderEditor({
+      name: 'demo',
+      display_name: 'demo',
+      auth: { type: 'none' },
+      datasets: { daily: { url: 'http://example.test/daily', method: 'GET', response_path: '', field_map: fieldMap } },
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /新增對應/ }))
+    const inputs = screen.getAllByPlaceholderText('外部欄位名')
+    expect(inputs).toHaveLength(10)
+    fireEvent.change(inputs[9], { target: { value: 'fresh' } })
+
+    const after = screen.getAllByPlaceholderText('外部欄位名')
+    expect(after[8]).toHaveValue('src9')
+    expect(after[9]).toHaveValue('fresh')
+  })
+})
+
+describe('DataSourceEditor existing source', () => {
+  const renderExisting = (config: CustomSourceConfig, onActivate = vi.fn()) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DataSourceEditor
+          existingName={config.name}
+          initial={config}
+          onCancel={() => {}}
+          onSaved={() => {}}
+          activeName=""
+          onActivate={onActivate}
+        />
+      </QueryClientProvider>,
+    )
+    return onActivate
+  }
+  const daily = { url: 'http://example.test/daily', method: 'GET', response_path: '', field_map: { c: 'close' } }
+
+  it('saves an edit through the update endpoint', async () => {
+    const { api } = await import('@/lib/api')
+    vi.mocked(api.saveDataSource).mockClear()
+    vi.mocked(api.updateDataSource).mockResolvedValue({} as never)
+    renderExisting({ name: 'mysrc', display_name: 'My Source', auth: { type: 'none' }, datasets: { daily } })
+
+    fireEvent.click(screen.getByRole('button', { name: /儲存/ }))
+
+    await waitFor(() => expect(api.updateDataSource).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(api.updateDataSource).mock.calls[0][0]).toBe('mysrc')
+    expect(api.saveDataSource).not.toHaveBeenCalled()
+  })
+
+  it('cannot be switched to when it only offers daily K or adjustment factors', () => {
+    const onActivate = renderExisting({
+      name: 'dailyonly', display_name: 'Daily Only', auth: { type: 'none' },
+      datasets: { daily, adj_factor: { ...daily, field_map: { f: 'ex_factor' } } },
+    })
+
+    const button = screen.getByRole('button', { name: /切換為目前資料來源/ })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('title', expect.stringContaining('台股日K與除權因子固定由台灣官方資料源提供'))
+    fireEvent.click(button)
+    expect(onActivate).not.toHaveBeenCalled()
+  })
+
+  it('can be switched to when it offers realtime quotes', () => {
+    renderExisting({
+      name: 'rt', display_name: 'RT', auth: { type: 'none' },
+      datasets: { realtime: { ...daily, field_map: { p: 'last_price' } } },
+    })
+
+    expect(screen.getByRole('button', { name: /切換為目前資料來源/ })).toBeEnabled()
+  })
+})
+
+describe('DataSourceEditor switch with unsaved edits', () => {
+  it('asks to save before switching while the form has unsaved edits', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const onActivate = vi.fn()
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DataSourceEditor
+          existingName="rt"
+          initial={{
+            name: 'rt', display_name: 'RT', auth: { type: 'none' },
+            datasets: { realtime: { url: 'http://example.test/rt', method: 'GET', response_path: '', field_map: { p: 'last_price' } } },
+          }}
+          onCancel={() => {}}
+          onSaved={() => {}}
+          activeName=""
+          onActivate={onActivate}
+        />
+      </QueryClientProvider>,
+    )
+
+    fireEvent.change(screen.getByPlaceholderText('我的 Tushare'), { target: { value: 'RT edited' } })
+
+    const button = screen.getByRole('button', { name: /切換為目前資料來源/ })
+    expect(button).toBeDisabled()
+    expect(button).toHaveAttribute('title', expect.stringContaining('請先儲存'))
+    fireEvent.click(button)
+    expect(onActivate).not.toHaveBeenCalled()
   })
 })

@@ -1,15 +1,16 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createElement } from 'react'
-import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { api } from '@/lib/api'
+import { ApiError, api } from '@/lib/api'
 import { toast } from '@/components/Toast'
 import { QK } from '@/lib/queryKeys'
 import { TaiwanHistoryDataCard } from './TaiwanHistoryDataCard'
 
-vi.mock('@/lib/api', () => ({
+vi.mock('@/lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api')>()),
   api: {
     taiwanHistoryStatus: vi.fn(),
     taiwanUpdateLatest: vi.fn(),
@@ -187,9 +188,93 @@ describe('TaiwanHistoryDataCard failures and bundle import', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /一鍵下載歷史資料包/ }))
 
-    await waitFor(() => expect(api.taiwanBootstrapJob).toHaveBeenCalledWith('job-1'))
+    await waitFor(() => expect(api.taiwanBootstrapJob).toHaveBeenCalledWith('job-1', { quiet: true }))
     await waitFor(() =>
       expect(queryClient.getQueryState(['taiwanMarketIntelligence'])?.isInvalidated).toBe(true),
     )
+  })
+})
+
+const MISSING_STATUS = {
+  has_data: false,
+  earliest_date: null,
+  latest_date: null,
+  trading_days: 0,
+  needs_bootstrap: true,
+}
+
+const renderCard = (queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })) =>
+  render(createElement(QueryClientProvider, { client: queryClient }, createElement(TaiwanHistoryDataCard)))
+
+describe('TaiwanHistoryDataCard bundle job polling', () => {
+  beforeEach(() => {
+    vi.mocked(api.taiwanBootstrapJob).mockReset()
+    vi.mocked(toast).mockClear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stops polling a job the server no longer knows', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue(MISSING_STATUS)
+    vi.mocked(api.taiwanBootstrapRun).mockResolvedValue({ job_id: 'job-1' } as never)
+    vi.mocked(api.taiwanBootstrapJob).mockRejectedValue(new ApiError('job not found', 404, undefined, '/api/taiwan/bootstrap/jobs/job-1'))
+    renderCard()
+
+    fireEvent.click(await screen.findByRole('button', { name: /一鍵下載歷史資料包/ }, { timeout: 5000 }))
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.stringContaining('任務已遺失'), 'error'))
+    await act(() => vi.advanceTimersByTimeAsync(10_000))
+    expect(api.taiwanBootstrapJob).toHaveBeenCalledTimes(1)
+    expect(api.taiwanBootstrapJob).toHaveBeenCalledWith('job-1', { quiet: true })
+    expect(screen.getByRole('button', { name: /一鍵下載歷史資料包/ })).toBeEnabled()
+  })
+
+  it('gives up after repeated transient failures and reports once', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue(MISSING_STATUS)
+    vi.mocked(api.taiwanBootstrapRun).mockResolvedValue({ job_id: 'job-1' } as never)
+    vi.mocked(api.taiwanBootstrapJob).mockRejectedValue(new Error('502 Bad Gateway'))
+    renderCard()
+
+    fireEvent.click(await screen.findByRole('button', { name: /一鍵下載歷史資料包/ }, { timeout: 5000 }))
+    await waitFor(() => expect(api.taiwanBootstrapJob).toHaveBeenCalled())
+    await act(() => vi.advanceTimersByTimeAsync(60_000))
+
+    const calls = vi.mocked(api.taiwanBootstrapJob).mock.calls
+    expect(calls.length).toBeGreaterThan(1)
+    expect(calls.length).toBeLessThanOrEqual(6)
+    expect(errorToasts()).toHaveLength(1)
+  })
+})
+
+describe('TaiwanHistoryDataCard update to latest while running', () => {
+  it('disables the bundle re-download while an update is running', async () => {
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue(READY_STATUS)
+    vi.mocked(api.taiwanUpdateLatest).mockReturnValue(new Promise(() => {}))
+    renderCard()
+
+    fireEvent.click(await screen.findByRole('button', { name: '更新到最新' }, { timeout: 5000 }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: '重新下載完整歷史資料包' })).toBeDisabled())
+  })
+
+  it('keeps the update locked after the card is remounted', async () => {
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue(READY_STATUS)
+    vi.mocked(api.taiwanUpdateLatest).mockReset()
+    vi.mocked(api.taiwanUpdateLatest).mockReturnValue(new Promise(() => {}))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const first = renderCard(queryClient)
+
+    fireEvent.click(await screen.findByRole('button', { name: '更新到最新' }, { timeout: 5000 }))
+    await waitFor(() => expect(api.taiwanUpdateLatest).toHaveBeenCalledTimes(1))
+    first.unmount()
+
+    renderCard(queryClient)
+    const button = await screen.findByRole('button', { name: '正在更新行情...' }, { timeout: 5000 })
+    expect(button).toBeDisabled()
+    expect(screen.getByRole('button', { name: '重新下載完整歷史資料包' })).toBeDisabled()
   })
 })

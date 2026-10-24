@@ -28,7 +28,7 @@ JobStatus = Literal["pending", "running", "succeeded", "failed"]
 # 慢带宽/高延迟环境下的冷启动全市场拉取可能远超 20 分钟, 但只要分块在推进,
 # 不应被误杀(reap 旧实现按总时长一刀切, 导致 UI 标记失败而拉取线程仍在写盘)。
 #
-# 阈值按任务类型区分,可在 Web 数据源设置中调整:
+# 阈值按任务类型区分(固定值, 不提供用户配置):
 #   - 普通任务(日K管道/扩展/修正/重算): 1200s (20 分钟无进度)
 #   - 长任务(分钟K全市场同步,数据量是日K的 ~240 倍): 1800s (30 分钟无进度)
 DEFAULT_JOB_TIMEOUT_S = 1200
@@ -171,16 +171,11 @@ class JobStore:
 
         is_new=False 表示复用了已有活跃任务,调用方**不得**再调度新的后台任务。
 
-        timeout_s: reap_stale 判定「进度停滞卡死」的阈值。None 时读取用户配置。
-        long_running: timeout_s 为 None 时,是否读取长任务配置;普通任务默认
-            1200s,分钟K全市场同步等长任务默认 1800s。
+        timeout_s: reap_stale 判定「进度停滞卡死」的阈值。None 时按 long_running
+            取 LONG_JOB_TIMEOUT_S 或 DEFAULT_JOB_TIMEOUT_S。
         """
         if timeout_s is None:
-            from app.services import preferences
-            if long_running:
-                timeout_s = preferences.get_data_source_long_job_timeout_s()
-            else:
-                timeout_s = preferences.get_data_source_job_timeout_s()
+            timeout_s = LONG_JOB_TIMEOUT_S if long_running else DEFAULT_JOB_TIMEOUT_S
 
         with self._lock:
             if self._active_id:

@@ -22,7 +22,7 @@ def test_update_data_providers_refreshes_capability_snapshot(monkeypatch):
 
     mock_request = MagicMock()
     settings_api.update_data_providers(
-        MagicMock(model_dump=lambda exclude_none: {"daily_data_provider": "mock_src"}),
+        MagicMock(model_dump=lambda exclude_none: {"realtime_data_provider": "mock_src"}),
         mock_request,
     )
     assert mock_request.app.state.capabilities is sentinel

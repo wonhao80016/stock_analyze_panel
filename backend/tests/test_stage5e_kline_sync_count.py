@@ -43,18 +43,16 @@ def test_explicit_window_is_passed_through(monkeypatch):
     assert provider.calls[0]["end_time"] == end
 
 
-def test_custom_daily_source_is_used_instead_of_tickflow(monkeypatch):
+def test_stored_custom_daily_source_still_fetches_from_the_official_provider(monkeypatch):
     provider = _RecordingProvider()
-    monkeypatch.setattr("app.services.preferences.get_daily_data_provider", lambda: "my_source")
-    monkeypatch.setattr(
-        "app.data_providers.custom.provider_has_dataset", lambda name, ds: name == "my_source" and ds == "daily"
-    )
-    monkeypatch.setattr("app.data_providers.custom.get_provider", lambda _name: provider)
+    monkeypatch.setattr("app.services.preferences.load", lambda: {"daily_data_provider": "my_source"})
+    monkeypatch.setattr("app.data_providers.custom.provider_has_dataset", lambda name, ds: True)
 
-    def _no_tickflow():
-        raise AssertionError("TickFlow client must not be used for a custom daily source")
+    def _no_custom(_name):
+        raise AssertionError("Taiwan daily K must not be fetched from a custom source")
 
-    monkeypatch.setattr(kline_sync, "get_client", _no_tickflow)
+    monkeypatch.setattr("app.data_providers.custom.get_provider", _no_custom)
+    monkeypatch.setattr("app.data_providers.registry.get_provider", lambda name: provider if name == "taiwan" else None)
 
     df = kline_sync.sync_daily_batch(["2330.TW"], count=60)
 

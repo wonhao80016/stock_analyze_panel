@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { KeyRound, Play, Plus, Save, Trash2, X, Zap, Check, ChevronDown } from 'lucide-react'
 import { api, type CustomSourceConfig, type DatasetConfig } from '@/lib/api'
 import { toast } from '@/components/Toast'
+import { NOT_ROUTABLE_HINT, hasRoutableDataset } from './taiwanRouting'
 
 // 暗色適配的標準輸入框樣式 (與 AI 頁統一, bg-base 在暗色下為深色, 不會白底白字)
 const INPUT_CLS =
@@ -30,7 +31,7 @@ const TARGET_FIELDS: Record<DatasetKey, string[]> = {
 
 // 內部字段的中文說明 (下拉選項展示用)
 const FIELD_LABELS: Record<string, string> = {
-  symbol: '股票代碼 (如 000001.SZ / 600000.SH)',
+  symbol: '股票代碼 (如 2330.TWSE / 6488.TPEX)',
   date: '交易日期 (YYYY-MM-DD)',
   datetime: '時間戳 (YYYY-MM-DD HH:MM:SS)',
   open: '開盤價',
@@ -79,6 +80,9 @@ function normalizeConfig({ load_error: _loadError, ...config }: CustomSourceConf
   }
 }
 
+// Names the routing preferences and the settings page already use for their own entries.
+const RESERVED_SOURCE_NAMES = new Set(['taiwan', 'tickflow', '__new__'])
+
 function emptyConfig(): CustomSourceConfig {
   return { name: '', display_name: '', auth: { type: 'none' }, datasets: {} }
 }
@@ -91,6 +95,7 @@ export function DataSourceEditor({
   activeName,
   onActivate,
   onDelete,
+  takenNames = [],
 }: {
   existingName?: string
   initial?: CustomSourceConfig | null
@@ -99,6 +104,8 @@ export function DataSourceEditor({
   activeName: string
   onActivate: (name: string) => void
   onDelete?: () => void
+  /** Built-in, plugin, custom and failed-to-load source names a new source must not reuse. */
+  takenNames?: string[]
 }) {
   const isNew = !existingName
   const [config, setConfig] = useState<CustomSourceConfig>(() => initial ? structuredClone(initial) : emptyConfig())
@@ -120,6 +127,10 @@ export function DataSourceEditor({
 
   const save = useMutation({
     mutationFn: () => {
+      const name = config.name.toLowerCase().trim()
+      if (isNew && (RESERVED_SOURCE_NAMES.has(name) || takenNames.includes(name))) {
+        throw new Error(`名稱「${name}」已被使用,請改用其他名稱`)
+      }
       // 提交前校驗: 每個已啟用數據集必須填了 URL
       for (const [key, ds] of Object.entries(config.datasets)) {
         if (!ds.url.trim()) {
@@ -134,7 +145,9 @@ export function DataSourceEditor({
           )
         }
       }
-      return api.saveDataSource(normalizeConfig(config))
+      return existingName
+        ? api.updateDataSource(existingName, normalizeConfig(config))
+        : api.saveDataSource(normalizeConfig(config))
     },
     onSuccess: () => {
       toast(isNew ? '資料來源已建立' : '資料來源已更新', 'success')
@@ -171,6 +184,11 @@ export function DataSourceEditor({
   const canSave = !!config.name.trim() && !save.isPending
   const loading = !!existingName && !initial && fetchCfg.isLoading
   const isActive = !isNew && activeName === existingName
+  const savedConfig = fetchCfg.data ?? initial ?? null
+  const routable = hasRoutableDataset(Object.keys(savedConfig?.datasets ?? config.datasets))
+  const hasUnsavedEdits = !!savedConfig
+    && JSON.stringify(normalizeConfig(config)) !== JSON.stringify(normalizeConfig(savedConfig))
+  const switchBlockedReason = hasUnsavedEdits ? '表單有未儲存的變更,請先儲存再切換' : routable ? undefined : NOT_ROUTABLE_HINT
 
   return (
     <section className="rounded-card border border-border bg-surface overflow-hidden">
@@ -194,7 +212,9 @@ export function DataSourceEditor({
           {!isNew && !isActive && config.name.trim() && (
             <button
               onClick={() => onActivate(config.name.toLowerCase().trim())}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors"
+              disabled={!!switchBlockedReason}
+              title={switchBlockedReason}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors disabled:opacity-50"
             >
               <Zap className="h-3.5 w-3.5" /> 切換為目前資料來源
             </button>
@@ -261,24 +281,30 @@ export function DataSourceEditor({
               {DATASETS.map(key => {
                 const enabled = !!config.datasets[key]
                 return (
-                  <button
+                  <div
                     key={key}
-                    onClick={() => setActiveTab(key)}
                     className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-btn text-sm transition-colors ${
                       activeTab === key ? 'bg-elevated text-foreground' : 'text-secondary hover:bg-elevated/50'
                     }`}
                   >
-                    <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${enabled ? 'bg-accent' : 'bg-muted/30'}`} />
-                    <span className="flex-1 text-left">{DATASET_LABEL[key]}</span>
-                    {enabled
-                      ? <span className="text-[9px] text-accent">已設定</span>
-                      : <span className="text-[9px] text-muted/50">回退 TF</span>
-                    }
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab(key)}
+                      className="flex-1 min-w-0 flex items-center gap-2 text-left"
+                    >
+                      <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${enabled ? 'bg-accent' : 'bg-muted/30'}`} />
+                      <span className="flex-1">{DATASET_LABEL[key]}</span>
+                      {enabled
+                        ? <span className="text-[9px] text-accent">已設定</span>
+                        : <span className="text-[9px] text-muted/50">回退內建</span>
+                      }
+                    </button>
                     <Toggle
                       checked={enabled}
-                      onChange={(e) => { e?.stopPropagation(); setDatasetEnabled(key, !enabled) }}
+                      ariaLabel={`${DATASET_LABEL[key]} 啟用`}
+                      onChange={() => setDatasetEnabled(key, !enabled)}
                     />
-                  </button>
+                  </div>
                 )
               })}
             </div>
@@ -683,7 +709,7 @@ function FieldMapEditor({
     // fieldMap 為空時自動預填該數據集的所有內部字段 (外部字段名留空待填)
     return targets.map((target, i) => ({ src: '', target, id: i + 1 }))
   })
-  const nextId = useRef(targets.length + 1)
+  const nextId = useRef(Math.max(0, ...rows.map(r => r.id)) + 1)
 
   // rows 變化時立即同步到父級 (含空 src 的草稿行, 用 __pending_ 前綴保留)
   // 這樣切換 tab 再切回來, 未填完的映射行不會丟
@@ -777,13 +803,14 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   )
 }
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (e?: React.MouseEvent) => void }) {
+function Toggle({ checked, onChange, ariaLabel }: { checked: boolean; onChange: () => void; ariaLabel?: string }) {
   return (
     <button
       type="button"
       onClick={onChange}
-      className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${checked ? 'bg-accent' : 'bg-elevated'}`}
+      className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${checked ? 'bg-accent' : 'bg-elevated'}`}
       aria-pressed={checked}
+      aria-label={ariaLabel}
     >
       <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${checked ? 'translate-x-[14px]' : 'translate-x-[2px]'}`} />
     </button>

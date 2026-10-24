@@ -9,6 +9,7 @@ import { toast } from '@/components/Toast'
 import { DataSourceEditor } from './DataSourceEditor'
 import { TaiwanHistoryDataCard } from './TaiwanHistoryDataCard'
 import { TaiwanEnrichmentDataCard } from './TaiwanEnrichmentDataCard'
+import { FIXED_TAIWAN_DATASETS, FIXED_TAIWAN_NOTE, NOT_ROUTABLE_HINT, hasRoutableDataset } from './taiwanRouting'
 
 const DATASET_LABEL: Record<string, string> = {
   daily: '日K',
@@ -29,11 +30,9 @@ const CAPABILITY_CARDS = [
 
 /** 數據集 → 路由偏好字段 + 默認值 (financial 無後端路由消費方, 僅展示) */
 const DATASET_ROUTE: Record<string, {
-  field: 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'
+  field: 'minute_data_provider' | 'realtime_data_provider'
   def: string
 }> = {
-  daily: { field: 'daily_data_provider', def: 'taiwan' },
-  adj_factor: { field: 'adj_factor_provider', def: 'same_as_daily' },
   minute: { field: 'minute_data_provider', def: 'taiwan' },
   realtime: { field: 'realtime_data_provider', def: 'taiwan' },
 }
@@ -53,8 +52,8 @@ function DatasetChipRow({ datasets }: { datasets: string[] }) {
   )
 }
 
-/** 按能力路由網格: 每個數據源詳情下展示一張能力卡,卡片上以可點標籤列出
- *  所有具備該能力的數據源 — 點誰,該數據集就立刻由誰提供,可跨源自由組合。
+/** 按能力路由網格: 每個數據源詳情下展示一張能力卡; 可路由的能力以可點標籤列出
+ *  所有具備該能力的數據源, 日K與除權因子在台股模式固定為台灣官方資料源。
  *  TickFlow 詳情含全部能力; 其他源只列自己參與的能力。 */
 function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesOf, providerOf, pending, onSelect, anyCustom, onReset }: {
   sourceName: string
@@ -62,7 +61,7 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
   datasets: string[]
   /** 該數據集的所有候選提供方 (含 TickFlow), 按推薦順序 */
   candidatesOf: (dataset: string) => { name: string; display: string }[]
-  /** 該數據集當前的原始路由偏好值 (adj_factor 可能是 same_as_daily) */
+  /** 該數據集當前的原始路由偏好值 */
   providerOf: (dataset: string) => string
   pending?: boolean
   onSelect: (dataset: string, provider: string) => void
@@ -99,8 +98,9 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
           const label = meta?.label || DATASET_LABEL[ds] || ds
           const desc = meta?.desc || ''
           if (!route) {
+            const fixedTaiwan = FIXED_TAIWAN_DATASETS.has(ds)
             return (
-              <div key={ds} className="rounded-lg border border-border/50 bg-elevated/20 px-3 py-2.5" title="該資料集暫不支援切換資料來源">
+              <div key={ds} className="rounded-lg border border-border/50 bg-elevated/20 px-3 py-2.5" title={fixedTaiwan ? FIXED_TAIWAN_NOTE : '該資料集暫不支援切換資料來源'}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-xs font-medium text-foreground truncate">{label}</div>
@@ -108,6 +108,9 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
                   </div>
                   <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] text-muted/50 bg-elevated/60">固定</span>
                 </div>
+                {fixedTaiwan && (
+                  <div className="mt-2 pt-2 border-t border-border/50 text-[10px] text-muted">台灣官方資料源</div>
+                )}
               </div>
             )
           }
@@ -123,17 +126,6 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
               </div>
               {/* 提供者標籤:點誰該資料集就由誰提供,目前項目高亮 */}
               <div className="flex flex-wrap gap-1 mt-2 pt-2 border-t border-border/50">
-                {ds === 'adj_factor' && (
-                  <button
-                    type="button"
-                    disabled={pending}
-                    onClick={() => onSelect(ds, 'same_as_daily')}
-                    title="除權因子跟隨日K資料來源"
-                    className={tagCls(raw === 'same_as_daily')}
-                  >
-                    跟隨日K
-                  </button>
-                )}
                 {candidates.map(c => (
                   <button
                     key={c.name}
@@ -151,6 +143,9 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
           )
         })}
       </div>
+      {dsList.some(ds => FIXED_TAIWAN_DATASETS.has(ds)) && (
+        <p className="text-[10px] text-muted/70 leading-relaxed">{FIXED_TAIWAN_NOTE}</p>
+      )}
     </div>
   )
 }
@@ -169,7 +164,7 @@ function tagCls(active: boolean) {
 interface RouteCtx {
   /** 數據集 → 候選提供方列表 (含 TickFlow) */
   candidatesOf: (dataset: string) => { name: string; display: string }[]
-  /** 數據集 → 當前原始路由偏好值 (adj_factor 可能是 same_as_daily) */
+  /** 數據集 → 當前原始路由偏好值 */
   providerOf: (dataset: string) => string
   displayOf: (name?: string) => string
   pending: boolean
@@ -388,15 +383,14 @@ export function SettingsDataSourcesPanel() {
           financial_data_provider: 'taiwan',
         })
       }
-      // 非台灣官方: 該源適配了哪些數據集就接管哪些, 其餘回退默認
+      // 非台灣官方: 接管該源適配的可路由數據集, 日K/除權固定回台灣官方
       const supported = new Set(
         allItems.find(s => s.name === name)?.datasets ?? []
       )
-      const pick = (dataset: string) =>
-        supported.has(dataset) ? name : (dataset === 'adj_factor' ? 'same_as_daily' : 'taiwan')
+      const pick = (dataset: string) => supported.has(dataset) ? name : 'taiwan'
       return api.updateDataProviders({
-        daily_data_provider: pick('daily'),
-        adj_factor_provider: pick('adj_factor'),
+        daily_data_provider: 'taiwan',
+        adj_factor_provider: 'same_as_daily',
         realtime_data_provider: pick('realtime'),
         minute_data_provider: pick('minute'),
         financial_data_provider: 'taiwan',
@@ -451,7 +445,6 @@ export function SettingsDataSourcesPanel() {
   const pluginList: PluginDataSourceItem[] = sources.data?.plugins ?? []
   const customList: DataSourceItem[] = sources.data?.custom ?? []
   const errors = sources.data?.errors ?? []
-  const activeName = prefs.data?.daily_data_provider || 'taiwan'
 
   // 插件 name → 狀態 (供卡片渲染時判斷 available/installing 等)
   const pluginMap = new Map(pluginList.map(p => [p.name, p]))
@@ -469,18 +462,17 @@ export function SettingsDataSourcesPanel() {
 
   const selectedCustom = customList.find(s => s.name === selected)
 
-  // ===== 各數據集當前的有效提供方 (除權 same_as_daily = 跟隨日K) =====
+  // ===== 各數據集當前的有效提供方 (日K/除權固定為台灣官方) =====
   // 用於"服務中"徽標: 改單個能力路由隻影響對應數據集, 不再產生"當前數據源被切換"的表現
-  const dailyPref = prefs.data?.daily_data_provider || 'taiwan'
-  const adjPref = prefs.data?.adj_factor_provider || 'same_as_daily'
   const effProvider: Record<string, string> = {
-    daily: dailyPref,
-    adj_factor: adjPref === 'same_as_daily' ? dailyPref : adjPref,
+    daily: 'taiwan',
+    adj_factor: 'taiwan',
     minute: prefs.data?.minute_data_provider || 'taiwan',
     realtime: prefs.data?.realtime_data_provider || 'taiwan',
   }
   const servingDatasets = (name: string) =>
     Object.entries(effProvider).filter(([, v]) => (name === 'taiwan' || name === 'tickflow') ? (v === 'taiwan' || v === 'tickflow') : v === name).map(([k]) => k)
+  const activeName = servingDatasets(selected).length > 0 ? selected : ''
   const servingLabels = (name: string) =>
     servingDatasets(name).map(k => DATASET_LABEL[k] || k)
 
@@ -495,7 +487,7 @@ export function SettingsDataSourcesPanel() {
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
   }
 
-  // 單個能力的提供方切換: 點標籤即刻生效 (same_as_daily 僅除權有效 = 跟隨日K)
+  // 單個能力的提供方切換: 點標籤即刻生效
   const routeMut = useMutation({
     mutationFn: ({ dataset, provider }: { dataset: string; provider: string }) => {
       const route = DATASET_ROUTE[dataset]
@@ -525,7 +517,7 @@ export function SettingsDataSourcesPanel() {
     onError: (e: Error) => toast(`恢復失敗: ${e.message}`, 'error'),
   })
 
-  const anyCustomRouting = Object.values(effProvider).some(v => v !== 'taiwan' && v !== 'tickflow') || adjPref !== 'same_as_daily'
+  const anyCustomRouting = Object.values(effProvider).some(v => v !== 'taiwan' && v !== 'tickflow')
 
   // 某數據集的全部候選提供方 (台灣官方恆在首位, 其餘按聲明該數據集的數據源列出)
   const candidatesOf = (dataset: string) => {
@@ -538,11 +530,9 @@ export function SettingsDataSourcesPanel() {
     return list
   }
 
-  // 數據集 → 當前原始路由偏好值 (adj_factor 保留 same_as_daily 以驅動"跟隨日K"標籤態)
+  // 數據集 → 當前原始路由偏好值
   const providerOf = (dataset: string) => {
     switch (dataset) {
-      case 'daily': return dailyPref
-      case 'adj_factor': return adjPref
       case 'minute': return prefs.data?.minute_data_provider || 'taiwan'
       case 'realtime': return prefs.data?.realtime_data_provider || 'taiwan'
       default: return 'taiwan'
@@ -677,7 +667,8 @@ export function SettingsDataSourcesPanel() {
                     <div className="flex items-center gap-1 shrink-0">
                       <button
                         onClick={(e) => { e.stopPropagation(); switchProvider.mutate(item.name) }}
-                        disabled={switchProvider.isPending}
+                        disabled={switchProvider.isPending || !hasRoutableDataset(item.datasets)}
+                        title={hasRoutableDataset(item.datasets) ? undefined : NOT_ROUTABLE_HINT}
                         className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
                       >
                         使用
@@ -698,7 +689,8 @@ export function SettingsDataSourcesPanel() {
                   ) : (
                     <button
                       onClick={(e) => { e.stopPropagation(); switchProvider.mutate(item.name) }}
-                      disabled={switchProvider.isPending}
+                      disabled={switchProvider.isPending || !hasRoutableDataset(item.datasets)}
+                      title={hasRoutableDataset(item.datasets) ? undefined : NOT_ROUTABLE_HINT}
                       className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
                     >
                       使用
@@ -706,7 +698,7 @@ export function SettingsDataSourcesPanel() {
                   )}
                 </div>
                 {/* 數據集標籤(靜態): 該源適配的數據集, 路由選擇在下方能力卡片 */}
-                <DatasetChipRow datasets={(item.name === 'taiwan' || item.name === 'tickflow') ? [...item.datasets, 'financial'] : item.datasets} />
+                <DatasetChipRow datasets={(item.name === 'taiwan' || item.name === 'tickflow') ? [...new Set([...item.datasets, 'financial'])] : item.datasets} />
                 {/* 未安裝插件顯示安裝命令提示 */}
                 {pluginUnavailable && plugin?.install_hint && (
                   <div className="ml-3.5 mt-1 text-[10px] text-muted/40 font-mono truncate">{plugin.install_hint}</div>
@@ -765,6 +757,7 @@ export function SettingsDataSourcesPanel() {
                 key={selected}
                 initial={null}
                 existingName={undefined}
+                takenNames={[...allItems.map(s => s.name), ...errors.flatMap(e => (e.name ? [e.name] : []))]}
                 onCancel={() => setSelected('taiwan')}
                 onSaved={() => {
                   qc.invalidateQueries({ queryKey: QK.dataSources })
@@ -906,7 +899,8 @@ function PluginDetail({ plugin, isActive, onSwitch, switching, route }: {
           ) : plugin.available ? (
             <button
               onClick={onSwitch}
-              disabled={switching}
+              disabled={switching || !hasRoutableDataset(plugin.datasets)}
+              title={hasRoutableDataset(plugin.datasets) ? undefined : NOT_ROUTABLE_HINT}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/10 text-accent text-xs font-medium hover:bg-accent/20 transition-colors disabled:opacity-50"
             >
               <Zap className="h-3.5 w-3.5" />

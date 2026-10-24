@@ -2363,8 +2363,6 @@ export interface Preferences {
   minute_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
-  data_source_job_timeout_s: number
-  data_source_long_job_timeout_s: number
   realtime_watchlist_symbols?: string[]
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
@@ -2473,6 +2471,13 @@ export const api = {
       body: JSON.stringify(ai),
     }),
 
+  /** Probe a candidate AI configuration without saving it; blank fields fall back to the saved values. */
+  testAiSettings: (ai: { provider?: string; base_url?: string; api_key?: string; model?: string; reasoning_effort?: string; user_agent?: string; max_output_tokens?: number; context_window?: number }) =>
+    request<{ ok: boolean; error?: string; model?: string; response?: string }>('/api/settings/ai/test', {
+      method: 'POST',
+      body: JSON.stringify(ai),
+    }),
+
   /** 一鍵清空 AI 配置(保留自定義 UA) */
   clearAiSettings: () =>
     request<{ ok: boolean }>('/api/settings/ai', { method: 'DELETE' }),
@@ -2481,9 +2486,15 @@ export const api = {
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
   dataSource: (name: string, options?: { dedupe?: boolean }) =>
     request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`, options),
+  /** Create a custom source; the backend answers 409 when the name is taken. */
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {
       method: 'POST',
+      body: JSON.stringify(config),
+    }),
+  updateDataSource: (name: string, config: CustomSourceConfig) =>
+    request<DataSourcesResponse>(`/api/settings/data-sources/${encodeURIComponent(name)}`, {
+      method: 'PUT',
       body: JSON.stringify(config),
     }),
   deleteDataSource: (name: string) =>
@@ -2529,17 +2540,6 @@ export const api = {
     request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
-    ),
-  updateDataSourceJobTimeouts: (dataSourceJobTimeoutS: number, dataSourceLongJobTimeoutS: number) =>
-    request<Pick<Preferences, 'data_source_job_timeout_s' | 'data_source_long_job_timeout_s'>>(
-      '/api/settings/preferences/data-source-job-timeouts',
-      {
-        method: 'PUT',
-        body: JSON.stringify({
-          data_source_job_timeout_s: dataSourceJobTimeoutS,
-          data_source_long_job_timeout_s: dataSourceLongJobTimeoutS,
-        }),
-      },
     ),
   // Phase 8B-5.8: updateMinuteSync/updatePipelinePullTypes/
   // updatePipelineRegimeEnabled/updateRegimeBatchParams 隨已刪除的
@@ -3393,8 +3393,8 @@ export const api = {
     request<TaiwanBootstrapRunResult>('/api/taiwan/bootstrap/run', { method: 'POST' }),
 
   /** 查詢台股歷史資料 Bootstrap 作業進度 */
-  taiwanBootstrapJob: (jobId: string) =>
-    request<TaiwanBootstrapJobState>(`/api/taiwan/bootstrap/jobs/${jobId}`),
+  taiwanBootstrapJob: (jobId: string, opts?: { quiet?: boolean }) =>
+    request<TaiwanBootstrapJobState>(`/api/taiwan/bootstrap/jobs/${jobId}`, { quiet: opts?.quiet }),
 
   /** 增量補齊已存在的歷史資料至最新交易日（不重新下載整包） */
   taiwanUpdateLatest: () =>
@@ -3413,8 +3413,8 @@ export const api = {
     }),
 
   /** 查詢三大法人與融資融券回補任務進度 */
-  taiwanEnrichmentBackfillJob: (jobId: string) =>
-    request<TaiwanEnrichmentBackfillJobState>(`/api/taiwan/enrichment/backfill/${jobId}`),
+  taiwanEnrichmentBackfillJob: (jobId: string, opts?: { quiet?: boolean }) =>
+    request<TaiwanEnrichmentBackfillJobState>(`/api/taiwan/enrichment/backfill/${jobId}`, { quiet: opts?.quiet }),
 }
 
 // ===== Taiwan Historical Bootstrap Interfaces =====

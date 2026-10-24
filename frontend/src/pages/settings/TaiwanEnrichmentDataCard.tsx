@@ -18,6 +18,7 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
+import { JOB_POLL_INTERVAL_MS, JOB_POLL_MAX_FAILURES, JOB_POLL_RETRY_MS, isMissingJobError } from './jobPolling'
 
 const RANGE_OPTIONS = [
   { days: 20, label: '近 20 個交易日' },
@@ -89,6 +90,7 @@ export function TaiwanEnrichmentDataCard() {
   const backfillMutation = useMutation({
     mutationFn: (days: number) => api.taiwanEnrichmentBackfillRun(days),
     onSuccess: (res) => {
+      setActiveJob(null)
       setActiveJobId(res.job_id)
       toast('三大法人與融資融券回補任務已啟動', 'success')
     },
@@ -102,11 +104,13 @@ export function TaiwanEnrichmentDataCard() {
 
     let cancelled = false
     let timerId: any = null
+    let failures = 0
 
     const checkProgress = async () => {
       try {
-        const job = await api.taiwanEnrichmentBackfillJob(activeJobId)
+        const job = await api.taiwanEnrichmentBackfillJob(activeJobId, { quiet: true })
         if (cancelled) return
+        failures = 0
         setActiveJob(job)
 
         if (job.status === 'success') {
@@ -123,11 +127,20 @@ export function TaiwanEnrichmentDataCard() {
           return
         }
 
-        timerId = setTimeout(checkProgress, 800)
+        timerId = setTimeout(checkProgress, JOB_POLL_INTERVAL_MS)
       } catch (err: any) {
-        if (!cancelled) {
-          timerId = setTimeout(checkProgress, 2000)
+        if (cancelled) return
+        if (isMissingJobError(err)) {
+          toast('回補任務已遺失（後端可能已重新啟動），請重新檢查資料狀態後再回補', 'error')
+        } else if (++failures >= JOB_POLL_MAX_FAILURES) {
+          toast(`無法取得回補進度: ${err?.message || err}`, 'error')
+        } else {
+          timerId = setTimeout(checkProgress, JOB_POLL_RETRY_MS)
+          return
         }
+        setActiveJob(null)
+        setActiveJobId(null)
+        qc.invalidateQueries({ queryKey: QK.taiwanEnrichmentStatus })
       }
     }
 
@@ -210,7 +223,12 @@ export function TaiwanEnrichmentDataCard() {
             )}
           </div>
 
-          {isJobRunning && activeJob ? (
+          {isJobRunning && !activeJob ? (
+            <div className="rounded-lg border border-accent/20 bg-accent/5 p-4 flex items-center gap-2 text-xs text-accent">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              正在啟動回補任務…
+            </div>
+          ) : isJobRunning && activeJob ? (
             <div className="rounded-lg border border-accent/20 bg-accent/5 p-4 space-y-3">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-medium text-accent flex items-center gap-2">
