@@ -6,7 +6,7 @@ import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '
 import { StockIntradayChart } from '@/components/StockIntradayChart'
 import { useFinancialMetrics } from '@/lib/useFinancials'
 import { useCapabilities } from '@/lib/useSharedQueries'
-import { rawChangeBase, type ChartMarker, type ChartPriceLine, type ChartRange } from '@/components/EChartsCandlestick'
+import { rawChangeBase, scaleToRaw, type ChartMarker, type ChartPriceLine, type ChartRange, type LinkedPrice } from '@/components/EChartsCandlestick'
 import {
   loadInfoFields,
   saveInfoFields,
@@ -65,10 +65,16 @@ export function StockPanel({
   refetchIntervalMs,
   infoBarOnly = false,
 }: Props) {
-  const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
+  const [linkedPrice, setLinkedPrice] = useState<LinkedPrice | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [intradayDismissed, setIntradayDismissed] = useState(false)
-  const [dailyResult, setDailyResult] = useState<StockDailyKChartResult | null>(null)
+  // Tagged with its symbol so a result reported for the previous symbol is never shown.
+  const [taggedDailyResult, setTaggedDailyResult] = useState<{ symbol: string; result: StockDailyKChartResult } | null>(null)
+  const dailyResult = taggedDailyResult?.symbol === symbol ? taggedDailyResult.result : null
+  const handleDailyData = useCallback(
+    (result: StockDailyKChartResult) => setTaggedDailyResult({ symbol, result }),
+    [symbol],
+  )
   // 信息條指標配置提升到此層：同時供 StockInfoBar 渲染與 StockDailyKChart 請求 ext 數據
   const [fields, setFields] = useState<ColumnConfig[]>(loadInfoFields)
   const extColumns = useMemo(() => buildInfoExtColumnsParam(fields), [fields])
@@ -102,16 +108,14 @@ export function StockPanel({
   const rawRows: KlineRow[] = dailyResult?.rawRows ?? []
 
   // symbol 變化時重置分時相關狀態，避免切股後殘留舊日期。
-  // 注意：必須跳過首次掛載——重開彈窗時 kline 命中 react-query 緩存，
-  // 子組件 onDataChange effect（先於父 effect 執行）會把 dailyResult 置為有效數據，
-  // 若此處再無條件清空，會把剛加載的數據抹掉，導致信息條整行消失。
+  // dailyResult must not be cleared here: the child's onDataChange effect runs first and
+  // has already reported a cached symbol's rows, which this effect would wipe out.
   const prevSymbol = useRef<string | null>(symbol)
   useEffect(() => {
     if (prevSymbol.current === symbol) return
     prevSymbol.current = symbol
     setSelectedDate(null)
     setLinkedPrice(null)
-    setDailyResult(null)
   }, [symbol])
 
   // 當分時開啟、無選中日期時，自動選中最新日期
@@ -125,6 +129,12 @@ export function StockPanel({
   const baseIdx = selectedIdx >= 0 ? selectedIdx : rows.length - 1
   // Minute bars trade at unadjusted prices, so the daily base moves off the forward-adjusted scale.
   const prevClose = baseIdx >= 0 ? rawChangeBase(rows, baseIdx) ?? undefined : undefined
+  // The intraday chart hovers traded prices while the daily chart is drawn forward-adjusted.
+  const tradedPerAdjusted = selectedIdx >= 0 ? scaleToRaw(rows[selectedIdx]) : 1
+  const handleIntradayHover = useCallback(
+    (price: number | null) => setLinkedPrice(price == null ? null : { value: price / tradedPerAdjusted, traded: price }),
+    [tradedPerAdjusted],
+  )
   if (!symbol) return null
 
   // 財務指標最新一期（metrics 按 period_end 排序，取首項）
@@ -162,7 +172,7 @@ export function StockPanel({
           linkedPrice={linkedPrice}
           onDateClick={handleDateClick}
           onPriceDoubleClick={onPriceDoubleClick}
-          onDataChange={setDailyResult}
+          onDataChange={handleDailyData}
           visibleBars={showIntraday ? 40 : 60}
           extColumns={extColumns}
         />
@@ -182,11 +192,11 @@ export function StockPanel({
               date={selectedDate}
               height={height}
               prevClose={prevClose}
-              onPriceHover={setLinkedPrice}
+              onPriceHover={handleIntradayHover}
               onPriceDoubleClick={onPriceDoubleClick}
               currentPrice={rows[rows.length - 1]?.close}
               priceLines={priceLines}
-              refetchIntervalMs={refetchIntervalMs}
+              refetchIntervalMs={selectedDate === rows[rows.length - 1]?.date ? refetchIntervalMs : undefined}
             />
           </div>
         )}

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Settings2, RadioTower, Star } from 'lucide-react'
-import type { KlineRow, FinancialMetricRecord } from '@/lib/api'
+import { BOARD_LOT_VOLUME_NOTE, type KlineRow, type FinancialMetricRecord } from '@/lib/api'
 import { fmtPrice, fmtBigNum } from '@/lib/format'
 import { formatVolume, useVolumeUnit } from '@/lib/volumeUnit'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
@@ -159,7 +159,11 @@ export function StockInfoBar({
       case 'market_cap':       return marketCap != null ? fmtBigNum(marketCap) : null
       case 'float_market_cap': return floatMarketCap != null ? fmtBigNum(floatMarketCap) : null
       case 'turnover':         return turnoverRate != null ? `${turnoverRate.toFixed(2)}%` : null
-      case 'volume':           return latest.volume != null ? formatVolume(Number(latest.volume), volumeUnit) : null
+      case 'volume': {
+        if (latest.volume == null) return null
+        const text = formatVolume(Number(latest.volume), volumeUnit)
+        return latest.board_lot_volume ? `${text} ${BOARD_LOT_VOLUME_NOTE}` : text
+      }
       case 'amplitude': {
         if (prevClose == null || prevClose === 0) return null
         const hi = Number(latest.high)

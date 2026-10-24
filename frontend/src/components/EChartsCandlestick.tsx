@@ -47,7 +47,8 @@ export function changeBase(data: OHLC[], idx: number): number | null {
   return idx > 0 && idx < data.length ? data[idx - 1].close : null
 }
 
-function scaleToRaw(bar: OHLC | undefined): number {
+/** Traded close over forward-adjusted close of the bar; 1 when it has no usable raw close. */
+export function scaleToRaw(bar: OHLC | undefined): number {
   const raw = bar?.raw_close
   if (bar == null || raw == null || !Number.isFinite(raw) || raw <= 0 || !(bar.close > 0)) return 1
   return raw / bar.close
@@ -77,6 +78,12 @@ export function unadjustedCloseHTML(bar: OHLC, color: string): string {
 export function turnoverRateHTML(bar: OHLC, color: string): string {
   const rate = resolveTurnoverRate(bar)
   return rate == null ? '' : `<span style="color:${color}">換手</span><span style="color:${color}">${rate.toFixed(2)}%</span>`
+}
+
+/** A price linked from another chart: its value on this chart's scale and the traded price it came from. */
+export interface LinkedPrice {
+  value: number
+  traded: number
 }
 
 export interface ChartMarker {
@@ -394,7 +401,7 @@ interface Props {
   showMarkers?: boolean
   onToggleMarkers?: () => void
   symbol?: string
-  linkedPrice?: number | null
+  linkedPrice?: LinkedPrice | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   /** 默認可見蠟燭根數, 默認 60 */
@@ -423,6 +430,10 @@ const CT = () => chartTheme(getTheme())
 
 /** 可見蠟燭超過此數量時，漲停/炸板標籤切換為小圓點。 */
 const COMPACT_THRESHOLD = 60
+
+// Stable default references: inline literals would rebuild the chart on every parent render.
+const DEFAULT_ACTIVE_INDICATORS: string[] = []
+const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
 
 /** 子圖上方信息欄高度 (px) */
 const INFO_BAR_H = 16
@@ -531,7 +542,7 @@ function buildOption(
   activeIndicators: string[],
   containerHeight: number,
   infoIdx: number,
-  linkedPrice: number | null | undefined,
+  linkedPrice: LinkedPrice | null | undefined,
   volumeCompare: VolumeCompareConfig,
   volumeUnit: VolumeUnit,
 ): EChartsOption {
@@ -707,12 +718,14 @@ function buildOption(
     })
 
   if (linkedPrice != null) {
+    const shown = linkedPrice.value.toFixed(2)
+    const traded = linkedPrice.traded.toFixed(2)
     markLineData.push({
-      yAxis: linkedPrice,
+      yAxis: linkedPrice.value,
       lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.7 },
       label: {
         show: true,
-        formatter: linkedPrice.toFixed(2),
+        formatter: traded === shown ? shown : `${shown}（成交 ${traded}）`,
         position: 'insideEndTop',
         color: '#3B82F6',
         fontSize: 10,
@@ -878,8 +891,8 @@ export function EChartsCandlestick({
   onDateClick,
   onPriceDoubleClick,
   visibleBars = 60,
-  activeIndicators = [],
-  volumeCompare = { enabled: true, days: 1 },
+  activeIndicators = DEFAULT_ACTIVE_INDICATORS,
+  volumeCompare = DEFAULT_VOLUME_COMPARE,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -908,6 +921,7 @@ export function EChartsCandlestick({
   const chartHeightRef = useRef(300)
   const subTotalHRef = useRef(0)
   const getInfoBarHTMLRef = useRef<() => string>(() => '')
+  const updateCompactPresentationRef = useRef<() => void>(() => {})
 
   // 強制刷新信息欄 DOM 的回調
   const infoBarRef = useRef<HTMLDivElement>(null)
@@ -1096,7 +1110,7 @@ export function EChartsCandlestick({
       const newCompact = visibleCount > COMPACT_THRESHOLD
       if (newCompact !== compactRef.current) {
         compactRef.current = newCompact
-        updateCompactPresentation()
+        updateCompactPresentationRef.current()
       }
     })
 
@@ -1181,6 +1195,8 @@ export function EChartsCandlestick({
     }
     if (seriesUpdates.length > 0) chart.setOption({ series: seriesUpdates })
   }
+  // The dataZoom handler is bound once per chart, so it reads the latest markers and data through this ref.
+  updateCompactPresentationRef.current = updateCompactPresentation
 
   // ===== 核心: 僅在數據/配置變更時全量 setOption =====
   useEffect(() => {

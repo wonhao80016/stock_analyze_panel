@@ -48,7 +48,7 @@ from app.taiwan.enrichment.institutional import TaiwanInstitutionalProvider
 from app.taiwan.enrichment.margin import TaiwanMarginProvider
 from app.taiwan.universe.models import TDR_SECURITY_CLASS, MarketProfileBridge
 from app.taiwan.providers.hybrid_provider import TaiwanHybridProvider
-from app.taiwan.realtime.calendar import taipei_now
+from app.taiwan.realtime.calendar import TAIPEI_TZ, taipei_now
 from app.taiwan.realtime.service import get_realtime_service
 from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 from app.taiwan.universe import get_security_master
@@ -839,7 +839,7 @@ class TaiwanStockDetailService:
             trigger_price=float(price) if price is not None else None,
             trigger_value=float(a.get("trigger_value") or 0.0),
             message=str(a.get("message", "")),
-            triggered_at=datetime.fromtimestamp(ts / 1000.0).isoformat() if ts else "",
+            triggered_at=datetime.fromtimestamp(ts / 1000.0, tz=TAIPEI_TZ).isoformat() if ts else "",
         )
 
     def _aggregate_recent_alerts(self, symbol_str: str) -> list[TaiwanRecentAlert]:

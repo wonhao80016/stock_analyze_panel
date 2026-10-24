@@ -134,8 +134,10 @@ export function TaiwanStockCompare() {
 
   const comparisonErrorMessage =
     comparisonQuery.error instanceof Error ? comparisonQuery.error.message : '比較資料載入失敗，請重試'
-  const fmtPct = (v: number | null | undefined) => (v == null ? 'N/A（不適用）' : `${(v * 100).toFixed(2)}%`)
-  const fmtNum = (v: number | null | undefined, digits = 2) => (v == null ? 'N/A（不適用）' : v.toFixed(digits))
+  // A null figure means the source has no value; inapplicable fields are labelled where they occur.
+  const NO_DATA = '無資料'
+  const fmtPct = (v: number | null | undefined) => (v == null ? NO_DATA : `${(v * 100).toFixed(2)}%`)
+  const fmtNum = (v: number | null | undefined, digits = 2) => (v == null ? NO_DATA : v.toFixed(digits))
 
   // 資料新鮮度提示文字（單行、非儀表板）：依 comparison_date 與 daily_as_of
   // 之關係，明確區分「最新」「歷史比較」「要求日期超出本機範圍」「非交易日」
@@ -371,7 +373,7 @@ export function TaiwanStockCompare() {
                         {data.instruments.map(inst => (
                           <td key={inst.symbol} className="py-2 px-3 font-mono">
                             {inst.context.institutional_context.foreign_net_1d == null
-                              ? 'N/A（不適用）'
+                              ? NO_DATA
                               : formatVolume(inst.context.institutional_context.foreign_net_1d, volumeUnit)}
                           </td>
                         ))}
@@ -382,9 +384,7 @@ export function TaiwanStockCompare() {
                           <td key={inst.symbol} className="py-2 px-3 font-mono">
                             {inst.context.fundamentals_context.status === 'not_applicable'
                               ? 'ETF 不適用'
-                              : inst.context.fundamentals_context.pe == null
-                                ? '未取得'
-                                : fmtNum(inst.context.fundamentals_context.pe)}
+                              : fmtNum(inst.context.fundamentals_context.pe)}
                           </td>
                         ))}
                       </tr>

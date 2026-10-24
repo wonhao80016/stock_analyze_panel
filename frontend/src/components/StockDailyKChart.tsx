@@ -10,6 +10,7 @@ import {
   type ChartMarker,
   type ChartPriceLine,
   type ChartRange,
+  type LinkedPrice,
   type OHLC,
   type StockInfo,
   type VolumeCompareConfig,
@@ -49,7 +50,7 @@ interface Props {
   showMA?: boolean
   showInfoBar?: boolean
   visibleBars?: number
-  linkedPrice?: number | null
+  linkedPrice?: LinkedPrice | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   onDataChange?: (result: StockDailyKChartResult) => void

@@ -1,4 +1,4 @@
-// Stage 5D: a missing stock PE is "not obtained" rather than "not applicable", and a
+// Stage 5D: a missing stock PE is "no data" rather than "not applicable", and a
 // symbol without a diagnostic item is "not evaluated" rather than zero signals.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
@@ -55,7 +55,7 @@ afterEach(() => {
 })
 
 describe('comparison table missing-value wording', () => {
-  it('shows a stock PE that was not obtained as 未取得 and an unevaluated diagnostic as 未評估', async () => {
+  it('shows a stock PE that was not obtained as 無資料 and an unevaluated diagnostic as 未評估', async () => {
     vi.mocked(api.taiwanStockCompare).mockResolvedValue({
       symbols_requested: ['2330.TWSE', '2881.TWSE'],
       comparison_date: '2026-09-30',
@@ -70,7 +70,7 @@ describe('comparison table missing-value wording', () => {
     renderPage()
     await waitFor(() => expect(screen.getByText('本益比 (PE)')).toBeInTheDocument())
 
-    expect(rowCells('本益比 (PE)')).toEqual(['未取得', '12.50'])
+    expect(rowCells('本益比 (PE)')).toEqual(['無資料', '12.50'])
     expect(rowCells('異常訊號數')).toEqual(['未評估', '0'])
   })
 })

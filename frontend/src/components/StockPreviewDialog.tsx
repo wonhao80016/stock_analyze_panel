@@ -8,7 +8,7 @@ import { boardTag } from '@/components/stock-table/primitives'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
-import { StockPanel, getDefaultRange } from '@/components/StockPanel'
+import { StockPanel } from '@/components/StockPanel'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { StockMultiDayIntradayChart } from '@/components/StockMultiDayIntradayChart'
 import { DatePicker } from '@/components/DatePicker'
@@ -19,7 +19,8 @@ import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
-import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
+import { loadLastCompareSymbols } from '@/lib/taiwanCompareSymbols'
+import { addToCompareList } from '@/lib/compareList'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 import { TaiwanStockDetail } from '@/pages/TaiwanStockDetail'
 
@@ -46,6 +47,23 @@ const PRESETS: { label: string; months: number }[] = [
 ]
 
 type PreviewView = 'daily' | 'intraday'
+type DateRange = { start: string; end: string }
+// A preset is resolved against the Taipei date on each render, so a long-lived dialog does not freeze its range.
+type RangeChoice = { months: number } | DateRange
+const DEFAULT_RANGE: RangeChoice = { months: 6 }
+
+function taipeiToday(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date())
+}
+
+function presetRange(months: number): DateRange {
+  const end = taipeiToday()
+  const [year, month, day] = end.split('-').map(Number)
+  return { start: new Date(Date.UTC(year, month - 1 - months, day)).toISOString().slice(0, 10), end }
+}
+
 interface PriceAlertDraft {
   id: number
   targetPrice: number
@@ -63,7 +81,8 @@ function loadIntradayDays(): number {
 export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props) {
   const [view, setView] = useState<PreviewView>('daily')
   const [intradayDays, setIntradayDays] = useState(loadIntradayDays)
-  const [dateRange, setDateRange] = useState(getDefaultRange)
+  const [rangeChoice, setRangeChoice] = useState<RangeChoice>(DEFAULT_RANGE)
+  const dateRange = 'months' in rangeChoice ? presetRange(rangeChoice.months) : rangeChoice
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
   const [priceAlertDraft, setPriceAlertDraft] = useState<PriceAlertDraft | null>(null)
   const [maximized, setMaximized] = useState(false)
@@ -119,7 +138,10 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   }, [symbol, onClose, priceAlertDraft])
 
   useEffect(() => {
-    if (symbol) setView('daily')
+    if (symbol) {
+      setView('daily')
+      setRangeChoice(DEFAULT_RANGE)
+    }
     setPriceAlertDraft(null)
   }, [symbol])
 
@@ -206,20 +228,11 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 {view === 'daily' ? (
                   <div className="flex items-center gap-1">
                     {PRESETS.map(p => {
-                      const now = new Date()
-                      const s = new Date(now)
-                      s.setMonth(s.getMonth() - p.months)
-                      const expected = s.toISOString().slice(0, 10)
-                      const isActive = dateRange.start === expected
+                      const isActive = 'months' in rangeChoice && rangeChoice.months === p.months
                       return (
                         <button
                           key={p.label}
-                          onClick={() => {
-                            const end = new Date().toISOString().slice(0, 10)
-                            const ns = new Date()
-                            ns.setMonth(ns.getMonth() - p.months)
-                            setDateRange({ start: ns.toISOString().slice(0, 10), end })
-                          }}
+                          onClick={() => setRangeChoice({ months: p.months })}
                           className={`h-6 px-1.5 rounded text-[11px] transition-colors cursor-pointer
                             ${isActive
                               ? 'bg-accent/20 text-accent font-medium border border-accent/30'
@@ -232,13 +245,13 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                     })}
                     <DatePicker
                       value={dateRange.start}
-                      onChange={(v) => setDateRange(prev => ({ ...prev, start: v }))}
+                      onChange={(v) => setRangeChoice({ ...dateRange, start: v })}
                       max={dateRange.end}
                     />
                     <span className="text-muted/40 text-[10px]">~</span>
                     <DatePicker
                       value={dateRange.end}
-                      onChange={(v) => setDateRange(prev => ({ ...prev, end: v }))}
+                      onChange={(v) => setRangeChoice({ ...dateRange, end: v })}
                       min={dateRange.start}
                     />
                   </div>
@@ -346,8 +359,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                 {isTaiwanSymbol && (
                   <button
                     onClick={() => {
-                      const merged = mergeSymbolIntoCompare(loadLastCompareSymbols(), symbol!)
-                      navigate(`/stocks/compare?symbols=${encodeURIComponent(merged.join(','))}`)
+                      const merged = addToCompareList(loadLastCompareSymbols(), symbol!)
+                      if (merged) navigate(`/stocks/compare?symbols=${encodeURIComponent(merged.join(','))}`)
                     }}
                     className="p-1.5 rounded-btn text-secondary hover:bg-elevated hover:text-foreground transition-colors cursor-pointer"
                     title="加入多標的比較"
@@ -438,6 +451,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
                   dateRange={dateRange}
                   priceLines={monitorPriceLines}
                   onPriceDoubleClick={openPriceAlert}
+                  refetchIntervalMs={dateRange.end === taipeiToday() ? intradayRefetchMs : undefined}
                 />
                 {/* Research workbench below the chart; it brings its own data queries. */}
                 {isTaiwanSymbol && symbol && (

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import {
   api,
+  type ApiError,
   type TaiwanSearchResult,
   type TaiwanAIStockResearchReport,
   type TaiwanDailyItem,
@@ -28,8 +29,10 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
-import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
+import { loadLastCompareSymbols } from '@/lib/taiwanCompareSymbols'
+import { addToCompareList } from '@/lib/compareList'
 import { isBenchmarkSymbol } from '@/lib/benchmarks'
+import { SHARES_PER_LOT, formatVolume, useVolumeUnit, volumeUnitLabel, type VolumeUnit } from '@/lib/volumeUnit'
 import { Modal } from '@/components/Modal'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { conditionSummary } from '@/components/monitor/GenericRulesList'
@@ -46,12 +49,34 @@ const INDEX_CHART_HEIGHT = 400
 const STOCK_DAILY_INDICATORS = ['vol']
 const INDEX_DAILY_INDICATORS: string[] = []
 
+// The detail endpoint counts trading sessions, so each period is sent as its approximate session count.
 const RANGE_OPTIONS = [
-  { label: '1 個月', days: 30 },
-  { label: '3 個月', days: 90 },
-  { label: '6 個月', days: 180 },
-  { label: '1 年', days: 360 },
+  { label: '1 個月', days: 21 },
+  { label: '3 個月', days: 63 },
+  { label: '6 個月', days: 126 },
+  { label: '1 年', days: 245 },
 ]
+const DEFAULT_RANGE_DAYS = 126
+
+const ALERT_TIME_PARTS = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Taipei',
+  month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+})
+
+const formatAlertTime = (iso: string | null | undefined): string => {
+  if (!iso) return '--'
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return iso
+  const part = Object.fromEntries(ALERT_TIME_PARTS.formatToParts(at).map(p => [p.type, p.value]))
+  return `${part.month}-${part.day} ${part.hour}:${part.minute}:${part.second}`
+}
+
+// History tables list exact daily figures, so they skip the compact 萬/億 form.
+const formatVolumeFull = (shares: number | null | undefined, unit: VolumeUnit): string => {
+  if (shares == null || !Number.isFinite(shares)) return '—'
+  const value = unit === 'lots' ? Math.round(shares / SHARES_PER_LOT) : shares
+  return `${(Object.is(value, -0) ? 0 : value).toLocaleString('en-US')}${volumeUnitLabel(unit)}`
+}
 
 export const signColorClass = (v: number | null | undefined) => {
   if (v == null || Number.isNaN(v) || v === 0) return 'text-muted'
@@ -116,9 +141,9 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   // 指數只有日K/分時, 個股專屬端點 (即時資料/研究脈絡) 對它回 404。
   const isIndex = isBenchmarkSymbol(symbol)
 
-  const [selectedRange, setSelectedRange] = useState<number>(180)
+  const [selectedRange, setSelectedRange] = useState<number>(DEFAULT_RANGE_DAYS)
   const [isRuleEditorOpen, setIsRuleEditorOpen] = useState<boolean>(false)
-  const [volUnit, setVolUnit] = useState<'lots' | 'shares'>('lots')
+  const [volumeUnit, setVolumeUnit] = useVolumeUnit()
   const [historyModalType, setHistoryModalType] = useState<'institutional' | 'margin' | null>(null)
 
   // Search state inside stock detail
@@ -152,7 +177,8 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   // Query unified stock detail
   const detailQuery = useQuery({
     queryKey: QK.taiwanStockDetail(symbol, selectedRange),
-    queryFn: () => api.taiwanStockDetail(symbol, selectedRange),
+    // Only a refresh over data already shown stays quiet; the page shows that failure itself.
+    queryFn: ({ queryKey }) => api.taiwanStockDetail(symbol, selectedRange, qc.getQueryData(queryKey) != null),
     refetchInterval: 10_000,
   })
 
@@ -175,27 +201,45 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const [aiReport, setAiReport] = useState<TaiwanAIStockResearchReport | null>(null)
   const [isAiLoading, setIsAiLoading] = useState<boolean>(false)
   const [aiError, setAiError] = useState<string | null>(null)
+  // AI state belongs to one symbol; switching clears it and discards responses still in flight.
+  const [aiSymbol, setAiSymbol] = useState(symbol)
+  const aiRequestId = useRef(0)
+  if (aiSymbol !== symbol) {
+    setAiSymbol(symbol)
+    setAiReport(null)
+    setAiError(null)
+    setIsAiLoading(false)
+  }
+  useEffect(() => {
+    aiRequestId.current += 1
+  }, [symbol])
 
   const handleGenerateAiReport = async () => {
+    const requestId = ++aiRequestId.current
     setIsAiLoading(true)
     setAiError(null)
     try {
       const res = await api.taiwanStockAIResearch(symbol)
+      if (aiRequestId.current !== requestId) return
       if (res.status === 'success' && res.report) {
         setAiReport(res.report)
       } else {
         setAiError(res.error_message || 'AI 研究報告生成失敗')
       }
     } catch (e: any) {
+      if (aiRequestId.current !== requestId) return
       setAiError(e?.message || 'AI 服務調用失敗，請稍後重試')
     } finally {
-      setIsAiLoading(false)
+      if (aiRequestId.current === requestId) setIsAiLoading(false)
     }
   }
 
   const data = detailQuery.data
   const isLoading = detailQuery.isLoading
   const isError = detailQuery.isError
+  const detailError = detailQuery.error
+  const detailStatus = (detailError as Partial<ApiError> | null)?.status
+  const isInvalidSymbol = detailStatus === 400 || detailStatus === 422
   const backtestAssetType = data?.identity?.instrument_type === 'stock' || data?.identity?.instrument_type === 'etf'
     ? data.identity.instrument_type
     : null
@@ -212,14 +256,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const priceColor = isUp ? 'text-rose-500' : isDown ? 'text-emerald-500' : 'text-foreground'
   const sign = isUp ? '+' : ''
 
-  // Volume display helper
-  const formatVol = (shares: number | null | undefined) => {
-    if (shares == null || Number.isNaN(shares)) return '--'
-    const inLots = volUnit === 'lots'
-    const value = inLots ? Math.round(shares / 1000) : shares
-    // Formatted volume must never render as '-0'.
-    return `${(Object.is(value, -0) ? 0 : value).toLocaleString()} ${inLots ? '張' : '股'}`
-  }
+  const formatVol = (shares: number | null | undefined) => formatVolume(shares, volumeUnit)
 
   return (
     <div className={cn('flex flex-col bg-base text-foreground', embedded ? 'pb-4' : 'min-h-screen pb-12')}>
@@ -286,8 +323,8 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             )}
             <button
               onClick={() => {
-                const merged = mergeSymbolIntoCompare(loadLastCompareSymbols(), symbol)
-                navigate(`/stocks/compare?symbols=${encodeURIComponent(merged.join(','))}`)
+                const merged = addToCompareList(loadLastCompareSymbols(), symbol)
+                if (merged) navigate(`/stocks/compare?symbols=${encodeURIComponent(merged.join(','))}`)
               }}
               title="加入多標的比較"
               className="flex items-center gap-1 rounded-lg border border-border/60 bg-base px-1.5 py-0.5 text-[10px] font-medium text-muted hover:border-accent/50 hover:text-accent transition-colors cursor-pointer"
@@ -392,11 +429,25 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
         </div>
       )}
 
-      {isError && (
+      {isError && data && (
+        <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[11px] text-amber-500">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <span>最新資料更新失敗，目前顯示上次成功取得的資料。</span>
+          <button onClick={() => detailQuery.refetch()} className="ml-auto underline cursor-pointer">
+            重試
+          </button>
+        </div>
+      )}
+
+      {isError && !data && (
         <div className="m-6 rounded-xl border border-rose-500/30 bg-rose-500/10 p-6 text-center">
           <AlertTriangle className="mx-auto h-8 w-8 text-rose-500 mb-2" />
           <h3 className="text-sm font-bold text-rose-500">個股資料載入失敗</h3>
-          <p className="text-xs text-muted mt-1">請確認標的代碼是否為標準台股規範 (如 2330.TWSE, 8069.TPEX)。</p>
+          <p className="text-xs text-muted mt-1">
+            {isInvalidSymbol
+              ? '請確認標的代碼是否為標準台股規範 (如 2330.TWSE, 8069.TPEX)。'
+              : detailError?.message || '後端暫時無法提供個股資料，請稍後重試。'}
+          </p>
           <button
             onClick={() => detailQuery.refetch()}
             className="mt-4 rounded-lg bg-accent px-4 py-1.5 text-xs font-medium text-white cursor-pointer"
@@ -545,10 +596,10 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                 <div className="flex items-center justify-between">
                   <span className="text-muted text-[11px]">成交量</span>
                   <button
-                    onClick={() => setVolUnit(v => v === 'lots' ? 'shares' : 'lots')}
+                    onClick={() => setVolumeUnit(volumeUnit === 'lots' ? 'shares' : 'lots')}
                     className="text-[10px] text-accent hover:underline cursor-pointer"
                   >
-                    {volUnit === 'lots' ? '張' : '股'}
+                    {volumeUnit === 'lots' ? '張' : '股'}
                   </button>
                 </div>
                 <p className="font-mono font-medium mt-0.5">{formatVol(data.realtime.volume)}</p>
@@ -623,16 +674,16 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-sm font-bold text-foreground">五檔即時盤口 (Level 2)</h3>
                   <span className="text-[10px] text-muted">
-                    單位: {volUnit === 'lots' ? '張 (1,000股)' : '股'}
+                    單位: {volumeUnit === 'lots' ? '張 (1,000股)' : '股'}
                   </span>
                 </div>
 
                 {/* 賣五檔 */}
                 <div className="space-y-1 my-2">
                   {data.realtime.asks && data.realtime.asks.length > 0 ? (
-                    data.realtime.asks.slice().reverse().map(([price, vol], idx) => (
+                    data.realtime.asks.slice().reverse().map(([price, vol], idx, levels) => (
                       <div key={`ask-${idx}`} className="flex items-center justify-between text-xs font-mono py-0.5 px-2 rounded bg-emerald-500/5">
-                        <span className="text-muted text-[10px]">賣 {5 - idx}</span>
+                        <span className="text-muted text-[10px]">賣 {levels.length - idx}</span>
                         <span className="text-emerald-500 font-semibold">{price.toFixed(2)}</span>
                         <span className="text-muted">{formatVol(vol)}</span>
                       </div>
@@ -788,7 +839,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             <div className="rounded-2xl border border-border bg-surface p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-bold text-foreground">核心籌碼滾動因子</h3>
-                <span className="text-[10px] text-muted">近 5 日指標</span>
+                <span className="text-[10px] text-muted">法人為 5 日累計</span>
               </div>
               {data.factors.status === 'available' ? (
                 <div className="space-y-2 text-xs">
@@ -810,7 +861,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                   <div className="rounded-lg bg-base p-2 border border-border/60">
                     <div className="flex items-center justify-between text-muted text-[11px]">
                       <span>自營商 5 日累計</span>
-                      <span>融資變動量</span>
+                      <span>融資單日增減</span>
                     </div>
                     <div className="flex items-center justify-between font-mono font-bold mt-1">
                       <span className={signColorClass(data.factors.dealer_net_5d)}>
@@ -823,7 +874,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                   </div>
 
                   <div className="rounded-lg bg-base p-2 border border-border/60 flex items-center justify-between">
-                    <span className="text-muted text-[11px]">最新券資比因子</span>
+                    <span className="text-muted text-[11px]">當日券資比</span>
                     <span className="font-mono font-bold text-accent">
                       {data.factors.short_margin_ratio != null ? `${data.factors.short_margin_ratio.toFixed(2)}%` : '--'}
                     </span>
@@ -908,7 +959,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                     <div key={a.alert_id} className="rounded-xl bg-base p-2.5 border border-border/80 text-xs">
                       <div className="flex items-center justify-between">
                         <span className="font-semibold text-foreground">{a.rule_name}</span>
-                        <span className="text-[10px] text-muted font-mono">{a.triggered_at?.slice(11, 19)}</span>
+                        <span className="text-[10px] text-muted font-mono" title="台北時間">{formatAlertTime(a.triggered_at)}</span>
                       </div>
                       <p className="text-[11px] text-muted mt-1">{a.message}</p>
                       <span className="text-[10px] text-muted font-mono">
@@ -948,19 +999,19 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
                   <div className="bg-base p-2 rounded-lg border border-border/50">
                     <span className="text-[10px] text-muted block">5日報酬率</span>
-                    <span className={researchQuery.data.price_context.return_5d !== null ? (researchQuery.data.price_context.return_5d > 0 ? 'text-up font-semibold' : researchQuery.data.price_context.return_5d < 0 ? 'text-down font-semibold' : 'text-foreground') : 'text-muted'}>
+                    <span className={cn(signColorClass(researchQuery.data.price_context.return_5d), 'font-semibold')}>
                       {researchQuery.data.price_context.return_5d !== null ? `${(researchQuery.data.price_context.return_5d * 100).toFixed(2)}%` : '—'}
                     </span>
                   </div>
                   <div className="bg-base p-2 rounded-lg border border-border/50">
                     <span className="text-[10px] text-muted block">20日報酬率</span>
-                    <span className={researchQuery.data.price_context.return_20d !== null ? (researchQuery.data.price_context.return_20d > 0 ? 'text-up font-semibold' : researchQuery.data.price_context.return_20d < 0 ? 'text-down font-semibold' : 'text-foreground') : 'text-muted'}>
+                    <span className={cn(signColorClass(researchQuery.data.price_context.return_20d), 'font-semibold')}>
                       {researchQuery.data.price_context.return_20d !== null ? `${(researchQuery.data.price_context.return_20d * 100).toFixed(2)}%` : '—'}
                     </span>
                   </div>
                   <div className="bg-base p-2 rounded-lg border border-border/50">
                     <span className="text-[10px] text-muted block">距 MA20 乖離</span>
-                    <span className={researchQuery.data.technical_context.distance_to_ma20 !== null ? (researchQuery.data.technical_context.distance_to_ma20 > 0 ? 'text-up' : researchQuery.data.technical_context.distance_to_ma20 < 0 ? 'text-down' : 'text-foreground') : 'text-muted'}>
+                    <span className={signColorClass(researchQuery.data.technical_context.distance_to_ma20)}>
                       {researchQuery.data.technical_context.distance_to_ma20 !== null ? `${(researchQuery.data.technical_context.distance_to_ma20 * 100).toFixed(2)}%` : '—'}
                     </span>
                   </div>
@@ -1186,7 +1237,7 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
           symbol={symbol}
           name={data?.identity?.name || symbol}
           type={historyModalType}
-          formatVol={formatVol}
+          formatVol={shares => formatVolumeFull(shares, volumeUnit)}
           onClose={() => setHistoryModalType(null)}
         />
       )}

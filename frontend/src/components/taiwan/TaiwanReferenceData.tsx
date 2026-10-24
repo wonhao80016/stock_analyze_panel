@@ -75,6 +75,12 @@ function percent(value: unknown) {
   return parsed == null ? '--' : `${number(parsed)}%`
 }
 
+// Statement amounts accumulate from the fiscal year start, so the period shows both ends.
+function accumulationPeriod(data: Record<string, unknown>) {
+  if (!present(data.period_end)) return '--'
+  return present(data.period_start) ? `${data.period_start} ~ ${data.period_end}` : `截至 ${data.period_end}`
+}
+
 // Only an NTD par value is priced; a foreign-currency or unlabelled one keeps its official text.
 function parValue(values: Record<string, unknown>) {
   return present(values.par_value_twd) ? `${number(values.par_value_twd)} 元` : text(values.par_value_raw)
@@ -159,10 +165,10 @@ function StockSections({ sections, isTdr }: { sections: Record<string, TaiwanDat
       </SectionCard>
       <SectionCard title="財務報表" section={statement}>
         <div className="text-xs">
-          <DataRow label="報表期間" value={text(statementData.period_end)} />
-          <DataRow label="營業收入" value={money(statementValues.revenue)} />
-          <DataRow label="營業利益" value={money(statementValues.operating_income)} />
-          <DataRow label="本期淨利" value={money(statementValues.net_income)} />
+          <DataRow label="累計期間" value={accumulationPeriod(statementData)} />
+          <DataRow label="累計營業收入" value={money(statementValues.revenue)} />
+          <DataRow label="累計營業利益" value={money(statementValues.operating_income)} />
+          <DataRow label="累計本期淨利" value={money(statementValues.net_income)} />
           <DataRow label="累計 EPS" value={number(statementValues.cumulative_eps)} />
           <DataRow label="權益總計" value={money(statementValues.equity)} />
         </div>
