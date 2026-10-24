@@ -123,3 +123,72 @@ describe('TaiwanHistoryDataCard update to latest', () => {
     )
   })
 })
+
+const READY_STATUS = {
+  has_data: true,
+  earliest_date: '2024-01-02',
+  latest_date: '2026-10-21',
+  trading_days: 690,
+  needs_bootstrap: false,
+}
+
+const errorToasts = () => vi.mocked(toast).mock.calls.filter(([, kind]) => kind === 'error')
+
+describe('TaiwanHistoryDataCard failures and bundle import', () => {
+  it('leaves the error toast of a refused update to the request helper', async () => {
+    vi.mocked(toast).mockClear()
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue(READY_STATUS)
+    vi.mocked(api.taiwanUpdateLatest).mockRejectedValue(new Error('另一個台股資料更新正在執行, 請稍後再試'))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(createElement(QueryClientProvider, { client: queryClient }, createElement(TaiwanHistoryDataCard)))
+
+    fireEvent.click(await screen.findByRole('button', { name: '更新到最新' }))
+
+    await waitFor(() => expect(api.taiwanUpdateLatest).toHaveBeenCalled())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(errorToasts()).toEqual([])
+  })
+
+  it('still reports a network failure that never reached the server', async () => {
+    vi.mocked(toast).mockClear()
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue(READY_STATUS)
+    vi.mocked(api.taiwanUpdateLatest).mockRejectedValue(new TypeError('Failed to fetch'))
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(createElement(QueryClientProvider, { client: queryClient }, createElement(TaiwanHistoryDataCard)))
+
+    fireEvent.click(await screen.findByRole('button', { name: '更新到最新' }))
+
+    await waitFor(() => expect(errorToasts()).toHaveLength(1))
+  })
+
+  it('invalidates every query once a bundle import succeeds', async () => {
+    vi.mocked(api.taiwanHistoryStatus).mockResolvedValue({
+      has_data: false,
+      earliest_date: null,
+      latest_date: null,
+      trading_days: 0,
+      needs_bootstrap: true,
+    })
+    vi.mocked(api.taiwanBootstrapRun).mockResolvedValue({ job_id: 'job-1' } as never)
+    vi.mocked(api.taiwanBootstrapJob).mockResolvedValue({
+      job_id: 'job-1',
+      status: 'success',
+      stage: '已完成',
+      progress: 100,
+      message: 'done',
+      error: null,
+      downloaded_bytes: 0,
+      total_bytes: 0,
+    })
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['taiwanMarketIntelligence'], { institutional_amounts: null })
+    render(createElement(QueryClientProvider, { client: queryClient }, createElement(TaiwanHistoryDataCard)))
+
+    fireEvent.click(await screen.findByRole('button', { name: /一鍵下載歷史資料包/ }))
+
+    await waitFor(() => expect(api.taiwanBootstrapJob).toHaveBeenCalledWith('job-1'))
+    await waitFor(() =>
+      expect(queryClient.getQueryState(['taiwanMarketIntelligence'])?.isInvalidated).toBe(true),
+    )
+  })
+})

@@ -22,7 +22,11 @@ from typing import Any
 
 import polars as pl
 
-from app.taiwan.daily_store import is_provisional_mtime
+from app.taiwan.daily_store import (
+    invalidate_latest_rows,
+    is_provisional_mtime,
+    newest_rows_per_symbol,
+)
 from app.taiwan.providers.base import (
     AmountUnit,
     PriceSemantics,
@@ -183,6 +187,7 @@ class TaiwanInstitutionalStore:
                 for attempt in range(retries):
                     try:
                         os.replace(tmp_path, target)
+                        invalidate_latest_rows(self._data_dir)
                         break
                     except OSError as exc:
                         if attempt == retries - 1:
@@ -210,18 +215,25 @@ class TaiwanInstitutionalStore:
         return self.read_range(symbols, latest, latest)
 
     def read_latest_per_symbol(self, symbols: list[str] | None = None) -> pl.DataFrame:
-        """Return the latest available row for each symbol."""
-        df = self.read_all(symbols)
-        if df.is_empty():
-            return df
-        return (
-            df.with_columns(
-                pl.col("date").max().over("symbol").alias("_max_date")
+        """Return the latest available row for each symbol; an empty *symbols* means every symbol."""
+        def combine(frames: list[pl.DataFrame]) -> pl.DataFrame:
+            if not frames:
+                return pl.DataFrame(schema=_schema())
+            return (
+                pl.concat(frames, how="diagonal_relaxed")
+                .unique(subset=["symbol", "date"], keep="last")
+                .sort(["symbol", "date"])
             )
-            .filter(pl.col("date") == pl.col("_max_date"))
-            .drop("_max_date")
-            .sort(["symbol", "date"])
+
+        latest = newest_rows_per_symbol(
+            self._data_dir,
+            lambda path: pl.read_parquet(path, columns=["symbol"])["symbol"].to_list(),
+            lambda path, wanted: pl.read_parquet(path).filter(pl.col("symbol").is_in(wanted)),
+            combine,
         )
+        if symbols:
+            latest = latest.filter(pl.col("symbol").is_in(symbols))
+        return latest
 
     def read_range(
         self,

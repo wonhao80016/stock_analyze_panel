@@ -29,6 +29,7 @@ from app.taiwan.daily_update import (
     DatasetRefreshStats,
     MasterRefreshOutcome,
     TaiwanDailyUpdateService,
+    exclusive_update,
     master_refresh_due,
     pending_listing_dates,
     publish_enriched,
@@ -517,70 +518,8 @@ class TaiwanBootstrapService:
                 dest_daily = dest_root / "daily"
                 dest_daily.mkdir(parents=True, exist_ok=True)
 
-                extracted_partitions = sorted(daily_src.glob("date=*/part.parquet"))
-                imported: set[str] = set()
-                for p in extracted_partitions:
-                    part_name = p.parent.name
-                    target_part_dir = dest_daily / part_name
-                    if not target_part_dir.exists():
-                        target_part_dir.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(str(p), str(target_part_dir / "part.parquet"))
-                        imported.add(part_name)
-                    else:
-                        target_file = target_part_dir / "part.parquet"
-                        if not target_file.exists():
-                            shutil.copy2(str(p), str(target_file))
-                            imported.add(part_name)
-
-                # Step 6: Post-bootstrap incremental sync to latest trading day
-                self._update_job(
-                    job_id,
-                    status="syncing",
-                    stage="補充最新行情",
-                    progress=90,
-                    message="正在自動補充最新交易日資料...",
-                )
-
-                st = TaiwanDailyStore(data_dir=dest_daily)
-                latest_stored = st.latest_date()
-                target_date = resolve_target_latest_trading_date()
-
-                fetched = 0
-                sync_start: date | None = None
-                if latest_stored and latest_stored < target_date:
-                    sync_start = latest_stored + timedelta(days=1)
-                    if sync_start <= target_date:
-                        try:
-                            refresh_svc = TaiwanDailyRefreshService(store=st)
-                            res = refresh_svc.refresh_dates(start_date=sync_start, end_date=target_date)
-                            fetched = res.get("dates_fetched", 0)
-                            logger.info("Post-bootstrap incremental sync: %s", res)
-                        except Exception as sync_exc:
-                            logger.warning("Post-bootstrap sync warning (non-fatal): %s", sync_exc)
-
-                # Screening, strategies and monitor signals read the enriched table, not these bars, and
-                # imported days can be older than the recent window a publish rewrites.
-                changed = bool(imported or fetched)
-                earliest = [d for d in st.available_dates() if f"date={d.isoformat()}" in imported]
-                if fetched and sync_start is not None:
-                    earliest.append(sync_start)
-                since = min(earliest, default=None)
-                published = self._publish(not changed, since=since)
-                if changed or published:
-                    self._refresh_caches("history bootstrap")
-
-                # Success!
-                final_dates = st.available_dates()
-                final_count = len(final_dates)
-                latest_str = str(final_dates[-1]) if final_dates else "未知"
-                self._update_job(
-                    job_id,
-                    status="success",
-                    stage="已完成",
-                    progress=100,
-                    message=f"歷史日 K 資料包匯入成功! 共 {final_count} 個交易日, 資料最新至 {latest_str}。",
-                )
-                logger.info("Taiwan historical bootstrap job %s completed successfully", job_id)
+                with exclusive_update(wait=True):
+                    self._import_and_sync(job_id, daily_src, dest_daily)
 
             except Exception as exc:
                 logger.exception("Taiwan bootstrap job %s failed: %s", job_id, exc)
@@ -592,9 +531,66 @@ class TaiwanBootstrapService:
                     message=f"資料包匯入失敗: {exc}",
                     error=str(exc),
                 )
-            finally:
-                # Temp dir is automatically cleaned up by TemporaryDirectory context manager
-                pass
+
+    def _import_and_sync(self, job_id: str, daily_src: Path, dest_daily: Path) -> None:
+        extracted_partitions = sorted(daily_src.glob("date=*/part.parquet"))
+        imported: set[str] = set()
+        for p in extracted_partitions:
+            part_name = p.parent.name
+            target_file = dest_daily / part_name / "part.parquet"
+            if not target_file.exists():
+                write_atomically(target_file, lambda tmp, src=p: shutil.copy2(str(src), str(tmp)))
+                imported.add(part_name)
+
+        # Step 6: Post-bootstrap incremental sync to latest trading day
+        self._update_job(
+            job_id,
+            status="syncing",
+            stage="補充最新行情",
+            progress=90,
+            message="正在自動補充最新交易日資料...",
+        )
+
+        st = TaiwanDailyStore(data_dir=dest_daily)
+        latest_stored = st.latest_date()
+        target_date = resolve_target_latest_trading_date()
+
+        fetched = 0
+        sync_start: date | None = None
+        if latest_stored and latest_stored < target_date:
+            sync_start = latest_stored + timedelta(days=1)
+            if sync_start <= target_date:
+                try:
+                    refresh_svc = TaiwanDailyRefreshService(store=st)
+                    res = refresh_svc.refresh_dates(start_date=sync_start, end_date=target_date)
+                    fetched = res.get("dates_fetched", 0)
+                    logger.info("Post-bootstrap incremental sync: %s", res)
+                except Exception as sync_exc:
+                    logger.warning("Post-bootstrap sync warning (non-fatal): %s", sync_exc)
+
+        # Screening, strategies and monitor signals read the enriched table, not these bars, and
+        # imported days can be older than the recent window a publish rewrites.
+        changed = bool(imported or fetched)
+        earliest = [d for d in st.available_dates() if f"date={d.isoformat()}" in imported]
+        if fetched and sync_start is not None:
+            earliest.append(sync_start)
+        since = min(earliest, default=None)
+        published = self._publish(not changed, since=since)
+        if changed or published:
+            self._refresh_caches("history bootstrap")
+
+        # Success!
+        final_dates = st.available_dates()
+        final_count = len(final_dates)
+        latest_str = str(final_dates[-1]) if final_dates else "未知"
+        self._update_job(
+            job_id,
+            status="success",
+            stage="已完成",
+            progress=100,
+            message=f"歷史日 K 資料包匯入成功! 共 {final_count} 個交易日, 資料最新至 {latest_str}。",
+        )
+        logger.info("Taiwan historical bootstrap job %s completed successfully", job_id)
 
     def _master(self) -> TaiwanSecurityMaster | None:
         if self._security_master is not None:
@@ -640,8 +636,16 @@ class TaiwanBootstrapService:
         After the daily bars, even when they are already current, institutional flows, market-wide
         institutional amounts and margin catch up to the same target as the scheduled run does;
         margin stops at the previous session until MARGIN_PUBLISH (resolve_margin_target). Their
-        failures never fail the update and are reported in "chip_data".
+        failures never fail the update and are reported in "chip_data". Only a failed new day with
+        nothing fetched raises, after the chip data has caught up; a failed refetch of a stored day
+        keeps that day and is named in the message.
+
+        Raises TaiwanUpdateBusyError while another update in this process holds exclusive_update.
         """
+        with exclusive_update(wait=False):
+            return self._update_to_latest()
+
+    def _update_to_latest(self) -> dict[str, Any]:
         st = self.store
         dates = st.available_dates()
         if not dates:
@@ -687,14 +691,17 @@ class TaiwanBootstrapService:
             start_date=start, end_date=target, **refetch_kwargs
         )
         fetched = res.get("dates_fetched", 0)
-        failures = [
+        new_day_failures = [
             (f"{f['date']} 行情抓取失敗", f["error"]) for f in res.get("failed_dates") or []
-        ] + [
+        ]
+        failures = new_day_failures + [
             (f"{f['date']} 重抓失敗, 保留原有資料", f["error"]) for f in res.get("repair_failed_dates") or []
         ]
-        if failures and not fetched:
-            raise RuntimeError(f"{failures[0][0]}: {failures[0][1]}")
         chip = self._refresh_chip_data(target, now)
+        if new_day_failures and not fetched:
+            raise RuntimeError(
+                f"{failures[0][0]}: {failures[0][1]}" + (_chip_message(chip) if chip is not None else "")
+            )
         # Screening takes its basis day from these bars, so their indicators must be published too.
         published = self._publish(not fetched and not republish, since=start if fetched else None)
         message = f"成功更新 {fetched} 個交易日 (最新至 {target})"

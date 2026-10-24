@@ -421,8 +421,11 @@ def test_update_to_latest_reports_a_refetch_that_failed(tmp_path: Path, monkeypa
         "dates_fetched": 0, "failed_dates": [], "repair_failed_dates": [{"date": "2024-01-02", "error": "no rows"}],
     }
 
-    with pytest.raises(RuntimeError, match="2024-01-02 重抓失敗, 保留原有資料"):
-        svc.update_to_latest()
+    res = svc.update_to_latest()
+
+    assert res["dates_fetched"] == 0
+    assert "2024-01-02 重抓失敗, 保留原有資料" in res["message"]
+    assert "請稍後再試" in res["message"]
 
 
 def test_update_to_latest_names_a_failed_refetch_next_to_new_days(tmp_path: Path, monkeypatch):

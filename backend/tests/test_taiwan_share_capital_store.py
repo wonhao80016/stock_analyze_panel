@@ -214,19 +214,18 @@ def test_load_is_cached_across_instances_until_the_file_changes(tmp_path):
 
 
 def test_load_reflects_a_refresh_that_changes_the_file(tmp_path):
-    store = TaiwanShareCapitalStore(data_dir=tmp_path, client=_client(twse=TWSE_ROWS, tpex=[]))
+    store = TaiwanShareCapitalStore(data_dir=tmp_path, client=_client(twse=TWSE_ROWS, tpex=TPEX_ROWS))
     store.refresh()
     before = TaiwanShareCapitalStore(data_dir=tmp_path).load()
 
-    # A disjoint symbol set (TPEx-only) proves the reload picked up new content,
-    # reusing the module's existing ASCII-keyed TPEX_ROWS fixture rather than a
-    # one-off row (TWSE_ROWS/TPEX_ROWS mirror the exchanges' own field names).
-    other = TaiwanShareCapitalStore(data_dir=tmp_path, client=_client(twse=[], tpex=TPEX_ROWS))
-    assert other.refresh() == 1
+    # A smaller TWSE answer proves the reload picked up new content; an exchange answering
+    # nothing would keep its previous rows instead.
+    other = TaiwanShareCapitalStore(data_dir=tmp_path, client=_client(twse=TWSE_ROWS[:1], tpex=TPEX_ROWS))
+    assert other.refresh() == 2
     after = TaiwanShareCapitalStore(data_dir=tmp_path).load()
 
     assert not after.equals(before)
-    assert set(after["symbol"]) == {"1240.TPEX"}
+    assert set(after["symbol"]) == {"1101.TWSE", "1240.TPEX"}
 
 
 # The order matters and nothing else pins it: publishing first would price today's
@@ -238,7 +237,7 @@ def test_the_daily_update_refreshes_share_capital_before_publishing():
 
     from app.taiwan import daily_update
 
-    assert "publish_enriched(" in inspect.getsource(daily_update.TaiwanDailyUpdateService.run_update)
+    assert "publish_enriched(" in inspect.getsource(daily_update.TaiwanDailyUpdateService._run_update)
     src = inspect.getsource(daily_update.publish_enriched)
     capital = re.search(r"TaiwanShareCapitalStore\(\)\.refresh\(\)", src)
     publish = re.search(r"TaiwanEnrichedRefreshService\([^)]*\)\.refresh_recent\(\)", src)

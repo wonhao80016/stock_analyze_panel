@@ -305,6 +305,7 @@ def test_hybrid_provider_exposes_existing_official_seam(monkeypatch):
         "app.taiwan.fundamentals.TaiwanOfficialFundamentals.__init__",
         lambda self, client=None: setattr(self, "client", _client_for(case)),
     )
+    monkeypatch.setattr("app.taiwan.providers.hybrid_provider._official_fundamentals_provider", None)
     provider = TaiwanHybridProvider()
     day = date(2026, 8, 11)
     events = provider.get_fundamentals(

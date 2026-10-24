@@ -19,8 +19,11 @@ Core Design Principles:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import threading
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
@@ -51,6 +54,25 @@ MARGIN_PUBLISH_HOUR = 21
 MARGIN_PUBLISH_MINUTE = 40
 
 UpdateStatus = Literal["success", "partial", "failed", "skipped"]
+
+# Held by whatever rewrites daily partitions and publishes enriched in this process: the
+# scheduled run, update-to-latest and the history bundle import. Other processes are not excluded.
+_update_lock = threading.RLock()
+
+
+class TaiwanUpdateBusyError(RuntimeError):
+    """Another Taiwan data update in this process holds the update lock."""
+
+
+@contextlib.contextmanager
+def exclusive_update(*, wait: bool) -> Iterator[None]:
+    """Hold the update lock; without *wait*, raise TaiwanUpdateBusyError when it is taken."""
+    if not _update_lock.acquire(blocking=wait):
+        raise TaiwanUpdateBusyError("另一個台股資料更新正在執行, 請稍後再試")
+    try:
+        yield
+    finally:
+        _update_lock.release()
 
 
 class DatasetRefreshStats(BaseModel):
@@ -447,7 +469,10 @@ class TaiwanDailyUpdateService:
         return "stale", days_behind
 
     def get_freshness(self, target_date: date | None = None) -> FreshnessStatus:
-        """Inspect and return current storage freshness across all 3 datasets."""
+        """Inspect and return current storage freshness across all 3 datasets.
+
+        Margin is measured against resolve_margin_target, since its day is published after MARGIN_PUBLISH.
+        """
         target = target_date or resolve_target_latest_trading_date(self.calendar)
         d_dates = self.daily_store.available_dates()
         i_dates = self.inst_store.available_dates()
@@ -459,7 +484,9 @@ class TaiwanDailyUpdateService:
 
         d_status, d_behind = self._calc_dataset_status(d_as_of, target)
         i_status, i_behind = self._calc_dataset_status(i_as_of, target)
-        m_status, m_behind = self._calc_dataset_status(m_as_of, target)
+        m_status, m_behind = self._calc_dataset_status(
+            m_as_of, resolve_margin_target(target, taipei_now(), self.calendar)
+        )
 
         is_current = (d_status == "current" and i_status == "current" and m_status == "current")
 
@@ -682,9 +709,35 @@ class TaiwanDailyUpdateService:
             master_force: Let the master refresh accept count drops and removals beyond its
                           validation limits.
 
+        Waits for any other update in this process (exclusive_update) before it starts.
+
         Returns:
             Structured TaiwanDailyUpdateResult.
         """
+        with exclusive_update(wait=True):
+            return self._run_update(
+                target_date=target_date,
+                refresh_daily=refresh_daily,
+                daily_symbols=daily_symbols,
+                force=force,
+                refresh_institutional=refresh_institutional,
+                refresh_margin=refresh_margin,
+                refresh_master=refresh_master,
+                master_force=master_force,
+            )
+
+    def _run_update(
+        self,
+        *,
+        target_date: date | None,
+        refresh_daily: bool,
+        daily_symbols: list[str] | None,
+        force: bool,
+        refresh_institutional: bool,
+        refresh_margin: bool,
+        refresh_master: bool | None,
+        master_force: bool,
+    ) -> TaiwanDailyUpdateResult:
         run_start = taipei_now()
         target = target_date or resolve_target_latest_trading_date(self.calendar, as_of_dt=run_start)
 

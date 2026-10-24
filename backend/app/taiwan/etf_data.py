@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
@@ -14,6 +15,18 @@ import httpx
 from app.taiwan.providers.taiwan_values import TAIPEI, parse_number, parse_taiwan_date
 
 TWSE_ETF_PRODUCTS_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap47_L"
+
+# One pooled client for the process: callers build a TaiwanOfficialETFData per request.
+_shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
+
+
+def _official_client() -> httpx.Client:
+    global _shared_client
+    with _shared_client_lock:
+        if _shared_client is None:
+            _shared_client = httpx.Client(timeout=30.0)
+        return _shared_client
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -175,7 +188,7 @@ class TaiwanOfficialETFData:
     """Current official ETF metadata; date-only records remain PIT-unavailable."""
 
     def __init__(self, client: httpx.Client | None = None) -> None:
-        self.client = client or httpx.Client(timeout=30.0)
+        self.client = client or _official_client()
 
     def profile(self, symbol: str, exchange: str) -> TaiwanETFProfile:
         retrieved, row = self._row(symbol, exchange)

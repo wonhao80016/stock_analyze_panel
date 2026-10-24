@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
@@ -32,6 +32,7 @@ from app.taiwan.providers.base import (
 )
 from app.taiwan.providers.normalizer import normalize_taiwan_daily
 from app.taiwan.realtime.calendar import TAIPEI_TZ
+from app.taiwan.universe.service import write_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -184,29 +185,19 @@ class TaiwanDailyStore:
             df = df.unique(subset=["symbol", "date"], keep="last").sort(["symbol", "date"])
             logger.debug("partition %s dedup: %d rows -> %d rows", d, before, df.height)
 
-            # Atomic write: temp file -> replace.
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(partition_dir), suffix=".parquet")
-            try:
-                os.close(tmp_fd)
-                df.write_parquet(tmp_path)
-                Path(tmp_path).replace(target)
-                if keep_provisional and not is_provisional_mtime(
-                    d, target.stat().st_mtime, final_from
-                ):
-                    # Rows already stored are still pre-final figures, so the day stays provisional;
-                    # the second before the cutoff stays newer than an enriched publish made before it.
-                    last_second = (
-                        datetime.combine(d, final_from, TAIPEI_TZ) - timedelta(seconds=1)
-                    ).timestamp()
-                    os.utime(target, (last_second, last_second))
-                invalidate_listing_sessions(self._data_dir)
-                logger.debug("Wrote %d rows to %s", df.height, target)
-            except BaseException:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+            write_atomically(target, df.write_parquet)
+            if keep_provisional and not is_provisional_mtime(
+                d, target.stat().st_mtime, final_from
+            ):
+                # Rows already stored are still pre-final figures, so the day stays provisional;
+                # the second before the cutoff stays newer than an enriched publish made before it.
+                last_second = (
+                    datetime.combine(d, final_from, TAIPEI_TZ) - timedelta(seconds=1)
+                ).timestamp()
+                os.utime(target, (last_second, last_second))
+            invalidate_listing_sessions(self._data_dir)
+            invalidate_latest_rows(self._data_dir)
+            logger.debug("Wrote %d rows to %s", df.height, target)
 
             return df.height
 
@@ -237,19 +228,37 @@ class TaiwanDailyStore:
         returns the row with the maximum date.  This is the primary API for
         the Taiwan Screener, which needs one current quote per instrument.
 
-        Results are sorted by symbol ASC, date ASC.
+        Results are sorted by symbol ASC, date ASC. Unreadable partitions are skipped, as in read_range.
         """
-        df = self.read_all(symbols)
-        if df.is_empty():
-            return df
-        return (
-            df.with_columns(
-                pl.col("date").max().over("symbol").alias("_max_date")
-            )
-            .filter(pl.col("date") == pl.col("_max_date"))
-            .drop("_max_date")
-            .sort(["symbol", "date"])
-        )
+
+        def read_symbols(path: Path) -> list[str] | None:
+            try:
+                frame = pl.read_parquet(path, columns=["symbol", "date"])
+            except Exception as exc:
+                logger.warning("read_latest_per_symbol skipped %s: %s", path, exc)
+                return None
+            return frame.filter(pl.col("date").is_not_null())["symbol"].to_list()
+
+        def read_rows(path: Path, wanted: list[str]) -> pl.DataFrame | None:
+            try:
+                return (
+                    pl.scan_parquet(path, missing_columns="insert", extra_columns="ignore")
+                    .filter(pl.col("date").is_not_null() & pl.col("symbol").is_in(wanted))
+                    .collect()
+                )
+            except Exception as exc:
+                logger.warning("read_latest_per_symbol skipped %s: %s", path, exc)
+                return None
+
+        def combine(frames: list[pl.DataFrame]) -> pl.DataFrame:
+            if not frames:
+                return pl.DataFrame(schema=_schema())
+            return pl.concat(frames, how="diagonal_relaxed").select(TAIWAN_DAILY_COLUMNS).sort(["symbol", "date"])
+
+        latest = newest_rows_per_symbol(self._data_dir, read_symbols, read_rows, combine)
+        if symbols is not None:
+            latest = latest.filter(pl.col("symbol").is_in(symbols))
+        return latest
 
     def read_latest(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """Deprecated: use :meth:`read_latest_per_symbol` instead."""
@@ -462,6 +471,76 @@ def listing_sessions(store: TaiwanDailyStore | None = None) -> ListingSessions:
     sessions = ListingSessions(tuple(store.available_dates()), store.first_sessions())
     _listing_sessions_cache[key] = (now, sessions)
     return sessions
+
+
+# Keyed by directory; an entry holds for as long as no partition is added, removed or rewritten.
+_latest_rows_cache: dict[str, tuple[tuple[tuple[str, int, int], ...], pl.DataFrame]] = {}
+_latest_rows_lock = threading.Lock()
+
+
+def newest_rows_per_symbol(
+    data_dir: Path,
+    read_symbols: Callable[[Path], list[str] | None],
+    read_rows: Callable[[Path, list[str]], pl.DataFrame | None],
+    combine: Callable[[list[pl.DataFrame]], pl.DataFrame],
+) -> pl.DataFrame:
+    """Every symbol's rows from the newest ``date=*/part.parquet`` partition under *data_dir* that holds it.
+
+    Partitions are visited newest first and read in full only for symbols not yet seen, and the
+    *combine*d result is reused until a partition's name, mtime or size changes. A reader returning
+    None skips that partition.
+    """
+    files: list[Path] = []
+    for path in sorted(data_dir.glob("date=*/part.parquet"), reverse=True):
+        try:
+            date.fromisoformat(path.parent.name.split("=", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        files.append(path)
+    signature: list[tuple[str, int, int]] = []
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((path.parent.name, stat.st_mtime_ns, stat.st_size))
+    key = _listing_sessions_key(data_dir)
+    with _latest_rows_lock:
+        cached = _latest_rows_cache.get(key)
+    if cached is not None and cached[0] == tuple(signature):
+        return cached[1]
+
+    seen: set[str] = set()
+    frames: list[pl.DataFrame] = []
+    complete = True
+    for path in files:
+        present = read_symbols(path)
+        if present is None:
+            complete = False
+            continue
+        new = set(present) - seen
+        if not new:
+            continue
+        rows = read_rows(path, sorted(new))
+        if rows is None:
+            complete = False
+            continue
+        if rows.is_empty():
+            continue
+        frames.append(rows)
+        seen |= new
+    result = combine(frames)
+    # A skipped partition may only be locked or mid-write; its unchanged signature must not pin the gap.
+    if complete:
+        with _latest_rows_lock:
+            _latest_rows_cache[key] = (tuple(signature), result)
+    return result
+
+
+def invalidate_latest_rows(data_dir: Path) -> None:
+    """Drop the cached newest_rows_per_symbol result of *data_dir* after a partition write."""
+    with _latest_rows_lock:
+        _latest_rows_cache.pop(_listing_sessions_key(data_dir), None)
 
 
 # ── Internal helpers ──────────────────────────────────────────────

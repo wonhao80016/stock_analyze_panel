@@ -34,6 +34,7 @@ import polars as pl
 from app.taiwan.providers.snapshot_provider import get_with_retry
 from app.taiwan.providers.taiwan_values import TAIPEI, parse_taiwan_date
 from app.taiwan.universe.models import TDR_SECURITY_CLASS, derive_security_class
+from app.taiwan.universe.service import write_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -177,9 +178,9 @@ class TaiwanShareCapitalStore:
     def refresh(self) -> int:
         """Fetch both exchanges and replace the file. Returns rows written.
 
-        An exchange that fails keeps its rows from the previous file, so one outage
-        does not drop that exchange's listings; the file is only replaced once at
-        least one exchange returned rows.
+        An exchange that fails, or answers without a usable row, keeps its rows from the
+        previous file, so one outage does not drop that exchange's listings; the file is
+        only replaced once at least one exchange returned rows.
         """
         rows: list[dict[str, Any]] = []
         failed: list[str] = []
@@ -203,6 +204,9 @@ class TaiwanShareCapitalStore:
         ):
             try:
                 fetched = self._fetch(url, suffix, code_keys, share_keys, private_keys, date_keys)
+                if not fetched:
+                    # An empty list or renamed fields would otherwise drop that exchange's denominators.
+                    raise ValueError(f"{suffix} returned no usable share counts")
                 logger.info("taiwan share capital: %s returned %d rows", suffix, len(fetched))
                 rows.extend(fetched)
             except Exception as e:  # noqa: BLE001
@@ -225,10 +229,7 @@ class TaiwanShareCapitalStore:
                 logger.info("taiwan share capital: kept %d previous rows for %s", kept.height, failed)
                 df = pl.concat([df, kept])
         df = df.unique(subset=["symbol"], keep="last").sort("symbol")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".parquet.tmp")
-        df.write_parquet(tmp)
-        tmp.replace(self.path)
+        write_atomically(self.path, df.write_parquet)
         logger.info("taiwan share capital refreshed: %d symbols -> %s", df.height, self.path)
         return df.height
 

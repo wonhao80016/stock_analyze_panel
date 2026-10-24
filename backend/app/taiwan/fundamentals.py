@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, timedelta
@@ -17,7 +18,9 @@ from typing import Any
 
 import httpx
 
+from app.taiwan.providers.snapshot_provider import get_with_retry
 from app.taiwan.providers.taiwan_values import MISSING_VALUES, TAIPEI, parse_number, parse_taiwan_date
+from app.taiwan.realtime.calendar import taipei_today
 
 STATEMENT_CATEGORIES = ("ci", "basi", "bd", "fh", "ins", "mim")
 NORMALIZED_STATUSES = {
@@ -185,14 +188,33 @@ class TaiwanFundamentalStore:
         return row.symbol, row.dataset, row.period_end, _iso(row.available_at) or "", row.revision
 
 
+_shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
+
+
+def _official_client() -> httpx.Client:
+    global _shared_client
+    with _shared_client_lock:
+        if _shared_client is None:
+            _shared_client = httpx.Client(timeout=30.0)
+        return _shared_client
+
+
 class TaiwanOfficialFundamentals:
-    """Official TWSE/TPEx fundamentals feeding the Taiwan contract model."""
+    """Official TWSE/TPEx fundamentals feeding the Taiwan contract model.
+
+    Each market-wide list is downloaded at most once per Taipei date per instance, so a list the
+    exchange republishes later that day is not seen until the next date. Transport errors and HTTP
+    5xx are retried (get_with_retry).
+    """
 
     TWSE = "https://openapi.twse.com.tw/v1"
     TPEX = "https://www.tpex.org.tw/openapi/v1"
 
     def __init__(self, client: httpx.Client | None = None) -> None:
-        self.client = client or httpx.Client(timeout=30.0)
+        self.client = client or _official_client()
+        self._rows_cache: dict[tuple[str, date], tuple[list[dict[str, Any]], datetime]] = {}
+        self._rows_cache_lock = threading.Lock()
 
     def monthly_revenue(self, symbol: str, exchange: str, *, security_type: str = "stock") -> FundamentalRecord:
         if security_type == "etf":
@@ -350,12 +372,23 @@ class TaiwanOfficialFundamentals:
 
     def _rows(self, exchange: str, path: str) -> tuple[str, list[dict[str, Any]], datetime]:
         url = f"{self.TWSE if exchange == 'TWSE' else self.TPEX}/{path}"
-        response = self.client.get(url)
-        response.raise_for_status()
+        key = (url, taipei_today())
+        with self._rows_cache_lock:
+            cached = self._rows_cache.get(key)
+        if cached is not None:
+            return url, cached[0], cached[1]
+        response = get_with_retry(self.client, url)
         retrieved = datetime.now(TAIPEI)
         rows = response.json()
         if not isinstance(rows, list):
             raise ValueError(f"official {path} schema changed")
+        if not rows:
+            # Not cached, so an empty answer is asked for again on the next call instead of all day.
+            return url, rows, retrieved
+        with self._rows_cache_lock:
+            for stale in [k for k in self._rows_cache if k[1] != key[1]]:
+                del self._rows_cache[stale]
+            self._rows_cache[key] = (rows, retrieved)
         return url, rows, retrieved
 
 

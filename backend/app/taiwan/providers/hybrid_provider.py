@@ -9,8 +9,11 @@ Implements the MarketDataProvider protocol:
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import date, datetime
 
+import httpx
 import polars as pl
 
 from app.data_providers.base import AssetType, ProviderCapabilities
@@ -20,6 +23,48 @@ from app.taiwan.providers.yahoo_provider import YahooFinanceAdapter
 from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 
 logger = logging.getLogger(__name__)
+
+# Provider instances are built per request; one fundamentals source keeps its per-day list cache across them.
+_official_fundamentals_provider = None
+_official_fundamentals_lock = threading.Lock()
+
+_OFFICIAL_DAILY_ATTEMPTS = 3
+_OFFICIAL_DAILY_BACKOFF_SECONDS = 1.0
+
+
+def _official_fundamentals():
+    from app.taiwan.fundamentals import TaiwanOfficialFundamentals
+
+    global _official_fundamentals_provider
+    with _official_fundamentals_lock:
+        if _official_fundamentals_provider is None:
+            _official_fundamentals_provider = TaiwanOfficialFundamentals()
+        return _official_fundamentals_provider
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500 or exc.response.status_code == 429
+    return isinstance(exc, httpx.TransportError)
+
+
+class _RetryingOfficialAdapter(OfficialTaiwanAdapter):
+    """Retries only the monthly table that failed transiently, so a run never refetches months it already has."""
+
+    def _fetch_month(self, symbol: TaiwanSymbol, month: object) -> pl.DataFrame:
+        attempt = 1
+        while True:
+            try:
+                return super()._fetch_month(symbol, month)
+            except Exception as exc:
+                if attempt >= _OFFICIAL_DAILY_ATTEMPTS or not _is_transient(exc):
+                    raise
+                logger.info(
+                    "Taiwan official month %s %s failed (attempt %d/%d), retrying: %s",
+                    symbol.canonical, month, attempt, _OFFICIAL_DAILY_ATTEMPTS, exc,
+                )
+                time.sleep(_OFFICIAL_DAILY_BACKOFF_SECONDS * attempt)
+                attempt += 1
 
 
 class TaiwanHybridProvider:
@@ -41,7 +86,7 @@ class TaiwanHybridProvider:
     ) -> None:
         self.finmind = FinMindAdapter(token=finmind_token)
         self.yahoo = YahooFinanceAdapter()
-        self.official = OfficialTaiwanAdapter()
+        self.official = _RetryingOfficialAdapter()
         self.primary = primary.lower()
 
     def get_fundamentals(
@@ -55,9 +100,7 @@ class TaiwanHybridProvider:
         end_date: date | None = None,
     ):
         """Use the authoritative Taiwan fundamentals seam without changing factors."""
-        from app.taiwan.fundamentals import TaiwanOfficialFundamentals
-
-        provider = TaiwanOfficialFundamentals()
+        provider = _official_fundamentals()
         if dataset == "monthly_revenue":
             return provider.monthly_revenue(symbol, exchange, security_type=security_type)
         if dataset == "financial_statement":
@@ -128,11 +171,8 @@ class TaiwanHybridProvider:
         for index, adapter in enumerate(adapters):
             try:
                 df = adapter.fetch_daily(
-                canonical_symbols,
-                start_time=start_time,
-                end_time=end_time,
-                asset_type=asset_type,
-            )
+                    canonical_symbols, start_time=start_time, end_time=end_time, asset_type=asset_type
+                )
                 if not df.is_empty():
                     if index:
                         df = df.with_columns(pl.lit("third_party_fallback").alias("status"))

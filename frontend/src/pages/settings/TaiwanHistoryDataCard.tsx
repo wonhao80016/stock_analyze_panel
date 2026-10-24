@@ -67,7 +67,8 @@ export function TaiwanHistoryDataCard() {
       }
     },
     onError: (err: any) => {
-      toast(`更新至最新交易日失敗: ${err.message || err}`, 'error')
+      // request() already toasts every HTTP error; only a fetch that never got a response arrives unannounced.
+      if (err instanceof TypeError) toast(`更新至最新交易日失敗: ${err.message || err}`, 'error')
     },
   })
 
@@ -86,8 +87,8 @@ export function TaiwanHistoryDataCard() {
 
         if (job.status === 'success') {
           toast(job.message || '歷史日 K 資料包匯入成功！', 'success')
-          qc.invalidateQueries({ queryKey: QK.taiwanHistoryStatus })
-          qc.invalidateQueries({ queryKey: QK.taiwanDataStatus })
+          // The import publishes indicators for every imported day, so every panel may be stale.
+          qc.invalidateQueries()
           setActiveJobId(null)
           return
         }

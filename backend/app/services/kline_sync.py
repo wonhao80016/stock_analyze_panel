@@ -106,6 +106,18 @@ def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     return df.select(keep)
 
 
+def _window_for_count(
+    count: int | None, start_time: datetime | None, end_time: datetime | None
+) -> tuple[datetime | None, datetime | None]:
+    """Fill a missing start from *count* trading days; date-range providers ignore a bare count."""
+    if start_time is not None or not count:
+        return start_time, end_time
+    end_time = end_time or datetime.now()
+    # About 245 Taiwan sessions a year (1.49 calendar days each); 1.6 plus 60 days covers holiday runs.
+    calendar_days = count * 8 // 5 + 60
+    return end_time - timedelta(days=calendar_days), end_time
+
+
 def sync_daily_batch(symbols: list[str],
                      count: int | None = None,
                      batch_size: int | None = None,
@@ -122,9 +134,17 @@ def sync_daily_batch(symbols: list[str],
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
     """
-    if preferences.get_daily_data_provider() in ("taiwan", "tickflow"):
+    provider_name = preferences.get_daily_data_provider()
+    if provider_name in ("taiwan", "tickflow"):
         from app.data_providers.registry import get_provider
-        provider = get_provider(preferences.get_daily_data_provider())
+        provider = get_provider(provider_name)
+        start_time, end_time = _window_for_count(count, start_time, end_time)
+        return provider.get_daily(symbols, start_time=start_time, end_time=end_time, on_chunk_done=on_chunk_done)
+
+    from app.data_providers import custom as custom_sources
+    if custom_sources.provider_has_dataset(provider_name, "daily"):
+        provider = custom_sources.get_provider(provider_name)
+        start_time, end_time = _window_for_count(count, start_time, end_time)
         return provider.get_daily(symbols, start_time=start_time, end_time=end_time, on_chunk_done=on_chunk_done)
 
     tf = get_client()

@@ -2248,9 +2248,10 @@ class KlineRepository:
         latest: date | None = None
         if not root.exists():
             return None
-        for partition in root.glob("date=*"):
+        # A date directory without part.parquet was created but never published.
+        for part in root.glob("date=*/part.parquet"):
             try:
-                value = date.fromisoformat(partition.name.removeprefix("date="))
+                value = date.fromisoformat(part.parent.name.removeprefix("date="))
             except ValueError:
                 continue
             if latest is None or value > latest:

@@ -15,7 +15,7 @@ from app.taiwan.current_data import (
     capability_matrix,
     get_taiwan_current_data_service,
 )
-from app.taiwan.daily_update import FreshnessStatus, TaiwanDailyUpdateService
+from app.taiwan.daily_update import FreshnessStatus, TaiwanDailyUpdateService, TaiwanUpdateBusyError
 from app.taiwan.detail_models import TaiwanStockDetailResponse
 from app.taiwan.detail_service import get_taiwan_stock_detail_service
 from app.taiwan.industry_intelligence import (
@@ -142,6 +142,8 @@ def update_taiwan_history_to_latest():
     svc = TaiwanBootstrapService()
     try:
         result = svc.update_to_latest()
+    except TaiwanUpdateBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except SecurityMasterUnavailableError:
