@@ -164,7 +164,7 @@
 | 5 台股資料與分析 | 已完成（2026-10-24） | 5A 指標口徑（D8）：`5c25f3c`；5B 關鍵價位：`05073b1`；5C 詳細頁與籌碼：`3d43f37`；5E 資料同步與 store：`9a45b33`；5F 選股、市場統計、自選頁：`59a8fde`；5D 異常診斷與 AI 研究：`26abe38`。合併後的後端全套：5058 passed、1 xfailed、12 deselected，0 failed；前端 tsc 通過，vitest 525 passed。上線步驟與後續事項見下方 |
 | 6 即時行情、監控與自訂訊號 | 已完成（2026-10-24） | 6A 即時行情：`6774d2f`；6D 截圖匯入與標的搜尋：`30c7787`；6B 監控規則與 D6：`63cc3e2`；6C 自訂訊號、AI 策略與自訂資料源：`2bd7544`。合併後的後端全套：5287 passed、1 xfailed、12 deselected，0 failed；前端 tsc 通過，vitest 547 passed。上線步驟與後續事項見下方 |
 | 7 前端顯示與狀態 | 程式已完成（2026-10-24），待瀏覽器檢查 | 7A 版面與共用函式庫：`4551cf8`；7B 圖表與個股頁：`5c6193a`；7C 選股與自選：`dd4534d`；7D 看板、監控中心、策略頁：`d48dc76`；7E 設定頁：`78d7e89`。合併後的後端全套：5330 passed、1 xfailed、12 deselected，1 failed（`test_stage2_master_refresh` 偶發，單獨重跑通過）；前端 tsc 通過，vitest 757 passed，`pnpm build` 通過（2026-10-24，echarts chunk 1.03 MB 有大小警告）。手動檢查清單見下方 |
-| 8 效能 | 未開始 | |
+| 8 效能 | 已完成（2026-10-25） | B049、B064：`ba5a9be`；B056、B053：`08f997f`。合併後的後端全套：5374 passed、1 skipped、1 xfailed、12 deselected，0 failed；前端 tsc 通過，vitest 770 passed，`pnpm build` 通過。量測與後續事項見下方 |
 | 9 Dead code 與遺留移除 | 未開始 | 待 D7 |
 | 10 文件與冗餘檔案 | 未開始 | 待 D9 |
 
@@ -307,6 +307,36 @@
 7. 監控徽標最多只算 7 天內 100 筆，舊的 `monitor_last_seen_total` 沒有清掉；`voiceBroadcast.ts` 沒有逾時保護。
 8. 新的 AI 測試端點沿用 `ai_provider` 的私有函式；`save_ai_settings` 會把記憶體中的 `ai_user_agent` 改成空字串。
 9. `frontend/src/pages/StrategyBacktest.test.tsx` 在工作區仍有一段與既有測試重複的新增測試，來源不明，未提交。
+
+### 階段 8 量測與後續事項
+
+量測（CONTRIBUTING.md 6.3）：在 scratchpad 以合成資料建立接近正式資料的規模，修改前的數字以 `git archive HEAD` 匯出的程式碼量測；官方 API 以 mock 模擬每次 100 毫秒。
+
+| 項目 | 修改前 | 修改後 |
+|---|---|---|
+| 個股頁開頁加輪詢 6 次的官方請求（上市 T86 1,300 列、上櫃 5,500 列） | 28 次 | 4 次；store 已有前一日時 2 次 |
+| 同上，官方全部逾時 | 70 次，以 3 秒逾時計約 30 秒 | 4 次，約 6 秒 |
+| 首頁靜態依賴 | 約 1.9 MB（含 echarts） | 約 0.55 MB |
+| 選股讀取的日K分區（680 分區 × 2,000 檔） | 682 個 | 8～9 個 |
+| 選股冷啟動 | 約 1.16 秒 | 約 0.42 秒；暖快取兩者相近 |
+| 即時輪詢每輪的 provider 建構（暖） | 約 0.4 秒、每輪 1 個 client | 低於 0.1 毫秒、0 個 |
+| `/api/taiwan/data` 每次（暖） | 約 0.28 秒、每次 1 個 client | 1.4 毫秒、0 個 |
+
+冷啟動時第一次建立 client 的成本省不掉，輪詢與 `/api/taiwan/data` 的冷啟動耗時兩者相近。
+
+行為變化：
+
+1. 個股頁的法人與融資：store 已有完整當日資料時直接讀 store，來源顯示為本機 store；即時抓取以 (dataset, exchange, trade_date) 快取，逾時、連線錯誤或 5xx 時該交易所退避、不再往前抓，回退 store 並標 stale。
+2. 個股頁 10 秒輪詢只在台北盤中進行，盤後改為偵測資料日期變動時重新讀取。
+3. 選股：完整分區中缺列的代號（例如停止買賣）不再列出，回應附 `daily_unlisted_count`；某交易所在最新分區缺席或列數未達前 5 個分區最大值的 50% 時，回退最多 5 個分區並標 `daily_stale_*` 或 `daily_missing_*`。
+
+後續事項：
+
+1. SSE `quotes_updated` 仍讓整個個股詳情失效；報價與籌碼在同一個回應中，要拆開需要新增後端端點。
+2. 沒有蓋日期的官方回應會被接受並快取到當日午夜（原本就接受，現在快取時間較長）。
+3. `listing_sessions` 的 `first_sessions` 每 60 秒仍掃描全部日K分區；分區檔損毀時會讓選股直接丟例外。
+4. 共用 provider 若在測試中建立於被 patch 的 `httpx.Client` 之下，會沿用到整個測試行程。
+5. echarts chunk 約 1.03 MB，建置時有大小警告。
 
 ## 維護方式
 
