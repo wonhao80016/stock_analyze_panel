@@ -10,22 +10,29 @@ CORE RULES:
 - Point-In-Time No Look-Ahead: Target day is strictly excluded from historical baselines.
 - Explicit Evidence & Formulas: Every triggered signal provides observed, baseline, ratio/delta, threshold, formula, and coverage.
 - Purely Objective Classifications:
-    * VOLUME_SPIKE: target_volume / mean(previous_5_volumes) >= 2.0 (all 5 sessions present)
-    * TURNOVER_SPIKE: target_amount / mean(previous_5_amounts) >= 2.0 (all 5 sessions present)
+    * VOLUME_SPIKE: target_volume / mean(previous_5_traded_volumes) >= 2.0
+      (the last 5 traded sessions within the previous 20; halted rows with null OHLC or no volume are skipped)
+    * TURNOVER_SPIKE: target_amount / mean(previous_5_traded_amounts) >= 2.0 (same traded-session baseline)
     * PRICE_MOVE: abs(change_pct) / abs(leverage_multiplier) >= 0.05
+      (previous_close is the latest traded session's close when the previous session was halted)
     * FOREIGN_FLOW_SPIKE: abs(foreign_net) >= 100,000 shares AND abs(foreign_net) / mean(abs(previous_20_foreign_net)) >= 3.0
-      (needs 15 of the previous 20 sessions and that mean itself >= 10,000 shares)
+      (a published session without a row for the symbol counts as 0, its halted sessions are skipped;
+      needs 15 such sessions since listing, and that mean itself >= 10,000 shares)
     * TRUST_FLOW_SPIKE: abs(trust_net) >= 50,000 shares AND abs(trust_net) / mean(abs(previous_20_trust_net)) >= 3.0
-      (needs 15 of the previous 20 sessions and that mean itself >= 5,000 shares)
+      (same zero-filled baseline; that mean itself >= 5,000 shares)
     * MARGIN_SURGE: abs(margin_change) >= 500,000 shares AND abs(margin_change) / median(abs(previous_20)) >= 3.0
-      (needs 15 of the previous 20 sessions)
+      (needs 15 of the previous 20 sessions; a zero median triggers on the absolute floor alone with
+      status="zero_baseline" and ratio=None)
     * SHORT_SURGE: abs(short_change) >= 100,000 shares AND abs(short_change) / median(abs(previous_20)) >= 3.0
-      (needs 15 of the previous 20 sessions)
+      (needs 15 of the previous 20 sessions; a zero median is reported as for MARGIN_SURGE)
     * SHORT_MARGIN_RATIO_SPIKE: (target_sm_ratio - median_previous_20_sm_ratio) >= 5.0 percentage points
       (needs 15 of the previous 20 sessions)
     * PRICE_FLOW_DIVERGENCE: abs(change_pct) / abs(leverage_multiplier) >= 0.03 AND an opposite foreign_net
       of >= 200,000 shares at >= 2x its own 20-session mean (inherits FOREIGN_FLOW_SPIKE's coverage gates)
     * RELATIVE_STRENGTH_OUTLIER: abs(stock_5d_return - industry_equal_weight_5d_return) >= 0.10
+      (the industry return averages the other members and excludes the stock itself)
+- Thresholds are compared on unrounded values; evidence ratios and deltas are rounded for display only.
+- market_context.advance_ratio counts stocks only, the same population as industry_context.advance_ratio.
 
 ETF COVERAGE (Phase 7J):
 - get_diagnostics() accepts an opt-in `include_etfs: bool = False` parameter. Default False
@@ -112,7 +119,7 @@ class CompactMarketContext(BaseModel):
     """Compact broad market breadth for context."""
 
     trade_date: str
-    advance_ratio: float | None = None
+    advance_ratio: float | None = Field(None, description="上漲家數比例 (僅計股票, 與產業脈絡同母體)")
     market_turnover: float | None = None
     overall_status: str = "unavailable"
 
@@ -189,6 +196,38 @@ class TaiwanAbnormalDiagnosticsSnapshot(BaseModel):
 def _has_industry(inst: Any) -> bool:
     """A null or blank industry is the UNCLASSIFIED bucket of the industry snapshot; TDRs have none."""
     return bool((inst.industry or "").strip())
+
+
+# Exact boundaries such as 105 / 100 - 1 land a few ulps below the threshold in floating point.
+_THRESHOLD_EPSILON = 1e-9
+
+
+def _at_least(value: float, threshold: float) -> bool:
+    return value >= threshold - _THRESHOLD_EPSILON
+
+
+def _traded_condition(df: pl.DataFrame) -> pl.Expr:
+    """Halted or no-trade rows carry null OHLC or zero volume."""
+    condition = pl.col("volume").is_not_null() & (pl.col("volume") > 0)
+    for col in (c for c in ("open", "high", "low", "close") if c in df.columns):
+        condition = condition & pl.col(col).is_not_null()
+    return condition
+
+
+def _traded_rows(df: pl.DataFrame) -> pl.DataFrame:
+    return df if df.is_empty() else df.filter(_traded_condition(df))
+
+
+def _exchange_of(symbol: str) -> str:
+    return symbol.rsplit(".", 1)[-1]
+
+
+def _listing_day(inst: Any) -> date | None:
+    raw = str(getattr(inst, "listing_date", None) or "").strip()
+    try:
+        return date.fromisoformat(raw[:10]) if raw else None
+    except ValueError:
+        return None
 
 
 class TaiwanAbnormalDiagnosticsService:
@@ -281,14 +320,17 @@ class TaiwanAbnormalDiagnosticsService:
         prev_date = prior_5_dates[-1] if prior_5_dates else None
         df_prev_daily = self.daily_store.read_range(stock_symbols, prev_date, prev_date) if prev_date else pl.DataFrame()
 
-        # 5-session & 20-session history for baselines
-        p5_start = prior_5_dates[0] if prior_5_dates else target
-        p20_start = prior_20_dates[0] if prior_20_dates else target
-        df_p5_daily = self.daily_store.read_range(stock_symbols, p5_start, prior_5_dates[-1]) if prior_5_dates else pl.DataFrame()
-        df_p20_daily = self.daily_store.read_range(stock_symbols, p20_start, prior_20_dates[-1]) if prior_20_dates else pl.DataFrame()
+        # 20-session history: the traded-session volume baseline and the 5D return base
+        df_p20_daily = self.daily_store.read_range(stock_symbols, prior_20_dates[0], prior_20_dates[-1]) if prior_20_dates else pl.DataFrame()
         events = read_events_or_empty(self.corporate_actions, end=target)
-        # The 5-session volume baseline and 5D return base are restated on target's scale.
-        df_p5_daily = forward_adjusted(df_p5_daily, events, target)
+        # Baselines are restated on target's scale.
+        df_p20_daily = forward_adjusted(df_p20_daily, events, target)
+        df_p20_traded = (
+            _traded_rows(df_p20_daily).sort(["symbol", "date"]) if not df_p20_daily.is_empty() else pl.DataFrame()
+        )
+        df_p5_traded = (
+            df_p20_traded.group_by("symbol", maintain_order=True).tail(5) if not df_p20_traded.is_empty() else pl.DataFrame()
+        )
 
         # 4. Batch Read: InstitutionalStore
         df_target_inst = self.inst_store.read_range(stock_symbols, target, target)
@@ -305,9 +347,10 @@ class TaiwanAbnormalDiagnosticsService:
         ind_snap = self.industry_intel_svc.get_snapshot(target)
         ind_metrics_map: dict[str, Any] = {im.industry: im for im in ind_snap.industries}
 
-        tot_adv = market_snap.market_totals.advance_count
-        tot_dec = market_snap.market_totals.decline_count
-        tot_flt = market_snap.market_totals.flat_count
+        stock_breadth = market_snap.by_instrument.stock
+        tot_adv = stock_breadth.advance_count
+        tot_dec = stock_breadth.decline_count
+        tot_flt = stock_breadth.flat_count
         tot_compared = tot_adv + tot_dec + tot_flt
         adv_ratio = round(tot_adv / tot_compared, 4) if tot_compared > 0 else None
 
@@ -319,19 +362,41 @@ class TaiwanAbnormalDiagnosticsService:
         )
 
         # 7. Aggregate Baseline Statistics with Polars
-        p5_vol_stats = df_p5_daily.group_by("symbol").agg([
+        p5_vol_stats = df_p5_traded.group_by("symbol").agg([
             pl.col("volume").mean().alias("mean_vol_5d"),
             pl.col("volume").count().alias("count_vol_5d"),
             pl.col("amount").mean().alias("mean_amt_5d"),
             pl.col("amount").count().alias("count_amt_5d"),
-        ]) if not df_p5_daily.is_empty() else pl.DataFrame()
+        ]) if not df_p5_traded.is_empty() else pl.DataFrame()
+        last_traded_close_map = {
+            r["symbol"]: float(r["close"])
+            for r in df_p20_traded.group_by("symbol", maintain_order=True).tail(1).iter_rows(named=True)
+        } if not df_p20_traded.is_empty() and "close" in df_p20_traded.columns else {}
 
-        p20_inst_stats = df_p20_inst.group_by("symbol").agg([
-            pl.col("foreign_net").abs().mean().alias("mean_abs_foreign_20d"),
-            pl.col("investment_trust_net").abs().mean().alias("mean_abs_trust_20d"),
-            pl.col("dealer_net").abs().mean().alias("mean_abs_dealer_20d"),
-            pl.col("foreign_net").count().alias("count_inst_20d"),
-        ]) if not df_p20_inst.is_empty() else pl.DataFrame()
+        # T86 and TPEx list only securities the institutions traded, so a published session
+        # without a row for the symbol is a zero-flow day rather than a missing one.
+        # A halted session is no flow day of the symbol; it leaves both the sum and the count.
+        halted_sessions: dict[str, set[date]] = {}
+        if not df_p20_daily.is_empty():
+            for sym, d in df_p20_daily.filter(~_traded_condition(df_p20_daily)).select(["symbol", "date"]).iter_rows():
+                halted_sessions.setdefault(sym, set()).add(d)
+        df_p20_flows = df_p20_inst
+        if halted_sessions and not df_p20_inst.is_empty() and "date" in df_p20_inst.columns:
+            halted_df = pl.DataFrame(
+                [(sym, d) for sym, ds in halted_sessions.items() for d in ds],
+                schema={"symbol": df_p20_inst.schema["symbol"], "date": df_p20_inst.schema["date"]},
+                orient="row",
+            )
+            df_p20_flows = df_p20_inst.join(halted_df, on=["symbol", "date"], how="anti")
+        p20_inst_stats = df_p20_flows.group_by("symbol").agg([
+            pl.col("foreign_net").abs().sum().alias("sum_abs_foreign_20d"),
+            pl.col("investment_trust_net").abs().sum().alias("sum_abs_trust_20d"),
+        ]) if not df_p20_flows.is_empty() else pl.DataFrame()
+        inst_published: dict[str, list[date]] = {}
+        if not df_p20_inst.is_empty() and "date" in df_p20_inst.columns:
+            for d, sym in df_p20_inst.select(["date", "symbol"]).iter_rows():
+                inst_published.setdefault(_exchange_of(sym), []).append(d)
+            inst_published = {ex: sorted(set(ds)) for ex, ds in inst_published.items()}
 
         p20_margin_stats = df_p20_margin.group_by("symbol").agg([
             pl.col("margin_change").abs().median().alias("median_abs_margin_change_20d"),
@@ -342,8 +407,8 @@ class TaiwanAbnormalDiagnosticsService:
 
         # 5-day return baseline for stocks: close at target vs close at 5 sessions ago
         c5_base_map: dict[str, float] = {}
-        if not df_p5_daily.is_empty():
-            earliest_p5 = df_p5_daily.filter(pl.col("date") == prior_5_dates[0])
+        if not df_p20_daily.is_empty():
+            earliest_p5 = df_p20_daily.filter(pl.col("date") == prior_5_dates[0])
             for row in earliest_p5.iter_rows(named=True):
                 if row["close"] is not None and row["close"] > 0:
                     c5_base_map[row["symbol"]] = float(row["close"])
@@ -392,13 +457,16 @@ class TaiwanAbnormalDiagnosticsService:
 
             close_p = float(t_daily["close"]) if t_daily["close"] is not None else None
             prev_close_p = float(p_daily["close"]) if (p_daily and p_daily["close"] is not None) else None
+            if prev_close_p is None:
+                prev_close_p = last_traded_close_map.get(sym)
             if sym in ref_price_map:
                 prev_close_p = float(ref_price_map[sym])
             vol = float(t_daily["volume"]) if t_daily["volume"] is not None else None
             amt = float(t_daily["amount"]) if t_daily["amount"] is not None else None
 
             chg = round(close_p - prev_close_p, 4) if (close_p is not None and prev_close_p is not None) else None
-            chg_pct = round((close_p / prev_close_p) - 1.0, 6) if (close_p is not None and prev_close_p is not None and prev_close_p > 0) else None
+            raw_chg_pct = (close_p / prev_close_p) - 1.0 if (close_p is not None and prev_close_p is not None and prev_close_p > 0) else None
+            chg_pct = round(raw_chg_pct, 6) if raw_chg_pct is not None else None
 
             # Leverage normalization (Phase 7J) — for PRICE_MOVE / PRICE_FLOW_DIVERGENCE
             # threshold checks ONLY. `observed` in the evidence always stays the RAW
@@ -406,7 +474,7 @@ class TaiwanAbnormalDiagnosticsService:
             # leveraged/inverse ETF's structural amplification doesn't by itself trip a
             # false "abnormal" signal. Divisor is 1.0 (no-op) for stocks and normal 1x ETFs.
             leverage_divisor = abs(inst_master.leverage_multiplier) if inst_master.leverage_multiplier else 1.0
-            normalized_chg_pct = (chg_pct / leverage_divisor) if chg_pct is not None else None
+            normalized_chg_pct = (raw_chg_pct / leverage_divisor) if raw_chg_pct is not None else None
 
             vol_ratio = None
             amt_ratio = None
@@ -421,11 +489,12 @@ class TaiwanAbnormalDiagnosticsService:
             # ── Signal 1: VOLUME_SPIKE ──
             if v_stat and v_stat["count_vol_5d"] == 5 and v_stat["mean_vol_5d"] > 0 and vol is not None:
                 mean_v5 = float(v_stat["mean_vol_5d"])
-                vol_ratio = round(vol / mean_v5, 2)
-                if vol_ratio >= 2.0:
+                raw_vol_ratio = vol / mean_v5
+                vol_ratio = round(raw_vol_ratio, 2)
+                if _at_least(raw_vol_ratio, 2.0):
                     sev: Literal["low", "moderate", "high", "extreme"] = "moderate"
-                    if vol_ratio >= 5.0: sev = "extreme"
-                    elif vol_ratio >= 3.0: sev = "high"
+                    if _at_least(raw_vol_ratio, 5.0): sev = "extreme"
+                    elif _at_least(raw_vol_ratio, 3.0): sev = "high"
                     signals.append(DiagnosticSignalEvidence(
                         type="VOLUME_SPIKE",
                         severity=sev,
@@ -433,7 +502,7 @@ class TaiwanAbnormalDiagnosticsService:
                         baseline=round(mean_v5, 1),
                         ratio=vol_ratio,
                         threshold=2.0,
-                        formula="target_volume / mean(previous_5_volumes)",
+                        formula="target_volume / mean(previous_5_traded_volumes)",
                         lookback_sessions=5,
                         valid_sessions=5,
                         source="taiwan_daily_store",
@@ -442,11 +511,12 @@ class TaiwanAbnormalDiagnosticsService:
             # ── Signal 2: TURNOVER_SPIKE ──
             if v_stat and v_stat["count_amt_5d"] == 5 and v_stat["mean_amt_5d"] > 0 and amt is not None:
                 mean_a5 = float(v_stat["mean_amt_5d"])
-                amt_ratio = round(amt / mean_a5, 2)
-                if amt_ratio >= 2.0:
+                raw_amt_ratio = amt / mean_a5
+                amt_ratio = round(raw_amt_ratio, 2)
+                if _at_least(raw_amt_ratio, 2.0):
                     sev: Literal["low", "moderate", "high", "extreme"] = "moderate"
-                    if amt_ratio >= 5.0: sev = "extreme"
-                    elif amt_ratio >= 3.0: sev = "high"
+                    if _at_least(raw_amt_ratio, 5.0): sev = "extreme"
+                    elif _at_least(raw_amt_ratio, 3.0): sev = "high"
                     signals.append(DiagnosticSignalEvidence(
                         type="TURNOVER_SPIKE",
                         severity=sev,
@@ -454,7 +524,7 @@ class TaiwanAbnormalDiagnosticsService:
                         baseline=round(mean_a5, 1),
                         ratio=amt_ratio,
                         threshold=2.0,
-                        formula="target_amount / mean(previous_5_amounts)",
+                        formula="target_amount / mean(previous_5_traded_amounts)",
                         lookback_sessions=5,
                         valid_sessions=5,
                         source="taiwan_daily_store",
@@ -464,8 +534,8 @@ class TaiwanAbnormalDiagnosticsService:
             # Leverage-normalized threshold check (Phase 7J): a 2x leveraged ETF's raw
             # move is divided by 2 before comparison so structural amplification alone
             # never trips a false signal; `observed`/`delta` stay the RAW change_pct.
-            if normalized_chg_pct is not None and abs(normalized_chg_pct) >= 0.05:
-                sev: Literal["low", "moderate", "high", "extreme"] = "extreme" if abs(normalized_chg_pct) >= 0.095 else ("high" if abs(normalized_chg_pct) >= 0.07 else "moderate")
+            if normalized_chg_pct is not None and _at_least(abs(normalized_chg_pct), 0.05):
+                sev: Literal["low", "moderate", "high", "extreme"] = "extreme" if _at_least(abs(normalized_chg_pct), 0.095) else ("high" if _at_least(abs(normalized_chg_pct), 0.07) else "moderate")
                 signals.append(DiagnosticSignalEvidence(
                     type="PRICE_MOVE",
                     subtype="UP" if chg_pct > 0 else "DOWN",
@@ -485,13 +555,20 @@ class TaiwanAbnormalDiagnosticsService:
                 ))
 
             # ── Signal 4: FOREIGN_FLOW_SPIKE ──
+            listed_on = _listing_day(inst_master)
+            inst_sessions = sum(
+                1 for d in inst_published.get(_exchange_of(sym), [])
+                if (listed_on is None or d >= listed_on) and d not in halted_sessions.get(sym, ())
+            )
             f_mult = None
-            if f_net is not None and i_stat and i_stat["count_inst_20d"] >= 15:
-                mean_abs_f20 = float(i_stat["mean_abs_foreign_20d"] or 0)
+            raw_f_mult = None
+            if f_net is not None and inst_sessions >= 15:
+                mean_abs_f20 = float((i_stat["sum_abs_foreign_20d"] or 0) if i_stat else 0) / inst_sessions
                 if mean_abs_f20 >= 10000 and abs(f_net) >= 100000:  # at least 100張 (100,000 shares)
-                    f_mult = round(abs(f_net) / mean_abs_f20, 2)
-                    if f_mult >= 3.0:
-                        sev = "extreme" if f_mult >= 6.0 else "high"
+                    raw_f_mult = abs(f_net) / mean_abs_f20
+                    f_mult = round(raw_f_mult, 2)
+                    if _at_least(raw_f_mult, 3.0):
+                        sev = "extreme" if _at_least(raw_f_mult, 6.0) else "high"
                         signals.append(DiagnosticSignalEvidence(
                             type="FOREIGN_FLOW_SPIKE",
                             subtype="BUY" if f_net > 0 else "SELL",
@@ -500,69 +577,72 @@ class TaiwanAbnormalDiagnosticsService:
                             baseline=round(mean_abs_f20, 1),
                             ratio=f_mult,
                             threshold=3.0,
-                            formula="abs(foreign_net) / mean(abs(previous_20_foreign_net)) >= 3.0",
+                            formula="abs(foreign_net) / mean(abs(previous_20_foreign_net), unlisted_sessions_as_0) >= 3.0",
                             lookback_sessions=20,
-                            valid_sessions=int(i_stat["count_inst_20d"]),
+                            valid_sessions=inst_sessions,
                             source="taiwan_institutional_store",
                         ))
 
             # ── Signal 5: TRUST_FLOW_SPIKE ──
-            it_mult = None
-            if it_net is not None and i_stat and i_stat["count_inst_20d"] >= 15:
-                mean_abs_it20 = float(i_stat["mean_abs_trust_20d"] or 0)
+            if it_net is not None and inst_sessions >= 15:
+                mean_abs_it20 = float((i_stat["sum_abs_trust_20d"] or 0) if i_stat else 0) / inst_sessions
                 if mean_abs_it20 >= 5000 and abs(it_net) >= 50000:  # at least 50張
-                    it_mult = round(abs(it_net) / mean_abs_it20, 2)
-                    if it_mult >= 3.0:
-                        sev = "extreme" if it_mult >= 6.0 else "high"
+                    raw_it_mult = abs(it_net) / mean_abs_it20
+                    if _at_least(raw_it_mult, 3.0):
+                        sev = "extreme" if _at_least(raw_it_mult, 6.0) else "high"
                         signals.append(DiagnosticSignalEvidence(
                             type="TRUST_FLOW_SPIKE",
                             subtype="BUY" if it_net > 0 else "SELL",
                             severity=sev,
                             observed=it_net,
                             baseline=round(mean_abs_it20, 1),
-                            ratio=it_mult,
+                            ratio=round(raw_it_mult, 2),
                             threshold=3.0,
-                            formula="abs(trust_net) / mean(abs(previous_20_trust_net)) >= 3.0",
+                            formula="abs(trust_net) / mean(abs(previous_20_trust_net), unlisted_sessions_as_0) >= 3.0",
                             lookback_sessions=20,
-                            valid_sessions=int(i_stat["count_inst_20d"]),
+                            valid_sessions=inst_sessions,
                             source="taiwan_institutional_store",
                         ))
 
-            # ── Signal 6: MARGIN_SURGE ──
-            if m_chg is not None and m_stat and m_stat["count_margin_20d"] >= 15:
-                med_abs_m20 = float(m_stat["median_abs_margin_change_20d"] or 0)
-                if med_abs_m20 > 0 and abs(m_chg) >= 500000:  # at least 500張 (500,000 shares)
-                    m_mult = round(abs(m_chg) / med_abs_m20, 2)
-                    if m_mult >= 3.0:
+            # ── Signals 6 & 7: MARGIN_SURGE / SHORT_SURGE ──
+            if m_stat and m_stat["count_margin_20d"] >= 15:
+                for sig_type, change, median_key, floor, floor_label in (
+                    ("MARGIN_SURGE", m_chg, "median_abs_margin_change_20d", 500000, "500k"),  # 500張
+                    ("SHORT_SURGE", s_chg, "median_abs_short_change_20d", 100000, "100k"),  # 100張
+                ):
+                    if change is None or abs(change) < floor:
+                        continue
+                    field = "margin_change" if sig_type == "MARGIN_SURGE" else "short_change"
+                    median_abs = float(m_stat[median_key] or 0)
+                    subtype = "INCREASE" if change > 0 else "DECREASE"
+                    if median_abs <= 0:
+                        # A ratio to a zero median is undefined; the absolute floor alone decides.
                         signals.append(DiagnosticSignalEvidence(
-                            type="MARGIN_SURGE",
-                            subtype="INCREASE" if m_chg > 0 else "DECREASE",
-                            severity="high" if m_mult >= 6.0 else "moderate",
-                            observed=m_chg,
-                            baseline=round(med_abs_m20, 1),
-                            ratio=m_mult,
-                            threshold=3.0,
-                            formula="abs(margin_change) >= 500k AND ratio_to_20d_median >= 3.0",
+                            type=sig_type,
+                            subtype=subtype,
+                            severity="high",
+                            observed=change,
+                            baseline=0.0,
+                            ratio=None,
+                            threshold=float(floor),
+                            formula=f"abs({field}) >= {floor_label} (median(abs(previous_20)) == 0, ratio undefined)",
                             lookback_sessions=20,
                             valid_sessions=int(m_stat["count_margin_20d"]),
                             source="taiwan_margin_store",
+                            status="zero_baseline",
                         ))
-
-            # ── Signal 7: SHORT_SURGE ──
-            if s_chg is not None and m_stat and m_stat["count_margin_20d"] >= 15:
-                med_abs_s20 = float(m_stat["median_abs_short_change_20d"] or 0)
-                if med_abs_s20 > 0 and abs(s_chg) >= 100000:  # at least 100張
-                    s_mult = round(abs(s_chg) / med_abs_s20, 2)
-                    if s_mult >= 3.0:
+                        continue
+                    raw_mult = abs(change) / median_abs
+                    if _at_least(raw_mult, 3.0):
                         signals.append(DiagnosticSignalEvidence(
-                            type="SHORT_SURGE",
-                            subtype="INCREASE" if s_chg > 0 else "DECREASE",
-                            severity="high" if s_mult >= 6.0 else "moderate",
-                            observed=s_chg,
-                            baseline=round(med_abs_s20, 1),
-                            ratio=s_mult,
+                            type=sig_type,
+                            subtype=subtype,
+                            severity="high" if _at_least(raw_mult, 6.0) else "moderate",
+                            observed=change,
+                            baseline=round(median_abs, 1),
+                            ratio=round(raw_mult, 2),
                             threshold=3.0,
-                            formula="abs(short_change) >= 100k AND ratio_to_20d_median >= 3.0",
+                            formula=f"abs({field}) >= {floor_label} AND ratio_to_20d_median >= 3.0",
                             lookback_sessions=20,
                             valid_sessions=int(m_stat["count_margin_20d"]),
                             source="taiwan_margin_store",
@@ -571,14 +651,14 @@ class TaiwanAbnormalDiagnosticsService:
             # ── Signal 8: SHORT_MARGIN_RATIO_SPIKE ──
             if sm_ratio is not None and m_stat and m_stat["count_margin_20d"] >= 15:
                 med_sm20 = float(m_stat["median_sm_ratio_20d"] or 0)
-                sm_delta = round(sm_ratio - med_sm20, 2)
-                if sm_delta >= 5.0:  # >= 5% percentage point increase
+                raw_sm_delta = sm_ratio - med_sm20
+                if _at_least(raw_sm_delta, 5.0):  # >= 5% percentage point increase
                     signals.append(DiagnosticSignalEvidence(
                         type="SHORT_MARGIN_RATIO_SPIKE",
-                        severity="high" if sm_delta >= 10.0 else "moderate",
+                        severity="high" if _at_least(raw_sm_delta, 10.0) else "moderate",
                         observed=sm_ratio,
                         baseline=med_sm20,
-                        delta=sm_delta,
+                        delta=round(raw_sm_delta, 2),
                         threshold=5.0,
                         formula="(short_margin_ratio - median_20d_ratio) >= 5.0 pct",
                         lookback_sessions=20,
@@ -589,9 +669,10 @@ class TaiwanAbnormalDiagnosticsService:
             # ── Signal 9: PRICE_FLOW_DIVERGENCE ──
             # Same leverage-normalization principle as PRICE_MOVE: the price-magnitude
             # gate (3%) is evaluated on normalized_chg_pct; observed/baseline stay raw.
-            if normalized_chg_pct is not None and abs(normalized_chg_pct) >= 0.03:
+            strong_foreign = raw_f_mult is not None and _at_least(raw_f_mult, 2.0)
+            if normalized_chg_pct is not None and _at_least(abs(normalized_chg_pct), 0.03):
                 # Up price with strong foreign sell
-                if normalized_chg_pct >= 0.03 and f_net is not None and f_net <= -200000 and (f_mult is not None and f_mult >= 2.0):
+                if normalized_chg_pct > 0 and f_net is not None and f_net <= -200000 and strong_foreign:
                     signals.append(DiagnosticSignalEvidence(
                         type="PRICE_FLOW_DIVERGENCE",
                         subtype="PRICE_UP_FOREIGN_SELL",
@@ -605,11 +686,11 @@ class TaiwanAbnormalDiagnosticsService:
                             f" normalized={round(normalized_chg_pct * 100.0, 2)}%)"
                         ),
                         lookback_sessions=20,
-                        valid_sessions=int(i_stat["count_inst_20d"] if i_stat else 1),
+                        valid_sessions=inst_sessions,
                         source="taiwan_daily_store+taiwan_institutional_store",
                     ))
                 # Down price with strong foreign buy
-                elif normalized_chg_pct <= -0.03 and f_net is not None and f_net >= 200000 and (f_mult is not None and f_mult >= 2.0):
+                elif normalized_chg_pct < 0 and f_net is not None and f_net >= 200000 and strong_foreign:
                     signals.append(DiagnosticSignalEvidence(
                         type="PRICE_FLOW_DIVERGENCE",
                         subtype="PRICE_DOWN_FOREIGN_BUY",
@@ -623,29 +704,32 @@ class TaiwanAbnormalDiagnosticsService:
                             f" normalized={round(normalized_chg_pct * 100.0, 2)}%)"
                         ),
                         lookback_sessions=20,
-                        valid_sessions=int(i_stat["count_inst_20d"] if i_stat else 1),
+                        valid_sessions=inst_sessions,
                         source="taiwan_daily_store+taiwan_institutional_store",
                     ))
 
             # ── Signal 10: RELATIVE_STRENGTH_OUTLIER ──
             ind_m = ind_metrics_map.get(inst_master.industry) if has_industry else None
             c5_base = c5_base_map.get(sym)
-            if ind_m and ind_m.average_return_5d is not None and c5_base and close_p is not None:
+            # The peer return leaves the stock itself out, or a small industry dilutes its own outlier.
+            peer_return_5d = ind_m.average_return_5d_excluding(sym) if ind_m else None
+            if peer_return_5d is not None and c5_base and close_p is not None:
                 ret_5d = (close_p / c5_base) - 1.0
                 # Both sides span the same five sessions: the industry's own equal-weight
                 # 5D return, not relative_strength_5d (which is already net of the market)
                 # and not average_change_pct (a single session).
-                diff_5d = round(ret_5d - ind_m.average_return_5d, 4)
-                if abs(diff_5d) >= 0.10:
+                raw_diff_5d = ret_5d - peer_return_5d
+                if _at_least(abs(raw_diff_5d), 0.10):
+                    diff_5d = round(raw_diff_5d, 4)
                     signals.append(DiagnosticSignalEvidence(
                         type="RELATIVE_STRENGTH_OUTLIER",
-                        subtype="LEADER" if diff_5d > 0 else "LAGGARD",
-                        severity="high" if abs(diff_5d) >= 0.15 else "moderate",
+                        subtype="LEADER" if raw_diff_5d > 0 else "LAGGARD",
+                        severity="high" if _at_least(abs(raw_diff_5d), 0.15) else "moderate",
                         observed=round(diff_5d * 100.0, 2),
-                        baseline=round(ind_m.average_return_5d * 100.0, 2),
+                        baseline=round(peer_return_5d * 100.0, 2),
                         delta=round(diff_5d * 100.0, 2),
                         threshold=10.0,
-                        formula="abs(stock_5d_return - industry_equal_weight_5d_return) >= 10%",
+                        formula="abs(stock_5d_return - industry_peer_equal_weight_5d_return) >= 10% (peers exclude the stock)",
                         lookback_sessions=5,
                         valid_sessions=5,
                         source="taiwan_daily_store+taiwan_industry_intelligence",

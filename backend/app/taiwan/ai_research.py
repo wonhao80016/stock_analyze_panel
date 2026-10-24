@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date
 from typing import Any, Literal
 from pydantic import BaseModel, Field
@@ -35,6 +36,9 @@ from app.taiwan.abnormal_diagnostics import (
     TaiwanAbnormalDiagnosticsService,
     TaiwanAbnormalDiagnosticItem,
 )
+from app.taiwan.comparison import _MemoizingSnapshotProxy
+from app.taiwan.industry_intelligence import TaiwanIndustryIntelligenceService
+from app.taiwan.market_intelligence import TaiwanMarketIntelligenceService
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 from app.taiwan.research_context import (
     TaiwanStockResearchContext,
@@ -45,6 +49,59 @@ logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "taiwan_stock_research_v1"
 DISCLAIMER_TEXT = "本報告僅依系統中可取得的結構化市場資料進行整理與客觀解讀，不構成任何投資建議、買賣建議、價格預測或報酬保證。"
+
+
+# ── Output Language Guards ────────────────────────────────────
+#
+# Curated multi-word phrases, so objective comparisons such as "報酬率較高" or
+# "higher 5D return" never match. Target prices only match when followed by a number,
+# so "本報告不提供目標價" stays allowed.
+RANKING_LANGUAGE_BLOCKLIST = re.compile(
+    r"最佳選擇|最值得投資|最具投資價值|更具投資吸引力|較佳投資機會|首選|勝出|"
+    r"更具吸引力|投資價值較高|應該會表現更好|值得優先考慮|"
+    r"優於.{0,20}(值得|建議|推薦|買進|投資)|"  # "優於" alone is objective; only flag when paired with preference verbs
+    r"best pick|top pick|better investment opportunity|more attractive investment|"
+    r"highest investment value|\bwinner\b|should outperform|top choice|best choice|"
+    r"more attractive than|better opportunity",
+    re.IGNORECASE,
+)
+# A negation right before the phrase ("不建議買進", "not a buy rating") is a disclaimer.
+_ZH_NEGATED = r"(?<!不)(?<!非)(?<!無)(?<!不得)(?<!不應)(?<!不構成)"
+_EN_NEGATED = r"(?<!not a )(?<!not an )(?<!no )"
+# A price is any Arabic number; one followed by a time or count unit ("20 日") is a window, not a price.
+_PRICE = r"(?:NT\$|\$)?\d[\d,.]*+(?!\s*(?:日|天|週|周|個月|月|年|季|檔|家|筆|次|%|\uff05|倍|days?|weeks?|months?|years?))"
+RECOMMENDATION_LANGUAGE_BLOCKLIST = re.compile(
+    rf"{_ZH_NEGATED}建議(?:買進|買入|賣出|加碼|減碼|持有|布局|佈局|進場|出場)|"
+    rf"{_ZH_NEGATED}(?:買進|賣出|持有|加碼|減碼)評級|"
+    rf"強烈推薦|{_ZH_NEGATED}推薦(?:買進|買入|持有)|逢低買進|"
+    rf"(?:目標價|合理價|公允價值)(?:格|位)?\s*(?:為|約|上看|在|是|:|\uff1a)?\s*{_PRICE}|"
+    rf"{_EN_NEGATED}\b(?:buy|sell|hold|overweight|underweight) rating\b|{_EN_NEGATED}\bstrong buy\b|"
+    rf"(?:target price|price target|fair value)\s*(?:of|is|at|:)?\s*{_PRICE}|"
+    # A valuation multiple, or a currency amount a few words later, still states a price.
+    r"(?:目標價|合理價)(?:格|位)?\s*\d[\d,.]*\s*倍|"
+    r"(?:目標價|合理價|公允價值|target price|price target|fair value).{0,20}?(?:\d[\d,.]*\s*元|\$\s*\d)",
+    re.IGNORECASE,
+)
+
+
+def detect_forbidden_language(text: str | None) -> str | None:
+    """First ranking or recommendation phrase in AI-written prose, or None when clean."""
+    if not text:
+        return None
+    match = RANKING_LANGUAGE_BLOCKLIST.search(text) or RECOMMENDATION_LANGUAGE_BLOCKLIST.search(text)
+    return match.group(0) if match else None
+
+
+_REPORT_PROSE_FIELDS = (
+    "overview",
+    "market_interpretation",
+    "industry_interpretation",
+    "price_technical_interpretation",
+    "institutional_interpretation",
+    "margin_interpretation",
+    "fundamentals_interpretation",
+    "abnormal_diagnostics_interpretation",
+)
 
 
 # ── Strong Typing & Pydantic Schemas ──────────────────────────
@@ -116,8 +173,13 @@ class TaiwanAIResearchResponse(BaseModel):
 def build_evidence_registry(
     ctx: TaiwanStockResearchContext,
     diag_item: TaiwanAbnormalDiagnosticItem | None,
+    diag_status: str | None = None,
 ) -> tuple[dict[str, Any], set[str], list[str]]:
-    """Builds a compact serialized evidence payload, valid registry keys, and missing items."""
+    """Builds a compact serialized evidence payload, valid registry keys, and missing items.
+
+    diag_item None means diagnostics were not evaluated for the symbol, never "no signals".
+    diag_status is the diagnostics snapshot's overall_status when the caller knows it.
+    """
     registry_keys: set[str] = set()
     payload: dict[str, Any] = {}
     missing_items: list[str] = list(ctx.evidence_summary.missing_sections)
@@ -139,19 +201,24 @@ def build_evidence_registry(
     ])
 
     # 2. Market Context
-    if ctx.market_context.status in ("current", "complete"):
+    # Breadth and turnover depend on daily bars only; a partial snapshot (e.g. margin not yet
+    # published) is still sent, with its status attached for the prompt to qualify.
+    if ctx.market_context.status in ("complete", "provisional", "partial"):
         tot_adv = ctx.market_context.advance_count
         tot_dec = ctx.market_context.decline_count
         tot_comp = tot_adv + tot_dec + ctx.market_context.flat_count
         mkt_adv_ratio = round(tot_adv / tot_comp, 4) if tot_comp > 0 else None
 
         payload["market_context"] = {
+            "trade_date": ctx.market_context.trade_date,
+            "status": ctx.market_context.status,
             "advance_ratio": mkt_adv_ratio,
             "advance_count": ctx.market_context.advance_count,
             "decline_count": ctx.market_context.decline_count,
             "market_turnover": ctx.market_context.market_turnover,
         }
         registry_keys.update([
+            "market_context.trade_date", "market_context.status",
             "market_context.advance_ratio", "market_context.advance_count",
             "market_context.decline_count", "market_context.market_turnover",
         ])
@@ -160,9 +227,10 @@ def build_evidence_registry(
             missing_items.append("market_context")
 
     # 3. Industry Context
-    # A provisional snapshot is the latest day's after-close figures, usable with its status attached.
-    if ctx.industry_context.status in ("current", "complete", "provisional") and ctx.industry_context.industry:
+    # Provisional and partial snapshots are usable with their status attached, as for the market.
+    if ctx.industry_context.status in ("complete", "provisional", "partial") and ctx.industry_context.industry:
         payload["industry_context"] = {
+            "trade_date": ctx.industry_context.meta.as_of,
             "status": ctx.industry_context.status,
             "industry": ctx.industry_context.industry,
             "turnover_share": ctx.industry_context.turnover_share,
@@ -171,7 +239,7 @@ def build_evidence_registry(
             "relative_strength_20d": ctx.industry_context.relative_strength_20d,
         }
         registry_keys.update([
-            "industry_context.status", "industry_context.industry", "industry_context.turnover_share",
+            "industry_context.trade_date", "industry_context.status", "industry_context.industry", "industry_context.turnover_share",
             "industry_context.advance_ratio", "industry_context.relative_strength_5d",
             "industry_context.relative_strength_20d",
         ])
@@ -190,11 +258,13 @@ def build_evidence_registry(
         "return_20d": ctx.price_context.return_20d,
         "distance_from_20d_high": ctx.price_context.distance_from_20d_high,
         "distance_from_20d_low": ctx.price_context.distance_from_20d_low,
+        "high_low_20d_basis": "close",
     }
     registry_keys.update([
         "price_context.trade_date", "price_context.close", "price_context.change_pct",
         "price_context.return_5d", "price_context.return_20d",
         "price_context.distance_from_20d_high", "price_context.distance_from_20d_low",
+        "price_context.high_low_20d_basis",
     ])
 
     # 5. Technical Context
@@ -288,7 +358,12 @@ def build_evidence_registry(
     registry_keys.update(["market_rules.price_limit_pct", "market_rules.is_no_limit"])
 
     # 10. Abnormal Diagnostics (Phase 7D)
-    if diag_item and diag_item.signals:
+    abnormal_status = "not_evaluated" if diag_item is None else (diag_status or "evaluated")
+    payload["abnormal_diagnostics_status"] = abnormal_status
+    registry_keys.add("abnormal.diagnostics_status")
+    if abnormal_status not in ("complete", "provisional", "evaluated"):
+        missing_items.append("abnormal_diagnostics")
+    if diag_item is not None:
         sig_summaries = []
         for s in diag_item.signals:
             sig_key = f"abnormal.{s.type.lower()}"
@@ -301,11 +376,11 @@ def build_evidence_registry(
                 "baseline": s.baseline,
                 "ratio": s.ratio,
                 "delta": s.delta,
+                "status": s.status,
             })
         payload["abnormal_signals"] = sig_summaries
+        payload["abnormal_signal_count"] = diag_item.signal_count
         registry_keys.add("abnormal.signal_count")
-    else:
-        payload["abnormal_signals"] = []
 
     # Structurally not-applicable signal types (Phase 7J) — e.g. RELATIVE_STRENGTH_OUTLIER
     # for ETFs. Single-source serialization: build_comparison_evidence_registry() reuses
@@ -335,7 +410,9 @@ SYSTEM_PROMPT = """你是一個客觀、確定性導向的「台股個股研究�
    - 你只能使用傳入的 JSON 數據進行解讀。
    - 嚴禁捏造新聞、法說會內容、非數據列出的財務指標、產業未驗證傳言或未來催化劑 (Catalysts)。
    - 若欄位為 null 或 missing，必須如實說明「目前資料不足」或「未提供」，不得私自推估數值。
-   - 若 industry_context.status 為 provisional，代表產業統計為盤後初值、當晚可能定稿，引用時必須註明為初值。
+   - 若 industry_context.status 為 provisional, 代表產業統計為盤後初值、當晚可能定稿, 引用時必須註明為初值。market_context.status 為 provisional 時同樣處理。
+   - 若 industry_context.status 或 market_context.status 為 partial, 代表部分資料集尚未齊全 (例如融資融券尚未公布或市場覆蓋不完整), 引用時必須註明為不完整資料。
+   - price_context.high_low_20d_basis 為 close, 代表 20 日高低點與距離以收盤價計算, 不得描述為盤中最高價或最低價。
 3. 證據引用規定 (Evidence Refs)：
    - key_observations 與 risk_factors 中的每一條觀察，必須附帶 1~3 個「合法證據鍵 (evidence_refs)」。
    - 只能引用在提供的證據鍵白名單中的鍵值（例如 price_context.return_5d, industry_context.relative_strength_5d 等）。
@@ -350,6 +427,8 @@ SYSTEM_PROMPT = """你是一個客觀、確定性導向的「台股個股研究�
 5. 零數值非缺失 (Zero Is Not Missing)：
    - 數值為 0（例如 foreign_net_1d=0, margin_change=0）代表「客觀數值為零 / 當日無變動」，絕對不得描述為資料缺失、遺失或未提供。
    - abnormal.signal_count 代表「已觸發且適用之異常訊號數量」，並非「已評估之診斷種類總數」。signal_count=0 僅代表「無適用之異常訊號被觸發」，不得延伸解讀為「所有診斷類型皆已檢查且正常」。
+   - abnormal.diagnostics_status 為 not_evaluated 時, 代表該交易日異常診斷未執行或尚無資料, 絕對不得描述為「沒有異常訊號」或「無異常」, 只能陳述為「異常診斷未評估」; 為 partial 或 unavailable 時, 未觸發的訊號不代表正常。
+   - 異常訊號的 status 為 zero_baseline 時, 代表前 20 日基期中位數為 0、倍數無法計算, 僅依絕對量門檻觸發, 不得描述為具體倍數。
    - 若證據中出現 abnormal.not_applicable_signals（或比較情境下之 {symbol}.abnormal.not_applicable_signals），其中列出之訊號類型代表「該類型訊號因標的類別而結構性不適用，並未被評估」，絕對不得描述為零、缺失、正常或「已檢查但未觸發」。例如 ETF 的 RELATIVE_STRENGTH_OUTLIER，僅可陳述為「此類型訊號不適用於此標的類別」。
 6. ETF 與存託憑證標的處理：
    - 若為 ETF 標的，個別公司基本面 (fundamentals) 狀態為 not_applicable，必須陳述為「ETF 不適用個別公司財務指標」，絕對不得描述為「資料缺失」、「資料品質不佳」或「基本面惡化」。
@@ -372,9 +451,18 @@ class TaiwanAIResearchService:
         diag_svc: TaiwanAbnormalDiagnosticsService | None = None,
         calendar: TaiwanTradingCalendar | None = None,
     ) -> None:
+        """Create one instance per request: the default services share a snapshot cache that never expires."""
         self.calendar = calendar or TaiwanTradingCalendar()
-        self.research_svc = research_svc or TaiwanStockResearchContextService(calendar=self.calendar)
-        self.diag_svc = diag_svc or TaiwanAbnormalDiagnosticsService(calendar=self.calendar)
+        market_svc = industry_svc = None
+        if research_svc is None or diag_svc is None:
+            market_svc = _MemoizingSnapshotProxy(TaiwanMarketIntelligenceService(calendar=self.calendar))
+            industry_svc = _MemoizingSnapshotProxy(TaiwanIndustryIntelligenceService(calendar=self.calendar))
+        self.research_svc = research_svc or TaiwanStockResearchContextService(
+            calendar=self.calendar, market_intel_svc=market_svc, industry_intel_svc=industry_svc,
+        )
+        self.diag_svc = diag_svc or TaiwanAbnormalDiagnosticsService(
+            calendar=self.calendar, market_intel_svc=market_svc, industry_intel_svc=industry_svc,
+        )
 
     async def generate_report(
         self,
@@ -396,26 +484,30 @@ class TaiwanAIResearchService:
                 generated_at=now_iso,
             )
 
-        # Retrieve Phase 7D diagnostic item if available
+        # Diagnose the session the price evidence belongs to; before the evening update the
+        # target date has no bars and every symbol would come back unevaluated.
         diag_item = None
+        diag_status = None
+        diag_date = ctx.price_context.trade_date
         try:
             # include_etfs=True (Phase 7J): single-symbol AI research already branches
             # ETF-vs-stock correctly throughout (fundamentals not_applicable, etc.) — one
             # of the two internal consumers proven safe to opt in.
             diag_snap = self.diag_svc.get_diagnostics(
-                target_date=date.fromisoformat(ctx.as_of_date),
+                target_date=date.fromisoformat(diag_date),
                 include_all=True,
                 include_etfs=True,
             )
+            diag_status = diag_snap.data_quality.overall_status
             for item in diag_snap.items:
                 if item.symbol == ctx.symbol:
                     diag_item = item
                     break
         except Exception as e:
-            logger.warning("Diagnostics lookup failed for %s on %s: %s", symbol, ctx.as_of_date, e)
+            logger.warning("Diagnostics lookup failed for %s on %s: %s", symbol, diag_date, e)
 
         # 2. Build Flattened Evidence Registry and Compact Payload
-        evidence_payload, registry_keys, missing_items = build_evidence_registry(ctx, diag_item)
+        evidence_payload, registry_keys, missing_items = build_evidence_registry(ctx, diag_item, diag_status)
 
         # 3. Construct LLM Prompts
         user_prompt = f"""請依據以下封閉研究證據 JSON，為 {ctx.identity.name} ({ctx.identity.code}) 產出結構化客觀解讀報告。
@@ -518,8 +610,29 @@ class TaiwanAIResearchService:
                 validated_risks.append(ObservationItem(text=text, evidence_refs=refs))
 
         # Merge deterministic missing items with AI reported missing items
-        ai_missing = parsed.get("missing_information") or []
-        combined_missing = sorted(list(set(missing_items + [str(m).strip() for m in ai_missing if m])))
+        ai_missing = [str(m).strip() for m in parsed.get("missing_information") or [] if m]
+        combined_missing = sorted(list(set(missing_items + ai_missing)))
+
+        # Only AI-written text is scanned; evidence values and names are untrusted data, not prose.
+        prose_fields = [str(parsed.get(name) or "") for name in _REPORT_PROSE_FIELDS]
+        prose_fields += [obs.text for obs in validated_observations]
+        prose_fields += [rsk.text for rsk in validated_risks]
+        prose_fields += ai_missing
+        for field_text in prose_fields:
+            hit = detect_forbidden_language(field_text)
+            if hit:
+                logger.warning("AI research rejected: forbidden language detected (%r) for %s", hit, symbol)
+                return TaiwanAIResearchResponse(
+                    status="unavailable",
+                    error_code="invalid_output",
+                    error_message="AI 回傳內容包含禁止之投資建議/排序/目標價用語, 已拒絕輸出。",
+                    provider=current_ai_provider(),
+                    model=current_ai_model(),
+                    prompt_version=PROMPT_VERSION,
+                    evidence_as_of=ctx.as_of_date,
+                    generated_at=now_iso,
+                    evidence_registry_keys=sorted(list(registry_keys)),
+                )
 
         # 7. Construct Final Grounded Report
         curr_provider = current_ai_provider()

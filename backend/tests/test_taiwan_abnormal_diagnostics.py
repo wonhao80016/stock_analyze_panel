@@ -499,6 +499,7 @@ def test_relative_strength_outlier_leader_and_laggard():
     mock_ind_metric.industry = "半導體業"
     mock_ind_metric.relative_strength_5d = 0.05
     mock_ind_metric.average_return_5d = 0.03
+    mock_ind_metric.average_return_5d_excluding.return_value = 0.03
     # Deliberately different from average_return_5d: the signal spans five sessions, so
     # reading this single-session mean instead would put observed at 14.0/-13.0 below.
     mock_ind_metric.average_change_pct = 0.01

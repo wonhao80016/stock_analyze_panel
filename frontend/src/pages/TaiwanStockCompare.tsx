@@ -382,7 +382,9 @@ export function TaiwanStockCompare() {
                           <td key={inst.symbol} className="py-2 px-3 font-mono">
                             {inst.context.fundamentals_context.status === 'not_applicable'
                               ? 'ETF 不適用'
-                              : fmtNum(inst.context.fundamentals_context.pe)}
+                              : inst.context.fundamentals_context.pe == null
+                                ? '未取得'
+                                : fmtNum(inst.context.fundamentals_context.pe)}
                           </td>
                         ))}
                       </tr>
@@ -390,7 +392,7 @@ export function TaiwanStockCompare() {
                         <td className="sticky left-0 bg-surface py-2 pr-3 text-muted">異常訊號數</td>
                         {data.instruments.map(inst => (
                           <td key={inst.symbol} className="py-2 px-3 font-mono">
-                            {inst.diagnostic_item?.signal_count ?? 0}
+                            {inst.diagnostic_item == null ? '未評估' : inst.diagnostic_item.signal_count}
                           </td>
                         ))}
                       </tr>

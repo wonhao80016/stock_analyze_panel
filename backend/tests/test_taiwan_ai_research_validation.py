@@ -37,6 +37,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.taiwan.abnormal_diagnostics import (
+    CompactIndustryContext,
+    CompactMarketContext,
+    TaiwanAbnormalDiagnosticItem,
+)
 from app.taiwan.ai_research import (
     TaiwanAIResearchResponse,
     TaiwanAIResearchService,
@@ -339,12 +344,19 @@ async def test_zero_is_not_missing_or_unavailable():
     zero_ctx.institutional_context.foreign_net_1d = 0
     zero_ctx.margin_context.margin_balance_change_1d = 0
 
-    payload, registry_keys, missing = build_evidence_registry(zero_ctx, diag_item=None)
+    # An evaluated diagnostic item with no triggered signals; a None item means "not evaluated".
+    evaluated_item = TaiwanAbnormalDiagnosticItem(
+        symbol=zero_ctx.symbol, code="2330", name="台積電", exchange="TWSE",
+        market_context=CompactMarketContext(trade_date=str(target_d)),
+        industry_context=CompactIndustryContext(),
+    )
+    payload, registry_keys, missing = build_evidence_registry(zero_ctx, diag_item=evaluated_item)
 
     # 0 must be preserved as numeric 0, NOT converted to None or marked missing
     assert payload["institutional_context"]["foreign_net_1d"] == 0
     assert payload["margin_context"]["margin_balance_change_1d"] == 0
     assert payload["abnormal_signals"] == []
+    assert payload["abnormal_signal_count"] == 0
     assert "institutional_context.foreign_net_1d" in registry_keys
     assert "margin_context.margin_balance_change_1d" in registry_keys
     assert "institutional_context.foreign_net_1d" not in missing

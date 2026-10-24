@@ -188,6 +188,7 @@ def _industry_svc() -> MagicMock:
         m = MagicMock()
         m.industry = name
         m.average_return_5d = 0.0
+        m.average_return_5d_excluding.return_value = 0.0
         m.relative_strength_5d = 0.0
         m.relative_strength_20d = 0.0
         m.turnover_share = 0.1

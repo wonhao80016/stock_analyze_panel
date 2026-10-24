@@ -42,18 +42,15 @@ MIN_COMPARE_SYMBOLS = 2
 MAX_COMPARE_SYMBOLS = 5
 
 
-# ── Request-Scoped Memoizing Proxy (private to this module) ──────
+# ── Request-Scoped Memoizing Proxy ───────────────────────────────
 #
 # `TaiwanMarketIntelligenceService.get_snapshot()` and
 # `TaiwanIndustryIntelligenceService.get_snapshot()` have no internal cache —
-# every call fully recomputes from the underlying stores, regardless of
-# whether the service instance is shared. `research_context.py` is NOT
-# modified to add caching; instead this proxy wraps ONE service instance for
-# the lifetime of a single `compare()` call, so that N symbols sharing the
-# same `target_date` trigger the real computation exactly once (the first
-# `get_snapshot(date)` call) and N-1 cheap in-memory cache hits thereafter.
-# This proxy is never exposed outside this module and never outlives one
-# comparison request — it is not a general-purpose cache.
+# every call fully recomputes from the underlying stores. This proxy wraps ONE
+# service instance shared by the research context and the diagnostics of a
+# single request, so each snapshot date is computed once. It has no
+# invalidation: it must never outlive one request (one compare() call, or one
+# TaiwanAIResearchService instance).
 
 
 class _MemoizingSnapshotProxy:
@@ -95,6 +92,7 @@ class ComparisonInstrumentResult(BaseModel):
     symbol: str
     context: TaiwanStockResearchContext
     diagnostic_item: TaiwanAbnormalDiagnosticItem | None = None
+    diagnostic_status: str | None = Field(None, description="異常診斷快照之 overall_status; 未取得快照時為 None")
 
 
 class TaiwanStockComparisonResponse(BaseModel):
@@ -174,19 +172,29 @@ class TaiwanStockComparisonService:
         # Factory so tests can inject a stubbed TaiwanStockResearchContextService;
         # defaults to constructing one per compare() call with a fresh memoizing proxy pair.
         self._research_svc_factory = research_svc_factory
-        self.diag_svc = diag_svc or TaiwanAbnormalDiagnosticsService(calendar=self.calendar)
+        self.diag_svc = diag_svc
 
-    def _build_research_service(self) -> TaiwanStockResearchContextService:
-        if self._research_svc_factory is not None:
-            return self._research_svc_factory()
+    def _build_services(self) -> tuple[TaiwanStockResearchContextService, TaiwanAbnormalDiagnosticsService]:
+        """Research and diagnostics services for one compare() call, sharing one snapshot cache."""
+        if self._research_svc_factory is not None and self.diag_svc is not None:
+            return self._research_svc_factory(), self.diag_svc
         market_proxy = _MemoizingSnapshotProxy(TaiwanMarketIntelligenceService(calendar=self.calendar))
         industry_proxy = _MemoizingSnapshotProxy(TaiwanIndustryIntelligenceService(calendar=self.calendar))
-        return TaiwanStockResearchContextService(
+        if self._research_svc_factory is not None:
+            research_svc = self._research_svc_factory()
+        else:
+            research_svc = TaiwanStockResearchContextService(
+                calendar=self.calendar,
+                security_master=self.security_master,
+                market_intel_svc=market_proxy,
+                industry_intel_svc=industry_proxy,
+            )
+        diag_svc = self.diag_svc or TaiwanAbnormalDiagnosticsService(
             calendar=self.calendar,
-            security_master=self.security_master,
             market_intel_svc=market_proxy,
             industry_intel_svc=industry_proxy,
         )
+        return research_svc, diag_svc
 
     def compare(
         self,
@@ -208,7 +216,7 @@ class TaiwanStockComparisonService:
         # Resolve the shared comparison date ONCE — every symbol uses this exact same date.
         resolved_date = target_date or resolve_target_latest_trading_date(self.calendar)
 
-        research_svc = self._build_research_service()
+        research_svc, diag_svc = self._build_services()
 
         instruments: list[ComparisonInstrumentResult] = []
         for symbol in resolved_symbols:
@@ -226,19 +234,22 @@ class TaiwanStockComparisonService:
                 f"無法解析: {unsupported}"
             )
 
-        # Abnormal diagnostics: ONE whole-market batch call at the shared date, then
-        # filter to the resolved symbol set (mirrors ai_research.py:382-392).
+        # Abnormal diagnostics: ONE whole-market batch call, then filter to the resolved
+        # symbols. It runs on the session the prices belong to, which precedes the
+        # comparison date until the evening update stores that day's bars.
+        diag_date = date.fromisoformat(instruments[0].context.price_context.trade_date)
         try:
             # include_etfs=True (Phase 7J): comparison already renders ETF instruments
             # correctly per-symbol (leverage badges, not_applicable fundamentals, etc.) —
             # this is one of the two internal consumers proven safe to opt in (the public
             # /abnormal-diagnostics endpoint and TaiwanScreener.tsx never pass this flag).
-            diag_snap = self.diag_svc.get_diagnostics(target_date=resolved_date, include_all=True, include_etfs=True)
+            diag_snap = diag_svc.get_diagnostics(target_date=diag_date, include_all=True, include_etfs=True)
             diag_by_symbol = {item.symbol: item for item in diag_snap.items}
             for instrument in instruments:
                 instrument.diagnostic_item = diag_by_symbol.get(instrument.symbol)
+                instrument.diagnostic_status = diag_snap.data_quality.overall_status
         except Exception as e:
-            logger.warning("Comparison: diagnostics lookup failed for date %s: %s", resolved_date, e)
+            logger.warning("Comparison: diagnostics lookup failed for date %s: %s", diag_date, e)
 
         return TaiwanStockComparisonResponse(
             symbols_requested=symbols,

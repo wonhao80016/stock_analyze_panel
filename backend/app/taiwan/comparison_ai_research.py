@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import date
 from typing import Any, Literal
 from pydantic import BaseModel, Field
@@ -39,7 +38,12 @@ from app.services.ai_provider import (
     generate_ai_text,
 )
 from app.strategy.custom_signals_ai import _extract_json_object
-from app.taiwan.ai_research import ObservationItem, build_evidence_registry
+from app.taiwan.ai_research import (
+    RANKING_LANGUAGE_BLOCKLIST,
+    ObservationItem,
+    build_evidence_registry,
+    detect_forbidden_language,
+)
 from app.taiwan.comparison import (
     MAX_COMPARE_SYMBOLS,
     MIN_COMPARE_SYMBOLS,
@@ -59,28 +63,14 @@ COMPARISON_DISCLAIMER_TEXT = (
 
 # ── Ranking/Recommendation Runtime Guard ──────────────────────
 #
-# Applied ONLY to AI-generated free-text prose fields (overview, per-dimension
-# interpretations, key_observations[].text, risk_factors[].text) — NEVER to
-# raw evidence values, company/industry names, or symbol metadata, which
-# remain untrusted data (per Phase 7E's existing prompt-injection stance) and
-# are not subject to this content check.
+# Applied ONLY to AI-generated free text (overview, per-dimension interpretations,
+# key_observations[].text, risk_factors[].text and the AI's own missing_information
+# entries) — NEVER to raw evidence values, company/industry names, or symbol
+# metadata, which remain untrusted data (per Phase 7E's existing prompt-injection
+# stance) and are not subject to this content check.
 #
-# Deliberately a curated MULTI-WORD PHRASE blocklist (mirrors the existing
-# `_FOCUS_BLOCKLIST` pattern in app/services/ai_provider.py), not single
-# comparative adjectives — so legitimate objective statements such as
-# "報酬率較高" / "RSI 較高" / "相對強度較強" / "higher 5D return" are never
-# flagged. This is a lightweight backstop against clear violations, not a
-# general NLP/sentiment validator (consistent with the project's existing
-# "no heavyweight NLP validator" decision).
-_RANKING_LANGUAGE_BLOCKLIST = re.compile(
-    r"最佳選擇|最值得投資|最具投資價值|更具投資吸引力|較佳投資機會|首選|勝出|"
-    r"更具吸引力|投資價值較高|應該會表現更好|值得優先考慮|"
-    r"優於.{0,20}(值得|建議|推薦|買進|投資)|"  # "優於" alone is objective; only flag when paired with preference verbs
-    r"best pick|top pick|better investment opportunity|more attractive investment|"
-    r"highest investment value|\bwinner\b|should outperform|top choice|best choice|"
-    r"more attractive than|better opportunity",
-    re.IGNORECASE,
-)
+# The curated phrase blocklists live in ai_research.py so the single-stock report
+# applies the same ones; this is a lightweight backstop, not an NLP validator.
 
 
 def detect_ranking_language(text: str) -> str | None:
@@ -92,7 +82,7 @@ def detect_ranking_language(text: str) -> str | None:
     """
     if not text:
         return None
-    match = _RANKING_LANGUAGE_BLOCKLIST.search(text)
+    match = RANKING_LANGUAGE_BLOCKLIST.search(text)
     return match.group(0) if match else None
 
 
@@ -170,7 +160,9 @@ def build_comparison_evidence_registry(
     combined_missing: list[str] = []
 
     for instrument in instruments:
-        payload, keys, missing_items = build_evidence_registry(instrument.context, instrument.diagnostic_item)
+        payload, keys, missing_items = build_evidence_registry(
+            instrument.context, instrument.diagnostic_item, instrument.diagnostic_status
+        )
         combined_payload[instrument.symbol] = payload
         for key in keys:
             combined_keys.add(f"{instrument.symbol}.{key}")
@@ -199,6 +191,8 @@ SYSTEM_PROMPT_COMPARISON = """你是一個客觀、確定性導向的「台股�
 2. 封閉事實邊界：只能使用傳入的 JSON 數據進行解讀，嚴禁捏造。若欄位為 null 或 missing，
    必須如實說明「該標的目前資料不足」，不得私自推估。
    若 {symbol}.industry_context.status 為 provisional，代表產業統計為盤後初值、當晚可能定稿，引用時必須註明為初值。
+   {symbol}.market_context.status 為 provisional 時同樣處理。兩者為 partial 時代表部分資料集尚未齊全 (例如融資融券尚未公布或市場覆蓋不完整), 引用時必須註明為不完整資料。
+   {symbol}.price_context.high_low_20d_basis 為 close, 代表 20 日高低點與距離以收盤價計算, 不得描述為盤中最高價或最低價。
 3. 證據引用規定：
    - key_observations 與 risk_factors 中的每一條觀察，必須附帶 1 個以上「合法命名空間證據鍵」
      (格式: {symbol}.{key}，例如 "2330.TWSE.price_context.return_5d")。
@@ -209,6 +203,9 @@ SYSTEM_PROMPT_COMPARISON = """你是一個客觀、確定性導向的「台股�
 5. 零數值非缺失：數值為 0 代表「客觀數值為零 / 當日無變動」，不得描述為缺失。
    abnormal.signal_count 代表「已觸發且適用之異常訊號數量」，並非「已評估之診斷種類總數」，
    signal_count=0 僅代表「無適用之異常訊號被觸發」，不得延伸解讀為「所有診斷類型皆已檢查且正常」。
+   {symbol}.abnormal.diagnostics_status 為 not_evaluated 時, 代表該標的異常診斷未執行或尚無資料, 絕對不得描述為
+   「沒有異常訊號」或「無異常」, 只能陳述為「異常診斷未評估」; 異常訊號 status 為 zero_baseline 時, 代表前 20 日
+   基期中位數為 0、倍數無法計算, 僅依絕對量門檻觸發, 不得描述為具體倍數。
    若證據中出現 {symbol}.abnormal.not_applicable_signals，其中列出之訊號類型代表「該標的因
    類別而結構性不適用此類型訊號，並未被評估」，絕對不得描述為零、缺失、正常或「已檢查但未觸發」；
    例如某 ETF 標的的 RELATIVE_STRENGTH_OUTLIER，僅可陳述為「此類型訊號不適用於該標的類別」。
@@ -355,8 +352,8 @@ class TaiwanComparisonAIResearchService:
             if refs:
                 validated_risks.append(ComparisonObservationItem(text=text, evidence_refs=refs))
 
-        ai_missing = parsed.get("missing_information") or []
-        combined_missing = sorted(set(missing_items + [str(m).strip() for m in ai_missing if m]))
+        ai_missing = [str(m).strip() for m in parsed.get("missing_information") or [] if m]
+        combined_missing = sorted(set(missing_items + ai_missing))
 
         # 7. Deterministic Ranking/Recommendation Language Guard — applied ONLY to
         #    AI-generated prose fields, never to raw evidence/symbol/company data.
@@ -370,9 +367,10 @@ class TaiwanComparisonAIResearchService:
         ]
         prose_fields.extend(obs.text for obs in validated_observations)
         prose_fields.extend(rsk.text for rsk in validated_risks)
+        prose_fields.extend(ai_missing)
 
         for field_text in prose_fields:
-            hit = detect_ranking_language(field_text)
+            hit = detect_forbidden_language(field_text)
             if hit:
                 logger.warning(
                     "AI comparison rejected: ranking/preference language detected (%r) for symbols=%s",
@@ -382,7 +380,7 @@ class TaiwanComparisonAIResearchService:
                 return TaiwanComparisonAIResearchResponse(
                     status="unavailable",
                     error_code="invalid_output",
-                    error_message="AI 回傳內容包含禁止之投資排序/偏好用語，已拒絕輸出。",
+                    error_message="AI 回傳內容包含禁止之投資排序/偏好/建議/目標價用語, 已拒絕輸出。",
                     provider=current_ai_provider(),
                     model=current_ai_model(),
                     prompt_version=COMPARISON_PROMPT_VERSION,

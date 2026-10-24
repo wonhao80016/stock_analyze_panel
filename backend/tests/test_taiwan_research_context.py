@@ -6,7 +6,7 @@ Verifies:
 - Price Context semantics:
     * change_pct decimal calculation, volume in shares, amount in TWD
 - Institutional rolling sums & coverage:
-    * 5D sum preserved, missing day does not equate to zero
+    * 5D sum over the last five stored sessions; a session without a T86 row counts as zero
 - Historical No Look-Ahead:
     * D+1 daily/institutional/margin data strictly ignored when querying date D
 - ETF Context vs Corporate Fundamentals:
@@ -116,6 +116,7 @@ def test_institutional_rolling_and_coverage():
     dates = [date(2026, 8, 24), date(2026, 8, 25), date(2026, 8, 26), date(2026, 8, 27), d_curr]
 
     mock_inst = MagicMock()
+    mock_inst._data_dir = None  # served through read_range, not partition files
     mock_inst.available_dates.return_value = dates
 
     df_inst = pl.DataFrame({
@@ -314,6 +315,9 @@ def _market_snapshot(status: str, d: date) -> MagicMock:
     snapshot.market_totals.flat_count = 0
     snapshot.market_totals.upper_limit_count = 0
     snapshot.market_totals.lower_limit_count = 0
+    snapshot.by_instrument.stock.advance_count = 1
+    snapshot.by_instrument.stock.decline_count = 1
+    snapshot.by_instrument.stock.flat_count = 0
     snapshot.by_exchange.twse.turnover = 600_000.0
     snapshot.by_exchange.tpex.turnover = 400_000.0
     snapshot.institutional.total_net_amount = 1000
@@ -399,7 +403,7 @@ def test_unpublished_indicators_downgrade_the_overall_status_from_complete(tmp_p
     assert with_ind == "complete"
 
 
-def test_provisional_market_is_provisional_and_excluded_from_ai_evidence(tmp_path, monkeypatch):
+def test_provisional_market_is_provisional_and_sent_to_ai_with_its_status(tmp_path, monkeypatch):
     d_prev, d_curr = date(2026, 8, 27), date(2026, 8, 28)
     _publish_indicators(
         tmp_path,
@@ -426,8 +430,8 @@ def test_provisional_market_is_provisional_and_excluded_from_ai_evidence(tmp_pat
 
     assert context.market_context.status == "provisional"
     assert context.data_quality.overall_status == "provisional"
-    assert "market_context" not in payload
-    assert "market_context" in missing
+    assert payload["market_context"]["status"] == "provisional"
+    assert "market_context" not in missing
 
 
 @pytest.mark.parametrize(

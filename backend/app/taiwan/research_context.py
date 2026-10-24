@@ -38,6 +38,7 @@ from app.taiwan.corporate_actions import (
     reference_prices,
 )
 from app.taiwan.daily_store import TaiwanDailyStore
+from app.taiwan.detail_service import _has_exchange
 from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
     resolve_target_latest_trading_date,
@@ -62,6 +63,12 @@ from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.models import TDR_SECURITY_CLASS, MarketProfileBridge, TaiwanInstrument
 
 logger = logging.getLogger(__name__)
+
+
+PRICE_WINDOW_FORMULA = (
+    "return_Nd = close / close(N trading sessions earlier) - 1, null when that session has no close; "
+    "high_20d / low_20d = max / min of closing prices over the last 20 trading sessions (close-based, not intraday)"
+)
 
 
 # ── Strong Typing & Pydantic Models ───────────────────────────
@@ -97,9 +104,9 @@ class MarketContextEvidence(BaseModel):
 
     trade_date: str
     market_turnover: float
-    advance_count: int
-    decline_count: int
-    flat_count: int
+    advance_count: int  # stocks only, the population of the industry advance ratio
+    decline_count: int  # stocks only
+    flat_count: int  # stocks only
     upper_limit_count: int
     lower_limit_count: int
     exchange_turnover: float | None = None
@@ -141,8 +148,8 @@ class PriceContextEvidence(BaseModel):
     change_pct: float | None = None  # decimal e.g. 0.05
     return_5d: float | None = None  # decimal e.g. 0.08
     return_20d: float | None = None  # decimal e.g. 0.15
-    high_20d: float | None = None
-    low_20d: float | None = None
+    high_20d: float | None = None  # highest close of the last 20 sessions, not the intraday high
+    low_20d: float | None = None  # lowest close of the last 20 sessions, not the intraday low
     distance_from_20d_high: float | None = None  # decimal e.g. -0.02
     distance_from_20d_low: float | None = None  # decimal e.g. 0.12
     meta: EvidenceMeta
@@ -435,19 +442,26 @@ class TaiwanStockResearchContextService:
         dist_l20 = None
 
         if len(hist_df) >= 2:
-            closes = hist_df["close"].drop_nulls().to_list()
+            # Lookbacks count trading sessions; a halted base session yields no return.
+            close_by_date = dict(zip(hist_df["date"].to_list(), hist_df["close"].to_list(), strict=True))
+            priced_sessions = [d for d in available_dates if d <= price_date]
 
-            if len(closes) >= 6:
-                c_5d_base = closes[-6]
-                if c_5d_base > 0 and c_price is not None:
-                    ret_5d = round((c_price / c_5d_base) - 1.0, 6)
-            if len(closes) >= 21:
-                c_20d_base = closes[-21]
-                if c_20d_base > 0 and c_price is not None:
-                    ret_20d = round((c_price / c_20d_base) - 1.0, 6)
+            def _base_close(sessions_back: int) -> float | None:
+                if len(priced_sessions) <= sessions_back:
+                    return None
+                return close_by_date.get(priced_sessions[-1 - sessions_back])
+
+            c_5d_base = _base_close(5)
+            if c_5d_base is not None and c_5d_base > 0 and c_price is not None:
+                ret_5d = round((c_price / c_5d_base) - 1.0, 6)
+            c_20d_base = _base_close(20)
+            if c_20d_base is not None and c_20d_base > 0 and c_price is not None:
+                ret_20d = round((c_price / c_20d_base) - 1.0, 6)
 
             # 20D Extremes
-            window_20_closes = closes[-20:]
+            window_20_closes = [
+                c for d in priced_sessions[-20:] if (c := close_by_date.get(d)) is not None
+            ]
             h_20d = max(window_20_closes) if window_20_closes else None
             l_20d = min(window_20_closes) if window_20_closes else None
             if c_price is not None and h_20d is not None and h_20d > 0:
@@ -501,6 +515,7 @@ class TaiwanStockResearchContextService:
             meta=EvidenceMeta(
                 classification="KNOWN" if c_price is not None else "MISSING",
                 source="taiwan_daily_store",
+                formula=PRICE_WINDOW_FORMULA,
                 as_of=str(price_date),
             ),
         )
@@ -536,36 +551,38 @@ class TaiwanStockResearchContextService:
         f_1d = None
         it_1d = None
         d_1d = None
-        f_5d = None
-        it_5d = None
-        d_5d = None
-        f_20d = None
-        it_20d = None
-        d_20d = None
-        cov_5d = 0
-        cov_20d = 0
-
-        if not inst_rows.is_empty():
-            inst_sorted = inst_rows.sort("date")
+        inst_sorted = inst_rows.sort("date") if not inst_rows.is_empty() else pl.DataFrame()
+        if not inst_sorted.is_empty():
             curr_inst = inst_sorted.filter(pl.col("date") == target).tail(1)
             if not curr_inst.is_empty():
                 f_1d = float(curr_inst["foreign_net"][0]) if curr_inst["foreign_net"][0] is not None else None
                 it_1d = float(curr_inst["investment_trust_net"][0]) if curr_inst["investment_trust_net"][0] is not None else None
                 d_1d = float(curr_inst["dealer_net"][0]) if curr_inst["dealer_net"][0] is not None else None
 
-            # 5D sum
-            sub_5 = inst_sorted.tail(5)
-            cov_5d = len(sub_5)
-            f_5d = float(sub_5["foreign_net"].sum()) if cov_5d > 0 and sub_5["foreign_net"].drop_nulls().len() > 0 else None
-            it_5d = float(sub_5["investment_trust_net"].sum()) if cov_5d > 0 and sub_5["investment_trust_net"].drop_nulls().len() > 0 else None
-            d_5d = float(sub_5["dealer_net"].sum()) if cov_5d > 0 and sub_5["dealer_net"].drop_nulls().len() > 0 else None
+        # T86 lists only traded securities, so a stored session without a row sums as zero;
+        # a session whose table for the symbol's exchange was not stored leaves the sum unknown.
+        published = {d for d in inst_window if _has_exchange(self.inst_store, d, canonical)}
 
-            # 20D sum
-            sub_20 = inst_sorted.tail(20)
-            cov_20d = len(sub_20)
-            f_20d = float(sub_20["foreign_net"].sum()) if cov_20d > 0 and sub_20["foreign_net"].drop_nulls().len() > 0 else None
-            it_20d = float(sub_20["investment_trust_net"].sum()) if cov_20d > 0 and sub_20["investment_trust_net"].drop_nulls().len() > 0 else None
-            d_20d = float(sub_20["dealer_net"].sum()) if cov_20d > 0 and sub_20["dealer_net"].drop_nulls().len() > 0 else None
+        def _window_sums(sessions: int) -> tuple[float | None, float | None, float | None, int]:
+            window = inst_available[-sessions:]
+            if inst_sorted.is_empty():
+                sub = inst_sorted
+                coverage = 0
+            else:
+                sub = inst_sorted.filter(pl.col("date").is_in(window))
+                coverage = sub["date"].n_unique()
+            if len(window) < sessions or not set(window) <= published:
+                return None, None, None, coverage
+
+            def _total(field: str) -> float | None:
+                if sub.is_empty():
+                    return 0.0
+                return None if sub[field].null_count() else float(sub[field].sum())
+
+            return _total("foreign_net"), _total("investment_trust_net"), _total("dealer_net"), coverage
+
+        f_5d, it_5d, d_5d, cov_5d = _window_sums(5)
+        f_20d, it_20d, d_20d, cov_20d = _window_sums(20)
 
         inst_evidence = InstitutionalContextEvidence(
             as_of=str(inst_as_of) if inst_as_of else None,
@@ -641,13 +658,15 @@ class TaiwanStockResearchContextService:
         )
 
         # 5. Market Context (Reused Phase 7A)
-        market_snap = self.market_intel_svc.get_snapshot(target)
+        # Snapshots describe the session the prices belong to, the same date diagnostics use.
+        market_snap = self.market_intel_svc.get_snapshot(price_date)
+        stock_breadth = market_snap.by_instrument.stock
         market_evidence = MarketContextEvidence(
             trade_date=market_snap.trade_date,
             market_turnover=market_snap.market_totals.turnover,
-            advance_count=market_snap.market_totals.advance_count,
-            decline_count=market_snap.market_totals.decline_count,
-            flat_count=market_snap.market_totals.flat_count,
+            advance_count=stock_breadth.advance_count,
+            decline_count=stock_breadth.decline_count,
+            flat_count=stock_breadth.flat_count,
             upper_limit_count=market_snap.market_totals.upper_limit_count,
             lower_limit_count=market_snap.market_totals.lower_limit_count,
             exchange_turnover=market_snap.by_exchange.twse.turnover if inst.exchange == "TWSE" else market_snap.by_exchange.tpex.turnover,
@@ -670,7 +689,7 @@ class TaiwanStockResearchContextService:
                 meta=EvidenceMeta(classification="MISSING", source="taiwan_security_master"),
             )
         elif inst.instrument_type == "stock" and inst.industry:
-            ind_snap = self.industry_intel_svc.get_snapshot(target)
+            ind_snap = self.industry_intel_svc.get_snapshot(price_date)
             target_ind_metric = next((im for im in ind_snap.industries if im.industry == inst.industry), None)
             if target_ind_metric:
                 industry_evidence = IndustryContextEvidence(
@@ -768,17 +787,15 @@ class TaiwanStockResearchContextService:
             ),
         )
 
-        # 9. Realtime & Monitor (Offline safe)
+        # 9. Realtime & Monitor: neither the quote feed nor the rule store is read here.
         realtime_evidence = RealtimeContextEvidence(
-            status="market_closed",
-            last_price=c_price,
-            quote_ts=str(price_date),
-            meta=EvidenceMeta(classification="KNOWN" if c_price is not None else "MISSING", source="taiwan_daily_store"),
+            status="unavailable",
+            meta=EvidenceMeta(classification="MISSING", source="taiwan_realtime_quotes"),
         )
         monitor_evidence = MonitorContextEvidence(
             active_rule_count=0,
             recent_alert_count=0,
-            meta=EvidenceMeta(classification="KNOWN", source="taiwan_monitor_rules"),
+            meta=EvidenceMeta(classification="MISSING", source="taiwan_monitor_rules"),
         )
 
         # 10. Data Quality & Overall Status
@@ -801,7 +818,7 @@ class TaiwanStockResearchContextService:
             overall_status = "partial"
         else:
             overall_status = "unavailable"
-        if overall_status in ("complete", "provisional") and not ind_row:
+        if overall_status in ("complete", "provisional") and (not ind_row or c_price is None):
             overall_status = "partial"
 
         dq = ResearchDataQuality(
@@ -810,22 +827,41 @@ class TaiwanStockResearchContextService:
             target_trade_date=str(target),
         )
 
-        # 11. Evidence Summary Counts
-        # Deterministic field counting
-        known_cnt = 10  # identity, OHLCV, 1D flows
-        if f_1d is not None: known_cnt += 3
-        if mb is not None: known_cnt += 4
-        if inst.instrument_type == "etf": known_cnt += 4
+        # 11. Evidence Summary Counts: every applicable field is either present or missing.
+        known_fields: list[Any] = [
+            inst.code, inst.name, inst.exchange, inst.instrument_type,
+            o_price, h_price, l_price, c_price, vol, amt, p_close,
+            f_1d, it_1d, d_1d,
+            mb, mb_chg_1d, sb, sb_chg_1d, sm_ratio,
+        ]
+        if inst.instrument_type == "etf":
+            known_fields += [
+                etf_evidence.etf_type, etf_evidence.underlying_scope,
+                etf_evidence.leverage_multiplier, etf_evidence.inverse,
+            ]
+        elif fund_evidence.status != "not_applicable":
+            known_fields += [
+                fund_evidence.pe, fund_evidence.pb, fund_evidence.dividend_yield,
+                fund_evidence.monthly_revenue_yoy, fund_evidence.latest_eps,
+            ]
+        derived_fields: list[Any] = [
+            chg, chg_pct, ret_5d, ret_20d, h_20d, l_20d, dist_h20, dist_l20,
+            ma5, ma20, ma60, rsi14, vol_ratio, dist_ma20,
+            f_5d, f_20d, it_5d, it_20d, d_5d, d_20d, mb_chg_5d, sb_chg_5d,
+        ]
+        if industry_evidence.status != "not_applicable":
+            derived_fields += [industry_evidence.relative_strength_5d, industry_evidence.relative_strength_20d]
+        known_cnt = sum(v is not None for v in known_fields)
+        derived_cnt = sum(v is not None for v in derived_fields)
+        missing_cnt = (len(known_fields) - known_cnt) + (len(derived_fields) - derived_cnt)
 
-        derived_cnt = 12  # returns, MA, RSI, RS 5D/20D, rolling sums
-        missing_cnt = 0
         missing_sections = []
+        if c_price is None:
+            missing_sections.append("price")
         if fund_evidence.status == "unavailable":
             missing_sections.append("fundamentals")
-            missing_cnt += 4
         if industry_evidence.status == "unavailable":
             missing_sections.append("industry")
-            missing_cnt += 4
 
         evidence_summary = EvidenceSummaryCounts(
             known_fields_count=known_cnt,

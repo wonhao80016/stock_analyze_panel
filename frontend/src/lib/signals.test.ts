@@ -209,8 +209,8 @@ describe('ABNORMAL_SIGNAL_DEFINITIONS — the rules shown to the user', () => {
   })
 
   it('states each trigger expression exactly as the backend evaluates it', () => {
-    expect(byId('VOLUME_SPIKE').formula).toBe('成交量 ÷ 前 5 日平均成交量 ≥ 2.0')
-    expect(byId('TURNOVER_SPIKE').formula).toBe('成交金額 ÷ 前 5 日平均成交金額 ≥ 2.0')
+    expect(byId('VOLUME_SPIKE').formula).toBe('成交量 ÷ 前 5 個有成交日平均成交量 ≥ 2.0')
+    expect(byId('TURNOVER_SPIKE').formula).toBe('成交金額 ÷ 前 5 個有成交日平均成交金額 ≥ 2.0')
     expect(byId('PRICE_MOVE').formula).toBe('|漲跌幅| ÷ |槓桿倍數| ≥ 5%')
     expect(byId('FOREIGN_FLOW_SPIKE').formula).toBe(
       '|外資買賣超| ≥ 100,000 股　且　|外資買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
@@ -219,10 +219,10 @@ describe('ABNORMAL_SIGNAL_DEFINITIONS — the rules shown to the user', () => {
       '|投信買賣超| ≥ 50,000 股　且　|投信買賣超| ÷ 前 20 日 |買賣超| 平均 ≥ 3.0',
     )
     expect(byId('MARGIN_SURGE').formula).toBe(
-      '|融資增減| ≥ 500,000 股　且　|融資增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0',
+      '|融資增減| ≥ 500,000 股　且　|融資增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0（中位數為 0 時：|融資增減| ≥ 500,000 股）',
     )
     expect(byId('SHORT_SURGE').formula).toBe(
-      '|融券增減| ≥ 100,000 股　且　|融券增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0',
+      '|融券增減| ≥ 100,000 股　且　|融券增減| ÷ 前 20 日 |增減| 中位數 ≥ 3.0（中位數為 0 時：|融券增減| ≥ 100,000 股）',
     )
     expect(byId('SHORT_MARGIN_RATIO_SPIKE').formula).toBe(
       '券資比 − 前 20 日券資比中位數 ≥ 5 個百分點',
@@ -250,21 +250,27 @@ describe('ABNORMAL_SIGNAL_DEFINITIONS — the rules shown to the user', () => {
   })
 
   it('states the history each signal needs before it is evaluated', () => {
-    expect(byId('VOLUME_SPIKE').dataRequirement).toBe('前 5 個交易日全部要有成交量資料')
-    expect(byId('TURNOVER_SPIKE').dataRequirement).toBe('前 5 個交易日全部要有成交金額資料')
+    expect(byId('VOLUME_SPIKE').dataRequirement).toBe('前 20 個交易日內要有 5 個有成交日（停牌或無成交日不計入）')
+    expect(byId('TURNOVER_SPIKE').dataRequirement).toBe('前 20 個交易日內要有 5 個有成交日（停牌或無成交日不計入）')
     expect(byId('FOREIGN_FLOW_SPIKE').dataRequirement).toBe(
-      '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 10,000 股',
+      '前 20 日中至少 15 個已公布法人資料的交易日（未列出的日子視為 0），且該平均本身 ≥ 10,000 股',
     )
     expect(byId('TRUST_FLOW_SPIKE').dataRequirement).toBe(
-      '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 5,000 股',
+      '前 20 日中至少 15 個已公布法人資料的交易日（未列出的日子視為 0），且該平均本身 ≥ 5,000 股',
     )
     // f_mult is only assigned inside the foreign-flow branch, so the divergence signal
     // inherits that branch's coverage and baseline gates.
     expect(byId('PRICE_FLOW_DIVERGENCE').dataRequirement).toBe(
-      '前 20 日至少 15 日有法人資料，且該平均本身 ≥ 10,000 股',
+      '前 20 日中至少 15 個已公布法人資料的交易日（未列出的日子視為 0），且該平均本身 ≥ 10,000 股',
     )
     for (const id of ['MARGIN_SURGE', 'SHORT_SURGE', 'SHORT_MARGIN_RATIO_SPIKE']) {
       expect(byId(id).dataRequirement).toBe('前 20 日至少 15 日有融資融券資料')
+    }
+  })
+
+  it('says a zero 20-session median triggers on the absolute floor alone', () => {
+    for (const id of ['MARGIN_SURGE', 'SHORT_SURGE']) {
+      expect(byId(id).description, id).toContain('中位數為 0')
     }
   })
 
