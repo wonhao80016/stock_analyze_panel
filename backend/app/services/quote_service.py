@@ -226,9 +226,14 @@ class QuoteService:
     }
     DEFAULT_INTERVAL = 6.0
     MAX_INTERVAL = 60.0
+    STOP_JOIN_TIMEOUT = 10.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # Guards _running/_enabled/_thread/_stop_event/_restart_pending across start, enable and stop.
+        self._lifecycle_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._restart_pending = False
         # 串行化行情拉取: 手动 POST /refresh 与后台轮询线程可能并发调用
         # _fetch_quotes, 两者同时写同一批 parquet/缓存会互相覆盖
         self._fetch_lock = threading.Lock()
@@ -260,6 +265,8 @@ class QuoteService:
         self._index_symbol_count: int = 0
         self._etf_symbol_count: int = 0
         self._index_quotes_cache: pl.DataFrame | None = None
+        # Today's Taiwan index rows for the monitor's index round; held in memory only, never stored.
+        self._taiwan_index_live: pl.DataFrame | None = None
         self._intraday_signal_evaluator = IntradaySignalEvaluator()
         self._intraday_signal_bucket: dict[str, str] = {}
         # Close-boundary sync state: one quote pull must succeed after the close
@@ -281,6 +288,7 @@ class QuoteService:
         # Whether this round's quote records came from a live source. None = no
         # status signal (non-Taiwan providers today) -> gate does not apply.
         self._quote_source_realtime: bool | None = None
+        self._missing_realtime_provider_warned: str | None = None
 
     # ================================================================
     # 生命周期
@@ -288,17 +296,16 @@ class QuoteService:
 
     def start(self, interval: float = 0.0) -> None:
         """启动后台行情轮询线程。"""
-        if self._running:
-            return
-        if interval <= 0:
-            from app.services import preferences
-            interval = preferences.get_realtime_quote_interval()
-        self._interval = self._clamp_interval(interval)
-        self._running = True
-        self._enabled = True
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-        self._thread.start()
-        self._save_enabled(True)
+        with self._lifecycle_lock:
+            if self._running:
+                return
+            if interval <= 0:
+                from app.services import preferences
+                interval = preferences.get_realtime_quote_interval()
+            self._interval = self._clamp_interval(interval)
+            self._enabled = True
+            self._launch_poll_thread_locked()
+            self._save_enabled(True)
         logger.info("行情服务已启动, 轮询间隔 %.1fs", self._interval)
 
     def stop(self, *, persist: bool = True) -> None:
@@ -307,14 +314,24 @@ class QuoteService:
         persist=False when the process is shutting down: a restart is not the user
         switching realtime off, and saving it there leaves the feature disabled after
         every reload until someone flips the toggle by hand.
+        A thread still inside a round after STOP_JOIN_TIMEOUT stays registered, so no
+        second poll thread can start until it exits.
         """
-        self._running = False
-        self._enabled = False
-        if self._thread:
-            self._thread.join(timeout=10)
-            self._thread = None
-        if persist:
-            self._save_enabled(False)
+        with self._lifecycle_lock:
+            self._running = False
+            self._enabled = False
+            self._restart_pending = False
+            self._stop_event.set()
+            thread = self._thread
+            if persist:
+                self._save_enabled(False)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=self.STOP_JOIN_TIMEOUT)
+            if thread.is_alive():
+                logger.warning(
+                    "quote poll thread still running after %.0fs; no new one starts until it exits",
+                    self.STOP_JOIN_TIMEOUT,
+                )
         logger.info("行情服务已停止")
 
     def enable(self) -> bool:
@@ -326,16 +343,49 @@ class QuoteService:
         if not self.is_realtime_allowed():
             logger.warning("实时行情开启被拒:当前档位(none)无实时行情权限")
             return False
-        self._enabled = True
-        self._save_enabled(True)
-        if not self._running:
-            from app.services import preferences
-            self._interval = self._clamp_interval(preferences.get_realtime_quote_interval())
-            self._running = True
-            self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-            self._thread.start()
+        with self._lifecycle_lock:
+            self._enabled = True
+            self._save_enabled(True)
+            if not self._running:
+                from app.services import preferences
+                self._interval = self._clamp_interval(preferences.get_realtime_quote_interval())
+                self._launch_poll_thread_locked()
         logger.info("行情服务已启用, 轮询间隔 %.1fs", self._interval)
         return True
+
+    def _launch_poll_thread_locked(self, predecessor: threading.Thread | None = None) -> None:
+        """Start the poll thread; caller holds _lifecycle_lock.
+
+        While a stopped thread is still finishing its round, the start is deferred to
+        that thread's exit (_run_poll_thread), so at most one poll thread is ever alive.
+        """
+        self._running = True
+        previous = self._thread
+        if previous is not None and previous.is_alive():
+            if self._stop_event.is_set():
+                self._restart_pending = True
+            return
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run_poll_thread, args=(self._stop_event, predecessor), daemon=True,
+        )
+        self._thread.start()
+
+    def _run_poll_thread(
+        self, stop_event: threading.Event, predecessor: threading.Thread | None,
+    ) -> None:
+        if predecessor is not None:
+            predecessor.join()
+        try:
+            self._poll_loop(stop_event)
+        finally:
+            with self._lifecycle_lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                    if self._restart_pending:
+                        self._restart_pending = False
+                        if self._running and self._enabled:
+                            self._launch_poll_thread_locked(predecessor=threading.current_thread())
 
     def disable(self) -> None:
         """关闭自动行情。"""
@@ -587,8 +637,12 @@ class QuoteService:
     # 后台轮询
     # ================================================================
 
-    def _poll_loop(self) -> None:
-        while self._running and self._enabled:
+    def _poll_loop(self, stop: threading.Event | None = None) -> None:
+        """Poll until stopped; *stop* is this thread's own signal, which a later enable() never clears."""
+        def active() -> bool:
+            return self._running and self._enabled and not (stop is not None and stop.is_set())
+
+        while active():
             try:
                 # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
                 # 线程继续存活 + 分片 sleep, resume() 后即时恢复, 无需重启线程。
@@ -611,7 +665,7 @@ class QuoteService:
                 logger.warning("行情轮询异常: %s", e)
 
             waited = 0.0
-            while self._running and self._enabled and waited < self._interval:
+            while active() and waited < self._interval:
                 time.sleep(0.5)
                 waited += 0.5
 
@@ -771,15 +825,16 @@ class QuoteService:
                 watch_syms = [str((s or {}).get("symbol") or "").strip() for s in symbols]
                 # Monitor rules may target symbols outside the watchlist; without merging
                 # them in, such a symbol never receives a live quote and its rule can
-                # never fire (mirrors the index-symbol merge below).
-                # Rule symbols go first so the cap below can only drop watchlist symbols.
+                # never fire.
+                # Index and rule symbols go first so the cap below can only drop watchlist symbols.
                 rule_syms: list[str] = []
                 engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
                 if engine:
                     for _r in list(engine.rules.values()):
                         if _r.get("enabled", True) and _r.get("scope") == "symbols":
                             rule_syms.extend(_r.get("symbols", []))
-                sym_list = list(dict.fromkeys(s for s in (*rule_syms, *watch_syms) if s))
+                index_syms = self._taiwan_index_pool()
+                sym_list = list(dict.fromkeys(s for s in (*index_syms, *rule_syms, *watch_syms) if s))
                 if len(sym_list) > self.TAIWAN_REALTIME_MAX_SYMBOLS:
                     logger.warning(
                         "台股实时标的池超限 (%d > %d), 已截断; MIS 端点单次请求无内建分批",
@@ -791,9 +846,11 @@ class QuoteService:
                 records = self._without_settled_closing_quotes(
                     self._taiwan_realtime_records(sym_list)
                 )
-                self._round_symbols = set(sym_list)
+                # Index quotes only feed the index cache: they neither hold the close nor fold into minute bars.
+                index_set = self._index_symbol_set()
+                self._round_symbols = set(sym_list) - index_set
                 if records:
-                    self._record_minute_bars(records)
+                    self._record_minute_bars([r for r in records if r.get("symbol") not in index_set])
                     self._process_full_market_records(records, t0=t0, now_ts=now_ts)
                 return
             except Exception as e:
@@ -811,94 +868,44 @@ class QuoteService:
             except Exception as e:  # noqa: BLE001
                 logger.warning("自定义实时行情拉取失败: %s", e)
                 return
-        t0 = time.perf_counter()
-        now_ts = time.perf_counter()
+        if self._missing_realtime_provider_warned != provider_name:
+            self._missing_realtime_provider_warned = provider_name
+            logger.warning(
+                "realtime data source %r has no realtime dataset; quote polling is skipped "
+                "until a source with one is selected",
+                provider_name,
+            )
 
-        try:
-            from app.services import preferences
-            all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
-            core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
-            all_index_symbols.update(core_index_symbols)
-            # 指数监控规则标的并入轮询 (mode=core 时 quotes.get 显式拉取覆盖; mode=all 被 CN_Index 全覆盖)
-            monitor_index_symbols: set[str] = set()
-            engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-            if engine:
-                for _r in list(engine.rules.values()):
-                    if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
-                        monitor_index_symbols.update(s for s in _r.get("symbols", []) if s)
-            all_index_symbols.update(monitor_index_symbols)
-            all_etf_symbols = set()
-            if self._repo:
-                etf_inst = self._repo.get_etf_instruments()
-                if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
-                    all_etf_symbols = set(etf_inst["symbol"].cast(pl.Utf8).to_list())
+    def _taiwan_index_pool(self) -> tuple[str, ...]:
+        """Index symbols the Taiwan poll requests; empty when index pulling is off."""
+        from app.services import preferences
 
-            universes: list[str] = []
-            if preferences.get_realtime_pull_stock():
-                universes.append("CN_Equity_A")
-            if preferences.get_realtime_pull_etf() and all_etf_symbols:
-                universes.append("CN_ETF")
-            if preferences.get_realtime_pull_index() and preferences.get_realtime_index_mode() == "all":
-                universes.append("CN_Index")
+        if not preferences.get_realtime_pull_index():
+            return ()
+        return tuple(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
 
-            resp = []
-            if universes:
-                _u0 = time.perf_counter()
-                logger.info("拉取全市场行情 (universes=%s, SDK超时=30s×重试3)", universes)
-                resp.extend(tf.quotes.get_by_universes(universes=universes) or [])
-                logger.info("全市场行情拉取完成: %d 条 (%.2fs)", len(resp), time.perf_counter() - _u0)
-            if preferences.get_realtime_pull_index() and preferences.get_realtime_index_mode() == "core":
-                _i0 = time.perf_counter()
-                _core_syms = sorted(core_index_symbols | monitor_index_symbols)
-                resp.extend(tf.quotes.get(symbols=_core_syms) or [])
-                logger.info("核心指数行情拉取完成: %d 只 (%.2fs)", len(_core_syms), time.perf_counter() - _i0)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("行情拉取失败 (%.2fs): %s", time.perf_counter() - t0, e)
-            return
+    def _index_symbol_set(self) -> set[str]:
+        """Symbols a round treats as indices, for classification and the minute-bar and closing exclusions."""
+        from app.services import preferences
 
-        if not resp:
-            logger.warning("行情数据为空")
-            return
-
-        # ---- 解析 API 响应 (临时变量, 用完丢弃) ----
-        records = []
-        for q in resp:
-            ext = q.get("ext") or {}
-            last_price = q.get("last_price")
-            prev_close = q.get("prev_close")
-            change_amount = ext.get("change_amount")
-            change_pct = ext.get("change_pct")
-            if change_amount is None and last_price is not None and prev_close is not None:
-                change_amount = float(last_price) - float(prev_close)
-            if change_pct is None and change_amount is not None and prev_close not in (None, 0):
-                # 与 API ext.change_pct 同为小数制 (0.0366 = 3.66%),
-                # enriched 全项目约定小数 (见 pipeline.py), 此处不可乘 100
-                change_pct = float(change_amount) / float(prev_close)
-            records.append({
-                "symbol": q.get("symbol"),
-                "name": q.get("name") or ext.get("name"),
-                "last_price": last_price,
-                "prev_close": prev_close,
-                "open": q.get("open"),
-                "high": q.get("high"),
-                "low": q.get("low"),
-                "volume": q.get("volume"),
-                "amount": q.get("amount"),
-                "change_pct": change_pct,
-                "change_amount": change_amount,
-                "amplitude": ext.get("amplitude"),
-                "turnover_rate": ext.get("turnover_rate"),
-                "timestamp": q.get("timestamp"),
-                "session": q.get("session"),
-            })
-
-        self._process_full_market_records(records, t0=t0, now_ts=now_ts)
+        symbols = set(self.CORE_INDEX_SYMBOLS) | set(preferences.get_realtime_index_symbols())
+        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
+        if engine:
+            for rule in list(engine.rules.values()):
+                if rule.get("enabled", True) and rule.get("asset_type") == "index":
+                    symbols.update(s for s in rule.get("symbols", []) if s)
+        if self._repo:
+            symbols.update(self._repo.get_index_symbol_set())
+        return symbols
 
     @staticmethod
     def _taiwan_realtime_records(symbols: list[str]) -> list[dict]:
         from app.data_providers.registry import get_provider
+        from app.taiwan.realtime.service import without_third_party_fallback
 
-        df = get_provider("taiwan").get_realtime(symbols=symbols)
+        # The hybrid frame keeps live quotes only, so a delayed Yahoo fetch would be discarded.
+        with without_third_party_fallback():
+            df = get_provider("taiwan").get_realtime(symbols=symbols)
         if df.is_empty():
             return []
         if "change_pct" in df.columns:
@@ -951,9 +958,7 @@ class QuoteService:
         # status is captured here before quote_extra drops the column.
         self._quote_source_realtime = self._records_realtime_status(records)
         self._track_closing_quotes(records)
-        all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
-        core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
-        all_index_symbols.update(core_index_symbols)
+        all_index_symbols = self._index_symbol_set()
         all_etf_symbols = set()
         if self._repo:
             etf_inst = self._repo.get_etf_instruments()
@@ -982,7 +987,10 @@ class QuoteService:
             self._symbol_count = len(stock_records)
             self._index_symbol_count = len(index_records)
             self._etf_symbol_count = len(etf_records)
-            self._index_quotes_cache = self._build_index_quotes(index_records)
+            # A round without index quotes keeps the last ones instead of blanking the index cache.
+            if index_records:
+                self._index_quotes_cache = self._build_index_quotes(index_records)
+        self._taiwan_index_live = self._taiwan_index_rows(index_records)
 
         _persist_last_fetch(fetched_at)
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
@@ -1015,6 +1023,9 @@ class QuoteService:
         engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
         if engine and engine.has_asset_rules("index") and self._repo:
             index_daily_df = self._build_daily(self._records_datable_today(index_records))
+            if not index_daily_df.is_empty():
+                # Taiwan index rows feed the index round from memory (_taiwan_index_live) instead.
+                index_daily_df = index_daily_df.filter(~_is_taiwan_symbol())
             if not index_daily_df.is_empty():
                 use_flush = preferences.get_realtime_index_mode() == "all"
                 try:
@@ -1296,12 +1307,20 @@ class QuoteService:
             return pl.DataFrame()
         df = pl.DataFrame(records)
         keep = [c for c in [
-            "symbol", "name", "last_price", "prev_close", "open", "high", "low",
+            "symbol", "name", "last_price", "close", "prev_close", "open", "high", "low",
             "volume", "amount", "change_pct", "change_amount", "amplitude", "timestamp", "session",
         ] if c in df.columns]
         if not keep or "symbol" not in keep:
             return pl.DataFrame()
         df = df.select(keep)
+        # The Taiwan hybrid frame names the price close.
+        if "last_price" not in df.columns and "close" in df.columns:
+            df = df.with_columns(pl.col("close").alias("last_price"))
+        # MIS volume is lots x 1000, which means nothing for an index.
+        if "volume" in df.columns:
+            df = df.with_columns(
+                pl.when(_is_taiwan_symbol()).then(None).otherwise(pl.col("volume")).alias("volume")
+            )
         # 自定义源可能不提供 change_pct/change_amount, 按 last_price/prev_close 补算
         # (TickFlow 路径在 _fetch_full_market_quotes 已算好, 此处只补缺失的)
         if "change_pct" not in df.columns and "last_price" in df.columns and "prev_close" in df.columns:
@@ -1515,10 +1534,10 @@ class QuoteService:
                     # 指数规则轮: 复刻 ETF 轮。快照由指数实时 flush 焐热;
                     # refresh=False 冷缓存不同步重算; 显式日期守卫防陈旧 parquet 误告警
                     # (ETF 轮靠空表隐式跳过, 指数轮更显式, 行为等价)。
-                    if engine.has_asset_rules("index") and self._repo is not None:
+                    if engine.has_asset_rules("index"):
                         try:
-                            index_enriched, index_date = self._repo.get_enriched_latest_asset("index", refresh=False)
-                            if not index_enriched.is_empty() and index_date == cn_today():
+                            index_enriched = self._index_round_rows(closing_pass)
+                            if not index_enriched.is_empty():
                                 index_enriched = self._inject_intraday_signals(index_enriched, engine, "index")
                                 rule_events = rule_events + engine.evaluate(
                                     index_enriched, asset_type="index", reset_strategy_results=False,
@@ -1585,6 +1604,53 @@ class QuoteService:
 
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
+
+    def _index_round_rows(self, closing_pass: bool) -> pl.DataFrame:
+        """Today's rows for the index round: stored non-Taiwan enriched plus the polled Taiwan indices."""
+        frames: list[pl.DataFrame] = []
+        if self._repo is not None:
+            stored, stored_date = self._repo.get_enriched_latest_asset("index", refresh=False)
+            if not stored.is_empty() and stored_date == cn_today():
+                frames.append(stored.filter(~_is_taiwan_symbol()) if "symbol" in stored.columns else stored)
+        taiwan = getattr(self, "_taiwan_index_live", None)
+        if taiwan is not None and not taiwan.is_empty():
+            taiwan = taiwan.filter(pl.col("date") == cn_today())
+            if closing_pass:
+                taiwan = self._closing_scope(taiwan)
+            frames.append(taiwan)
+        frames = [frame for frame in frames if not frame.is_empty()]
+        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+    @classmethod
+    def _taiwan_index_rows(cls, index_records: list[dict]) -> pl.DataFrame | None:
+        """Live Taiwan index records as today's index rows, change_pct decimal (CONTRIBUTING 3.1).
+
+        Volume and amount are left out: MIS reports an index's volume in its own unit, not shares.
+        """
+        live = [
+            r for r in cls._records_datable_today(index_records)
+            if str(r.get("symbol") or "").endswith(TAIWAN_SUFFIXES)
+        ]
+        bars = cls._build_daily(live)
+        if bars.is_empty():
+            return None
+        extra = pl.DataFrame(live)
+        keep = [c for c in ("symbol", "name", "prev_close", "change_pct") if c in extra.columns]
+        rows = bars.drop([c for c in ("volume", "amount") if c in bars.columns]).join(
+            extra.select(keep).unique(subset=["symbol"], keep="last"), on="symbol", how="left",
+        )
+        if "prev_close" not in rows.columns:
+            return rows
+        valid_prev = pl.col("prev_close").is_not_null() & (pl.col("prev_close") != 0)
+        computed_pct = pl.when(valid_prev).then(pl.col("close") / pl.col("prev_close") - 1)
+        if "change_pct" in rows.columns:
+            computed_pct = pl.coalesce(pl.col("change_pct"), computed_pct)
+        return rows.with_columns(
+            computed_pct.alias("change_pct"),
+            pl.when(pl.col("prev_close").is_not_null())
+            .then(pl.col("close") - pl.col("prev_close"))
+            .alias("change_amount"),
+        )
 
     def _format_extension_notifications(self, events: list[dict]) -> list[dict]:
         """Apply optional copy formatters after evaluation and before every output channel."""
@@ -1824,7 +1890,7 @@ class QuoteService:
                     body = message or name
 
                 title = f"TickFlow · {source_label}"
-                notify_adapter.notify(title, body)
+                notify_adapter.notify_async(title, body)
         except Exception as e:  # noqa: BLE001
             logger.debug("系统通知发送异常 (不影响告警主流程): %s", e)
 

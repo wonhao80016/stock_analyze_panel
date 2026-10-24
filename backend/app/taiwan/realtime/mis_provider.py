@@ -59,6 +59,35 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+def _match_canonical(
+    item: dict,
+    channel_to_canonical: dict[str, str],
+    canonicals_by_code: dict[str, list[str]],
+) -> str | None:
+    """Requested symbol of a MIS item.
+
+    MIS answers ch as "2330.tw" without the market prefix it was asked with; the market is
+    in ex ("tse"/"otc") or the head of key ("otc_8069.tw_20260828"). Matching on the code
+    alone is accepted only when the item names no market and one requested symbol has that code.
+    """
+    code = str(item.get("c") or "").strip()
+    qualified: list[str] = []
+    ex = str(item.get("ex") or "").strip().lower()
+    if ex and code:
+        qualified.append(f"{ex}_{code}.tw")
+    key = str(item.get("key") or "")
+    if "_" in key and ".tw" in key:
+        qualified.append(key[: key.index(".tw") + 3])
+    for channel in (str(item.get("ch") or ""), *qualified):
+        canonical = channel_to_canonical.get(channel)
+        if canonical:
+            return canonical
+    if qualified:
+        return None
+    same_code = canonicals_by_code.get(code, [])
+    return same_code[0] if len(same_code) == 1 else None
+
+
 _SESSION_STATUSES = (MarketStatus.PRE_OPEN, MarketStatus.OPEN, MarketStatus.CLOSING_AUCTION)
 _LIVE_STATUSES = (RealtimeStatus.REALTIME.value, RealtimeStatus.CLOSE_FINAL.value)
 
@@ -145,17 +174,13 @@ class TwseMisRealtimeProvider:
         fetched_at_iso = now_tpe.isoformat()
         current_market_status = get_market_status(now_tpe)
 
+        canonicals_by_code: dict[str, list[str]] = {}
+        for ts in parsed_symbols:
+            canonicals_by_code.setdefault(ts.code, []).append(ts.canonical)
+
         quotes: dict[str, TaiwanRealtimeQuote] = {}
         for item in raw_data.get("msgArray", []):
-            channel = item.get("ch")
-            canonical = channel_to_canonical.get(channel)
-            if not canonical:
-                # Fallback match by code + exchange
-                code = item.get("c")
-                for ch, c_sym in channel_to_canonical.items():
-                    if f"_{code}." in ch:
-                        canonical = c_sym
-                        break
+            canonical = _match_canonical(item, channel_to_canonical, canonicals_by_code)
             if not canonical:
                 continue
 

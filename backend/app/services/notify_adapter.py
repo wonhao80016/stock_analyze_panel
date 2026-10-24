@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import base64
 import logging
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,12 @@ _WINDOWS_APP_ID = "TickFlow"
 
 # 避免重复探测平台能力, 缓存一次
 _backend_cache: str | None = None
+
+# osascript/notify-send may each block up to 5s; a burst beyond this many is dropped.
+_QUEUE_MAX = 50
+_queue: queue.Queue[tuple[str, str, Path | None]] = queue.Queue(maxsize=_QUEUE_MAX)
+_worker: threading.Thread | None = None
+_worker_lock = threading.Lock()
 
 
 def _detect_backend() -> str | None:
@@ -103,6 +111,43 @@ def notify(title: str, message: str, icon: Path | None = None) -> bool:
         return False
 
     return False
+
+
+def notify_async(title: str, message: str, icon: Path | None = None) -> bool:
+    """Queue a notification for the background sender without waiting on the platform backend.
+
+    Returns False when the title is empty or the queue is full (the notification is dropped).
+    """
+    if not _truncate(title):
+        return False
+    _ensure_worker()
+    try:
+        _queue.put_nowait((title, message, icon))
+    except queue.Full:
+        logger.warning("system notification queue full, dropped: %s", _truncate(title))
+        return False
+    return True
+
+
+def _ensure_worker() -> None:
+    global _worker
+    with _worker_lock:
+        if _worker is None or not _worker.is_alive():
+            _worker = threading.Thread(
+                target=_drain, args=(_queue,), name="system-notify", daemon=True,
+            )
+            _worker.start()
+
+
+def _drain(pending: queue.Queue[tuple[str, str, Path | None]]) -> None:
+    while True:
+        title, message, icon = pending.get()
+        try:
+            notify(title, message, icon)
+        except Exception as e:
+            logger.debug("system notification failed: %s", e)
+        finally:
+            pending.task_done()
 
 
 def _powershell_text(text: str) -> str:

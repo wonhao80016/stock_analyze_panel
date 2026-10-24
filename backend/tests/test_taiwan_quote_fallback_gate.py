@@ -311,7 +311,8 @@ def test_monitor_rule_symbol_in_watchlist_appears_once_within_cap():
     ):
         svc._fetch_full_market_quotes()
 
-    assert sorted(captured["symbols"]) == sorted(watchlist_symbols)
+    polled = [s for s in captured["symbols"] if s not in QuoteService.CORE_INDEX_SYMBOLS]
+    assert sorted(polled) == sorted(watchlist_symbols)
     assert len(captured["symbols"]) == len(set(captured["symbols"]))
 
 

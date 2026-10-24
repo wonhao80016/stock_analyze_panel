@@ -5,6 +5,9 @@ rate limiting protection, freshness / stale detection, and fallback chain.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import date, datetime, time as dt_time, timedelta
 
@@ -34,6 +37,23 @@ logger = logging.getLogger(__name__)
 # Canonical close time for Taiwan market (13:30 Taipei)
 _MARKET_CLOSE_TIME = dt_time(13, 30, 0)
 
+_third_party_fallback_enabled: ContextVar[bool] = ContextVar(
+    "taiwan_realtime_third_party_fallback", default=True,
+)
+
+
+@contextmanager
+def without_third_party_fallback() -> Iterator[None]:
+    """Skip the Yahoo tier of get_quotes in this context, for callers that accept only live quotes.
+
+    Yahoo quotes are delayed and never marked realtime, so a live-only caller discards them anyway.
+    """
+    token = _third_party_fallback_enabled.set(False)
+    try:
+        yield
+    finally:
+        _third_party_fallback_enabled.reset(token)
+
 
 class TaiwanRealtimeService:
     """Thread-safe Real-time Quotation Service with a Fallback Chain."""
@@ -60,6 +80,8 @@ class TaiwanRealtimeService:
         self.cache_hits = 0
         self.cache_misses = 0
         self.provider_requests = 0
+
+        self._unresolvable_logged: set[str] = set()
 
 
     def clear_cache(self) -> None:
@@ -88,7 +110,17 @@ class TaiwanRealtimeService:
         cur_market_status = self.trading_calendar.get_market_status(
             now_tpe, require_verified_trading_day=True,
         )
-        parsed_symbols = [s if isinstance(s, TaiwanSymbol) else parse_symbol(s) for s in symbols]
+        parsed_symbols: list[TaiwanSymbol] = []
+        unavailable: dict[str, TaiwanRealtimeQuote] = {}
+        for s in symbols:
+            if isinstance(s, TaiwanSymbol):
+                parsed_symbols.append(s)
+                continue
+            try:
+                parsed_symbols.append(parse_symbol(s))
+            except (ValueError, AttributeError) as e:
+                self._log_unresolvable(s, e)
+                unavailable[str(s)] = _unavailable_quote(str(s), now_tpe, cur_market_status, str(e))
         results: dict[str, TaiwanRealtimeQuote] = {}
         to_fetch: list[TaiwanSymbol] = []
 
@@ -107,7 +139,7 @@ class TaiwanRealtimeService:
                 to_fetch.append(ts)
 
         if not to_fetch:
-            return results
+            return {**results, **unavailable}
 
 
         # 2. Primary Provider: TWSE MIS
@@ -136,7 +168,7 @@ class TaiwanRealtimeService:
         missing_after_primary = [ts for ts in to_fetch if ts.canonical not in results]
 
         # 3. Secondary Provider: Yahoo Finance
-        if missing_after_primary:
+        if missing_after_primary and _third_party_fallback_enabled.get():
             self.provider_requests += 1
             try:
                 yahoo_quotes = self.yahoo_provider.fetch_quotes(missing_after_primary)
@@ -212,6 +244,7 @@ class TaiwanRealtimeService:
 
         # 5. Apply Freshness / Stale Policy & populate Cache
         # Quote times stop at ~13:25 for the closing auction and its result never updates again.
+        fetched_this_call = {ts.canonical for ts in to_fetch}
         ages_out = (
             cur_market_status in (MarketStatus.OPEN, MarketStatus.SCHEDULED_OPEN_UNVERIFIED)
             and self.trading_calendar.get_market_status(now_tpe) != MarketStatus.CLOSING_AUCTION
@@ -233,12 +266,22 @@ class TaiwanRealtimeService:
                         )
                         q.source_meta = replace(q.source_meta, is_stale=True, status=new_status)
 
-                # Update in-memory cache scoped by session
+                # A cache hit keeps its original expiry; re-stamping it would let it live forever.
+                if sym in fetched_this_call:
+                    self._cache[(sym, cur_market_status.value)] = (now_mono + self.cache_ttl_seconds, q)
 
-                cache_key = (sym, cur_market_status.value)
-                self._cache[cache_key] = (now_mono + self.cache_ttl_seconds, q)
+        return {**results, **unavailable}
 
-        return results
+    def _log_unresolvable(self, raw: object, error: Exception) -> None:
+        """Warn once per symbol; pools are polled every few seconds."""
+        key = str(raw)
+        with self._lock:
+            first = key not in self._unresolvable_logged
+            self._unresolvable_logged.add(key)
+        if first:
+            logger.warning("Unresolvable Taiwan symbol %r marked unavailable: %s", raw, error)
+        else:
+            logger.debug("Unresolvable Taiwan symbol %r marked unavailable", raw)
 
 
     def get_quote(
@@ -255,6 +298,37 @@ class TaiwanRealtimeService:
         )
         ts = symbol if isinstance(symbol, TaiwanSymbol) else parse_symbol(symbol)
         return res.get(ts.canonical)
+
+
+def _unavailable_quote(
+    raw: str, now_tpe: datetime, market_status: MarketStatus, reason: str,
+) -> TaiwanRealtimeQuote:
+    return TaiwanRealtimeQuote(
+        symbol=raw,
+        name=raw,
+        exchange="",
+        last_price=None,
+        prev_close=None,
+        open=None,
+        high=None,
+        low=None,
+        change=None,
+        change_pct=None,
+        volume=None,
+        amount=None,
+        quote_time=None,
+        trade_date=now_tpe.date(),
+        market_status=market_status.value,
+        source_meta=SourceMeta(
+            source="taiwan:symbol",
+            source_url="",
+            fetched_at=now_tpe.isoformat(),
+            trade_date=None,
+            status=RealtimeStatus.UNAVAILABLE.value,
+            fallback_reason=f"Unresolvable symbol: {reason}",
+            is_stale=True,
+        ),
+    )
 
 
 _default_service: TaiwanRealtimeService | None = None
