@@ -2591,8 +2591,8 @@ class KlineRepository:
         base = self.store.data_dir / table
         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
         out = base / f"date={ds}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
         if write_to_disk:
+            out.parent.mkdir(parents=True, exist_ok=True)
             publication = (
                 EnrichedPublication(self.store.data_dir, asset_type, recover=True)
                 if asset_type in {"stock", "etf"}
