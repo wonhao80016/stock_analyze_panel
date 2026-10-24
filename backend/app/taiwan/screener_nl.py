@@ -129,6 +129,10 @@ def _validate_contradictory_ranges(fields: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _is_str_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(v, str) for v in value)
+
+
 class TaiwanScreenerTranslator:
     """Service to translate natural language queries to TaiwanScreenerRequest."""
 
@@ -181,8 +185,24 @@ class TaiwanScreenerTranslator:
         request_fields = parsed_raw.get("request_fields") or {}
         recognized = parsed_raw.get("recognized_conditions") or []
         unsupported = parsed_raw.get("unsupported_conditions") or []
-        clarification_needed = bool(parsed_raw.get("clarification_needed", False))
+        clarification_needed = parsed_raw.get("clarification_needed", False)
         clarification_message = parsed_raw.get("clarification_message")
+        if not (
+            isinstance(request_fields, dict)
+            and _is_str_list(recognized)
+            and _is_str_list(unsupported)
+            and isinstance(clarification_needed, bool)
+            and (clarification_message is None or isinstance(clarification_message, str))
+        ):
+            logger.warning("AI response does not match the translation schema: %s", raw_text)
+            return TaiwanScreenerTranslation(
+                request=None,
+                recognized_conditions=[],
+                unsupported_conditions=["模型回傳格式不符"],
+                clarification_needed=True,
+                clarification_message="AI 回傳的欄位型別不符。請重新輸入或簡化描述。",
+            )
+        unsupported = list(unsupported)
 
         # 1. Filter out unknown fields against TaiwanScreenerRequest schema whitelist
         allowed_keys = set(TaiwanScreenerRequest.model_fields.keys())
@@ -216,7 +236,8 @@ class TaiwanScreenerTranslator:
 
         # 4. Instantiate and validate TaiwanScreenerRequest via Pydantic
         try:
-            screener_req = TaiwanScreenerRequest(**sanitized_fields)
+            # JSON already carries native types, so a string number or 0/1 boolean is a model error.
+            screener_req = TaiwanScreenerRequest.model_validate(sanitized_fields, strict=True)
         except Exception as e:
             logger.warning("Pydantic validation failed for translated fields: %s", e)
             return TaiwanScreenerTranslation(

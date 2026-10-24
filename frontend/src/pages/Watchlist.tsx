@@ -10,6 +10,7 @@ import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { patchLiveCandles } from '@/lib/liveCandles'
+import { turnoverDisplay } from '@/lib/watchlistTurnover'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -494,6 +495,7 @@ const StockCard = React.memo(function StockCard({
   const pct = r.rt_pct ?? r.change_pct
   const name = r.rt_name ?? r.name
   const signals = getSignals(r)
+  const turnover = turnoverDisplay(r)
   const isUp = (pct ?? 0) > 0
   const isDown = (pct ?? 0) < 0
 
@@ -587,7 +589,7 @@ const StockCard = React.memo(function StockCard({
 
         {/* 第三行: 指標 */}
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] text-muted leading-relaxed">
-          <span title={r.board_lot_volume ? `換手率（${BOARD_LOT_VOLUME_NOTE}）` : '換手率'}>換手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}</span>{r.board_lot_volume && <span className="ml-0.5">整股</span>}</span>
+          <span title={turnover.title}>換手<span className={`font-mono ml-0.5 ${turnoverColor(r.turnover_rate)}`}>{turnover.text}</span>{turnover.suffix && <span className="ml-0.5">{turnover.suffix}</span>}</span>
           <span title="量比">量比<span className="font-mono ml-0.5">{fmtPrice(r.vol_ratio_5d)}</span></span>
           <span title="RSI14">RSI<span className="font-mono ml-0.5">{r.rsi_14 != null ? r.rsi_14.toFixed(1) : '—'}</span></span>
           {r.indicator_date && <span title={`指標日期 ${r.indicator_date}`}>指標{String(r.indicator_date).slice(5)}</span>}
@@ -1802,10 +1804,11 @@ export function Watchlist() {
                   return <td className={`${numCls} text-secondary`} title={r.board_lot_volume ? BOARD_LOT_VOLUME_NOTE : undefined}>{fmtBigNum(r.rt_amount ?? r.amount)}</td>
                 }
                 if (key === 'turnover') {
+                  const turnover = turnoverDisplay(r)
                   return (
-                    <td className={`${numCls} ${turnoverColor(r.turnover_rate)}`} title={r.board_lot_volume ? BOARD_LOT_VOLUME_NOTE : undefined}>
-                      {r.turnover_rate != null ? `${r.turnover_rate.toFixed(2)}%` : '—'}
-                      {r.board_lot_volume && <span className="ml-0.5 text-[10px] text-muted">整股</span>}
+                    <td className={`${numCls} ${turnoverColor(r.turnover_rate)}`} title={turnover.title}>
+                      {turnover.text}
+                      {turnover.suffix && <span className="ml-0.5 text-[10px] text-muted">{turnover.suffix}</span>}
                     </td>
                   )
                 }

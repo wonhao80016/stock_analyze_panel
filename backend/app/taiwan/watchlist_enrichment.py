@@ -19,6 +19,8 @@ network itself; it only orchestrates already-built services:
 signal_* (limit-up/board-related) stay ``None``.
 
 ``turnover_rate`` is filled for today's quotes only; see ``_taiwan_turnover_rate``.
+``turnover_rate_status`` marks it ``not_applicable`` (ETF, TDR) or ``board_lot_estimate``
+(MIS board-lot numerator over the full share count, before the official row is stored).
 
 An intraday quote counts board-lot trades only and has no amount, so until the official daily
 row of its trade date is stored the row sets ``board_lot_volume`` and a null ``amount``; once
@@ -98,13 +100,33 @@ def _official_session(q: Any, stored: dict | None) -> dict | None:
     return stored if stored.get("date") == q.trade_date else None
 
 
+_MIS_SOURCE = "twse:mis"
+
+TURNOVER_NOT_APPLICABLE = "not_applicable"
+TURNOVER_BOARD_LOT_ESTIMATE = "board_lot_estimate"
+
+
 def _is_board_lot_quote(q: Any, official: dict | None) -> bool:
+    """MIS volume stays board-lot after the close too, so a non-live MIS quote counts as well."""
     return (
         official is None
         and q is not None
         and q.source_meta is not None
-        and bool(q.source_meta.is_realtime)
+        and (bool(q.source_meta.is_realtime) or q.source_meta.source == _MIS_SOURCE)
     )
+
+
+def _turnover_not_applicable(asset_type: str, inst: Any) -> bool:
+    """ETFs and TDRs have no turnover denominator (CONTRIBUTING.md 3.4)."""
+    return asset_type != "stock" or (isinstance(inst, TaiwanInstrument) and MarketProfileBridge.is_tdr(inst))
+
+
+def _turnover_rate_status(rate: float | None, not_applicable: bool, board_lot: bool) -> str | None:
+    if not_applicable:
+        return TURNOVER_NOT_APPLICABLE
+    if rate is not None and board_lot:
+        return TURNOVER_BOARD_LOT_ESTIMATE
+    return None
 
 
 def _taiwan_turnover_rate(
@@ -119,9 +141,7 @@ def _taiwan_turnover_rate(
     rather than being priced with today's share count. A TDR stays null too: its
     official count is the underlying company's shares, not receipts.
     """
-    if q is None or asset_type != "stock":
-        return None
-    if isinstance(inst, TaiwanInstrument) and MarketProfileBridge.is_tdr(inst):
+    if q is None or _turnover_not_applicable(asset_type, inst):
         return None
     if q.trade_date is None or q.trade_date != today:
         return None
@@ -265,6 +285,7 @@ def enrich_taiwan_watchlist_rows(
             amount = official.get("amount")
         else:
             amount = None if board_lot or q is None else q.amount
+        turnover_rate = _taiwan_turnover_rate(q, asset_type, denominators.get(symbol), today, inst, official)
         rows.append({
             "symbol": symbol,
             "name": inst.name if inst else None,
@@ -289,8 +310,9 @@ def enrich_taiwan_watchlist_rows(
             "live_date": _taiwan_live_date(q),
             "indicator_date": indicator_date if ind else None,
             **{f: _sanitize_float(ind.get(f)) for f in _TAIWAN_INDICATOR_FIELDS},
-            "turnover_rate": _taiwan_turnover_rate(
-                q, asset_type, denominators.get(symbol), today, inst, official
+            "turnover_rate": turnover_rate,
+            "turnover_rate_status": _turnover_rate_status(
+                turnover_rate, _turnover_not_applicable(asset_type, inst), board_lot
             ),
         })
     return rows

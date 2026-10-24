@@ -31,7 +31,9 @@ from app.taiwan.corporate_actions import (
     read_events_or_empty,
     reference_prices,
 )
+from app.taiwan.benchmarks import TAIEX, TPEX_INDEX, BenchmarkIndex
 from app.taiwan.daily_store import TaiwanDailyStore, listing_sessions
+from app.taiwan.data_root import taiwan_data_root
 from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
     resolve_target_latest_trading_date,
@@ -146,12 +148,16 @@ def stored_partition_status(
     return "complete"
 
 
-# Band bounds are decimal change (0.05 = 5%), lower inclusive / upper exclusive.
+FLAT_BAND_LABEL = "平盤"
+
+# Band bounds are decimal change (0.05 = 5%), lower inclusive / upper exclusive; an exactly
+# unchanged close goes to FLAT_BAND_LABEL, so "0~1%" holds only rises.
 CHANGE_DISTRIBUTION_BANDS: tuple[tuple[str, float | None, float | None], ...] = (
     ("<-5%", None, -0.05),
     ("-5~-3%", -0.05, -0.03),
     ("-3~-1%", -0.03, -0.01),
     ("-1~0%", -0.01, 0.0),
+    (FLAT_BAND_LABEL, 0.0, 0.0),
     ("0~1%", 0.0, 0.01),
     ("1~3%", 0.01, 0.03),
     ("3~5%", 0.03, 0.05),
@@ -171,7 +177,12 @@ DAILY_COVERAGE_COMPLETE_RATIO = 0.98
 
 
 class MarketBreadthStats(BaseModel):
-    """Deterministic price movement and trading activity statistics."""
+    """Deterministic price movement and trading activity statistics.
+
+    A row traded when its close is present and its volume is above zero. Advance, decline
+    and flat count traded rows against the previous close; a traded row without one is
+    uncompared and a row that did not trade is untraded, so the five add up to the rows.
+    """
 
     supported_count: int = 0
     snapshot_row_count: int = 0
@@ -180,6 +191,7 @@ class MarketBreadthStats(BaseModel):
     decline_count: int = 0
     flat_count: int = 0
     uncompared_count: int = 0
+    untraded_count: int = 0
     upper_limit_count: int = 0
     lower_limit_count: int = 0
     turnover: float = 0.0  # in TWD (元)
@@ -279,7 +291,7 @@ class IndexSnapshot(BaseModel):
     trade_date: str | None = None
     close: float | None = None
     change: float | None = None
-    change_pct: float | None = None
+    change_pct: float | None = None  # decimal: 0.01 = 1%
     status: str = "unavailable"
 
 
@@ -350,6 +362,7 @@ class TaiwanMarketIntelligenceService:
         security_master: TaiwanSecurityMaster | None = None,
         market_inst_store: TaiwanMarketInstitutionalStore | None = None,
         corporate_actions: TaiwanCorporateActionStore | None = None,
+        index_store: TaiwanDailyStore | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         self.daily_store = daily_store or TaiwanDailyStore()
@@ -358,6 +371,8 @@ class TaiwanMarketIntelligenceService:
         self.security_master = security_master or get_security_master()
         self.market_inst_store = market_inst_store or TaiwanMarketInstitutionalStore()
         self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
+        # The store TaiwanIndexDailyService backfills; the service itself fetches over HTTP.
+        self.index_store = index_store or TaiwanDailyStore(taiwan_data_root() / "index_daily")
 
     def get_previous_trading_date(self, target_date: date) -> date | None:
         """Find the immediately preceding trading date using TaiwanTradingCalendar and store history."""
@@ -411,19 +426,44 @@ class TaiwanMarketIntelligenceService:
             .drop("_ref_price")
         )
 
+    def _index_snapshot(self, bench: BenchmarkIndex, label: str, target: date) -> IndexSnapshot:
+        """Latest stored close up to *target*, compared with the index's own previous stored close."""
+        empty = IndexSnapshot(symbol=label, name=bench.name)
+        try:
+            if not self.index_store.available_dates():
+                return empty
+            rows = self.index_store.scan_range([bench.symbol], target - timedelta(days=45), target)
+        except Exception as exc:
+            logger.warning("index_daily read failed for %s: %s", bench.symbol, exc)
+            return empty
+        rows = rows.filter(pl.col("close").is_not_null()).sort("date")
+        if rows.is_empty():
+            return empty
+        last = rows.row(-1, named=True)
+        prev_close = rows["close"][-2] if rows.height >= 2 else None
+        change = last["close"] - prev_close if prev_close else None
+        return IndexSnapshot(
+            symbol=label,
+            name=bench.name,
+            trade_date=str(last["date"]),
+            close=last["close"],
+            change=change,
+            change_pct=change / prev_close if change is not None else None,
+            status="current" if last["date"] == target else "stale",
+        )
+
     def _calc_breadth(self, df: pl.DataFrame) -> MarketBreadthStats:
         """Compute MarketBreadthStats from joined current & previous dataframe."""
         if df.is_empty():
             return MarketBreadthStats()
 
         snapshot_rows = len(df)
-        traded = df.filter(pl.col("volume") > 0)
+        traded = df.filter(traded_expr())
         traded_count = len(traded)
         turnover = float(df["amount"].sum() or 0.0)
 
-        # Comparable with previous close
-        comparable = df.filter(pl.col("prev_close").is_not_null())
-        uncompared_count = snapshot_rows - len(comparable)
+        comparable = traded.filter(pl.col("prev_close").is_not_null() & (pl.col("prev_close") > 0))
+        uncompared_count = traded_count - len(comparable)
 
         advance_count = len(comparable.filter(pl.col("close") > pl.col("prev_close")))
         decline_count = len(comparable.filter(pl.col("close") < pl.col("prev_close")))
@@ -441,6 +481,7 @@ class TaiwanMarketIntelligenceService:
             decline_count=decline_count,
             flat_count=flat_count,
             uncompared_count=uncompared_count,
+            untraded_count=snapshot_rows - traded_count,
             upper_limit_count=limit_ups,
             lower_limit_count=limit_downs,
             turnover=turnover,
@@ -452,7 +493,8 @@ class TaiwanMarketIntelligenceService:
             return []
 
         changes = (
-            df.with_columns(
+            df.filter(traded_expr())
+            .with_columns(
                 (
                     pl.col("close").cast(pl.Float64, strict=False)
                     / pl.col("prev_close").cast(pl.Float64, strict=False)
@@ -469,7 +511,11 @@ class TaiwanMarketIntelligenceService:
 
         bands: list[ChangeDistributionBand] = []
         for label, low, high in CHANGE_DISTRIBUTION_BANDS:
-            if low is None:
+            if label == FLAT_BAND_LABEL:
+                count = sum(1 for v in changes if v == 0.0)
+            elif low == 0.0:
+                count = sum(1 for v in changes if 0.0 < v < high)
+            elif low is None:
                 count = sum(1 for v in changes if v < high)
             elif high is None:
                 count = sum(1 for v in changes if v >= low)
@@ -745,21 +791,15 @@ class TaiwanMarketIntelligenceService:
                 status=m_status,
             )
 
-        # 6. Indexes Integration (Pure offline / persisted fallback)
-        # Note: In accordance with zero-HTTP acceptance rules, do not fetch network index data.
         indexes_snapshot = MarketIndexesSnapshot(
-            taiex=IndexSnapshot(
-                symbol="TAIEX",
-                name="發行量加權股價指數",
-                trade_date=str(target),
-                status="unavailable",
-            ),
-            tpex_index=IndexSnapshot(
-                symbol="TPEX_INDEX",
-                name="櫃買指數",
-                trade_date=str(target),
-                status="unavailable",
-            ),
+            taiex=self._index_snapshot(TAIEX, "TAIEX", target),
+            tpex_index=self._index_snapshot(TPEX_INDEX, "TPEX_INDEX", target),
+        )
+        index_dates = [i.trade_date for i in (indexes_snapshot.taiex, indexes_snapshot.tpex_index) if i.trade_date]
+        index_status: Literal["current", "stale", "unavailable"] = (
+            "unavailable" if not index_dates
+            else "current" if len(index_dates) == 2 and all(d == str(target) for d in index_dates)
+            else "stale"
         )
 
         coverage_complete = daily_coverage_complete(universe_df, snapshot_symbols)
@@ -807,9 +847,9 @@ class TaiwanMarketIntelligenceService:
             ),
             indexes=DatasetQualityMeta(
                 dataset="indexes",
-                as_of=None,
-                status="unavailable",
-                source="taiwan_index_provider",
+                as_of=min(index_dates) if index_dates else None,
+                status=index_status,
+                source="taiwan_index_daily_store",
             ),
             universe_supported_symbols=supported_count,
             daily_snapshot_symbols=matched_symbols_count,
@@ -833,6 +873,11 @@ class TaiwanMarketIntelligenceService:
             indexes=indexes_snapshot,
             data_quality=dq,
         )
+
+
+def traded_expr() -> pl.Expr:
+    """A row traded when its close is present and its volume is above zero."""
+    return pl.col("close").is_not_null() & (pl.col("volume") > 0)
 
 
 def _net_amounts(rows: pl.DataFrame) -> InstitutionalNetAmounts | None:

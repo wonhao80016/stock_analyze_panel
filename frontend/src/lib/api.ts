@@ -159,6 +159,9 @@ export interface KlineRow {
   volume_time_factor?: number | null
   /** Taiwan: volume and turnover count intraday board-lot trades only and amount is null, until the official daily row is stored. */
   board_lot_volume?: boolean
+  turnover_rate?: number | null
+  /** Taiwan watchlist: not_applicable for ETF/TDR; board_lot_estimate while turnover uses MIS board-lot volume. */
+  turnover_rate_status?: 'not_applicable' | 'board_lot_estimate' | null
   [key: string]: any
 }
 
@@ -1253,6 +1256,8 @@ export interface MarketBreadthStats {
   decline_count: number
   flat_count: number
   uncompared_count: number
+  /** Rows without a close or with zero volume; advance/decline/flat count traded rows only. */
+  untraded_count?: number
   upper_limit_count: number
   lower_limit_count: number
   turnover: number
@@ -1354,6 +1359,7 @@ export interface IndustryMetrics {
   decline_count: number
   flat_count: number
   uncompared_count: number
+  untraded_count?: number
   advance_ratio: number | null
   decline_ratio: number | null
   average_change_pct: number | null

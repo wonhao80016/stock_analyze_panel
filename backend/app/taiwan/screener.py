@@ -21,10 +21,10 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import polars as pl
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.taiwan.corporate_actions import REF_LIMIT_DOWN, REF_LIMIT_UP, REF_PREV_CLOSE
 from app.taiwan.daily_store import TaiwanDailyStore, listing_sessions
@@ -49,10 +49,21 @@ SortField = Literal[
     "margin_balance_change", "short_balance", "short_margin_ratio",
 ]
 SortDir = Literal["asc", "desc"]
+# Published built-in signal columns are named signal_<id>.
+SignalId = Annotated[str, StringConstraints(pattern=r"^signal_[a-z0-9_]+$", max_length=64)]
 
 _INDICATOR_COLUMNS = ["change_pct", "ma5", "ma10", "ma20", "rsi_14", "momentum_5d", "vol_ratio_5d"]
 _LIMIT_REFERENCE_SOURCE_COLUMNS = ["prev_close", "close", "raw_close", REF_PREV_CLOSE, REF_LIMIT_UP, REF_LIMIT_DOWN]
 _LIMIT_REFERENCE_COLUMNS = ["_limit_ref_price", "_official_limit_up", "_official_limit_down"]
+_CHIP_EXCHANGES = ("TWSE", "TPEX")
+_CHIP_SET = frozenset(_CHIP_EXCHANGES)
+_FLOW_COLUMNS = ["foreign_net", "investment_trust_net", "dealer_net"]
+_INSTITUTIONAL_COLUMNS = [
+    *_FLOW_COLUMNS, "foreign_net_5d", "investment_trust_net_5d", "institutional_date", "institutional_status",
+]
+_MARGIN_COLUMNS = [
+    "margin_balance", "margin_balance_change", "short_balance", "short_margin_ratio", "margin_date", "margin_status",
+]
 
 
 def _enriched_part(as_of: str | None) -> Path:
@@ -69,22 +80,22 @@ class TaiwanScreenerRequest(BaseModel):
     industry: str | None = None  # None or specific industry name
 
     # Price & Volume filters
-    price_min: float | None = None
-    price_max: float | None = None
-    change_pct_min: float | None = None  # 0.05 = 5%
-    change_pct_max: float | None = None
-    volume_min: float | None = None  # in shares
-    volume_max: float | None = None
-    amount_min: float | None = None  # in TWD
-    amount_max: float | None = None
+    price_min: float | None = Field(None, ge=0)
+    price_max: float | None = Field(None, ge=0)
+    change_pct_min: float | None = Field(None, ge=-1, le=1)  # 0.05 = 5%
+    change_pct_max: float | None = Field(None, ge=-1, le=1)
+    volume_min: float | None = Field(None, ge=0)  # in shares
+    volume_max: float | None = Field(None, ge=0)
+    amount_min: float | None = Field(None, ge=0)  # in TWD
+    amount_max: float | None = Field(None, ge=0)
 
     # Technical Indicators
-    rsi_14_min: float | None = None
-    rsi_14_max: float | None = None
+    rsi_14_min: float | None = Field(None, ge=0, le=100)
+    rsi_14_max: float | None = Field(None, ge=0, le=100)
     momentum_5d_min: float | None = None
     momentum_5d_max: float | None = None
-    vol_ratio_5d_min: float | None = None
-    vol_ratio_5d_max: float | None = None
+    vol_ratio_5d_min: float | None = Field(None, ge=0)
+    vol_ratio_5d_max: float | None = Field(None, ge=0)
     above_ma5: bool | None = None
     above_ma20: bool | None = None
 
@@ -97,21 +108,21 @@ class TaiwanScreenerRequest(BaseModel):
     dealer_net_max: float | None = None
 
     # Built-in signals: a row must carry every requested signal.
-    signals: list[str] | None = None
+    signals: list[SignalId] | None = None
 
     # Margin & Short
     margin_balance_change_min: float | None = None
     margin_balance_change_max: float | None = None
-    short_balance_min: float | None = None
-    short_balance_max: float | None = None
-    short_margin_ratio_min: float | None = None  # 10.0 = 10%
-    short_margin_ratio_max: float | None = None
+    short_balance_min: float | None = Field(None, ge=0)
+    short_balance_max: float | None = Field(None, ge=0)
+    short_margin_ratio_min: float | None = Field(None, ge=0)  # 10.0 = 10%
+    short_margin_ratio_max: float | None = Field(None, ge=0)
 
     # Price Limit proximity
     near_upper_limit: bool | None = None  # distance_to_upper <= 0.03
     near_lower_limit: bool | None = None  # distance_to_lower <= 0.03
-    distance_to_upper_limit_max: float | None = None
-    distance_to_lower_limit_max: float | None = None
+    distance_to_upper_limit_max: float | None = Field(None, ge=0)
+    distance_to_lower_limit_max: float | None = Field(None, ge=0)
 
     # Pagination & Sorting
     sort_by: SortField = "symbol"
@@ -255,7 +266,9 @@ class TaiwanScreenerService:
         combined = self._enrich_price_limits(combined)
 
         # Step 6: Batch Join Institutional & Margin
-        combined, inst_date, margin_date, degraded = self._join_institutional_margin(combined, valid_symbols)
+        combined, inst_date, margin_date, degraded = self._join_institutional_margin(
+            combined, valid_symbols, daily_as_of
+        )
         if df_indicators is None:
             degraded = ["indicators", *degraded]
         if not patterns_published:
@@ -420,74 +433,128 @@ class TaiwanScreenerService:
         # Nullable boolean columns can be all-null in the first rows; infer from every row.
         return pl.DataFrame(rows, infer_schema_length=None).drop(_LIMIT_REFERENCE_COLUMNS, strict=False)
 
+    @staticmethod
+    def _chip_date(store: Any, as_of: str | None) -> tuple[date | None, list[date]]:
+        """The store's latest date not after *as_of*, and its stored dates up to it."""
+        dates = sorted(store.available_dates())
+        if as_of:
+            cap = date.fromisoformat(as_of)
+            dates = [d for d in dates if d <= cap]
+        return (dates[-1] if dates else None), dates
+
+    @staticmethod
+    def _with_exchange(df: pl.DataFrame) -> pl.DataFrame:
+        return df.with_columns(pl.col("symbol").str.split(".").list.last().alias("_exchange"))
+
+    @staticmethod
+    def _missing_exchanges(present: set[str], section: str, scope: set[str]) -> list[str]:
+        """Flags for the exchanges in *scope* absent from *present*; *section* already names the dataset."""
+        return [f"{section}_missing_{ex.lower()}" for ex in _CHIP_EXCHANGES if ex in scope and ex not in present]
+
+    @staticmethod
+    def _exchange_scope(df: pl.DataFrame) -> set[str]:
+        return {str(s).rsplit(".", 1)[-1] for s in df["symbol"].to_list()}
+
+    def _join_institutional(
+        self, df: pl.DataFrame, as_of: str | None
+    ) -> tuple[pl.DataFrame, str | None, list[str]]:
+        """Institutional flows of the market-wide chip date, following T86.
+
+        A partition can hold one exchange alone. On a date holding the symbol's exchange a
+        missing row is zero; without that exchange the flow is unknown. A 5-session sum is
+        null when the store has fewer than five dates or any of them lacks the exchange.
+        """
+        target, dates = self._chip_date(self.institutional_store, as_of)
+        if target is None:
+            return self._add_null_cols(df, _INSTITUTIONAL_COLUMNS), None, []
+        window = dates[-5:]
+        stored = self._with_exchange(self.institutional_store.read_range(None, window[0], target))
+        if stored.is_empty():
+            return self._add_null_cols(df, _INSTITUTIONAL_COLUMNS), None, []
+        exchanges_by_date = {
+            d: set(g["_exchange"].to_list())
+            for (d,), g in stored.select("date", "_exchange").unique().group_by("date")
+        }
+        on_target = exchanges_by_date.get(target, set())
+        full_window = {
+            ex for ex in _CHIP_EXCHANGES
+            if len(window) == 5 and all(ex in exchanges_by_date.get(d, set()) for d in window)
+        }
+
+        flows = [pl.col(c).cast(pl.Float64, strict=False) for c in _FLOW_COLUMNS]
+        rows = stored.filter(pl.col("symbol").is_in(df["symbol"].to_list()))
+        day = rows.filter(pl.col("date") == target).select(
+            "symbol", *flows, pl.col("status").alias("institutional_status"),
+        )
+        sums = rows.group_by("symbol").agg(
+            pl.col("foreign_net").cast(pl.Float64).sum().alias("foreign_net_5d"),
+            pl.col("investment_trust_net").cast(pl.Float64).sum().alias("investment_trust_net_5d"),
+            pl.col("foreign_net").null_count().alias("_null_foreign"),
+            pl.col("investment_trust_net").null_count().alias("_null_trust"),
+        )
+        joined = (
+            self._with_exchange(df.drop(_INSTITUTIONAL_COLUMNS, strict=False))
+            .join(day, on="symbol", how="left")
+            .join(sums, on="symbol", how="left")
+        )
+        has_table = pl.col("_exchange").is_in(list(on_target))
+        has_window = pl.col("_exchange").is_in(list(full_window))
+        joined = joined.with_columns(
+            *[pl.when(has_table).then(pl.col(c).fill_null(0.0)).alias(c) for c in _FLOW_COLUMNS],
+            pl.when(has_table).then(pl.lit(str(target))).alias("institutional_date"),
+            pl.when(has_table).then(pl.col("institutional_status").fill_null("available"))
+            .alias("institutional_status"),
+            pl.when(has_window & has_table & (pl.col("_null_foreign").fill_null(0) == 0))
+            .then(pl.col("foreign_net_5d").fill_null(0.0)).alias("foreign_net_5d"),
+            pl.when(has_window & has_table & (pl.col("_null_trust").fill_null(0) == 0))
+            .then(pl.col("investment_trust_net_5d").fill_null(0.0)).alias("investment_trust_net_5d"),
+        ).drop("_exchange", "_null_foreign", "_null_trust")
+        scope = self._exchange_scope(df)
+        missing = self._missing_exchanges(on_target, "institutional", scope)
+        if len(window) == 5:
+            missing += self._missing_exchanges(full_window | (_CHIP_SET - on_target), "institutional_window", scope)
+        return joined, str(target), missing
+
+    def _join_margin(self, df: pl.DataFrame, as_of: str | None) -> tuple[pl.DataFrame, str | None, list[str]]:
+        """Margin rows of the market-wide chip date; a symbol absent from the table stays null."""
+        target, _ = self._chip_date(self.margin_store, as_of)
+        margin_df = self.margin_store.read_range(None, target, target) if target is not None else pl.DataFrame()
+        if margin_df.is_empty():
+            return self._add_null_cols(df, _MARGIN_COLUMNS), None, []
+        present = set(self._with_exchange(margin_df)["_exchange"].to_list())
+        margin_join = margin_df.filter(pl.col("symbol").is_in(df["symbol"].to_list())).select([
+            pl.col("symbol"),
+            pl.col("margin_balance").cast(pl.Float64, strict=False).alias("margin_balance"),
+            pl.col("margin_change").cast(pl.Float64, strict=False).alias("margin_balance_change"),
+            pl.col("short_balance").cast(pl.Float64, strict=False).alias("short_balance"),
+            pl.col("short_margin_ratio").cast(pl.Float64, strict=False).alias("short_margin_ratio"),
+            pl.col("date").cast(pl.String).alias("margin_date"),
+            pl.col("status").alias("margin_status"),
+        ])
+        missing = self._missing_exchanges(present, "margin", self._exchange_scope(df))
+        return df.join(margin_join, on="symbol", how="left"), str(target), missing
+
     def _join_institutional_margin(
-        self, df: pl.DataFrame, symbols: list[str]
+        self, df: pl.DataFrame, symbols: list[str], as_of: str | None = None
     ) -> tuple[pl.DataFrame, str | None, str | None, list[str]]:
-        """Join institutional and margin metadata safely via Polars batch join."""
-        degraded = []
+        """Join chip rows of one market-wide date; degraded lists unreadable or missing-exchange sections."""
+        degraded: list[str] = []
         inst_date = None
         margin_date = None
-
-        # 1. Batch read latest institutional
         try:
-            inst_df = self.institutional_store.read_latest_per_symbol(symbols)
-            if not inst_df.is_empty():
-                inst_date = str(inst_df["date"].max())
-                # Select fields to join
-                inst_join = inst_df.select([
-                    pl.col("symbol"),
-                    pl.col("foreign_net").cast(pl.Float64, strict=False).alias("foreign_net"),
-                    pl.col("investment_trust_net").cast(pl.Float64, strict=False).alias("investment_trust_net"),
-                    pl.col("dealer_net").cast(pl.Float64, strict=False).alias("dealer_net"),
-                    pl.col("date").cast(pl.String).alias("institutional_date"),
-                    pl.col("status").alias("institutional_status"),
-                ])
-                df = df.join(inst_join, on="symbol", how="left")
-            else:
-                df = self._add_null_cols(df, [
-                    "foreign_net", "investment_trust_net", "dealer_net",
-                    "institutional_date", "institutional_status"
-                ])
+            df, inst_date, missing = self._join_institutional(df, as_of)
+            degraded.extend(missing)
         except Exception as e:
             logger.warning("Batch read institutional failed in screener: %s", e)
             degraded.append("institutional")
-            df = self._add_null_cols(df, [
-                "foreign_net", "investment_trust_net", "dealer_net",
-                "institutional_date", "institutional_status"
-            ])
-
-        # 5-day rolling placeholders (or calculated if history present)
-        if "foreign_net_5d" not in df.columns:
-            df = self._add_null_cols(df, ["foreign_net_5d", "investment_trust_net_5d"])
-
-        # 2. Batch read latest margin
+            df = self._add_null_cols(df.drop(_INSTITUTIONAL_COLUMNS, strict=False), _INSTITUTIONAL_COLUMNS)
         try:
-            margin_df = self.margin_store.read_latest_per_symbol(symbols)
-            if not margin_df.is_empty():
-                margin_date = str(margin_df["date"].max())
-                margin_join = margin_df.select([
-                    pl.col("symbol"),
-                    pl.col("margin_balance").cast(pl.Float64, strict=False).alias("margin_balance"),
-                    pl.col("margin_change").cast(pl.Float64, strict=False).alias("margin_balance_change"),
-                    pl.col("short_balance").cast(pl.Float64, strict=False).alias("short_balance"),
-                    pl.col("short_margin_ratio").cast(pl.Float64, strict=False).alias("short_margin_ratio"),
-                    pl.col("date").cast(pl.String).alias("margin_date"),
-                    pl.col("status").alias("margin_status"),
-                ])
-                df = df.join(margin_join, on="symbol", how="left")
-            else:
-                df = self._add_null_cols(df, [
-                    "margin_balance", "margin_balance_change", "short_balance", "short_margin_ratio",
-                    "margin_date", "margin_status"
-                ])
+            df, margin_date, missing = self._join_margin(df, as_of)
+            degraded.extend(missing)
         except Exception as e:
             logger.warning("Batch read margin failed in screener: %s", e)
             degraded.append("margin")
-            df = self._add_null_cols(df, [
-                "margin_balance", "margin_balance_change", "short_balance", "short_margin_ratio",
-                "margin_date", "margin_status"
-            ])
-
+            df = self._add_null_cols(df.drop(_MARGIN_COLUMNS, strict=False), _MARGIN_COLUMNS)
         return df, inst_date, margin_date, degraded
 
     def _apply_filters(self, df: pl.DataFrame, req: TaiwanScreenerRequest) -> pl.DataFrame:

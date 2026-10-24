@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 import polars as pl
 
 from app.taiwan.corporate_actions import (
@@ -42,6 +42,7 @@ from app.taiwan.market_intelligence import (
     delisted_after,
     listed_by,
     stored_partition_status,
+    traded_expr,
 )
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
@@ -86,7 +87,9 @@ class IndustryMetrics(BaseModel):
     advance_count: int = 0
     decline_count: int = 0
     flat_count: int = 0
+    # Same basis as MarketBreadthStats: breadth counts traded rows only.
     uncompared_count: int = 0
+    untraded_count: int = 0
 
     advance_ratio: float | None = None  # advance / (advance + decline + flat)
     decline_ratio: float | None = None  # decline / (advance + decline + flat)
@@ -113,6 +116,14 @@ class IndustryMetrics(BaseModel):
     top_gainers: list[IndustryConstituentMover] = Field(default_factory=list)
     top_losers: list[IndustryConstituentMover] = Field(default_factory=list)
     top_turnover: list[IndustryConstituentMover] = Field(default_factory=list)
+
+    # Members of the average_return_5d mean; kept out of the API payload.
+    _return_5d_by_symbol: dict[str, float] = PrivateAttr(default_factory=dict)
+
+    def average_return_5d_excluding(self, symbol: str) -> float | None:
+        """Equal-weight 5-session return of the other members, None when no other member has one."""
+        others = [r for s, r in self._return_5d_by_symbol.items() if s != symbol]
+        return sum(others) / len(others) if others else None
 
 
 class MarketReferenceStats(BaseModel):
@@ -425,14 +436,14 @@ class TaiwanIndustryIntelligenceService:
             ind_df = base.filter(pl.col("industry") == ind)
             supp_cnt = len(ind_df)
             snap_cnt = len(ind_df.filter(pl.col("close").is_not_null()))
-            traded_cnt = len(ind_df.filter(pl.col("volume") > 0))
+            traded_cnt = len(ind_df.filter(traded_expr()))
             ind_turnover = float(ind_df["amount"].sum() or 0.0)
             turnover_sh = round(ind_turnover / market_stock_turnover, 6) if market_stock_turnover > 0 else 0.0
 
             # Breadth
-            comp_df = ind_df.filter(pl.col("change_pct").is_not_null())
+            comp_df = ind_df.filter(traded_expr() & pl.col("change_pct").is_not_null())
             comp_cnt = len(comp_df)
-            uncomp_cnt = supp_cnt - comp_cnt
+            uncomp_cnt = traded_cnt - comp_cnt
 
             adv_cnt = len(comp_df.filter(pl.col("change_pct") > 0))
             dec_cnt = len(comp_df.filter(pl.col("change_pct") < 0))
@@ -540,6 +551,7 @@ class TaiwanIndustryIntelligenceService:
                 decline_count=dec_cnt,
                 flat_count=flat_cnt,
                 uncompared_count=uncomp_cnt,
+                untraded_count=supp_cnt - traded_cnt,
                 advance_ratio=adv_ratio,
                 decline_ratio=dec_ratio,
                 average_change_pct=avg_chg,
@@ -558,6 +570,7 @@ class TaiwanIndustryIntelligenceService:
                 top_losers=top_losers,
                 top_turnover=top_turnovers,
             )
+            metric._return_5d_by_symbol = dict(zip(comp_5d["symbol"].to_list(), comp_5d["return_5d"].to_list(), strict=True))
             industry_metrics_list.append(metric)
 
         # Sort industries (default turnover DESC)

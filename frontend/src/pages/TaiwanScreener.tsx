@@ -41,6 +41,8 @@ import { Modal } from '@/components/Modal'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { loadLastCompareSymbols, mergeSymbolIntoCompare } from '@/lib/taiwanCompareSymbols'
 import { ABNORMAL_SIGNAL_DEFINITIONS, BUILTIN_SIGNAL_DEFINITIONS, VOLUME_PATTERN_DEFINITIONS } from '@/lib/signals'
+import { breadthBasisNote } from '@/lib/marketBreadth'
+import { missingChipExchangesNote } from '@/lib/screenerDegraded'
 import { useStockPreview } from '@/components/StockPreviewProvider'
 
 function DataQualityBadge({ status, provisionalText, incompleteText }: {
@@ -607,7 +609,7 @@ export function TaiwanScreener() {
                 <span className="text-zinc-600">/</span>
                 <span className="text-zinc-400">{intelData.market_totals.flat_count}</span>
               </div>
-              <span className="text-[10px] text-zinc-500 mt-1">上漲 / 下跌 / 平盤</span>
+              <span className="text-[10px] text-zinc-500 mt-1" title={breadthBasisNote(intelData.market_totals)}>上漲 / 下跌 / 平盤（{breadthBasisNote(intelData.market_totals)}）</span>
             </div>
 
             {/* Limit Up / Limit Down */}
@@ -1590,6 +1592,11 @@ export function TaiwanScreener() {
         {data?.degraded_sections?.includes('price_limits') && (
           <div role="status" className="px-4 py-2 text-[11px] text-amber-400 bg-amber-500/10 border-b border-zinc-800">
             當日缺少漲跌停參考價，「逼近漲停／跌停」暫無法判斷
+          </div>
+        )}
+        {missingChipExchangesNote(data?.degraded_sections) && (
+          <div role="status" className="px-4 py-2 text-[11px] text-amber-400 bg-amber-500/10 border-b border-zinc-800">
+            {missingChipExchangesNote(data?.degraded_sections)}
           </div>
         )}
         {/* Table View */}

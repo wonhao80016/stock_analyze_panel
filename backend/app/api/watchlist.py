@@ -457,7 +457,9 @@ def watchlist_enriched(
 
     # The two paths emit different key sets; fill the gaps with None so a missing
     # value is null rather than an absent key.
-    expected_cols = _WATCHLIST_COLS + ["name", "float_shares", "asset_type", "live_date", "indicator_date"] + ext_col_names
+    expected_cols = _WATCHLIST_COLS + [
+        "name", "float_shares", "asset_type", "live_date", "indicator_date", "turnover_rate_status",
+    ] + ext_col_names
     all_rows = legacy_rows + taiwan_rows
     for row in all_rows:
         for col in expected_cols:

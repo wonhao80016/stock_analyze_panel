@@ -4,7 +4,7 @@ Verifies:
 - 100% deterministic breadth calculations:
     * 3 symbols fixture: 1 up, 1 down, 1 flat -> advance=1, decline=1, flat=1.
     * Missing previous close -> uncompared_count incremented, excluded from A/D/F.
-    * Volume = 0 -> not counted in traded_count.
+    * Volume = 0 -> not counted in traded_count nor as flat; counted in untraded_count.
     * Monday target date correctly resolves to prior Friday.
 - Price limit rules:
     * 0050.TWSE (domestic ETF, 10% limit)
@@ -419,8 +419,9 @@ def test_deterministic_breadth_fixture(mock_calendar):
     assert totals.traded_count == 4  # SYM5 volume=0 not traded
     assert totals.advance_count == 1  # SYM1 11.0 > 10.0
     assert totals.decline_count == 1  # SYM2 19.0 < 20.0
-    assert totals.flat_count == 2  # SYM3 30.0 == 30.0, SYM5 50.0 == 50.0
+    assert totals.flat_count == 1  # SYM3 30.0 == 30.0; SYM5 did not trade
     assert totals.uncompared_count == 1  # SYM4 missing prev close
+    assert totals.untraded_count == 1  # SYM5 volume=0
     assert totals.turnover == 307000.0
 
 
