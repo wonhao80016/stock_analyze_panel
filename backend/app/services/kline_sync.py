@@ -755,8 +755,15 @@ def sync_minute_batch(
     return pl.concat(out, how="diagonal_relaxed")
 
 
+_NO_MINUTE_SOURCE_REASON = "台股沒有分鐘資料源, 分時訊號需要設定分鐘資料插件"
+
+
 def intraday_monitor_support(capset: CapabilitySet | None) -> dict[str, object]:
-    """返回分时信号监控可用的数据能力和单轮标的上限。"""
+    """返回分时信号监控可用的数据能力和单轮标的上限。
+
+    Only a resolvable custom minute plugin supplies intraday bars; the taiwan provider
+    and the TickFlow capability fallback both return empty frames.
+    """
     provider_name = preferences.get_minute_data_provider()
     _, fallback, error = _resolve_minute_provider(provider_name)
     if not fallback:
@@ -766,6 +773,14 @@ def intraday_monitor_support(capset: CapabilitySet | None) -> dict[str, object]:
         }
     if error is not None:
         logger.warning("minute provider resolution failed while checking monitor support: %s", error)
+    return {
+        "available": False, "source": None, "max_symbols": 0,
+        "reason": _NO_MINUTE_SOURCE_REASON,
+    }
+
+
+def _tickflow_intraday_support(capset: CapabilitySet | None) -> dict[str, object]:
+    """TickFlow capability mapping for intraday monitoring; not wired into any caller."""
     if capset is None:
         return {
             "available": False, "source": None, "max_symbols": 0,

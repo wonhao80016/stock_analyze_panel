@@ -121,9 +121,9 @@ def test_field_labels_are_the_monitor_s_labels_with_the_id_as_fallback():
     assert field_label("amount") == "成交額"
     assert field_label("my_factor") == "my_factor"
     text = MonitorRuleEngine._format_conditions_text(
-        {"logic": "and"}, [{"field": "turnover_rate", "op": "gte", "value": 2}]
+        {"logic": "and"}, [{"field": "turnover_rate", "op": ">=", "value": 2}]
     )
-    assert text == "換手率≥2"
+    assert text == "換手率大於等於2"
 
 
 def test_a_thin_session_is_refused_with_the_label_and_the_share_of_stocks():

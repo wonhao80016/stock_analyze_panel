@@ -148,46 +148,27 @@ def test_intraday_rule_rejects_non_symbol_scope():
         monitor_rules.validate(_intraday_rule("all"))
 
 
-def test_intraday_support_uses_capability_limits(monkeypatch):
+def test_intraday_support_ignores_tickflow_capabilities(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "tickflow")
     capset = CapabilitySet({Cap.KLINE_MINUTE_BATCH: CapabilityLimits(batch=25, rpm=30)})
     support = intraday_monitor_support(capset)
-    assert support["available"] is True
-    assert support["source"] == "minute_batch"
-    assert support["max_symbols"] == 25
+    assert support["available"] is False
+    assert support["source"] is None
+    assert support["max_symbols"] == 0
 
     denied = intraday_monitor_support(CapabilitySet())
     assert denied["available"] is False
 
 
-def test_intraday_batch_provider_is_normalized_without_network(monkeypatch):
-    # fetch_intraday_monitor_batch short-circuits for the taiwan/tickflow minute
-    # providers, so the intraday_batch branch under test only runs for a custom
-    # source. (This test used to declare "tickflow", which the implementation
-    # later added to that short-circuit list.)
+def test_unresolved_custom_minute_source_does_not_call_tickflow(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "custom_source")
 
-    class FakeKlines:
-        def intraday_batch(self, symbols, count, as_dataframe, show_progress, batch_size):
-            assert symbols == ["600000.SH"]
-            assert count == 300
-            assert as_dataframe is True
-            assert show_progress is False
-            assert batch_size == 20
-            return pl.DataFrame({
-                "symbol": symbols,
-                "datetime": [datetime(2026, 7, 17, 9, 30)],
-                "open": [10.0], "high": [10.1], "low": [9.9], "close": [10.0],
-                "volume": [1.0], "amount": [1000.0],
-            })
+    def _no_client():
+        raise AssertionError("TickFlow client must not be used")
 
-    class FakeClient:
-        klines = FakeKlines()
-
-    monkeypatch.setattr("app.services.kline_sync.get_client", lambda: FakeClient())
+    monkeypatch.setattr("app.services.kline_sync.get_client", _no_client)
     capset = CapabilitySet({Cap.INTRADAY_BATCH: CapabilityLimits(batch=20, rpm=30)})
     result = fetch_intraday_monitor_batch(
         ["600000.SH"], capset, now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),
     )
-    assert result.columns == ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
-    assert result["symbol"].to_list() == ["600000.SH"]
+    assert result.is_empty()

@@ -23,11 +23,14 @@ from pathlib import Path
 
 from app.strategy.custom_signals import ALLOWED_FIELDS
 from app.strategy.intraday_signals import uses_intraday_signals
+from app.taiwan.benchmarks import is_benchmark
 
 logger = logging.getLogger(__name__)
 
 # ── 常量 ────────────────────────────────────────────────
 ID_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+# Strategy ids may hold upper case and hyphens; migrated rules embed them in their id and file name.
+STRATEGY_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,180}")
 RULE_TYPES = {"strategy", "signal", "price", "market", "sector"}
 SCOPES = {"symbols", "all", "sector", "watchlist_group"}
 LOGICS = {"and", "or"}
@@ -43,11 +46,29 @@ SECTOR_KINDS = {"index", "concept", "industry"}
 SECTOR_TRIGGERS = {"change_pct", "momentum"}
 SECTOR_WINDOWS = {1, 3, 5, 10, 15}
 
+# Realtime Taiwan benchmark index rows carry only these columns; no signals, indicators or volume.
+TAIWAN_INDEX_FIELDS = frozenset({
+    "close", "open", "high", "low", "prev_close", "change_pct", "change_amount",
+})
+TAIWAN_INDEX_FIELDS_ERROR = "台股指數只支援價格與漲跌幅條件 (收盤、開盤、最高、最低、昨收、漲跌幅、漲跌額), 不支援訊號、指標或量能"
+
 # 布尔信号列前缀 (op=truth 时 field 取这些)
 _SIGNAL_PREFIXES = ("signal_", "csg_")
 
 
 # ── 持久化 (镜像 custom_signals.py) ─────────────────────
+def is_valid_rule_id(rule_id: object) -> bool:
+    """User rule ids, or a migrated strategy rule id; neither charset admits path separators or dots."""
+    if not isinstance(rule_id, str):
+        return False
+    if ID_RE.fullmatch(rule_id):
+        return True
+    return (
+        rule_id.startswith(STRATEGY_RULE_PREFIX)
+        and STRATEGY_ID_RE.fullmatch(rule_id[len(STRATEGY_RULE_PREFIX):]) is not None
+    )
+
+
 def _dir(data_dir: Path) -> Path:
     d = data_dir / "user_data" / "monitor_rules"
     d.mkdir(parents=True, exist_ok=True)
@@ -55,22 +76,34 @@ def _dir(data_dir: Path) -> Path:
 
 
 def _path(data_dir: Path, rule_id: str) -> Path:
+    if not is_valid_rule_id(rule_id):
+        raise ValueError(f"規則 id 非法: {rule_id!r}")
     return _dir(data_dir) / f"{rule_id}.json"
 
 
 def load_all(data_dir: Path) -> list[dict]:
-    """读取全部监控规则。损坏的文件被跳过。"""
+    """读取全部监控规则。损坏的文件被跳过。
+
+    Rules whose id fails is_valid_rule_id are skipped too, so callers can save every rule returned.
+    """
     d = _dir(data_dir)
     out: list[dict] = []
     for f in sorted(d.glob("*.json")):
         try:
-            out.append(normalize(json.loads(f.read_text(encoding="utf-8"))))
+            rule = normalize(json.loads(f.read_text(encoding="utf-8")))
         except Exception as e:
             logger.warning("monitor rule load failed %s: %s", f.name, e)
+            continue
+        if not is_valid_rule_id(rule.get("id")):
+            logger.warning("monitor rule skipped, invalid id in %s: %r", f.name, rule.get("id"))
+            continue
+        out.append(rule)
     return out
 
 
 def load_one(data_dir: Path, rule_id: str) -> dict | None:
+    if not is_valid_rule_id(rule_id):
+        return None
     p = _path(data_dir, rule_id)
     if not p.exists():
         return None
@@ -88,6 +121,8 @@ def save_one(data_dir: Path, rule: dict) -> None:
 
 
 def delete_one(data_dir: Path, rule_id: str) -> bool:
+    if not is_valid_rule_id(rule_id):
+        return False
     p = _path(data_dir, rule_id)
     if p.exists():
         p.unlink()
@@ -101,10 +136,22 @@ def _is_signal_field(field: str) -> bool:
     return any(field.startswith(p) for p in _SIGNAL_PREFIXES)
 
 
+def taiwan_index_condition_error(rule: dict) -> str | None:
+    """Reason a Taiwan benchmark index rule can never fire on the realtime index rows, else None."""
+    if rule.get("asset_type") != "index":
+        return None
+    if not any(isinstance(s, str) and is_benchmark(s) for s in rule.get("symbols") or []):
+        return None
+    for c in rule.get("conditions") or []:
+        if not isinstance(c, dict) or c.get("op") == "truth" or c.get("field") not in TAIWAN_INDEX_FIELDS:
+            return TAIWAN_INDEX_FIELDS_ERROR
+    return None
+
+
 def validate(rule: dict) -> None:
     """校验一条监控规则,非法则抛 ValueError (含中文信息)。"""
     rid = rule.get("id", "")
-    if not isinstance(rid, str) or not ID_RE.match(rid):
+    if not is_valid_rule_id(rid):
         raise ValueError(f"規則 id 非法 (僅小寫字母數字下劃線, 1-40字符): {rid!r}")
     if not isinstance(rule.get("name"), str) or not rule["name"].strip():
         raise ValueError("規則 name 不可為空")
@@ -120,6 +167,9 @@ def validate(rule: dict) -> None:
             raise ValueError("指數監控僅支援指定標的 (scope=symbols)")
         if uses_intraday_signals(rule):
             raise ValueError("指數無本地分鐘K資料, 不支持分時訊號條件")
+        index_error = taiwan_index_condition_error(rule)
+        if index_error:
+            raise ValueError(index_error)
 
     # 策略类型: 需要 strategy_id + direction,conditions 可空
     if rule.get("type") == "strategy":
@@ -328,6 +378,9 @@ def migrate_strategy_monitors(data_dir: Path, strategy_ids: list[str], strategy_
     touched: list[dict] = []
     # 1. 为当前监控池的策略 upsert 规则
     for sid in desired:
+        if not isinstance(sid, str) or not STRATEGY_ID_RE.fullmatch(sid):
+            logger.warning("strategy monitor id rejected: %r", sid)
+            continue
         rule_id = strategy_rule_id(sid)
         name = strategy_names.get(sid, sid)
         rule = existing_strategy_rules.get(sid)

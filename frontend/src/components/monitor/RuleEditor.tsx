@@ -54,9 +54,12 @@ const CATEGORY_OPTIONS: Array<{ key: MonitorCategory; label: string; icon: typeo
 ]
 
 const VOLUME_FIELD_KEYS = ['volume', 'vol_ratio_5d']
+// Realtime Taiwan index rows carry only these columns; mirrors TAIWAN_INDEX_FIELDS in monitor_rules.py.
+const INDEX_THRESHOLD_FIELDS = ['close', 'open', 'high', 'low', 'prev_close', 'change_pct', 'change_amount']
 
 function categoryForRule(rule: MonitorRule): MonitorCategory {
   if (rule.type === 'strategy' || rule.type === 'sector') return 'advanced'
+  if (rule.asset_type === 'index') return 'price'
   if (rule.conditions.some(c => VOLUME_FIELD_KEYS.includes(c.field))) return 'volume'
   return rule.type === 'signal' ? 'signal' : 'price'
 }
@@ -158,6 +161,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   // 監控情境(晶片層) — 純 UI 分類, 實際仍落到 draft.type/conditions。
   const [category, setCategory] = useState<MonitorCategory>(() => categoryForRule(draft))
   const [volUnit, setVolUnit] = useState<'lots' | 'shares'>('lots')
+  const [indexRemovedNotice, setIndexRemovedNotice] = useState('')
   // 資產類型切到指數/ETF 等會把 type 改成 strategy/sector 以外的值, 這時情境分類要跟著校正,
   // 否則會停在「進階」卻看不到任何策略/板塊表單。
   useEffect(() => {
@@ -291,7 +295,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       conditions: [...d.conditions, op === 'truth'
         ? { field: 'signal_volume_surge', op: 'truth' }
         // simple 模式(個股彈窗)默認現價; 完整模式默認 RSI 超賣
-        : { field: simple ? 'close' : 'rsi_14', op: '<', value: simple ? 0 : 30 }],
+        : simple || d.asset_type === 'index'
+          ? { field: 'close', op: '<', value: 0 }
+          : { field: 'rsi_14', op: '<', value: 30 }],
     }))
   const removeCond = (idx: number) =>
     setDraft(d => ({ ...d, conditions: d.conditions.filter((_, i) => i !== idx) }))
@@ -323,10 +329,10 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const volumeCondition = draft.conditions.find(c => c.field === 'volume' && c.op === '>=')
   const volumeInputValue = (() => {
     if (!volumeCondition || volumeCondition.value == null) return volUnit === 'lots' ? 1 : 1000
-    return volUnit === 'lots' ? Math.round(volumeCondition.value / 1000) : volumeCondition.value
+    return volUnit === 'lots' ? volumeCondition.value / 1000 : volumeCondition.value
   })()
   const setVolumeValue = (inputVal: number) =>
-    upsertCondition('volume', '>=', volUnit === 'lots' ? inputVal * 1000 : inputVal)
+    upsertCondition('volume', '>=', volUnit === 'lots' ? Math.round(inputVal * 1000) : inputVal)
 
   // 監控情境切換: 只調整分類與相依欄位(type/logic/scope/direction), 不動已填的條件,
   // 這樣使用者在情境間來回切換時不會弄丟已設定的價位/訊號。
@@ -479,7 +485,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       }
     })
 
-  const thresholdFields = options.data?.threshold_fields ?? []
+  const thresholdFields = (options.data?.threshold_fields ?? []).filter(
+    f => assetType !== 'index' || INDEX_THRESHOLD_FIELDS.includes(f.key),
+  )
   const operators = options.data?.operators ?? ['>', '>=', '<', '<=', '==', '!=']
   const selectedSignals = draft.conditions.filter(c => c.op === 'truth').map(c => c.field)
   const hasIntradaySignal = selectedSignals.some(signal => MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(signal))
@@ -491,6 +499,11 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   // 指數: 隱藏漲跌停/連板類 (指數無這些列) 與分時訊號 (無本地分鐘K, 會靜默不觸發)
   const INDEX_HIDDEN_SIGNALS = (key: string) =>
     key.includes('limit') || MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(key)
+  const isIndexHiddenCondition = (c: MonitorCondition) =>
+    c.op === 'truth' || !INDEX_THRESHOLD_FIELDS.includes(c.field)
+  const visiblePriceChips = assetType === 'index'
+    ? PRICE_CHIPS.filter(chip => !chip.field.includes('limit'))
+    : PRICE_CHIPS
   const pickerSignals = assetType === 'index'
     ? monitorBuiltinSignals.filter(o => !INDEX_HIDDEN_SIGNALS(o.key))
     : monitorBuiltinSignals
@@ -500,9 +513,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const intradayDisabledHint = isGroupScope
     ? '分時穿越訊號需逐股訂閱, 暫不支援自選分組作用域'
     : intradaySupport?.reason
-  // 指數: 監控類型僅 signal/price (無漲跌停/策略/封單語義)
+  // 指數: 監控類型僅 price (即時指數列只有價格與漲跌欄位)
   const visibleTypes = (options.data?.types ?? []).filter(
-    t => assetType !== 'index' || t.key === 'signal' || t.key === 'price',
+    t => assetType !== 'index' || t.key === 'price',
   )
   // 指數: 作用範圍僅 symbols (無全市場/板塊語義); ETF: 不支持自選分組 (分組為個股)
   const visibleScopes = (options.data?.scopes ?? []).filter(
@@ -575,7 +588,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
             disabledSignals={intradaySupport?.available === false ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []}
             disabledSignalHint={intradaySupport?.reason}
           />
-          {hasIntradaySignal && (
+          {(hasIntradaySignal || (intradaySupport?.available === false && assetType !== 'index')) && (
             <div className={`mt-2 text-[10px] ${intradaySupport?.available === false ? 'text-danger' : 'text-muted'}`}>
               {intradaySupport?.available === false
                 ? intradaySupport.reason
@@ -658,12 +671,21 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 aria-pressed={assetType === t}
                 onClick={() => {
                   if (assetType === t) return
+                  const hiddenConds = t === 'index'
+                    ? draft.conditions.filter(isIndexHiddenCondition)
+                    : []
+                  setIndexRemovedNotice(hiddenConds.length
+                    ? `已移除指數不適用的條件: ${hiddenConds.map(c => (c.op === 'truth' ? cnSignal(c.field) : (thresholdFields.find(f => f.key === c.field)?.label ?? cnSignal(c.field)))).join('、')}`
+                    : '')
                   setDraft(d => ({
                     ...d,
+                    conditions: t === 'index'
+                      ? d.conditions.filter(c => !isIndexHiddenCondition(c))
+                      : d.conditions,
                     asset_type: t,
                     strategy_id: null,
                     symbols: [],
-                    type: t === 'index' && d.type !== 'signal' && d.type !== 'price' ? 'signal' : d.type,
+                    type: t === 'index' ? 'price' : d.type,
                     // 指數僅指定標的; ETF 不支持分組作用域 (自選分組為個股)
                     scope: t === 'index' || (t !== 'stock' && d.scope === 'watchlist_group')
                       ? 'symbols'
@@ -671,6 +693,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                   }))
                   setStrategyQuery('')
                   setStrategyCategory('all')
+                  if (t === 'index') setCategory('price')
                 }}
                 className={`h-full px-4 text-xs font-medium transition-colors cursor-pointer
                   ${assetType === t ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
@@ -679,6 +702,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
               </button>
             ))}
           </div>
+          {indexRemovedNotice && <p className="text-[10px] text-amber-600 dark:text-amber-400">{indexRemovedNotice}</p>}
         </div>
       )}
 
@@ -687,7 +711,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         <span className="text-[11px] text-muted">監控情境</span>
         <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
           {CATEGORY_OPTIONS.filter(opt =>
-            opt.key !== 'advanced' || visibleTypes.some(t => t.key === 'strategy' || t.key === 'sector'),
+            (opt.key !== 'advanced' || visibleTypes.some(t => t.key === 'strategy' || t.key === 'sector'))
+            && (assetType !== 'index' || opt.key === 'price'),
           ).map(opt => {
             const Icon = opt.icon
             const active = category === opt.key
@@ -713,7 +738,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         {/* 第二層: 預設條件晶片 — 點一下填好 conditions, 下方「觸發條件」仍可逐條編輯/疊加 */}
         {category === 'price' && (
           <div className="flex flex-wrap gap-2 pt-1">
-            {PRICE_CHIPS.map(chip => {
+            {visiblePriceChips.map(chip => {
               const active = !!chipCondition(chip)
               return (
                 <div
@@ -1291,16 +1316,18 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
               <select value={draft.logic} onChange={e => setDraft(d => ({ ...d, logic: e.target.value as MonitorRule['logic'] }))} className="h-7 rounded border border-border bg-base px-1.5 text-[11px] text-foreground">
                 {(options.data?.logics ?? []).map(l => <option key={l.key} value={l.key}>{l.label}</option>)}
               </select>
-              <button onClick={() => addCond('truth')} className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent/80 cursor-pointer">
-                <Plus className="h-3 w-3" />訊號條件
-              </button>
+              {assetType !== 'index' && (
+                <button onClick={() => addCond('truth')} className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent/80 cursor-pointer">
+                  <Plus className="h-3 w-3" />訊號條件
+                </button>
+              )}
               <button onClick={() => addCond('threshold')} className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent/80 cursor-pointer">
                 <Plus className="h-3 w-3" />閾值條件
               </button>
             </div>
           </div>
 
-          {selectedSignals.length > 0 || (options.data?.builtin_signals ?? []).length > 0 ? (
+          {assetType !== 'index' && (selectedSignals.length > 0 || (options.data?.builtin_signals ?? []).length > 0) ? (
             <div>
               <div className="mb-1.5 text-[10px] text-muted/70">訊號條件 (點選)</div>
               <SignalPicker
@@ -1311,7 +1338,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 disabledSignals={intradayDisabledSignals}
                 disabledSignalHint={intradayDisabledHint}
               />
-              {hasIntradaySignal && (
+              {(hasIntradaySignal || intradaySupport?.available === false) && (
                 <div className={`mt-2 text-[10px] ${intradaySupport?.available === false ? 'text-danger' : 'text-muted'}`}>
                   {intradaySupport?.available === false
                     ? intradaySupport.reason

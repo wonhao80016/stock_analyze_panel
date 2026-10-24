@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.strategy import monitor_rules
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_signals
@@ -46,12 +46,13 @@ def _validate_taiwan_symbols(symbols: list[str]) -> None:
     只覆蓋能解析成台股 canonical 格式 (`{code}.{TWSE|TPEX}`) 的 symbol;
     其他市場格式 (如 A 股 `600000.SH`) 不受 Security Master 管轄, 略過。
     """
+    from app.taiwan.benchmarks import is_benchmark
     from app.taiwan.symbol import parse_symbol
     from app.taiwan.universe import get_security_master
 
     sec_master = get_security_master()
     for sym in symbols:
-        if not sym:
+        if not sym or is_benchmark(sym):
             continue
         try:
             parse_symbol(sym)
@@ -68,6 +69,30 @@ def _validate_taiwan_symbols(symbols: list[str]) -> None:
                     f"(类型: {inst.instrument_type}, 上市状态: {inst.listing_status})"
                 ),
             )
+
+
+def _apply_benchmark_symbols(rule: dict) -> None:
+    """Rewrite benchmark index symbols to their canonical case and keep them out of non-index rules."""
+    from app.taiwan.benchmarks import get_benchmark
+
+    symbols: list[str] = []
+    for sym in rule.get("symbols", []):
+        benchmark = get_benchmark(sym) if isinstance(sym, str) else None
+        symbols.append(benchmark.symbol if benchmark else sym)
+    rule["symbols"] = symbols
+
+
+def _reject_benchmarks_outside_index_rules(rule: dict) -> None:
+    from app.taiwan.benchmarks import is_benchmark
+
+    if rule.get("asset_type", "stock") == "index":
+        return
+    benchmarks = [s for s in rule.get("symbols", []) if isinstance(s, str) and is_benchmark(s)]
+    if benchmarks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{'、'.join(benchmarks)} 是指數代號, 只能用於資產類型為「指數」的規則",
+        )
 
 
 def _sync_engine(request: Request) -> None:
@@ -218,6 +243,14 @@ def get_options(request: Request):
 @router.get("")
 def list_rules(request: Request):
     repo = request.app.state.repo
+
+    def _add_runtime_warning(rule: dict, warning: str) -> None:
+        # Several checks can apply to one rule; keep every reason instead of the last one.
+        reasons = [r for r in str(rule.get("runtime_warning") or "").split("; ") if r]
+        if warning not in reasons:
+            reasons.append(warning)
+        rule["runtime_warning"] = "; ".join(reasons)
+
     rules = [
         _reconcile_index_asset_type(r, repo)
         for r in monitor_rules.load_all(_data_dir(request))
@@ -244,7 +277,7 @@ def list_rules(request: Request):
         )
     if runtime_warning:
         for rule in intraday_rules:
-            rule["runtime_warning"] = runtime_warning
+            _add_runtime_warning(rule, runtime_warning)
     sector_service = getattr(request.app.state, "sector_monitor_service", None)
     if sector_service is not None:
         for rule in rules:
@@ -253,9 +286,13 @@ def list_rules(request: Request):
             missing = sector_service.missing_target_keys(rule.get("sector_targets", []))
             unavailable = sector_service.unavailable_target_keys(rule.get("sector_targets", []))
             if missing:
-                rule["runtime_warning"] = "部分板块数据已不存在, 请重新选择监控对象"
+                _add_runtime_warning(rule, "部分板块数据已不存在, 请重新选择监控对象")
             elif unavailable:
-                rule["runtime_warning"] = "所选指数未加入实时指数池, 请先在实时监控设置中启用"
+                _add_runtime_warning(rule, "所选指数未加入实时指数池, 请先在实时监控设置中启用")
+    for rule in rules:
+        index_error = monitor_rules.taiwan_index_condition_error(rule)
+        if index_error:
+            _add_runtime_warning(rule, index_error)
     # 分组作用域规则: 绑定的分组被删除 → 标注运行时警告 (引擎侧已 fail-closed 跳过)
     group_rules = [rule for rule in rules if rule.get("scope") == "watchlist_group"]
     if group_rules:
@@ -265,7 +302,7 @@ def list_rules(request: Request):
             existing_ids = {g["id"] for g in watchlist_service.list_groups()}
             for rule in group_rules:
                 if rule.get("group_id") not in existing_ids:
-                    rule["runtime_warning"] = "绑定的自选分组已删除, 规则已暂停监控, 编辑可重新选择"
+                    _add_runtime_warning(rule, "绑定的自选分组已删除, 规则已暂停监控, 编辑可重新选择")
         except Exception:  # noqa: BLE001
             pass
     # 按 created_at 倒序
@@ -277,7 +314,9 @@ def list_rules(request: Request):
 @router.post("")
 def save_rule(req: RuleModel, request: Request):
     rule = monitor_rules.normalize(req.model_dump())
+    _apply_benchmark_symbols(rule)
     rule = _reconcile_index_asset_type(rule, request.app.state.repo)
+    _reject_benchmarks_outside_index_rules(rule)
     if rule.get("type") == "strategy":
         from app.strategy.engine import StrategyDataContext
 
@@ -351,10 +390,35 @@ def save_rule(req: RuleModel, request: Request):
     return {"ok": True, "rule": rule}
 
 
+class EnabledModel(BaseModel):
+    enabled: bool
+
+
+@router.put("/{rule_id}/enabled")
+def set_rule_enabled(rule_id: str, req: EnabledModel, request: Request):
+    """Toggle a rule; disabling skips binding validation so a rule with a deleted group,
+    strategy or symbol can still be paused, enabling goes through the full save path."""
+    if not monitor_rules.is_valid_rule_id(rule_id):
+        raise HTTPException(status_code=400, detail="規則 id 非法")
+    existing = monitor_rules.load_one(_data_dir(request), rule_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="規則不存在")
+    if req.enabled:
+        try:
+            model = RuleModel(**{**existing, "enabled": True})
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail="規則內容無法通過校驗, 請編輯後再啟用") from e
+        return save_rule(model, request)
+    existing["enabled"] = False
+    monitor_rules.save_one(_data_dir(request), existing)
+    _sync_engine(request)
+    return {"ok": True, "rule": existing}
+
+
 # ── 删除 ───────────────────────────────────────────────
 @router.delete("/{rule_id}")
 def delete_rule(rule_id: str, request: Request):
-    if not monitor_rules.ID_RE.match(rule_id):
+    if not monitor_rules.is_valid_rule_id(rule_id):
         raise HTTPException(status_code=400, detail="规则 id 非法")
     deleted = monitor_rules.delete_one(_data_dir(request), rule_id)
     if not deleted:

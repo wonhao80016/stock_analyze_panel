@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RuleEditor } from './RuleEditor'
-import type { MonitorRule } from '@/lib/api'
+import { api, type MonitorRule } from '@/lib/api'
 
 const monitorRuleSave = vi.fn().mockResolvedValue({ ok: true, rule: {} })
 
@@ -64,12 +64,12 @@ vi.mock('@/lib/api', () => ({
   genRuleId: () => 'mr_test',
 }))
 
-function renderEditor() {
+function renderEditor(rule: MonitorRule | null = null) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={qc}>
       <RuleEditor
-        rule={null}
+        rule={rule}
         preset={{ scope: 'symbols', symbols: ['2330.TWSE'] }}
         onClose={() => {}}
       />
@@ -145,5 +145,129 @@ describe('RuleEditor — 監控情境晶片(取代台股即時引擎的 9 種 ru
     const cond = saved.conditions.find(c => c.field === 'volume')
     expect(cond?.op).toBe('>=')
     expect(cond?.value).toBe(5000)
+  })
+})
+
+function savedRule(overrides: Partial<MonitorRule>): MonitorRule {
+  return {
+    id: 'mr_saved',
+    name: '已存規則',
+    enabled: true,
+    type: 'signal',
+    asset_type: 'stock',
+    scope: 'symbols',
+    symbols: ['2330.TWSE'],
+    direction: 'entry',
+    conditions: [],
+    logic: 'and',
+    cooldown_seconds: 3600,
+    severity: 'info',
+    message: '',
+    ...overrides,
+  }
+}
+
+describe('RuleEditor — 分時訊號能力、指數切換與成交量單位', () => {
+  it('分時資料不可用時停用分時訊號並直接顯示原因', async () => {
+    const reason = '台股沒有分鐘資料源, 分時訊號需要設定分鐘資料插件'
+    const base = await api.monitorRuleOptions()
+    vi.mocked(api.monitorRuleOptions).mockResolvedValueOnce({
+      ...base,
+      intraday_signal_support: { available: false, source: null, max_symbols: 0, reason },
+    })
+    renderEditor()
+    await screen.findByText('監控情境')
+    fireEvent.click(screen.getByRole('button', { name: '技術訊號' }))
+
+    expect(await screen.findByText(reason)).toBeTruthy()
+    expect((screen.getByRole('button', { name: '分時價格上穿均價' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('切到指數時移除訊號條件, 只留價格條件', async () => {
+    vi.mocked(api.instrumentSearch).mockResolvedValue({
+      results: [{ symbol: 'IX0001.TWSE', name: '加權指數' }],
+    } as Awaited<ReturnType<typeof api.instrumentSearch>>)
+    renderEditor(savedRule({
+      conditions: [
+        { field: 'signal_limit_up', op: 'truth' },
+        { field: 'signal_intraday_avg_cross_up', op: 'truth' },
+        { field: 'signal_volume_surge', op: 'truth' },
+        { field: 'change_pct', op: '>=', value: 0.01 },
+      ],
+    }))
+    await screen.findByText('監控情境')
+
+    fireEvent.click(screen.getByRole('button', { name: '指數' }))
+    fireEvent.change(screen.getByPlaceholderText('搜尋代號或名稱新增標的…'), { target: { value: 'IX' } })
+    fireEvent.click(await screen.findByRole('button', { name: /IX0001\.TWSE/ }))
+    fireEvent.click(screen.getByRole('button', { name: '儲存' }))
+
+    await waitFor(() => expect(monitorRuleSave).toHaveBeenCalledTimes(1))
+    const saved = monitorRuleSave.mock.calls[0][0] as MonitorRule
+    expect(saved.asset_type).toBe('index')
+    expect(saved.type).toBe('price')
+    expect(saved.conditions.map(c => c.field)).toEqual(['change_pct'])
+  })
+
+  it('指數模式隱藏訊號與量能選項, 門檻欄位只列指數有的價格欄位', async () => {
+    vi.mocked(api.instrumentSearch).mockResolvedValue({
+      results: [{ symbol: 't00.TWSE', name: '加權指數' }],
+    } as Awaited<ReturnType<typeof api.instrumentSearch>>)
+    renderEditor()
+    await screen.findByText('監控情境')
+    fireEvent.click(screen.getByRole('button', { name: '技術訊號' }))
+
+    fireEvent.click(screen.getByRole('button', { name: '指數' }))
+
+    expect(screen.queryByRole('button', { name: '技術訊號' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '量能' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '訊號條件' })).toBeNull()
+    expect(screen.getByRole('button', { name: '價格與漲跌' }).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: '閾值條件' }))
+    const fieldOptions = Array.from(document.querySelectorAll('select option')).map(o => (o as HTMLOptionElement).value)
+    expect(fieldOptions).toContain('close')
+    expect(fieldOptions).not.toContain('volume')
+    expect(fieldOptions).not.toContain('vol_ratio_5d')
+
+    fireEvent.change(screen.getByPlaceholderText('搜尋代號或名稱新增標的…'), { target: { value: 't00' } })
+    fireEvent.click(await screen.findByRole('button', { name: /t00\.TWSE/ }))
+    fireEvent.click(screen.getByRole('button', { name: '儲存' }))
+
+    await waitFor(() => expect(monitorRuleSave).toHaveBeenCalledTimes(1))
+    const saved = monitorRuleSave.mock.calls[0][0] as MonitorRule
+    expect(saved.type).toBe('price')
+    expect(saved.conditions).toEqual([expect.objectContaining({ field: 'close' })])
+  })
+
+  it('切到指數時一併移除接近漲跌停的門檻條件並隱藏其晶片', async () => {
+    vi.mocked(api.instrumentSearch).mockResolvedValue({
+      results: [{ symbol: 't00.TWSE', name: '加權指數' }],
+    } as Awaited<ReturnType<typeof api.instrumentSearch>>)
+    renderEditor(savedRule({
+      type: 'price',
+      conditions: [
+        { field: 'distance_to_upper_limit', op: '<=', value: 0.01 },
+        { field: 'distance_to_lower_limit', op: '<=', value: 0.01 },
+        { field: 'change_pct', op: '>=', value: 0.03 },
+      ],
+    }))
+    await screen.findByText('監控情境')
+
+    fireEvent.click(screen.getByRole('button', { name: '指數' }))
+    expect(screen.queryByRole('button', { name: '接近漲停' })).toBeNull()
+    fireEvent.change(screen.getByPlaceholderText('搜尋代號或名稱新增標的…'), { target: { value: 't00' } })
+    fireEvent.click(await screen.findByRole('button', { name: /t00\.TWSE/ }))
+    fireEvent.click(screen.getByRole('button', { name: '儲存' }))
+
+    await waitFor(() => expect(monitorRuleSave).toHaveBeenCalledTimes(1))
+    const saved = monitorRuleSave.mock.calls[0][0] as MonitorRule
+    expect(saved.conditions.map(c => c.field)).toEqual(['change_pct'])
+  })
+
+  it('成交量以張顯示時保留小數, 不把已存門檻四捨五入', async () => {
+    renderEditor(savedRule({ type: 'price', conditions: [{ field: 'volume', op: '>=', value: 1500 }] }))
+    await screen.findByText('監控情境')
+
+    expect((screen.getByLabelText('成交量高於數值') as HTMLInputElement).value).toBe('1.5')
   })
 })

@@ -57,7 +57,7 @@ export function GenericRulesList({ onEdit }: GenericRulesListProps) {
   const rulesQuery = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList })
 
   const toggleMut = useMutation({
-    mutationFn: (rule: MonitorRule) => api.monitorRuleSave({ ...rule, enabled: !rule.enabled }),
+    mutationFn: (rule: MonitorRule) => api.monitorRuleSetEnabled(rule.id, !rule.enabled),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.monitorRules }),
   })
 
@@ -84,6 +84,11 @@ export function GenericRulesList({ onEdit }: GenericRulesListProps) {
 
   return (
     <div className="space-y-2">
+      {toggleMut.error && (
+        <div className="rounded border border-danger/30 bg-danger/5 px-2 py-1 text-[11px] text-danger">
+          {String((toggleMut.error as Error).message ?? toggleMut.error)}
+        </div>
+      )}
       {rules.map(r => (
         <motion.div
           key={r.id}
@@ -157,6 +162,11 @@ export function GenericRulesList({ onEdit }: GenericRulesListProps) {
               </span>
             )}
           </div>
+          {r.runtime_warning && (
+            <div className="mt-2 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-600 dark:text-amber-400">
+              {r.runtime_warning}
+            </div>
+          )}
         </motion.div>
       ))}
     </div>

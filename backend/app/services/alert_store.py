@@ -139,8 +139,11 @@ def list_recent(
     except Exception as e:
         logger.warning("alert_store read failed: %s", e)
         return []
+    numeric = [ev for ev in events if isinstance(ev.get("ts", 0), (int, float)) and not isinstance(ev.get("ts"), bool)]
+    if len(numeric) != len(events):
+        logger.warning("alert_store skipped %d records without a numeric ts", len(events) - len(numeric))
     out = [
-        ev for ev in events
+        ev for ev in numeric
         if ev.get("ts", 0) >= cutoff
         and (not source or ev.get("source") == source)
         and (not type or ev.get("type") == type)

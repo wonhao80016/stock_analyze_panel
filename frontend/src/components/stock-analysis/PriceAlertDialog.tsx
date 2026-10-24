@@ -165,10 +165,7 @@ export function PriceAlertDialog({
   })
 
   const toggle = useMutation({
-    mutationFn: (rule: MonitorRule) => {
-      const { runtime_warning: _runtimeWarning, ...persisted } = rule
-      return api.monitorRuleSave({ ...persisted, enabled: !rule.enabled })
-    },
+    mutationFn: (rule: MonitorRule) => api.monitorRuleSetEnabled(rule.id, !rule.enabled),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.monitorRules }),
     onError: error => toast(String((error as Error)?.message || '更新失敗'), 'error'),
   })

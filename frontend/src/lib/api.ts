@@ -3054,6 +3054,13 @@ export const api = {
       body: JSON.stringify(rule),
     }),
 
+  /** Disabling skips binding validation; enabling runs the full save validation. */
+  monitorRuleSetEnabled: (id: string, enabled: boolean) =>
+    request<{ ok: boolean; rule: MonitorRule }>(`/api/monitor-rules/${encodeURIComponent(id)}/enabled`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
   monitorRuleDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/monitor-rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 

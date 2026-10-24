@@ -181,6 +181,7 @@ class StrategyMonitorService:
 # ================================================================
 
 _SIGNAL_PREFIXES = ("signal_", "csg_")
+_CONDITION_RULE_TYPES = frozenset({"signal", "price", "market"})
 
 
 # ── 自选分组作用域: group_id → 成员集合解析 (进程内缓存) ────
@@ -293,6 +294,27 @@ def _rearm_crossed(row: dict, conditions: list[dict]) -> bool:
     return True
 
 
+def _conditions_signature(conditions: Any) -> tuple[Any, ...]:
+    return tuple(
+        (c.get("field"), c.get("op"), c.get("value"), c.get("rearm_value"))
+        for c in (conditions if isinstance(conditions, list) else [])
+        if isinstance(c, dict)
+    )
+
+
+_OP_WORDS = {
+    ">": "大於", ">=": "大於等於", "<": "小於", "<=": "小於等於", "==": "等於", "!=": "不等於",
+}
+# Stored as decimals (0.03 = 3%); keep in sync with PERCENT_DECIMAL_FIELDS in GenericRulesList.tsx.
+_PERCENT_DECIMAL_FIELDS = frozenset({"change_pct", "distance_to_upper_limit", "distance_to_lower_limit"})
+
+
+def _format_condition_value(field: str, value: Any) -> str:
+    if field in _PERCENT_DECIMAL_FIELDS and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value * 100:.2f}".rstrip("0").rstrip(".") + "%"
+    return str(value)
+
+
 class MonitorRuleEngine:
     """通用监控规则引擎 — 接收实时行情 DataFrame,评估所有规则,返回 AlertEvent。
 
@@ -341,6 +363,7 @@ class MonitorRuleEngine:
         # (rule_id, symbol, event_type) → 是否已重新 armed (可再次触发)。
         # 用于 signal/price/market 的边缘触发去重 (trigger_mode="edge"), 键形状比照 _last_fire。
         self._condition_state: dict[tuple[str, str, str], bool] = {}
+        self._initial_rules_loaded = False
 
     def set_strategy_engine(self, engine) -> None:
         """注入 StrategyEngine, type=strategy 规则据此跑选股。"""
@@ -413,6 +436,10 @@ class MonitorRuleEngine:
             rule.get("threshold_pct"),
             rule.get("window_minutes"),
             rule.get("abnormal_window"),
+            rule.get("group_id"),
+            _conditions_signature(rule.get("conditions")),
+            rule.get("logic", "and"),
+            rule.get("trigger_mode", "edge"),
         )
 
     def set_rules(self, rules: list[dict]) -> None:
@@ -460,7 +487,47 @@ class MonitorRuleEngine:
             for key, value in list(self._condition_state.items())
             if key[0] in active_ids
         }
+        if not self._initial_rules_loaded:
+            self._initial_rules_loaded = True
+            self._restore_todays_condition_fires(new_rules)
         logger.info("MonitorRuleEngine: 装载 %d 条规则", len(self._rules))
+
+    def _restore_todays_condition_fires(self, rules: dict[str, dict]) -> None:
+        """Resume edge and cooldown state of condition rules from today's (Taipei) alert log.
+
+        Only fires already recorded today are suppressed; anything not yet fired today still fires.
+        """
+        if self._data_dir is None:
+            return
+        from app.market_time import CN_TZ
+        from app.services import alert_store
+
+        today = cn_today()
+        try:
+            events = alert_store.list_recent(self._data_dir, days=1)
+        except Exception as exc:
+            logger.warning("今日告警记录读取失败, 重启后不回填监控状态: %s", exc)
+            return
+        for event in events:
+            rule = rules.get(str(event.get("rule_id") or ""))
+            ts = event.get("ts")
+            if rule is None or rule.get("type") not in _CONDITION_RULE_TYPES or not isinstance(ts, (int, float)):
+                continue
+            if _dt.datetime.fromtimestamp(ts / 1000, CN_TZ).date() != today:
+                continue
+            # Records predating the snapshot fields are taken as fired under the current conditions.
+            if "conditions" in event and _conditions_signature(event.get("conditions")) != _conditions_signature(
+                rule.get("conditions")
+            ):
+                continue
+            if "logic" in event and event.get("logic") != rule.get("logic", "and"):
+                continue
+            key = (rule["id"], str(event.get("symbol") or ""), str(event.get("type") or ""))
+            fired_at = ts / 1000
+            if fired_at > self._last_fire.get(key, 0.0):
+                self._last_fire[key] = fired_at
+            if rule.get("trigger_mode", "edge") == "edge":
+                self._condition_state[key] = False
 
     def add_rule(self, rule: dict) -> None:
         if rule.get("enabled") is not False:
@@ -836,7 +903,7 @@ class MonitorRuleEngine:
         rtype = rule.get("type", "signal")
         if rtype == "strategy":
             # 策略类型: 跑策略选股, 同时产出所选的信号和结果池变更事件
-            hit_rows = self._match_strategy(scoped, rule)
+            hit_rows = self._match_strategy(scoped, rule, now)
         else:
             # signal / price / market: 通用条件匹配
             if rule.get("trigger_mode", "edge") == "edge":
@@ -856,14 +923,14 @@ class MonitorRuleEngine:
 
         events: list[dict] = []
         for ev_type, sym, name, price, pct, hit_sigs in hit_rows:
-            # cooldown 键包含事件类型, 同股不同策略事件互不压制。
             is_batch = sym == "_batch"
-            key_symbol = f"_{ev_type}_batch" if is_batch else sym
-            key = (rule["id"], key_symbol, ev_type)
-            last = self._last_fire.get(key)
-            if last is not None and (now - last) < cooldown:
-                continue  # 冷却期内, 跳过
-            self._last_fire[key] = now
+            # Strategy rows were already cooled down per symbol in _match_strategy.
+            if rtype != "strategy":
+                key = (rule["id"], sym, ev_type)
+                last = self._last_fire.get(key)
+                if last is not None and (now - last) < cooldown:
+                    continue
+                self._last_fire[key] = now
 
             # 批量事件: name 存放预构建的消息文本
             if is_batch:
@@ -934,13 +1001,14 @@ class MonitorRuleEngine:
         return df
 
     def _match_strategy(
-        self, df: pl.DataFrame, rule: dict,
+        self, df: pl.DataFrame, rule: dict, now: float,
     ) -> list[tuple[str, str, Any, Any, Any, list[str]]]:
         """策略类型评估: 一次执行同时产出交易信号和结果池变更事件。
 
         返回 [(event_type, symbol, name, price, pct, signals)]
         event_type: buy_signal | sell_signal | pool_entry | pool_exit
         同类事件超过 5 只时合并为一条批量事件 (symbol="_batch")
+        Cooldown is keyed per (rule_id, symbol, event_type) and applied before merging into a batch.
         """
         if self._strategy_engine is None:
             return []
@@ -1140,10 +1208,20 @@ class MonitorRuleEngine:
             "pool_entry": "進入選股結果",
             "pool_exit": "移出選股結果",
         }
+        cooldown = rule.get("cooldown_seconds", 3600)
         for event_type, symbols in changes.items():
             if event_type not in notify_events or not symbols:
                 continue
-            symbol_list = sorted(symbols)
+            symbol_list = []
+            for symbol in sorted(symbols):
+                key = (rule["id"], symbol, event_type)
+                last = self._last_fire.get(key)
+                if last is not None and (now - last) < cooldown:
+                    continue
+                self._last_fire[key] = now
+                symbol_list.append(symbol)
+            if not symbol_list:
+                continue
             if len(symbol_list) > 5:
                 names = [
                     str(row_map.get(symbol, {}).get("name") or self._name_map.get(symbol, symbol))
@@ -1340,6 +1418,5 @@ class MonitorRuleEngine:
             if op == "truth":
                 parts.append(label)
             else:
-                op_map = {"gte": "≥", "lte": "≤", "gt": ">", "lt": "<", "eq": "="}
-                parts.append(f"{label}{op_map.get(op, op)}{value}")
+                parts.append(f"{label}{_OP_WORDS.get(op, op)}{_format_condition_value(field, value)}")
         return f" {logic_word} ".join(parts)

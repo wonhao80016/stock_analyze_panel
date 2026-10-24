@@ -418,9 +418,17 @@ def get_cached(
         return pick_grades.grade_cached_payload(empty, engine, data_dir)
 
     ext_values = _load_ext_value_maps(request.app.state.repo, ext_columns)
-    payload = _attach_instrument_names(
-        request.app.state.repo, _cache_payload_with_ext(cached, ext_values)
-    )
+    payload = _cache_payload_with_ext(cached, ext_values)
+    # Rows are shared with the monitor engine and the cache reader; name them on copies.
+    payload = {
+        **payload,
+        "results": {
+            sid: {**result, "rows": [dict(row) for row in result.get("rows") or []]}
+            if isinstance(result, dict) else result
+            for sid, result in (payload.get("results") or {}).items()
+        },
+    }
+    payload = _attach_instrument_names(request.app.state.repo, payload)
     return pick_grades.grade_cached_payload(payload, engine, data_dir)
 
 
