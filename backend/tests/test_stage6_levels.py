@@ -22,6 +22,7 @@ from app.taiwan.corporate_actions import TaiwanCorporateActionStore, corporate_a
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
 from app.taiwan.enrichment.corporate_actions import ETF_SPLIT, EXDIV
+from app.taiwan.market_rules import TickSizeClass, TickSizeModel
 from app.taiwan.universe import TaiwanSecurityMaster
 from app.taiwan.universe.models import TaiwanInstrument
 from app.tickflow.repository import DataStore, KlineRepository
@@ -34,8 +35,7 @@ EX_RIGHTS = "6669.TWSE"
 UNADJUSTED = {SPLIT: "0051.TWSE", DIVIDEND: "1102.TWSE", EX_RIGHTS: "6670.TWSE"}
 SYMBOLS = [SPLIT, DIVIDEND, EX_RIGHTS]
 SESSIONS = 300
-# The dividend falls on the last session: the gap fill rule counts any later bar overlapping the
-# gap as a fill, which would hide the unadjusted twin's gap.
+# The dividend falls on the last session, so no later bar can fill or shrink the unadjusted twin's gap.
 EVENT_AT = {SPLIT: SESSIONS - 40, DIVIDEND: SESSIONS - 1, EX_RIGHTS: SESSIONS - 60}
 PRICE_FACTOR = {SPLIT: 4.0, DIVIDEND: 1.10, EX_RIGHTS: 2.98}
 VOLUME_FACTOR = {SPLIT: 4.0, DIVIDEND: 1.0, EX_RIGHTS: 1.0}
@@ -222,6 +222,11 @@ def _values(response: dict, group: str, label: str | None = None) -> list[float]
     return [p["value"] for p in response["levels"][group] if label is None or p["label"] == label]
 
 
+def _tick(value: float, mode: str) -> float:
+    """The repository resolves every fixture symbol as a stock, and the newest bar is unadjusted."""
+    return TickSizeModel.round_order_price(value, TickSizeClass.ORDINARY_STOCK, mode=mode)
+
+
 @pytest.mark.parametrize("symbol", SYMBOLS)
 def test_the_requested_window_covers_the_event_and_250_sessions(symbol):
     window = _window(ADJUSTED[symbol])
@@ -237,10 +242,10 @@ def test_extreme_levels_are_the_adjusted_highs_and_lows(levels, symbol):
     for n in (60, 250):
         recent = window[-n:]
         assert _values(response, "extreme", f"{n}日新高") == [
-            round(max(b["high"] for b in recent), 2)
+            _tick(max(b["high"] for b in recent), "ceil")
         ]
         assert _values(response, "extreme", f"{n}日新低") == [
-            round(min(b["low"] for b in recent), 2)
+            _tick(min(b["low"] for b in recent), "floor")
         ]
 
 
@@ -253,7 +258,7 @@ def test_chip_and_fibonacci_levels_stay_inside_the_adjusted_range(levels, symbol
     for group in ("sr", "extreme", "fib"):
         values = _values(response, group)
         assert values, group
-        assert all(round(low, 2) - 0.01 <= v <= round(high, 2) + 0.01 for v in values), (
+        assert all(_tick(low, "floor") <= v <= _tick(high, "ceil") for v in values), (
             group,
             values,
         )
@@ -262,8 +267,8 @@ def test_chip_and_fibonacci_levels_stay_inside_the_adjusted_range(levels, symbol
 @pytest.mark.parametrize("symbol", SYMBOLS)
 def test_the_unadjusted_twin_shows_the_stale_scale(levels, symbol):
     """Control: the same bars without the corporate action keep the pre-event high."""
-    raw_high = round(max(b["high"] for b in _window(RAW[symbol])[-250:]), 2)
-    adjusted_high = round(max(b["high"] for b in _window(ADJUSTED[symbol])[-250:]), 2)
+    raw_high = _tick(max(b["high"] for b in _window(RAW[symbol])[-250:]), "ceil")
+    adjusted_high = _tick(max(b["high"] for b in _window(ADJUSTED[symbol])[-250:]), "ceil")
     assert raw_high > adjusted_high * 1.05
     assert _values(levels(UNADJUSTED[symbol]), "extreme", "250日新高") == [raw_high]
 
@@ -279,6 +284,6 @@ def test_the_unadjusted_twin_reports_the_dividend_drop_as_a_downward_gap(levels)
     raw, at = RAW[DIVIDEND], EVENT_AT[DIVIDEND]
     assert raw[at]["high"] < raw[at - 1]["low"]
     gaps = levels(UNADJUSTED[DIVIDEND])["levels"]["gap"]
-    assert [(p["label"], p["value"]) for p in gaps] == [
-        ("向下缺口", round((raw[at]["high"] + raw[at - 1]["low"]) / 2, 2)),
-    ]
+    middle = (raw[at]["high"] + raw[at - 1]["low"]) / 2
+    assert middle > raw[at]["close"] * 1.001
+    assert [(p["label"], p["value"]) for p in gaps] == [("向下缺口", _tick(middle, "ceil"))]

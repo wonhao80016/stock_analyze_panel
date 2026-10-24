@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.indicators.levels import compute_levels, summarize_levels
+from app.indicators.levels import KELTNER_TIERS, compute_levels, keltner_bands, summarize_levels
+from app.taiwan.market_rules import TickSizeClass
+from app.taiwan.realtime.calendar import get_market_status, taipei_now
+from app.taiwan.realtime.models import MarketStatus
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +53,9 @@ def _build_series(df: pl.DataFrame) -> dict:
     返回结构(每个 value 都是按日期对齐的数组):
       {
         "boll":      {"upper": [...], "lower": [...]},
-        "keltner_s": {"upper": [...], "lower": [...]},   # 短期 MA20±2ATR
-        "keltner_m": {"upper": [...], "lower": [...]},   # 中期 MA60±2.5ATR
-        "keltner_l": {"upper": [...], "lower": [...]},   # 长期 MA120±3ATR
+        "keltner_s": {"upper": [...], "lower": [...]},   # EMA20 ± 2 * ATR10
+        "keltner_m": {"upper": [...], "lower": [...]},   # EMA60 ± 2.5 * ATR10
+        "keltner_l": {"upper": [...], "lower": [...]},   # EMA120 ± 3 * ATR10
         "atr":       {"stop_loss": [...], "take_profit": [...]},  # close∓2ATR
       }
     """
@@ -71,25 +74,13 @@ def _build_series(df: pl.DataFrame) -> dict:
             "mid": _to_float_list(df["ma20"]) if "ma20" in df.columns else None,
         }
 
-    # Keltner 通道三档(需要 ATR)
+    for key, (window, mult, _label) in KELTNER_TIERS.items():
+        bands = keltner_bands(df, window, mult)
+        if bands is not None:
+            out[key] = {"upper": _to_float_list(bands[0]), "lower": _to_float_list(bands[1])}
+
     if has_atr:
         atr = df["atr_14"]
-        # MA120 现场算(不在预计算列中)
-        ma120 = df.select(pl.col("close").rolling_mean(120))["close"] if df.height >= 120 else None
-
-        def _channel(ma: pl.Series, n: float) -> dict:
-            return {
-                "upper": _to_float_list(ma + n * atr),
-                "lower": _to_float_list(ma - n * atr),
-            }
-
-        if "ma20" in df.columns:
-            out["keltner_s"] = _channel(df["ma20"], 2.0)
-        if "ma60" in df.columns:
-            out["keltner_m"] = _channel(df["ma60"], 2.5)
-        if ma120 is not None:
-            out["keltner_l"] = _channel(ma120, 3.0)
-
         # ATR 止损/止盈: close ± 2×ATR(跟随行情漂移的动态止损线)
         out["atr"] = {
             "stop_loss": _to_float_list(close - 2 * atr),
@@ -97,6 +88,25 @@ def _build_series(df: pl.DataFrame) -> dict:
         }
 
     return out
+
+
+_TICK_CLASSES = {"stock": TickSizeClass.ORDINARY_STOCK, "etf": TickSizeClass.ETF}
+_COMPLETED_SESSION_STATUSES = (
+    MarketStatus.POST_CLOSE,
+    MarketStatus.CLOSED,
+    MarketStatus.NON_TRADING_DAY,
+)
+
+
+def _last_bar_is_live(df: pl.DataFrame) -> bool:
+    """Whether the newest bar is today's session bar, still forming from the pre-open to the close."""
+    if "date" not in df.columns:
+        return False
+    last = df["date"][-1]
+    if isinstance(last, datetime):
+        last = last.date()
+    now = taipei_now()
+    return last == now.date() and get_market_status(now) not in _COMPLETED_SESSION_STATUSES
 
 
 @router.get("/levels")
@@ -118,16 +128,19 @@ def get_levels(
     repo = request.app.state.repo
     end = date.today()
     start = end - timedelta(days=days * 2)
+    asset_type = repo.resolve_asset_type(symbol)
     # 按资产类型分流: ETF/指数走独立 enriched 存储, 股票保持原路径
-    df = repo.get_daily_asset(repo.resolve_asset_type(symbol), symbol, start, end)
+    df = repo.get_daily_asset(asset_type, symbol, start, end)
     if df.is_empty():
         return {"levels": {"sr": [], "pivot": [], "extreme": [],
                            "boll": [], "keltner_s": [], "keltner_m": [], "keltner_l": [],
                            "atr_stop": [], "gap": [], "fib": [], "round": []},
-                "close": None, "summary": "无数据", "symbol": symbol,
+                "close": None, "summary": "無數據", "symbol": symbol,
                 "dates": [], "series": {}}
 
-    levels = compute_levels(df)
+    levels = compute_levels(
+        df, last_bar_live=_last_bar_is_live(df), tick_class=_TICK_CLASSES.get(asset_type)
+    )
     close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
     # 日期 + 带状曲线序列(供前端画 Keltner/ATR/布林带曲线)
     dates = df["date"].to_list()

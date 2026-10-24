@@ -1,21 +1,21 @@
-"""关键价位计算 —— 独立模块,纯函数,无 IO / 无存储。
+"""Key price levels: pure functions over forward-adjusted daily bars, with no IO.
 
-输入: 已经包含 OHLCV 的 polars 日 K DataFrame(内存中,通常来自 KlineRepository 缓存)。
-输出: 4 类结构化价位点,供:
-  - 图表 markLine 渲染(压力位 / 支撑位 / 成交密集区 / 枢轴点 / 前高前低)
-  - AI 个股分析提示词(价位上下文)
-
-设计:
-  - 纯函数 + polars 向量化,毫秒级,无需落盘。
-  - 每个点位带 {value, label, type, side, strength?},前端直接画水平价格线。
-  - NaN/Inf 全部过滤,空数据返回空列表,不抛异常。
+Each group of LEVEL_TYPES yields points {value, label, type, side, strength?, rank?} for the chart
+and price alerts. A group that cannot be computed is empty without affecting the others, and
+non-finite or non-positive values are dropped.
 """
 from __future__ import annotations
 
 import logging
+import math
+from datetime import date, datetime
 from typing import Any
 
+import numpy as np
 import polars as pl
+
+from app.indicators.pipeline import ema_values, wilder_values
+from app.taiwan.market_rules import TickSizeClass, TickSizeModel
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class PriceLevel:
 
     {
       "value": 12.34,          # 价格
-      "label": "压力位 R1",     # 显示标签
+      "label": "壓力位 R1",     # 显示标签
       "type": "pivot",         # 类型分组(同类型用一个开关按钮控制显隐)
       "side": "resistance",    # 方向:resistance(压力) / support(支撑) / neutral
       "strength": "medium",    # 强度:strong / medium / weak(可选,影响线型)
@@ -41,18 +41,26 @@ class PriceLevel:
 
 # 价位分组 → 开关 key。前端按这个 type 显隐。
 LEVEL_TYPES = {
-    "sr": "压力支撑",        # 成交密集区(价量:Volume Profile POC + 高成交密集区)
-    "pivot": "枢轴点",        # 经典 Pivot P/R/S
+    "sr": "壓力支撐",        # 成交密集区(价量:Volume Profile POC + 高成交密集区)
+    "pivot": "樞軸點",        # 经典 Pivot P/R/S
     "extreme": "前高前低",    # 60/250 日极值 + 近期 swing 高低点
-    "boll": "布林带",         # MA20 ± 2σ,标准差波动带(参考性,非真实支撑压力)
-    "keltner_s": "Keltner短期",  # MA20 ± 2×ATR
-    "keltner_m": "Keltner中期",  # MA60 ± 2.5×ATR
-    "keltner_l": "Keltner长期",  # MA120 ± 3×ATR(牛熊趋势边界)
-    "atr_stop": "ATR波动通道",    # close±nATR 动态波动带(中性命名,非操作指令)
+    "boll": "布林帶",         # MA20 ± 2σ,标准差波动带(参考性,非真实支撑压力)
+    "keltner_s": "Keltner短期",  # EMA20 ± 2×ATR10
+    "keltner_m": "Keltner中期",  # EMA60 ± 2.5×ATR10
+    "keltner_l": "Keltner長期",  # EMA120 ± 3×ATR10
+    "atr_stop": "ATR波動通道",    # close±nATR 动态波动带(中性命名,非操作指令)
     "gap": "缺口位",          # 未回补跳空缺口
     "fib": "斐波那契",        # 回撤位 0.236~0.786
-    "round": "整数关口",      # 心理整数位
+    "round": "整數關口",      # 心理整数位
 }
+
+# Keltner tiers: group key -> (EMA window, ATR multiple, label prefix).
+KELTNER_TIERS: dict[str, tuple[int, float, str]] = {
+    "keltner_s": (20, 2.0, "短期"),
+    "keltner_m": (60, 2.5, "中期"),
+    "keltner_l": (120, 3.0, "長期"),
+}
+KELTNER_ATR_WINDOW = 10
 
 
 # ================================================================
@@ -155,7 +163,7 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
 
     close = float(df.tail(1)["close"][0])
     if chip_model:
-        poc_label, zone_label = "成交密集区(POC)", "成交密集区"
+        poc_label, zone_label = "成交密集區(POC)", "成交密集區"
     else:
         poc_label, zone_label = "量能POC", "量能密集區"
 
@@ -163,7 +171,7 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
     # POC: 当前筹码量最大的桶(最多人持仓的成本区)
     poc_pos = max(range(len(vals)), key=lambda i: vals[i])
     poc_mid = bin_mid(bin_ids[poc_pos])
-    out.append({"value": round(poc_mid, 2), "label": poc_label,
+    out.append({"value": poc_mid, "label": poc_label,
                 "type": "sr", "side": _side(poc_mid, close), "strength": "strong"})
 
     # 其他高筹码区(高于均值, 排除 POC), 按筹码量降序取 2 个
@@ -171,7 +179,7 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
     candidates.sort(key=lambda x: x[1], reverse=True)
     for i, _v in candidates[:2]:
         mid = bin_mid(bin_ids[i])
-        out.append({"value": round(mid, 2), "label": zone_label,
+        out.append({"value": mid, "label": zone_label,
                     "type": "sr", "side": _side(mid, close), "strength": "medium"})
     return out
 
@@ -180,17 +188,17 @@ def _support_resistance(df: pl.DataFrame, bins: int = 40) -> list[dict]:
 # 2. 枢轴点 (Pivot Point) —— 经典公式,基于最近完整交易日
 # ================================================================
 
-def _pivot_points(df: pl.DataFrame) -> list[dict]:
-    """经典 Pivot:P = (H+L+C)/3, R1/R2/R3, S1/S2/S3。
+def _pivot_points(df: pl.DataFrame, last_bar_live: bool = False) -> list[dict]:
+    """Classic pivots P = (H+L+C)/3 with R1-R3 and S1-S3, from the newest completed session.
 
-    基准:最后 1 根 K(代表"上一交易日")。实务中常用前一日,这里取最后一根。
+    A live last bar is still forming, so the bar before it is the base.
     """
-    if df.is_empty():
+    if df.height < (2 if last_bar_live else 1):
         return []
-    last = df.tail(1)
-    h = last["high"][0]
-    l = last["low"][0]
-    c = last["close"][0]
+    base = df.slice(-2, 1) if last_bar_live else df.tail(1)
+    h = base["high"][0]
+    l = base["low"][0]
+    c = base["close"][0]
     if not _ok(h) or not _ok(l) or not _ok(c):
         return []
 
@@ -209,17 +217,17 @@ def _pivot_points(df: pl.DataFrame) -> list[dict]:
         #   1 = R1/S1(第一档压力/支撑)
         #   2 = R2/S2(第二档)
         #   3 = R3/S3(第三档,极端,实际很少触及)
-        return {"value": round(v, 2), "label": label, "type": "pivot",
+        return {"value": v, "label": label, "type": "pivot",
                 "side": side, "strength": strength, "rank": rank}
 
     return [
-        lv(p, "枢轴位 P", "neutral", "strong", 0),
-        lv(r1, "压力位 R1", "resistance", "medium", 1),
-        lv(r2, "压力位 R2", "resistance", "medium", 2),
-        lv(r3, "压力位 R3", "resistance", "weak", 3),
-        lv(s1, "支撑位 S1", "support", "medium", 1),
-        lv(s2, "支撑位 S2", "support", "medium", 2),
-        lv(s3, "支撑位 S3", "support", "weak", 3),
+        lv(p, "樞軸位 P", "neutral", "strong", 0),
+        lv(r1, "壓力位 R1", "resistance", "medium", 1),
+        lv(r2, "壓力位 R2", "resistance", "medium", 2),
+        lv(r3, "壓力位 R3", "resistance", "weak", 3),
+        lv(s1, "支撐位 S1", "support", "medium", 1),
+        lv(s2, "支撐位 S2", "support", "medium", 2),
+        lv(s3, "支撐位 S3", "support", "weak", 3),
     ]
 
 
@@ -245,13 +253,13 @@ def _extreme_levels(df: pl.DataFrame) -> list[dict]:
         if df.height < n:
             continue
         sub = df.tail(n)
-        hi = float(sub["high"].max())
-        lo = float(sub["low"].min())
+        hi = sub["high"].max()
+        lo = sub["low"].min()
         if _ok(hi):
-            out.append({"value": round(hi, 2), "label": f"{n}日新高",
+            out.append({"value": float(hi), "label": f"{n}日新高",
                         "type": "extreme", "side": "resistance", "strength": "strong"})
         if _ok(lo):
-            out.append({"value": round(lo, 2), "label": f"{n}日新低",
+            out.append({"value": float(lo), "label": f"{n}日新低",
                         "type": "extreme", "side": "support", "strength": "strong"})
 
     # —— 近期 swing 高低点(每侧只取距当前价最近的 2 个,避免点位爆炸)——
@@ -267,19 +275,17 @@ def _extreme_levels(df: pl.DataFrame) -> list[dict]:
             if lows[i] == min(lows[i - win:i + win + 1]):
                 swing_lows.append(float(lows[i]))
 
-        # 聚合 ±1% 相近价位,再按距当前价排序取最近 2 个
-        agg_h = _aggregate_levels(swing_highs, 0.01)
-        agg_h = [v for v in agg_h if v > close * 1.001]
+        # Filter by side before merging, so a group straddling the close cannot hide a valid level.
+        agg_h = _aggregate_levels([v for v in swing_highs if v > close * 1.001], 0.01)
         agg_h.sort(key=lambda v: abs(v - close))
         for v in agg_h[:2]:
-            out.append({"value": round(v, 2), "label": "前高",
+            out.append({"value": v, "label": "前高",
                         "type": "extreme", "side": "resistance", "strength": "medium"})
 
-        agg_l = _aggregate_levels(swing_lows, 0.01)
-        agg_l = [v for v in agg_l if v < close * 0.999]
+        agg_l = _aggregate_levels([v for v in swing_lows if v < close * 0.999], 0.01)
         agg_l.sort(key=lambda v: abs(v - close))
         for v in agg_l[:2]:
-            out.append({"value": round(v, 2), "label": "前低",
+            out.append({"value": v, "label": "前低",
                         "type": "extreme", "side": "support", "strength": "medium"})
 
     return out
@@ -289,46 +295,51 @@ def _extreme_levels(df: pl.DataFrame) -> list[dict]:
 # 4. 波动通道 —— 布林带 + Keltner 三档,各自独立开关
 # ================================================================
 
-def _ma_value(df: pl.DataFrame, ma_col: str | None, window: int) -> float | None:
-    """取某档均线值:优先用预计算列,缺失则现场 rolling_mean。"""
-    last = df.tail(1)
-    if ma_col and ma_col in df.columns:
-        v = last[ma_col][0]
-        return float(v) if _ok(v) else None
-    if df.height >= window:
-        v = df.select(pl.col("close").rolling_mean(window)).tail(1)["close"][0]
-        return float(v) if _ok(v) else None
-    return None
+def keltner_bands(df: pl.DataFrame, window: int, mult: float) -> tuple[pl.Series, pl.Series] | None:
+    """Per-bar Keltner (upper, lower): EMA(window) ± mult * ATR10, Linda Raschke's modern form.
 
-
-def _keltner_band(
-    df: pl.DataFrame, ma_col: str | None, window: int, n: float,
-    label_short: str, type_key: str,
-) -> list[dict]:
-    """单档 Keltner 通道:均线 ± n×ATR。
-
-    ATR 自适应波动,通道宽度随行情自动收缩/扩张。type_key 决定归入哪一组
-    (keltner_s / keltner_m / keltner_l),前端各自独立开关。
+    The 20-day tier at 2 ATR is Raschke's standard; the 60- and 120-day tiers are this project's
+    longer variants of the same construction. EMA is SMA-seeded and ATR is Wilder's, as in the
+    pipeline; a published ema{window} column is preferred over one computed on this window.
+    Returns None without high, low and close.
     """
-    if df.is_empty() or df.height < 20 or "atr_14" not in df.columns:
-        return []
-    last = df.tail(1)
-    close = float(last["close"][0]) if "close" in df.columns else 0
-    atr = float(last["atr_14"][0])
-    if not close or not _ok(atr):
-        return []
+    if df.is_empty() or not {"high", "low", "close"} <= set(df.columns):
+        return None
+    offsets = np.array([0, df.height], dtype=np.int64)
+    close = df["close"].cast(pl.Float64).to_numpy()
+    high = df["high"].cast(pl.Float64).to_numpy()
+    low = df["low"].cast(pl.Float64).to_numpy()
+    ema_col = f"ema{window}"
+    ema = (
+        df[ema_col].cast(pl.Float64).to_numpy()
+        if ema_col in df.columns
+        else ema_values(close, offsets, window)
+    )
+    prev_close = np.concatenate(([np.nan], close[:-1]))
+    true_range = np.maximum.reduce(
+        [high - low, np.abs(high - prev_close), np.abs(low - prev_close)]
+    )
+    atr = wilder_values(true_range, offsets, KELTNER_ATR_WINDOW)
+    return (
+        pl.Series("upper", ema + mult * atr, dtype=pl.Float64, nan_to_null=True),
+        pl.Series("lower", ema - mult * atr, dtype=pl.Float64, nan_to_null=True),
+    )
 
-    ma_val = _ma_value(df, ma_col, window)
-    if ma_val is None:
+
+def _keltner_band(df: pl.DataFrame, type_key: str) -> list[dict]:
+    window, mult, label_short = KELTNER_TIERS[type_key]
+    bands = keltner_bands(df, window, mult)
+    close = df.tail(1)["close"][0] if "close" in df.columns else None
+    if bands is None or not _ok(close):
         return []
-    upper = ma_val + n * atr
-    lower = ma_val - n * atr
-    return [
-        {"value": round(upper, 2), "label": f"{label_short}通道上轨",
-         "type": type_key, "side": _side(upper, close), "strength": "medium"},
-        {"value": round(lower, 2), "label": f"{label_short}通道下轨",
-         "type": type_key, "side": _side(lower, close), "strength": "medium"},
-    ]
+    close = float(close)
+    out: list[dict] = []
+    for series, edge in zip(bands, ("上軌", "下軌"), strict=True):
+        v = series[-1]
+        if _ok(v):
+            out.append({"value": float(v), "label": f"{label_short}通道{edge}",
+                        "type": type_key, "side": _side(float(v), close), "strength": "medium"})
+    return out
 
 
 def _boll_channel(df: pl.DataFrame) -> list[dict]:
@@ -349,9 +360,9 @@ def _boll_channel(df: pl.DataFrame) -> list[dict]:
         return []
     bu, bl = float(bu), float(bl)
     out = [
-        {"value": round(bu, 2), "label": "布林上轨",
+        {"value": bu, "label": "布林上軌",
          "type": "boll", "side": _side(bu, close), "strength": "medium"},
-        {"value": round(bl, 2), "label": "布林下轨",
+        {"value": bl, "label": "布林下軌",
          "type": "boll", "side": _side(bl, close), "strength": "medium"},
     ]
     # 布林中轨 = MA20(多空平衡线,价格在其上下分强弱);数据层已预计算 ma20
@@ -359,24 +370,21 @@ def _boll_channel(df: pl.DataFrame) -> list[dict]:
         mid = last["ma20"][0]
         if _ok(mid):
             mid = float(mid)
-            out.append({"value": round(mid, 2), "label": "布林中轨",
+            out.append({"value": mid, "label": "布林中軌",
                         "type": "boll", "side": _side(mid, close), "strength": "medium"})
     return out
 
 
 def _keltner_short(df: pl.DataFrame) -> list[dict]:
-    """Keltner 短期:MA20 ± 2×ATR(近期波动带,约一个月)。"""
-    return _keltner_band(df, "ma20", 20, 2.0, "短期", "keltner_s")
+    return _keltner_band(df, "keltner_s")
 
 
 def _keltner_mid(df: pl.DataFrame) -> list[dict]:
-    """Keltner 中期:MA60 ± 2.5×ATR(季度波动带)。"""
-    return _keltner_band(df, "ma60", 60, 2.5, "中期", "keltner_m")
+    return _keltner_band(df, "keltner_m")
 
 
 def _keltner_long(df: pl.DataFrame) -> list[dict]:
-    """Keltner 长期:MA120 ± 3×ATR(半年波动带,牛熊趋势边界)。"""
-    return _keltner_band(df, None, 120, 3.0, "长期", "keltner_l")
+    return _keltner_band(df, "keltner_l")
 
 
 # ================================================================
@@ -395,20 +403,21 @@ def _atr_stops(df: pl.DataFrame) -> list[dict]:
     if df.is_empty() or "atr_14" not in df.columns:
         return []
     last = df.tail(1)
-    close = float(last["close"][0])
-    atr = float(last["atr_14"][0])
+    close = last["close"][0]
+    atr = last["atr_14"][0]
     if not _ok(close) or not _ok(atr):
         return []
+    close, atr = float(close), float(atr)
 
     def lv(v: float, label: str, side: str, strength: str) -> dict:
-        return {"value": round(v, 2), "label": label, "type": "atr_stop",
+        return {"value": v, "label": label, "type": "atr_stop",
                 "side": side, "strength": strength}
 
     return [
-        lv(close + 2 * atr, "ATR 上轨(+2)", "resistance", "medium"),
-        lv(close + 1.5 * atr, "ATR 上轨(+1.5)", "resistance", "weak"),
-        lv(close - 1.5 * atr, "ATR 下轨(-1.5)", "support", "weak"),
-        lv(close - 2 * atr, "ATR 下轨(-2)", "support", "medium"),
+        lv(close + 2 * atr, "ATR 上軌(+2)", "resistance", "medium"),
+        lv(close + 1.5 * atr, "ATR 上軌(+1.5)", "resistance", "weak"),
+        lv(close - 1.5 * atr, "ATR 下軌(-1.5)", "support", "weak"),
+        lv(close - 2 * atr, "ATR 下軌(-2)", "support", "medium"),
     ]
 
 
@@ -417,15 +426,13 @@ def _atr_stops(df: pl.DataFrame) -> list[dict]:
 # ================================================================
 
 def _gap_levels(df: pl.DataFrame, lookback: int = 120) -> list[dict]:
-    """近期未回补的向上/向下跳空缺口。
+    """Unfilled price gaps of the last *lookback* bars, at most 3 per direction nearest the close.
 
-    向上缺口:当日 low > 前日 high(开盘跳空高开,全天未回补)
-    向下缺口:当日 high < 前日 low(开盘跳空低开,全天未回补)
-
-    缺口是天然的支撑/阻力位。只保留"未回补"的:缺口形成后,后续任何一根 K 线的
-    价格(low/high)只要回到缺口区间内,就算已回补(支撑/阻力已被测试消化),过滤掉。
-    这与"当前价是否在缺口内"无关 —— 即使价格后来远离,只要曾经回补过就不算有效缺口。
-    最后按价格聚合相近缺口(±0.5%),每方向只取距当前价最近的 2~3 个。
+    An upward gap lies between a bar's high and the next bar's higher low. A later low at or below
+    its lower edge fills it, and it is dropped; a later low inside it fills it partially, and only
+    the part below that low stays open. A gap left behind by a later gap in the same direction
+    stays open. Downward gaps mirror this. Each level is the middle of the open part, and nearby
+    levels within 0.5% are merged.
     """
     if df.is_empty() or df.height < 5:
         return []
@@ -434,9 +441,7 @@ def _gap_levels(df: pl.DataFrame, lookback: int = 120) -> list[dict]:
     highs = sub["high"].to_list()
     lows = sub["low"].to_list()
 
-    # 收集缺口: (形成位置 i, 缺口下沿, 缺口上沿)
-    # 向上缺口: 第 i 日 low > 第 i-1 日 high, 缺口区间 = (highs[i-1], lows[i])
-    # 向下缺口: 第 i 日 high < 第 i-1 日 low, 缺口区间 = (highs[i], lows[i-1])
+    # (bar where the gap formed, lower edge, upper edge)
     up_gaps: list[tuple[int, float, float]] = []
     dn_gaps: list[tuple[int, float, float]] = []
     for i in range(1, len(highs)):
@@ -446,33 +451,38 @@ def _gap_levels(df: pl.DataFrame, lookback: int = 120) -> list[dict]:
             elif highs[i] < lows[i - 1]:
                 dn_gaps.append((i, float(highs[i]), float(lows[i - 1])))
 
-    def _filter_unfilled(gaps: list[tuple[int, float, float]]) -> list[float]:
-        """过滤掉已被回补的缺口。
+    def _open_part(i: int, g_lo: float, g_hi: float, upward: bool) -> tuple[float, float] | None:
+        for j in range(i + 1, len(highs)):
+            if upward:
+                if not _ok(lows[j]):
+                    continue
+                if lows[j] <= g_lo:
+                    return None
+                g_hi = min(g_hi, float(lows[j]))
+            else:
+                if not _ok(highs[j]):
+                    continue
+                if highs[j] >= g_hi:
+                    return None
+                g_lo = max(g_lo, float(highs[j]))
+        return g_lo, g_hi
 
-        回补判定: 缺口在位置 i 形成, 向后扫描 i+1..end, 只要任意一根 K 线的价格区间
-        完全覆盖缺口真空带(low <= g_hi 且 high >= g_lo), 即价格真正穿越了缺口 → 已回补。
-        仅"触及缺口边缘"(如 low 跌到上沿)不算回补, 因为缺口是价格真空带, 必须整个
-        被某根 K 线的高低区间覆盖才算填补了真空。
-        """
+    def _unfilled(gaps: list[tuple[int, float, float]], upward: bool) -> list[float]:
         mids: list[float] = []
         for i, g_lo, g_hi in gaps:
-            filled = False
-            for j in range(i + 1, len(highs)):
-                if lows[j] <= g_hi and highs[j] >= g_lo:
-                    filled = True
-                    break
-            if not filled:
-                mids.append((g_lo + g_hi) / 2)
+            part = _open_part(i, g_lo, g_hi, upward)
+            if part is not None:
+                mids.append((part[0] + part[1]) / 2)
         agg = _aggregate_levels(mids, 0.005)
         agg.sort(key=lambda v: abs(v - close))
         return agg[:3]
 
     out: list[dict] = []
-    for mid in _filter_unfilled(up_gaps):
-        out.append({"value": round(mid, 2), "label": "向上缺口",
+    for mid in _unfilled(up_gaps, upward=True):
+        out.append({"value": mid, "label": "向上缺口",
                     "type": "gap", "side": _side(mid, close), "strength": "medium"})
-    for mid in _filter_unfilled(dn_gaps):
-        out.append({"value": round(mid, 2), "label": "向下缺口",
+    for mid in _unfilled(dn_gaps, upward=False):
+        out.append({"value": mid, "label": "向下缺口",
                     "type": "gap", "side": _side(mid, close), "strength": "medium"})
     return out
 
@@ -514,7 +524,7 @@ def _fibonacci_levels(df: pl.DataFrame, window: int = 120) -> list[dict]:
             val = hi_val - rng * r          # 从高点向下回撤
         else:
             val = lo_val + rng * r          # 从低点向上回撤
-        out.append({"value": round(val, 2), "label": f"Fib {int(r * 1000) / 10:.1f}%",
+        out.append({"value": val, "label": f"Fib {int(r * 1000) / 10:.1f}%",
                     "type": "fib", "side": _side(val, close), "strength": "medium"})
     return out
 
@@ -523,17 +533,16 @@ def _fibonacci_levels(df: pl.DataFrame, window: int = 120) -> list[dict]:
 # 8. 整数关口 —— 心理支撑/阻力位
 # ================================================================
 
-def _round_numbers(df: pl.DataFrame, pct: float = 0.10, max_count: int = 8) -> list[dict]:
-    """当前价附近的心理整数关口。
+# Ordinary-stock tick -> round-number step in ticks.
+_ROUND_STEP_TICKS = {0.01: 50, 0.05: 20, 0.10: 50, 0.50: 20, 1.00: 50, 5.00: 20}
 
-    整数位(如 10/11/12元,或 60/65/70元)是天然的心理支撑/阻力,
-    低价股尤其明显。按价格量级自适应步长:
-      - 价格 < 10:   步长 0.5  (如 6.5, 7.0, 7.5)
-      - 价格 < 20:   步长 1    (如 11, 12, 13)
-      - 价格 < 100:  步长 5    (如 60, 65, 70)
-      - 价格 < 500:  步长 10   (如 110, 120, 130)
-      - 价格 >= 500: 步长 50   (如 1100, 1150, 1200)
-    过滤掉距当前价 <1% 的(太近,无分析价值),最多 max_count 个。
+
+def _round_numbers(df: pl.DataFrame, pct: float = 0.10, max_count: int = 8) -> list[dict]:
+    """Psychological round-number levels within *pct* of the close, at most *max_count*.
+
+    The step follows the Taiwan ordinary-stock tick tier of the close: tick * _ROUND_STEP_TICKS,
+    i.e. 0.5 under 10, 1 for 10-50, 5 for 50-100, 10 for 100-500, 50 for 500-1000 and 100 from
+    1000. Levels within 1% of the close are dropped.
     """
     if df.is_empty():
         return []
@@ -541,16 +550,8 @@ def _round_numbers(df: pl.DataFrame, pct: float = 0.10, max_count: int = 8) -> l
     if not _ok(close):
         return []
 
-    if close < 10:
-        step = 0.5
-    elif close < 20:
-        step = 1.0
-    elif close < 100:
-        step = 5.0
-    elif close < 500:
-        step = 10.0
-    else:
-        step = 50.0
+    tick = TickSizeModel.get_tick_size(close, TickSizeClass.ORDINARY_STOCK)
+    step = round(tick * _ROUND_STEP_TICKS[tick], 4)
 
     lo = close * (1 - pct)
     hi = close * (1 + pct)
@@ -570,46 +571,83 @@ def _round_numbers(df: pl.DataFrame, pct: float = 0.10, max_count: int = 8) -> l
         # 过滤距当前价 <1% 的(太近,无分析价值)
         if abs(v - close) / close < 0.01:
             continue
-        out.append({"value": round(v, 2), "label": f"整数关口 {v:g}",
+        out.append({"value": v, "label": f"整數關口 {v:g}",
                     "type": "round", "side": _side(v, close), "strength": "weak"})
     return out
 
-def compute_levels(df: pl.DataFrame) -> dict[str, list[dict]]:
-    """计算 11 类价位点,返回 {分组key: [点位...]}。
 
-    分组 key 与 LEVEL_TYPES 一致(sr / pivot / extreme / boll /
-    keltner_s / keltner_m / keltner_l / atr_stop / gap / fib / round),
-    前端按 key 渲染开关按钮,逐组显隐。
+def compute_levels(
+    df: pl.DataFrame,
+    *,
+    last_bar_live: bool = False,
+    tick_class: TickSizeClass | None = None,
+) -> dict[str, list[dict]]:
+    """Compute every LEVEL_TYPES group, returning {group key: [points]}.
+
+    last_bar_live marks the newest bar as a session still trading, which pivots skip. With a
+    tick_class each value is snapped to the Taiwan tick of its raw-price equivalent: resistance
+    rounds up, support down and neutral to the nearest tick. Without one, values keep 2 decimals.
+    A group that raises is left empty.
     """
     if df.is_empty():
         return {k: [] for k in LEVEL_TYPES}
 
-    try:
-        return {
-            "sr": _support_resistance(df),
-            "pivot": _pivot_points(df),
-            "extreme": _extreme_levels(df),
-            "boll": _boll_channel(df),
-            "keltner_s": _keltner_short(df),
-            "keltner_m": _keltner_mid(df),
-            "keltner_l": _keltner_long(df),
-            "atr_stop": _atr_stops(df),
-            "gap": _gap_levels(df),
-            "fib": _fibonacci_levels(df),
-            "round": _round_numbers(df),
-        }
-    except Exception as e:  # noqa: BLE001
-        logger.warning("compute_levels failed: %s", e)
-        return {k: [] for k in LEVEL_TYPES}
+    builders = {
+        "sr": _support_resistance,
+        "pivot": lambda frame: _pivot_points(frame, last_bar_live),
+        "extreme": _extreme_levels,
+        "boll": _boll_channel,
+        "keltner_s": _keltner_short,
+        "keltner_m": _keltner_mid,
+        "keltner_l": _keltner_long,
+        "atr_stop": _atr_stops,
+        "gap": _gap_levels,
+        "fib": _fibonacci_levels,
+        "round": _round_numbers,
+    }
+    snap = _tick_snapper(df, tick_class)
+    out: dict[str, list[dict]] = {}
+    for key, build in builders.items():
+        try:
+            points = build(df)
+        except Exception as e:
+            logger.warning("compute_levels %s failed: %s", key, e, exc_info=True)
+            points = []
+        snapped = ({**p, "value": snap(p["value"], p["side"])} for p in points if _ok(p["value"]))
+        out[key] = [p for p in snapped if _ok(p["value"])]
+    return out
+
+
+def _tick_snapper(df: pl.DataFrame, tick_class: TickSizeClass | None):
+    """Rounding of adjusted values, on the raw scale of the newest bar when a tick class is given."""
+    if tick_class is None:
+        return lambda value, side: round(value, 2)
+    last = df.tail(1)
+    raw, adjusted = (last[c][0] if c in df.columns else None for c in ("raw_close", "close"))
+    factor = float(raw) / float(adjusted) if _ok(raw) and _ok(adjusted) else 1.0
+    trade_date = last["date"][0] if "date" in df.columns else None
+    if isinstance(trade_date, datetime):
+        trade_date = trade_date.date()
+    if not isinstance(trade_date, date):
+        trade_date = None
+    modes = {"resistance": "ceil", "support": "floor"}
+
+    def snap(value: float, side: str) -> float:
+        raw_value = TickSizeModel.round_order_price(
+            value * factor, tick_class, mode=modes.get(side, "nearest"), trade_date=trade_date
+        )
+        return round(raw_value / factor, 4)
+
+    return snap
 
 
 def summarize_levels(levels: dict[str, list[dict]], close: float | None) -> str:
     """生成给 AI 提示词的价位摘要文本(紧凑,供上下文)。"""
     if not close:
-        return "无价位数据"
+        return "無價位數據"
     parts: list[str] = []
     # 当前价
-    parts.append(f"当前价 {close:.2f}")
+    parts.append(f"當前價 {close:.2f}")
     # 每组取前 2 个最相关的(距当前价近的优先)
     for key, label in LEVEL_TYPES.items():
         pts = levels.get(key, [])
@@ -634,7 +672,6 @@ def _ok(v: Any) -> bool:
         f = float(v)
     except (TypeError, ValueError):
         return False
-    import math
     return math.isfinite(f) and f > 0
 
 
@@ -648,14 +685,14 @@ def _side(level: float, close: float) -> str:
 
 
 def _aggregate_levels(values: list[float], tol: float) -> list[float]:
-    """把相近的价位聚合(±tol),返回去重后的代表值(保留最新)。"""
-    if not values:
-        return []
-    values = sorted(values)
-    out: list[float] = [values[0]]
-    for v in values[1:]:
-        if abs(v - out[-1]) / out[-1] <= tol:
-            out[-1] = v  # 聚合到最新(更近期)
+    """Merge sorted values lying within *tol* of their group's lowest value; each group yields its mean.
+
+    Comparing with the group's first value keeps a chain of close values from drifting into one group.
+    """
+    groups: list[list[float]] = []
+    for v in sorted(values):
+        if groups and (v - groups[-1][0]) / groups[-1][0] <= tol:
+            groups[-1].append(v)
         else:
-            out.append(v)
-    return out
+            groups.append([v])
+    return [sum(g) / len(g) for g in groups]

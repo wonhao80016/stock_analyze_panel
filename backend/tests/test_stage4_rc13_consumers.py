@@ -148,7 +148,7 @@ def _sr(turnover) -> list[dict]:
     return compute_levels(_levels_frame(turnover))["sr"]
 
 
-CHIP_POC_LABEL = "成交密集区(POC)"
+CHIP_POC_LABEL = "成交密集區(POC)"
 
 
 def _poc(levels: list[dict]) -> dict:
@@ -161,7 +161,7 @@ def test_full_turnover_history_keeps_the_decayed_chip_distribution():
     poc = _poc(levels)
     assert poc["value"] > 19
     assert poc["label"] == CHIP_POC_LABEL
-    assert {p["label"] for p in levels if p is not poc} == {"成交密集区"}
+    assert {p["label"] for p in levels if p is not poc} == {"成交密集區"}
 
 
 @pytest.mark.parametrize(
