@@ -164,38 +164,8 @@ def _enriched_partition_mtime(data_dir: Path, day: date) -> float | None:
 
 
 def start_scheduler() -> AsyncIOScheduler:
-    """启动调度器 — 周期性能力重探 + 台股盘后增量更新。"""
+    """Start the scheduler: the Taiwan after-close updates and the holiday schedule refresh."""
     scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
-
-    # 周期性能力重探: 付费 Key 中途过期/续费无需重启即可被发现。
-    # 只热更新 app.state.capabilities(API 端点均读它);
-    # 档位变化记 WARNING, 让「Key 失效」在日志/前端可见, 不再静默按旧档位打 403 端点。
-    def _reprobe_capabilities():
-        from app.tickflow.policy import detect_capabilities, tier_label
-        app_state = _get_app_state()
-        if app_state is None:
-            return
-        try:
-            old = getattr(app_state, "capabilities", None)
-            old_n = len(old.all()) if old else -1
-            new_capset = detect_capabilities(force=True)
-            app_state.capabilities = new_capset
-            new_n = len(new_capset.all())
-            if old_n != new_n:
-                logger.warning(
-                    "能力集变化: %d → %d capabilities (档位=%s)。Key 过期/续费或端点波动, "
-                    "已热更新 app.state.capabilities。", old_n, new_n, tier_label(),
-                )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("周期能力重探失败(保留现有能力集): %s", e)
-
-    scheduler.add_job(
-        _reprobe_capabilities,
-        trigger=IntervalTrigger(minutes=60),
-        id="reprobe_capabilities",
-        misfire_grace_time=600,
-        replace_existing=True,
-    )
 
     # 台股盤後增量更新, 分兩班。官方全市場快照端點: Daily (TWSE 1 + TPEx 1) +
     # Inst (2) + Margin (2) = ~6 次 HTTP 請求 / 日。
@@ -307,7 +277,7 @@ def start_scheduler() -> AsyncIOScheduler:
 
     scheduler.start()
     logger.info(
-        "scheduler started; reprobe@60min, taiwan@16:30 (daily+inst) & 21:40 (margin) mon-fri, "
+        "scheduler started; taiwan@16:30 (daily+inst) & 21:40 (margin) mon-fri, "
         "holiday schedule@3h"
     )
     return scheduler

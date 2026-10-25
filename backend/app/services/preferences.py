@@ -8,7 +8,6 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import re
 import threading
 import time
 from pathlib import Path
@@ -214,11 +213,6 @@ def get_realtime_watchlist_symbols() -> list[str]:
         if len(out) >= 5:
             break
     return out
-
-
-def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:  # noqa: ARG001
-    """兼容旧接口: Free 实时标的现在由自选页前 5 个决定。"""
-    return get_realtime_watchlist_symbols()
 
 
 def set_realtime_quote_interval(interval: float) -> float:
@@ -429,48 +423,6 @@ def get_regime_warmup_days() -> int:
         return 40
 
 
-# ── 市场主线(概念/行业涨停梯队)过滤 ──
-# 宽基/风格标签(融资融券 ~7700 成分、深股通/沪股通 ~3300-3700、国企改革 ~2900)
-# 会按"家数"霸占主线榜首, 但它们不是可操作的题材主线。默认按成分股数上限过滤。
-# 标定(2026-08 THS 概念): 成员 >600 的 55 个概念几乎全是此类风格标签,
-# 真实题材(华为概念 2006/人工智能 2166/固态电池等)均在 600 以下或可自行调整。
-_MAINLINE_MAX_MEMBERS_MIN = 50
-_MAINLINE_MAX_MEMBERS_MAX = 5000
-_MAINLINE_MIN_MEMBERS_MIN = 1
-_MAINLINE_MIN_MEMBERS_MAX = 200
-
-
-def get_mainline_max_members() -> int:
-    """主线维度成员数上限, 超过视为宽基/风格标签被过滤。默认 600。"""
-    v = load().get("mainline_max_members", 600)
-    try:
-        return max(_MAINLINE_MAX_MEMBERS_MIN, min(_MAINLINE_MAX_MEMBERS_MAX, int(v)))
-    except (TypeError, ValueError):
-        return 600
-
-
-def get_mainline_min_members() -> int:
-    """主线维度成员数下限, 过滤微型标签。默认 4。"""
-    v = load().get("mainline_min_members", 4)
-    try:
-        return max(_MAINLINE_MIN_MEMBERS_MIN, min(_MAINLINE_MIN_MEMBERS_MAX, int(v)))
-    except (TypeError, ValueError):
-        return 4
-
-
-def get_mainline_blacklist() -> list[str]:
-    """用户自定义屏蔽的维度成员名(不论成员数大小)。默认空。
-
-    保存时接受 list 或逗号/顿号/分号/空白分隔的字符串。
-    """
-    v = load().get("mainline_blacklist", [])
-    if isinstance(v, str):
-        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]  # noqa: RUF001
-    if not isinstance(v, list):
-        return []
-    return [str(x).strip() for x in v if str(x).strip()]
-
-
 def get_sentiment_exclude_st() -> bool:
     """市场环境/主线统计是否剔除风险警示(ST)股。默认 True。
 
@@ -481,71 +433,9 @@ def get_sentiment_exclude_st() -> bool:
     return bool(load().get("sentiment_exclude_st", True))
 
 
-def set_sentiment_exclude_st(v: bool) -> bool:
-    save({"sentiment_exclude_st": bool(v)})
-    return get_sentiment_exclude_st()
-
-
-def get_mainline_filter_config() -> dict:
-    """主线过滤配置汇总(供 API 返回与计算读取)。"""
-    return {
-        "min_members": get_mainline_min_members(),
-        "max_members": get_mainline_max_members(),
-        "blacklist": get_mainline_blacklist(),
-        "exclude_st": get_sentiment_exclude_st(),
-    }
-
-
-def set_mainline_filter_config(cfg: dict) -> dict:
-    """保存主线过滤配置(白名单字段, 部分更新)。修改后需重算主线生效。"""
-    updates: dict = {}
-    if "min_members" in cfg and cfg["min_members"] is not None:
-        updates["mainline_min_members"] = cfg["min_members"]
-    if "max_members" in cfg and cfg["max_members"] is not None:
-        updates["mainline_max_members"] = cfg["max_members"]
-    if "exclude_st" in cfg and cfg["exclude_st"] is not None:
-        updates["sentiment_exclude_st"] = bool(cfg["exclude_st"])
-    if "blacklist" in cfg and cfg["blacklist"] is not None:
-        raw = cfg["blacklist"]
-        if isinstance(raw, str):
-            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]  # noqa: RUF001
-        updates["mainline_blacklist"] = [str(x).strip() for x in (raw or []) if str(x).strip()]
-    if updates:
-        save(updates)
-    return get_mainline_filter_config()
-
-
-_PIPELINE_PULL_KEYS = ("pipeline_pull_etf", "pipeline_pull_index")
-
-
-def get_pipeline_pull_types() -> dict:
-    """返回三个拉取开关的当前值。"""
-    return {
-        "pipeline_pull_a_share": get_pipeline_pull_a_share(),
-        "pipeline_pull_etf": get_pipeline_pull_etf(),
-        "pipeline_pull_index": get_pipeline_pull_index(),
-    }
-
-
-def set_pipeline_pull_types(cfg: dict) -> dict:
-    """批量保存拉取开关。只接受白名单内的布尔字段。"""
-    updates = {
-        k: bool(v) for k, v in cfg.items()
-        if k in _PIPELINE_PULL_KEYS and v is not None
-    }
-    save(updates)
-    return get_pipeline_pull_types()
-
-
 def get_pipeline_index_symbols() -> str:
     """指数自定义拉取代码(逗号/换行/空格分隔)。空串表示全量。"""
     return str(load().get("pipeline_index_symbols", "") or "").strip()
-
-
-def set_pipeline_index_symbols(symbols: str) -> str:
-    """保存指数自定义代码,返回规范化后的字符串。"""
-    save({"pipeline_index_symbols": symbols})
-    return get_pipeline_index_symbols()
 
 
 def get_pipeline_schedule() -> dict:
@@ -554,31 +444,10 @@ def get_pipeline_schedule() -> dict:
     return {"hour": d.get("hour", 15), "minute": d.get("minute", 30)}
 
 
-def set_pipeline_schedule(hour: int, minute: int) -> dict:
-    h = max(0, min(23, hour))
-    m = max(0, min(59, minute))
-    # 盘后不早于 15:00
-    if h * 60 + m < 15 * 60:
-        h, m = 15, 0
-    save({"pipeline_schedule": {"hour": h, "minute": m}})
-    return {"hour": h, "minute": m}
-
-
 def get_instruments_schedule() -> dict:
     """返回盘前标的维表调度时间 {"hour": 8, "minute": 10}。"""
     d = load().get("instruments_schedule", {"hour": 8, "minute": 10})
     return {"hour": d.get("hour", 8), "minute": d.get("minute", 10)}
-
-
-def set_instruments_schedule(hour: int, minute: int) -> dict:
-    h = max(0, min(23, hour))
-    m = max(0, min(59, minute))
-    # Must finish before the 09:00 open: the job writes the instrument table that
-    # the realtime poll loop reads.
-    if h * 60 + m > 8 * 60 + 45:
-        h, m = 8, 45
-    save({"instruments_schedule": {"hour": h, "minute": m}})
-    return {"hour": h, "minute": m}
 
 
 def get_enriched_batch_size() -> int:
@@ -586,23 +455,9 @@ def get_enriched_batch_size() -> int:
     return max(1, min(10000, load().get("enriched_batch_size", 1000)))
 
 
-def set_enriched_batch_size(size: int) -> int:
-    """保存 enriched 全量计算批次大小。"""
-    size = max(10, min(6000, size))
-    save({"enriched_batch_size": size})
-    return size
-
-
 def get_index_daily_batch_size() -> int:
     """返回指数日 K 同步每批 symbol 数量。"""
     return max(1, min(10000, load().get("index_daily_batch_size", 100)))
-
-
-def set_index_daily_batch_size(size: int) -> int:
-    """保存指数日 K 同步批次大小。"""
-    size = max(1, min(10000, size))
-    save({"index_daily_batch_size": size})
-    return size
 
 
 # 监控规则可选的外部推播渠道。多选: 不推播 = 空数组, 而非 'none'。
@@ -688,20 +543,6 @@ def get_realtime_index_symbols() -> list[str]:
     return [str(s) for s in stored if str(s).strip()]
 
 
-def set_realtime_quote_scope(cfg: dict) -> dict:
-    updates = {}
-    for key in ("realtime_pull_stock", "realtime_pull_etf", "realtime_pull_index"):
-        if key in cfg and cfg[key] is not None:
-            updates[key] = bool(cfg[key])
-    if "realtime_index_mode" in cfg and cfg["realtime_index_mode"] in {"core", "all"}:
-        updates["realtime_index_mode"] = cfg["realtime_index_mode"]
-    if "realtime_index_symbols" in cfg and cfg["realtime_index_symbols"] is not None:
-        updates["realtime_index_symbols"] = cfg["realtime_index_symbols"]
-    if updates:
-        save(updates)
-    return get_realtime_quote_scope()
-
-
 def get_realtime_quote_scope() -> dict:
     return {
         "realtime_pull_stock": get_realtime_pull_stock(),
@@ -719,12 +560,6 @@ def get_sse_refresh_pages() -> dict[str, bool]:
     result = dict(SSE_REFRESH_PAGES_DEFAULT)
     result.update({key: value for key, value in stored.items() if key in result})
     return result
-
-
-def set_sse_refresh_pages(pages: dict[str, bool]) -> dict[str, bool]:
-    """保存页面 SSE 刷新配置。"""
-    save({"sse_refresh_pages": pages})
-    return get_sse_refresh_pages()
 
 
 def get_sidebar_index_symbols() -> list[str]:
@@ -805,15 +640,6 @@ def get_webhook_enabled_default() -> bool:
     保留向后兼容: 读取 webhook_default_channels 非空时返回 True。
     """
     return bool(get_webhook_default_channels())
-
-
-def set_webhook_enabled_default(enabled: bool) -> bool:
-    """保存推送默认勾选态 (老布尔兼容入口)。
-
-    舊布林值無法安全推斷新的 LINE/Telegram 收件者; True/False 都不自動啟用新渠道。
-    """
-    set_webhook_default_channels([])
-    return get_webhook_enabled_default()
 
 
 def get_webhook_default_channels() -> list[str]:
@@ -938,12 +764,6 @@ def get_screener_result_columns() -> list[dict] | None:
     return load().get("screener_result_columns")
 
 
-def set_screener_result_columns(columns: list[dict]) -> list[dict]:
-    """保存策略结果列表列配置。"""
-    save({"screener_result_columns": columns})
-    return columns
-
-
 # ===== 首次使用引导 =====
 
 def get_onboarding_completed() -> bool:
@@ -955,18 +775,3 @@ def set_onboarding_completed(done: bool = True) -> bool:
     """标记首次使用向导完成状态。"""
     save({"onboarding_completed": bool(done)})
     return bool(done)
-
-
-# ===== 财务数据同步时间(持久化,重启不丢失) =====
-# 结构: { "metrics": "2026-06-25T10:00:00+08:00", "income": ..., ... }
-
-def get_financial_sync_times() -> dict[str, str]:
-    """返回各财务表的最后同步时间(ISO 字符串)。未同步过的表不在返回值中。"""
-    return load().get("financial_sync_times", {}) or {}
-
-
-def set_financial_sync_time(table: str, iso_ts: str) -> None:
-    """更新单张财务表的最后同步时间(合并写入,不清除其他表)。"""
-    times = get_financial_sync_times()
-    times[table] = iso_ts
-    save({"financial_sync_times": times})

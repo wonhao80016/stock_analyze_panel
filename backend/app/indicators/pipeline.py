@@ -228,7 +228,6 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
 
 # 仅供 AI/开发者快速索引: 按类别的列名列表
 ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
-    "storage":  [k for k in ENRICHED_COLUMNS if k in ENRICHED_STORAGE_COLS],
     "basic":    ["prev_close", "change_pct", "change_amount", "amplitude"],
     "ma":       ["ma5", "ma10", "ma20", "ma30", "ma60"],
     "ema":      ["ema5", "ema10", "ema20", "ema30", "ema60"],
@@ -241,8 +240,6 @@ ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
     "momentum": ["momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d"],
     "volatility": ["annual_vol_20d"],
     "rsi":      ["rsi_6", "rsi_14", "rsi_24"],
-    "signals":  [k for k in ENRICHED_COLUMNS if k.startswith("signal_")],
-    "join":     ["name", "total_shares", "float_shares"],
 }
 
 
@@ -372,16 +369,6 @@ def _series(name: str, values: np.ndarray) -> pl.Series:
     return pl.Series(name, values, dtype=pl.Float64, nan_to_null=True)
 
 
-def _math_half_up(expr: pl.Expr, decimals: int = 2) -> pl.Expr:
-    """交易所四舍五入 (round half up)，替代 Python round()（银行家舍入）。
-
-    round(2.625, 2) = 2.62  ← Python 银行家舍入
-    exchange_round(2.625) = 2.63  ← 交易所四舍五入
-    """
-    factor = 10 ** decimals
-    return (expr * factor + 0.5).floor() / factor
-
-
 def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
     """对 raw K 线应用前复权 (forward adjustment)。
 
@@ -489,7 +476,6 @@ _INDICATOR_DEPS: dict[str, set[str]] = {
     "kdj_d": {"kdj_k"},
     "kdj_j": {"kdj_k", "kdj_d"},
     "atr_14": {"_tr"},
-    "vol_ratio_5d": {"_vol_ma5"},
     "annual_vol_20d": {"_daily_log_return"},
 }
 
@@ -498,7 +484,7 @@ _ALL_INDICATOR_COLS: frozenset[str] = frozenset({
     "prev_close", "ma5", "ma10", "ma20", "ma30", "ma60",
     "ema5", "ema10", "ema20", "ema30", "ema60",
     "_boll_std", "_kdj_ln", "_kdj_hn", "_tr", "vol_ma5", "vol_ma10",
-    "_vol_ma5", "high_60d", "low_60d",
+    "high_60d", "low_60d",
     "macd_dif", "boll_upper", "boll_lower", "macd_dea", "macd_hist",
     "kdj_k", "kdj_d", "kdj_j",
     "atr_14", "vol_ratio_5d",
@@ -614,8 +600,6 @@ def compute_indicators(
         _p1.append(pl.col("volume").rolling_mean(5).over("symbol").alias("vol_ma5"))
     if "vol_ma10" in want:
         _p1.append(pl.col("volume").rolling_mean(10).over("symbol").alias("vol_ma10"))
-    if "_vol_ma5" in want:
-        _p1.append(pl.col("volume").rolling_mean(5).over("symbol").alias("_vol_ma5"))
     if "vol_ratio_5d" in want:
         # 前5日平均成交量(不含当天), 标准量比分母: volume.shift(1).rolling_mean(5)
         _p1.append(pl.col("volume").shift(1).rolling_mean(5).over("symbol").alias("_vol_ma5_prev"))
@@ -732,7 +716,7 @@ def compute_indicators(
 
     # 清理临时列 (只丢弃实际存在的临时列)
     _temp_cols = ["_boll_std", "_tr",
-                  "_kdj_ln", "_kdj_hn", "_vol_ma5", "_vol_ma5_prev", "_daily_log_return"]
+                  "_kdj_ln", "_kdj_hn", "_vol_ma5_prev", "_daily_log_return"]
     df = df.drop([c for c in _temp_cols if c in df.columns])
 
     _elapsed = (_time.perf_counter() - _t0) * 1000

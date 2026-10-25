@@ -26,7 +26,6 @@ from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.services import preferences
 from app.services.mining_jobs import (
-    RUN_STATUSES,
     SUCCESS_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
     MiningRunStore,
@@ -144,28 +143,6 @@ def get_availability(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/runs")
-def list_runs(
-    request: Request,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    status: Annotated[list[str] | None, Query()] = None,
-) -> dict[str, Any]:
-    manager = _manager(request)
-    statuses = None
-    if status:
-        unknown = sorted(set(status) - RUN_STATUSES)
-        if unknown:
-            raise HTTPException(status_code=400, detail=f"unsupported mining statuses: {unknown}")
-        statuses = status
-    try:
-        manifests = manager.store.list_runs(limit=limit, statuses=statuses)
-        return {"items": [_project_run(manager.store, item) for item in manifests]}
-    except MiningRunValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except MiningRunStoreError as exc:
-        raise HTTPException(status_code=500, detail="failed to read mining runs") from exc
-
-
 @router.post("/runs")
 def start_run(payload: MiningStartRequest, request: Request) -> dict[str, Any]:
     manager = _manager(request)
@@ -221,23 +198,6 @@ def start_run(payload: MiningStartRequest, request: Request) -> dict[str, Any]:
         ) from exc
     except MiningRunStoreError as exc:
         raise HTTPException(status_code=500, detail="failed to persist mining run") from exc
-
-
-@router.get("/runs/{run_id}")
-def get_run(run_id: str, request: Request) -> dict[str, Any]:
-    store = _manager(request).store
-    return _project_run(store, _required_manifest(store, run_id))
-
-
-@router.post("/runs/{run_id}/cancel")
-def cancel_run(run_id: str, request: Request) -> dict[str, Any]:
-    manager = _manager(request)
-    try:
-        return _project_run(manager.store, manager.cancel(run_id))
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="mining run not found") from exc
-    except MiningRunValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/result")
@@ -440,11 +400,6 @@ def _start_reevaluation_run(
     except (ValueError, EnrichedGenerationUnavailableError) as exc:
         raise RerunUnavailableError(f"enriched data is being updated: {exc}") from exc
     return manager.start(worker_request, fingerprint, source="reevaluation")
-
-
-@router.get("/config")
-def get_config() -> dict[str, Any]:
-    return preferences.get_mining_schedule()
 
 
 @router.patch("/config")

@@ -4844,15 +4844,5 @@ def _symbol_in_boards(symbol: str, boards: list[str]) -> bool:
             return True
         if board in ("TPEX", "上櫃", "柜买") and symbol.endswith(".TPEX"):
             return True
-        if board == "沪主板" and symbol.startswith("60"):
-            return True
-        if board == "深主板" and symbol.startswith(("00", "001")):
-            return True
-        if board == "创业板" and symbol.startswith(("300", "301")):
-            return True
-        if board == "科创板" and symbol.startswith("688"):
-            return True
-        if board == "北交所" and symbol.endswith(".BJ"):
-            return True
     return False
 

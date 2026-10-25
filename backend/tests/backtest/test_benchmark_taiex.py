@@ -257,20 +257,6 @@ def test_a_session_missing_inside_the_period_keeps_the_endpoint_return(data_dir)
     assert [point["date"] for point in result.benchmark_curve] == [DAY_TEXT[i] for i in kept]
 
 
-def test_non_taiwan_universe_keeps_the_shanghai_composite(data_dir):
-    _write_index(data_dir, DAYS, INDEX_CLOSES)
-    repo = _Repo({"000001.SH": list(zip(DAYS, [3000.0, 3010.0, 3020.0, 3030.0, 3060.0], strict=True))})
-
-    result, repo = _run("600000.SH", repo)
-
-    stats = result.stats
-    assert repo.index_requests == ["000001.SH"]
-    assert stats["benchmark_return"] == 0.02
-    assert stats["benchmark"]["symbol"] == "000001.SH"
-    assert stats["benchmark"]["name"] == "上证指数"
-    assert {point["symbol"] for point in result.benchmark_curve} == {"000001.SH"}
-
-
 def test_full_mode_reports_the_benchmark_return_without_an_excess(data_dir):
     _write_index(data_dir, DAYS, INDEX_CLOSES)
 

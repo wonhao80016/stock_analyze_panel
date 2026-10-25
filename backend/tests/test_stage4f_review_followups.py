@@ -150,8 +150,8 @@ def test_settings_write_on_a_corrupt_file_answers_503_with_a_reason(prefs_path, 
     prefs_path.write_text("{broken", encoding="utf-8")
 
     res = _api_client(monkeypatch).put(
-        "/api/settings/preferences/minute-sync",
-        json={"minute_sync_enabled": True, "minute_sync_days": 5},
+        "/api/settings/preferences/nav-order",
+        json={"nav_order": ["/watchlist"]},
     )
 
     assert res.status_code == 503, res.text

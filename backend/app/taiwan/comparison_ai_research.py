@@ -40,7 +40,6 @@ from app.services.ai_provider import (
 from app.strategy.custom_signals_ai import _extract_json_object
 from app.taiwan.ai_research import (
     RANKING_LANGUAGE_BLOCKLIST,
-    ObservationItem,
     build_evidence_registry,
     detect_forbidden_language,
 )

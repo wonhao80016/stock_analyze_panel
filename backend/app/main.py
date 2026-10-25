@@ -17,13 +17,10 @@ from app.api import (
     backtest,
     data,
     ext_data,
-    financials,
     intraday,
     kline,
     mining,
     monitor_rules,
-    pipeline,
-    regime,
     screener,
     signals,
     stock_analysis,
@@ -115,7 +112,6 @@ async def _application_lifespan(app: FastAPI):
     # 数据层
     store = DataStore()
     repo = KlineRepository(store)
-    app.state.datastore = store
     app.state.repo = repo
     from app.services.mining_manager import MiningJobManager
 
@@ -423,11 +419,8 @@ app.include_router(screener.router)
 app.include_router(backtest.router)
 app.include_router(mining.router)
 app.include_router(intraday.router)
-app.include_router(regime.router)
-app.include_router(pipeline.router)
 app.include_router(data.router)
 app.include_router(ext_data.router)
-app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(settings_api.router)
 app.include_router(strategy.router)
@@ -437,25 +430,8 @@ app.include_router(alerts.router)
 app.include_router(taiwan.router)
 
 # 二次开发路由与小粒度策略在所有核心路由后注册, 禁止覆盖核心路径。
-extension_registry, extension_load_errors = configure_backend_extensions(app)
+extension_registry, _extension_load_errors = configure_backend_extensions(app)
 app.state.extension_registry = extension_registry
-app.state.extension_load_errors = extension_load_errors
-
-
-# 能力门控异常 → 403(而非默认 500)
-# 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDenied;
-# 若不注册 handler 会冒泡成 500 Internal Server Error,对前端不友好且语义错误。
-from fastapi import Request
-from fastapi.responses import JSONResponse
-from app.tickflow.capabilities import CapabilityDenied
-
-
-@app.exception_handler(CapabilityDenied)
-async def capability_denied_handler(request: Request, exc: CapabilityDenied) -> JSONResponse:
-    return JSONResponse(
-        status_code=403,
-        content={"detail": str(exc), "suggestion": exc.suggestion},
-    )
 
 
 @app.exception_handler(EnrichedGenerationUnavailableError)

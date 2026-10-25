@@ -68,14 +68,6 @@ STATE_RANGE = 45        # 45-55 震荡
 STATE_LEAN_WEAK = 30    # 30-45 偏弱
 # < 30 弱势
 
-STATE_LABELS = {
-    "strong": "强势",
-    "lean_strong": "偏强",
-    "range": "震荡",
-    "lean_weak": "偏弱",
-    "weak": "弱势",
-}
-
 
 def _score(value: float, low: float, high: float) -> float:
     """归一化: 把 value 在 [low, high] 区间线性映射到 [0, 100], 钳制边界。
@@ -617,23 +609,6 @@ def detect_stale_dates(data_dir: Path, repo) -> list[date]:
     return sorted(stale)
 
 
-def latest_phase_transition(data_dir: Path) -> tuple[str, str, str] | None:
-    """读取 regime 时序末两日, 返回最近一次阶段切换 (prev, new, 日期str)。
-
-    末两日阶段相同(或数据不足/无阶段列)返回 None。供盘后管道推送阶段切换通知。
-    """
-    hist = load_regime_history(data_dir)
-    if hist.is_empty() or "phase" not in hist.columns:
-        return None
-    tail = hist.select(["date", "phase"]).sort("date").tail(2)
-    if tail.height < 2:
-        return None
-    prev_phase, cur_phase = tail["phase"].to_list()
-    if not prev_phase or not cur_phase or prev_phase == cur_phase:
-        return None
-    return prev_phase, cur_phase, str(tail["date"][-1])
-
-
 def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = None) -> pl.DataFrame:
     """增量计算 regime(供 daily_pipeline / 启动补算调用)。
 
@@ -678,9 +653,3 @@ def enriched_date_set(repo) -> set[date]:
         except ValueError:
             continue
     return dates
-
-
-def earliest_enriched_date(repo) -> date | None:
-    """返回 enriched 最早日期(供全量重算定起点)。无数据返回 None。"""
-    dates = enriched_date_set(repo)
-    return min(dates) if dates else None

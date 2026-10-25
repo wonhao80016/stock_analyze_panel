@@ -11,7 +11,7 @@ Data.tsx/EndpointTestDialog.tsx 一并删除的端点诊断功能, zero 消费�
 setter(zero 前端消费者, 且会持久化配置并呼叫 scheduler.reschedule_job 操作
 已被 Phase 8B-5.0.2 从调度器移除的 daily_pipeline/pre_market_instruments
 job——目前虽因 job 不存在而实际上会抛错, 但一旦该 job id 未来被重新注册即
-恢复危险)。DEFAULT_PAID_ENDPOINT / tf_client / capability detection /
+恢复危险)。tf_client / capability detection /
 preferences.get_pipeline_schedule() 与 get_instruments_schedule()(供
 daily_pipeline.py 的 start_scheduler() 读取排程时间)等底层能力完全未动。
 """
@@ -38,15 +38,6 @@ from app.tickflow.policy import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
-
-# 默认端点 —— endpoints.json 列表第一项,UI"当前使用"始终对齐此项。
-# 注意:Free 模式 SDK 实际走 free-api(免费数据通道),但 UI 显示统一用默认节点。
-DEFAULT_PAID_ENDPOINT = "https://api.tickflow.org"
-
-
-class TickflowKeyIn(BaseModel):
-    api_key: str
-
 
 @router.get("")
 def get_settings() -> dict:
@@ -93,109 +84,6 @@ def get_settings() -> dict:
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
         "ai_max_output_tokens": current_ai_max_output_tokens(),
         "ai_context_window": current_ai_context_window(),
-    }
-
-
-@router.post("/tickflow-key")
-def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
-    """保存 TickFlow API Key 并立即重新探测能力。
-
-    先探后存(关键改动,修复乱填 key 也会被持久化的问题):
-      1. 临时用新 key 探测(付费端点),判定档位
-      2. 判定为 none(连单只日K都拿不到)→ key 无效:不存,清除已存的,
-         返回 {ok: false, reason: "invalid"},前端提示「Key 无效」
-      3. 判定为 free(免费有效 key)→ 存 key,客户端切到 free-api 服务器
-      4. 判定为 starter+ → 存 key,切到付费端点(现有逻辑)
-
-    端点联动:从无 key 升级到付费 key 时,残留的 free-api 端点不可用,
-    故自动切到默认付费端点(api.tickflow.org);free 档则清除自定义端点。
-    """
-    from app.tickflow.policy import (
-        base_tier_name, is_invalid_key,
-    )
-
-    key = req.api_key.strip()
-    if not key:
-        return {"ok": False, "error": "key empty"}
-
-    # ===== 1) 临时存 key + 重置客户端,让探测走付费端点 =====
-    secrets_store.save({"tickflow_api_key": key})
-    tf_client.reset_clients()
-
-    # 立即重新探测(此时 client 已按档位判定,但首次探测必然走付费端点验证)
-    capset = detect_capabilities(force=True)
-    request.app.state.capabilities = capset
-
-    # ===== 2) 判定为无效 key(连单只日K都拿不到)→ 不存,清除 =====
-    if is_invalid_key() or base_tier_name() == "none":
-        # 无效 key:清除刚存的,避免乱填被持久化;退回 none 档
-        secrets_store.clear("tickflow_api_key", "tickflow_base_url")
-        tf_client.reset_clients()
-        capset = detect_capabilities(force=True)
-        request.app.state.capabilities = capset
-        return {
-            "ok": False,
-            "reason": "invalid",
-            "error": "Key 无效或已过期,请检查后重试",
-            "mode": "none",
-            "tier_label": tier_label(),
-            "current_endpoint": tf_client.current_endpoint(),
-            "probe_log": [],
-            "capabilities_count": len(capset.all()),
-        }
-
-    # ===== 3) free 档(免费有效 key)→ 存 key,切到 free-api 服务器 =====
-    if base_tier_name() == "free":
-        # 免费档运行时走 free-api 服务器,清除付费端点的自定义配置
-        secrets_store.clear("tickflow_base_url")
-        tf_client.reset_clients()
-        return {
-            "ok": True,
-            "tickflow_api_key_masked": secrets_store.mask(key),
-            "mode": "free",
-            "tier_label": tier_label(),
-            "current_endpoint": tf_client.current_endpoint(),
-            "probe_log": [],
-            "capabilities_count": len(capset.all()),
-        }
-
-    # ===== 4) starter+ 付费档 → 确保走付费端点(现有逻辑) =====
-    # 若之前是 none/free(无自定义付费端点),切到默认付费端点
-    base = secrets_store.load().get("tickflow_base_url")
-    if not base:
-        secrets_store.save({"tickflow_base_url": DEFAULT_PAID_ENDPOINT})
-    tf_client.reset_clients()
-
-    return {
-        "ok": True,
-        "tickflow_api_key_masked": secrets_store.mask(key),
-        "mode": "api_key",
-        "tier_label": tier_label(),
-        "current_endpoint": tf_client.current_endpoint(),
-        "probe_log": [],
-        "capabilities_count": len(capset.all()),
-    }
-
-
-@router.delete("/tickflow-key")
-def clear_tickflow_key(request: Request) -> dict:
-    """清除 Key,退回无档(none)。
-
-    同时清除 tickflow_base_url(测速切换的自定义端点),使客户端走 free-api
-    服务器取历史日K;档位标签为 None(无档)。
-    """
-    secrets_store.clear("tickflow_api_key", "tickflow_base_url")
-    tf_client.reset_clients()
-
-    capset = detect_capabilities(force=True)
-    request.app.state.capabilities = capset
-
-    return {
-        "ok": True,
-        "mode": "none",
-        "tier_label": tier_label(),
-        "current_endpoint": tf_client.current_endpoint(),
-        "capabilities_count": len(capset.all()),
     }
 
 
@@ -428,13 +316,6 @@ def _realtime_allowed() -> bool:
     return QuoteService.is_realtime_allowed()
 
 
-class MinuteSyncPrefs(BaseModel):
-    minute_sync_enabled: bool
-    minute_sync_days: int = 5
-    # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
-    minute_sync_segment_days: int | None = None
-
-
 _OFFICIAL_PROVIDERS = {"taiwan", "tickflow"}
 # Routing values and settings-page keys that a custom source name must not shadow.
 _RESERVED_SOURCE_NAMES = _OFFICIAL_PROVIDERS | {"same_as_daily", "__new__"}
@@ -451,11 +332,6 @@ class DataProvidersIn(BaseModel):
 class PluginKeyIn(BaseModel):
     plugin: str
     api_key: str
-
-
-class DatasetFieldMapItem(BaseModel):
-    source: str
-    target: str
 
 
 class DatasetConfigIn(BaseModel):
@@ -579,7 +455,7 @@ def list_data_sources() -> dict:
 
 @router.post("/plugin-key")
 def save_plugin_key(req: PluginKeyIn) -> dict:
-    """保存插件 API Key(先探后存, 对齐 /tickflow-key 语义)。
+    """保存插件 API Key(先探后存)。
 
     流程: probe_plugin_key 用候选 Key 实探 → 有效才写 secrets.json
     ({plugin}_api_key, 优先级高于 .env) → load_all 重扫, 插件即刻变为可切换。
@@ -909,46 +785,6 @@ def update_watchlist_columns(req: dict) -> dict:
     return {"columns": saved}
 
 
-@router.get("/preferences/screener-result-columns")
-def get_screener_result_columns() -> dict:
-    """返回策略结果列表列配置。"""
-    from app.services import preferences
-    cols = preferences.get_screener_result_columns()
-    return {"columns": cols}
-
-
-@router.put("/preferences/screener-result-columns")
-def update_screener_result_columns(req: dict) -> dict:
-    """保存策略结果列表列配置。"""
-    from app.services import preferences
-    columns = req.get("columns", [])
-    saved = preferences.set_screener_result_columns(columns)
-    return {"columns": saved}
-
-
-@router.put("/preferences/minute-sync")
-def update_minute_sync(req: MinuteSyncPrefs) -> dict:
-    """保存分钟 K 同步偏好。
-
-    minute_sync_segment_days 为可选:未传(None)时不覆盖现有值,便于开关/天数
-    与段大小各自独立更新。
-    """
-    from app.services import preferences
-    days = max(1, min(30, req.minute_sync_days))
-    updates: dict = {
-        "minute_sync_enabled": req.minute_sync_enabled,
-        "minute_sync_days": days,
-    }
-    if req.minute_sync_segment_days is not None:
-        updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
-    preferences.save(updates)
-    return {
-        "minute_sync_enabled": req.minute_sync_enabled,
-        "minute_sync_days": days,
-        "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
-    }
-
-
 class RealtimeQuotesPrefs(BaseModel):
     realtime_quotes_enabled: bool
 
@@ -972,14 +808,6 @@ def update_market_closed_today(req: MarketClosedTodayPrefs) -> dict:
 
     preferences.set_taiwan_market_closed_date(taipei_today().isoformat() if req.closed else None)
     return {"taiwan_market_closed_today": _taiwan_market_closed_today()}
-
-
-class RealtimeQuoteScopePrefs(BaseModel):
-    realtime_pull_stock: bool | None = None
-    realtime_pull_etf: bool | None = None
-    realtime_pull_index: bool | None = None
-    realtime_index_mode: str | None = None
-    realtime_index_symbols: list[str] | None = None
 
 
 @router.put("/preferences/realtime-quotes")
@@ -1012,26 +840,6 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     if qs and req.realtime_quotes_enabled:
         qs.enable()
     return {"realtime_quotes_enabled": req.realtime_quotes_enabled, "realtime_allowed": allowed}
-
-
-@router.put("/preferences/realtime-quote-scope")
-def update_realtime_quote_scope(req: RealtimeQuoteScopePrefs) -> dict:
-    """保存盘中实时行情范围；独立于盘后管道范围。"""
-    from app.services import preferences
-    cfg = req.model_dump(exclude_none=True)
-    return preferences.set_realtime_quote_scope(cfg)
-
-
-class RealtimeWatchlistPrefs(BaseModel):
-    symbols: list[str] = []
-
-
-@router.put("/preferences/realtime-watchlist")
-def update_realtime_watchlist(req: RealtimeWatchlistPrefs) -> dict:
-    """兼容旧入口；Free 实时标的由自选页前 5 个决定。"""
-    from app.services import preferences
-    symbols = preferences.set_realtime_watchlist_symbols(req.symbols)
-    return {"realtime_watchlist_symbols": symbols}
 
 
 class WatchlistGroupsInNavPrefs(BaseModel):
@@ -1086,91 +894,6 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
                 pass
 
     return result
-
-
-class PipelinePullTypesIn(BaseModel):
-    """盘后管道拉取内容开关(A股 / ETF / 指数 独立控制)。"""
-    pipeline_pull_a_share: bool | None = None
-    pipeline_pull_etf: bool | None = None
-    pipeline_pull_index: bool | None = None
-
-
-@router.put("/preferences/pipeline-pull-types")
-def update_pipeline_pull_types(req: PipelinePullTypesIn) -> dict:
-    """更新盘后管道拉取内容开关。"""
-    from app.services import preferences
-    cfg = req.model_dump(exclude_none=True)
-    return preferences.set_pipeline_pull_types(cfg)
-
-
-class PipelineRegimeEnabledIn(BaseModel):
-    """盘后管道是否自动计算市场环境(regime)。"""
-    pipeline_regime_enabled: bool
-
-
-@router.put("/preferences/pipeline-regime-enabled")
-def update_pipeline_regime_enabled(req: PipelineRegimeEnabledIn) -> dict:
-    """更新盘后管道 regime 自动计算开关。"""
-    from app.services import preferences
-    preferences.save({"pipeline_regime_enabled": bool(req.pipeline_regime_enabled)})
-    return {"pipeline_regime_enabled": preferences.get_pipeline_regime_enabled()}
-
-
-class RegimeBatchParamsIn(BaseModel):
-    """regime 全量回填分批参数(控制内存峰值)。"""
-    batch_days: int | None = None
-    warmup_days: int | None = None
-
-
-@router.put("/preferences/regime-batch-params")
-def update_regime_batch_params(req: RegimeBatchParamsIn) -> dict:
-    """更新 regime 分批参数。仅在传入字段时保存对应项(支持部分更新)。"""
-    from app.services import preferences
-    updates: dict = {}
-    if req.batch_days is not None:
-        updates["regime_batch_days"] = req.batch_days
-    if req.warmup_days is not None:
-        updates["regime_warmup_days"] = req.warmup_days
-    if updates:
-        preferences.save(updates)
-    return {
-        "regime_batch_days": preferences.get_regime_batch_days(),
-        "regime_warmup_days": preferences.get_regime_warmup_days(),
-    }
-
-
-class PipelineIndexSymbolsIn(BaseModel):
-    """指数自定义拉取代码(逗号/换行/空格分隔,空串表示全量)。"""
-    symbols: str = ""
-
-
-class MainlineFilterIn(BaseModel):
-    """市场主线过滤配置(宽基/风格标签按成员数过滤 + 名称黑名单 + ST 剔除开关)。"""
-
-    min_members: int | None = None
-    max_members: int | None = None
-    blacklist: list[str] | str | None = None
-    exclude_st: bool | None = None
-
-
-@router.put("/preferences/mainline-filter")
-def update_mainline_filter(req: MainlineFilterIn) -> dict:
-    """更新市场主线过滤配置。部分更新; 修改后需重算主线(POST /api/regime/mainline/recompute)生效。
-
-    exclude_st 同步控制市场环境(regime)统计口径 — 切换后需全量重算 regime。
-    """
-    from app.services import preferences
-
-    payload = req.model_dump()
-    return preferences.set_mainline_filter_config(payload)
-
-
-@router.put("/preferences/pipeline-index-symbols")
-def update_pipeline_index_symbols(req: PipelineIndexSymbolsIn) -> dict:
-    """保存指数自定义拉取代码。"""
-    from app.services import preferences
-    symbols = preferences.set_pipeline_index_symbols(req.symbols)
-    return {"pipeline_index_symbols": symbols}
 
 
 class QuoteIntervalIn(BaseModel):
@@ -1269,22 +992,6 @@ def test_telegram_bot() -> dict:
     return {"ok": ok}
 
 
-class WebhookEnabledDefaultIn(BaseModel):
-    enabled: bool
-
-
-@router.put("/preferences/webhook-enabled-default")
-def update_webhook_enabled_default(req: WebhookEnabledDefaultIn) -> dict:
-    """新建监控规则时是否默认勾选推送 (老布尔接口, 兼容旧前端)。
-
-    舊布林值無法安全推斷新的 LINE/Telegram 收件者,因此不自動啟用新渠道。
-    """
-    from app.services import preferences
-
-    saved = preferences.set_webhook_enabled_default(req.enabled)
-    return {"webhook_enabled_default": saved}
-
-
 class WebhookDefaultChannelsIn(BaseModel):
     channels: list[str]  # 多选: ['line','telegram']; 空数组=默认不推送
 
@@ -1305,9 +1012,7 @@ def update_webhook_default_channels(req: WebhookDefaultChannelsIn) -> dict:
 @router.put("/preferences/quote-interval")
 def update_quote_interval(req: QuoteIntervalIn, request: Request) -> dict:
     """更新行情轮询间隔。按档位自动 clamp。"""
-    qs = getattr(request.app.state, "quote_service", None)
-    if not qs:
-        return {"interval": req.interval, "min_interval": qs.get_min_interval(), "max_interval": 60.0}
+    qs = request.app.state.quote_service
     clamped = qs.set_interval(req.interval)
     return {
         "interval": clamped,
@@ -1327,27 +1032,3 @@ def get_quote_interval(request: Request) -> dict:
         "min_interval": qs.get_min_interval(),
         "max_interval": qs.MAX_INTERVAL,
     }
-
-
-class EnrichedBatchSizeIn(BaseModel):
-    size: int
-
-
-@router.put("/preferences/enriched-batch-size")
-def update_enriched_batch_size(req: EnrichedBatchSizeIn) -> dict:
-    """保存 enriched 全量计算批次大小。"""
-    from app.services import preferences
-    size = preferences.set_enriched_batch_size(req.size)
-    return {"enriched_batch_size": size}
-
-
-class IndexDailyBatchSizeIn(BaseModel):
-    size: int
-
-
-@router.put("/preferences/index-daily-batch-size")
-def update_index_daily_batch_size(req: IndexDailyBatchSizeIn) -> dict:
-    """保存指数日 K 同步批次大小。"""
-    from app.services import preferences
-    size = preferences.set_index_daily_batch_size(req.size)
-    return {"index_daily_batch_size": size}

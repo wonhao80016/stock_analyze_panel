@@ -24,29 +24,15 @@ import polars as pl
 
 from app.config import settings
 from app.taiwan.market_rules import ListingSessions
-from app.taiwan.providers.base import (
-    AmountUnit,
-    PriceSemantics,
-    SourceMetadata,
-    VolumeUnit,
-)
-from app.taiwan.providers.normalizer import normalize_taiwan_daily
 from app.taiwan.realtime.calendar import TAIPEI_TZ
 from app.taiwan.universe.service import write_atomically
 
 logger = logging.getLogger(__name__)
 
+# Stored bars stay raw; the enriched publish forward-adjusts them and keeps these prices as raw_*.
 TAIWAN_DAILY_COLUMNS: list[str] = [
     "symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"
 ]
-
-# Stored bars stay raw; the enriched publish forward-adjusts them and keeps these prices as raw_*.
-DEFAULT_TAIWAN_METADATA = SourceMetadata(
-    source_name="taiwan_daily_store",
-    volume_unit=VolumeUnit.SHARES,
-    amount_unit=AmountUnit.TWD,
-    price_semantics=PriceSemantics.RAW,
-)
 
 # How many of the newest stored days a daily run checks for repair, about four weeks.
 REPAIR_WINDOW_PARTITIONS = 20
@@ -301,10 +287,6 @@ class TaiwanDailyStore:
             .row(0, named=True)
         )
         return {s: int(counts[s] or 0) for s in suffixes}
-
-    def read_latest(self, symbols: list[str] | None = None) -> pl.DataFrame:
-        """Deprecated: use :meth:`read_latest_per_symbol` instead."""
-        return self.read_latest_per_symbol(symbols)
 
     def read_range(
         self,

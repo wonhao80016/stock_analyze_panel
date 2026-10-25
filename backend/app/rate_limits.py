@@ -117,8 +117,3 @@ def sleep_between_batches(index: int, rpm: int | None, *, default_interval: floa
     wait = _reserve_slot(rpm or -1, interval)
     if wait > 0:
         time.sleep(wait)
-
-
-def min_batch(preferred: int, limit: ResolvedLimit) -> int:
-    """Clamp a user-preferred batch size by a resolved capability batch limit."""
-    return min(preferred, limit.batch) if limit.batch else preferred

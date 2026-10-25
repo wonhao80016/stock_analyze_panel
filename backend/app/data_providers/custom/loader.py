@@ -352,14 +352,10 @@ def failed_config_dict(name: str) -> dict | None:
     return {**config, "load_error": [e for item in failures for e in item["errors"]]}
 
 
-def is_custom_provider(name: str) -> bool:
-    return (name or "").lower() in _PROVIDERS
-
-
 def provider_has_dataset(name: str, dataset: str) -> bool:
     """判断某个 custom 源是否配置了指定数据集。
 
-    用于主流程分流: 总开关选了 custom, 但某个数据集未启用时, 该数据集回退 TickFlow。
+    A selected custom source serves only the datasets it declares.
     """
     provider = _PROVIDERS.get((name or "").lower())
     if provider is None:

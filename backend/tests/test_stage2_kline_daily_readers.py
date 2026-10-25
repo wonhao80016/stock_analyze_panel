@@ -2,7 +2,7 @@
 
 kline_daily is an A-share table the Taiwan deployment no longer writes; the few partitions
 left in it hold misdated watchlist rows. A backtest without a start, the minute chart's
-trading-day guess and the data status must read the same with or without them.
+trading-day guess must read the same with or without them.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import polars as pl
 import pytest
 
 from app.api import backtest as backtest_api
-from app.api import data as data_api
 from app.api import kline
 from app.taiwan import universe
 from app.tickflow.repository import DataStore, KlineRepository
@@ -222,46 +221,6 @@ def test_minute_batch_trading_day_follows_the_taiwan_store(
     kline.get_minute_batch(minute_request, {"symbols": ["2330.TWSE"]})
 
     assert seen == [expected]
-
-
-def test_data_status_reports_the_taiwan_daily_store(repo):
-    stats = data_api._safe_aggregate_daily(repo)
-
-    assert stats["earliest_date"] == FIRST_SESSION.isoformat()
-    assert stats["latest_date"] == LAST_SESSION.isoformat()
-    assert stats["trading_days"] == len(SESSIONS)
-
-
-def test_storage_counts_the_taiwan_daily_store(repo):
-    storage = data_api._compute_storage(repo.store.data_dir)
-
-    assert storage["taiwan_daily_files"] == len(SESSIONS)
-    assert storage["taiwan_daily_size_mb"] >= 0.0
-
-
-def test_adj_factor_stats_span_the_taiwan_sessions(tmp_path, monkeypatch, deny_network):
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "data_dir", tmp_path)
-    for d in SESSIONS:
-        _write_partition(tmp_path, "taiwan/daily", d)
-    _write_partition(tmp_path, "kline_daily", LEFTOVER)
-    factors = tmp_path / "adj_factor"
-    factors.mkdir(parents=True)
-    pl.DataFrame(
-        {
-            "symbol": ["2330.TWSE", "2330.TWSE"],
-            "trade_date": [date(2024, 6, 1), LEFTOVER],
-            "adj_factor": [1.0, 1.1],
-        }
-    ).write_parquet(factors / "all.parquet")
-    repo = KlineRepository(DataStore(tmp_path))
-
-    stats = data_api._safe_aggregate_adj_factor(repo)
-
-    assert stats["earliest_date"] == FIRST_SESSION.isoformat()
-    assert stats["latest_date"] == LAST_SESSION.isoformat()
-    assert stats["rows"] == 2
 
 
 TODAY = date(2026, 10, 7)

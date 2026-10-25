@@ -33,18 +33,6 @@ PHASE_CLIMAX = "climax"
 PHASE_EBB = "ebb"
 PHASE_REPAIR = "repair"
 
-PHASE_LABELS = {
-    PHASE_ICE: "冰点",
-    PHASE_IGNITE: "启动",
-    PHASE_RALLY: "主升",
-    PHASE_CLIMAX: "高潮",
-    PHASE_EBB: "退潮",
-    PHASE_REPAIR: "修复",
-}
-
-# 规则判定优先级: 高潮 > 主升 > 退潮 > 启动 > 冰点 > 修复(兜底)
-_PHASE_PRIORITY = (PHASE_CLIMAX, PHASE_RALLY, PHASE_EBB, PHASE_IGNITE, PHASE_ICE)
-
 # ───────────────────────── 阈值(标定自 2020-08~2026-08 分位数) ─────────────────────────
 # 高潮: 情绪极端宣泄 — 二板以上宽度或首板数达到 p90 的 ~2 倍以上(历史 <2% 天数)
 CLIMAX_GE2 = 50            # p90(25) 的 2 倍

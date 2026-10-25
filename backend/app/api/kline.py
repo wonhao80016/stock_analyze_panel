@@ -40,7 +40,6 @@ from app.indicators.pipeline import (
     PRICE_COLUMNS,
     VOLUME_COLUMNS,
     compute_enriched,
-    compute_enriched_single,
     compute_indicators,
 )
 from app.market_time import cn_now, cn_today
@@ -53,19 +52,6 @@ from app.volume_units import TAIWAN_SUFFIXES
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
-
-
-def _minute_allowed(capset) -> bool:
-    """是否有分钟K权限 (TickFlow Pro+ 或 custom minute 源)。"""
-    from app.tickflow.capabilities import Cap
-    if capset.has(Cap.KLINE_MINUTE_BATCH):
-        return True
-    from app.services import preferences
-    provider = preferences.get_minute_data_provider()
-    _, fallback, error = kline_sync._resolve_minute_provider(provider)
-    if error is not None:
-        logger.warning("minute provider resolution failed while checking access: %s", error)
-    return not fallback
 
 
 _SEARCHABLE_ASSET_TYPES = frozenset({"stock", "etf", "index"})
@@ -648,16 +634,7 @@ def get_daily(
             raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
         if raw.is_empty():
             return {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []}
-        # 拉除权因子做前复权 (Starter+ 有权限), 否则空 df → compute_enriched 退回未复权
-        factors = pl.DataFrame()
-        capset = getattr(request.app.state, "capabilities", None)
-        try:
-            from app.tickflow.capabilities import Cap
-            if capset and capset.has(Cap.ADJ_FACTOR):
-                factors = kline_sync.fetch_adj_factor_single(symbol)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("单股除权因子拉取失败 %s: %s", symbol, e)
-        enriched = compute_enriched(raw, factors=factors)
+        enriched = compute_enriched(raw)
         rows = enriched.tail(days).to_dicts()
         # 即使 live 模式也尝试追加实时蜡烛
         rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
@@ -912,12 +889,6 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
     return rows
 
 
-class DailyBatchRequest:
-    """批量日K请求。"""
-    symbols: list[str]
-    days: int = 12
-
-
 @router.post("/daily-batch")
 def get_daily_batch(request: Request, body: dict):
     """批量获取多只股票最近 N 天日K (OHLCV)。
@@ -991,10 +962,8 @@ def get_minute_batch(request: Request, body: dict):
 
     - 本地优先: 先从 kline_minute parquet 读, 完整的直接用
     - 缺失补拉: 本地不完整的 symbol 用 sync_minute_batch 批量实时拉 (不落库)
-    - 需 Pro+ 权限 (kline.minute.batch)
     """
     import polars as pl
-    from app.tickflow.capabilities import Cap
 
     symbols: list[str] = body.get("symbols", [])
     trade_date_str: str | None = body.get("date")
@@ -1002,11 +971,6 @@ def get_minute_batch(request: Request, body: dict):
         return {"data": {}}
 
     repo = request.app.state.repo
-    capset = request.app.state.capabilities
-
-    # 权限守卫: 分钟K批量是 Pro+ 能力
-    if not capset.has(Cap.KLINE_MINUTE_BATCH):
-        raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (kline.minute.batch)")
 
     trade_date = date.fromisoformat(trade_date_str) if trade_date_str else cn_today()
 
@@ -1064,7 +1028,6 @@ def get_minute_batch(request: Request, body: dict):
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
     if incomplete:
         start_time, end_time = kline_sync.intraday_window(trade_date)
-        lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
         # etf_set 已在上方获取, 直接复用 — 按 asset_type 拆分调用 sync_minute_batch
         # (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)
         # 契约: 本端点只接受 stock/ETF (指数分钟K已随 Phase 8B-5.1 一并移除),
@@ -1078,8 +1041,6 @@ def get_minute_batch(request: Request, body: dict):
                 stock_incomplete,
                 start_time=start_time,
                 end_time=end_time,
-                batch_size=lim.batch if lim else None,
-                rpm=lim.rpm if lim else None,
                 asset_type="stock",
             )
             if not df_s.is_empty():
@@ -1089,8 +1050,6 @@ def get_minute_batch(request: Request, body: dict):
                 etf_incomplete,
                 start_time=start_time,
                 end_time=end_time,
-                batch_size=lim.batch if lim else None,
-                rpm=lim.rpm if lim else None,
                 asset_type="etf",
             )
             if not df_e.is_empty():
@@ -1196,7 +1155,7 @@ def get_minute(
     """读取某只股票某天的分钟 K 线。
 
     - 本地有完整数据(当日已交易分钟数, 盘后为全时段 270 条) → 直接返回
-    - 本地无数据或不完整 → 从 TickFlow 实时拉取返回（不写入）
+    - 本地无数据或不完整 → 从自定义分钟源实时拉取返回（不写入）
     """
     repo = request.app.state.repo
     asset_type = repo.resolve_asset_type(symbol)
@@ -1222,18 +1181,6 @@ def get_minute(
             trade_date = recent if recent is not None else today
         else:
             trade_date = today
-    if trade_date is None:
-        # 本地无任何分钟K，尝试从 TickFlow 拉取当天
-        trade_date = cn_today()
-        df = kline_sync.fetch_minute_single(symbol, trade_date, asset_type=asset_type)
-        prev_close, price_limit = _session_price_limit(repo, symbol, trade_date, asset_type, stock_name)
-        return {
-            "symbol": symbol, "name": stock_name, "stock_info": stock_info,
-            "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
-            "asset_type": asset_type,
-            "price_limit": price_limit,
-            "prev_close": prev_close,
-        }
 
     prev_close, price_limit = _session_price_limit(repo, symbol, trade_date, asset_type, stock_name)
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
@@ -1304,9 +1251,6 @@ async def sync_minute_single(request: Request, body: dict):
     # 无实时读取替代路径。)
     if repo.resolve_asset_type(symbol) == "index":
         raise HTTPException(status_code=400, detail="指数分钟K不支持落库同步")
-
-    if not _minute_allowed(capset):
-        raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
     days = requested_days if requested_days is not None else get_minute_sync_days()
     loop = asyncio.get_event_loop()

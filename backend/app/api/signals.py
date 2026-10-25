@@ -93,11 +93,6 @@ def get_options():
         "maxDays": custom_signals.MAX_DAYS,
         "units": custom_signals.UNIT_LABELS,
         "operators": [">", ">=", "<", "<=", "==", "!="],
-        "kinds": [
-            {"key": "entry", "label": "入场"},
-            {"key": "exit", "label": "出场"},
-            {"key": "both", "label": "出入通用"},
-        ],
     }
 
 

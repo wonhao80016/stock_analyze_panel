@@ -101,7 +101,6 @@ class RunReport:
 
 @dataclass(frozen=True)
 class RecordOutcome:
-    run_id: str
     written: tuple[str, ...]
     rejected: dict[str, str]
 
@@ -404,7 +403,7 @@ def record(
         candidates[sid] = (int(total) if total is not None else len(rows), rows, groups)
 
     if not candidates:
-        return RecordOutcome(run_id=run_id, written=(), rejected=rejected)
+        return RecordOutcome(written=(), rejected=rejected)
 
     hard_frozen = any(d > signal_date for d in _daily_dates(data_dir))
     soft_frozen = now >= predicted_open(signal_date)
@@ -486,7 +485,7 @@ def record(
         "strategy pick history: %s %s wrote %d strategies, rejected %d",
         signal_date, run_label, len(written), len(rejected),
     )
-    return RecordOutcome(run_id=run_id, written=tuple(written), rejected=rejected)
+    return RecordOutcome(written=tuple(written), rejected=rejected)
 
 
 def read_picks(

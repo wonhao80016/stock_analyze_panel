@@ -160,13 +160,8 @@ def test_intraday_support_ignores_tickflow_capabilities(monkeypatch):
     assert denied["available"] is False
 
 
-def test_unresolved_custom_minute_source_does_not_call_tickflow(monkeypatch):
+def test_unresolved_custom_minute_source_returns_no_minutes(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "custom_source")
-
-    def _no_client():
-        raise AssertionError("TickFlow client must not be used")
-
-    monkeypatch.setattr("app.services.kline_sync.get_client", _no_client)
     capset = CapabilitySet({Cap.INTRADAY_BATCH: CapabilityLimits(batch=20, rpm=30)})
     result = fetch_intraday_monitor_batch(
         ["600000.SH"], capset, now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),

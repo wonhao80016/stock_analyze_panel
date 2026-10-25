@@ -79,15 +79,10 @@ class TaiwanHybridProvider:
         financial=True,
     )
 
-    def __init__(
-        self,
-        finmind_token: str = "",
-        primary: str = "official",
-    ) -> None:
-        self.finmind = FinMindAdapter(token=finmind_token)
+    def __init__(self) -> None:
+        self.finmind = FinMindAdapter()
         self.yahoo = YahooFinanceAdapter()
         self.official = _RetryingOfficialAdapter()
-        self.primary = primary.lower()
 
     def close(self) -> None:
         self.official.close()
@@ -170,7 +165,7 @@ class TaiwanHybridProvider:
         if not canonical_symbols:
             return pl.DataFrame()
 
-        adapters = [self.official, self.finmind, self.yahoo] if self.primary == "official" else [self.finmind, self.yahoo]
+        adapters = [self.official, self.finmind, self.yahoo]
         for index, adapter in enumerate(adapters):
             try:
                 df = adapter.fetch_daily(

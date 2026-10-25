@@ -39,7 +39,7 @@ from app.taiwan.institutional_margin_refresh import (
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
-from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar, taipei_now, taipei_today
+from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar, taipei_now
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.service import SecurityMasterUnavailableError
 

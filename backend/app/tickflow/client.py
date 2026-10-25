@@ -5,24 +5,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-FREE_ENDPOINT = "https://twse.com.tw"
 PAID_ENDPOINT = "https://tpex.org.tw"
-
-
-def _should_use_free_server() -> bool:
-    return True
 
 
 def _base_url() -> str | None:
     return None
-
-
-def get_client():
-    raise RuntimeError("TickFlow 外部 SDK 已停用；系統已全面改用台灣官方 (TWSE/TPEx) 與免費資料來源。")
-
-
-def get_async_client():
-    raise RuntimeError("TickFlow 外部 SDK 已停用；系統已全面改用台灣官方 (TWSE/TPEx) 與免費資料來源。")
 
 
 def get_paid_realtime_client():

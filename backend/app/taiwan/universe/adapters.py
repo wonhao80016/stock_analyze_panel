@@ -393,8 +393,6 @@ class TwseInstrumentAdapter:
         html = html_content
         # If live and no product types injected, fetch live product types
         prod_types = official_product_types
-        if prod_types is None and html_content is None:
-            prod_types = fetch_official_twse_etf_products()
 
         return parse_isin_html(
             html,

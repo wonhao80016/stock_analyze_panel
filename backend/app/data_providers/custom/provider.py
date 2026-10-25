@@ -207,41 +207,6 @@ class GenericHTTPProvider:
                 on_chunk_done(i + 1, len(chunks))
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
-    def get_financials(
-        self,
-        table: str,
-        symbols: list[str],
-        latest_only: bool = True,
-    ) -> pl.DataFrame:
-        """拉取财务数据。table 包含四张财务报表及 shares 股本表。
-
-        No sync flow calls this; only the settings-page dataset test reaches a financial config.
-
-        custom 源用一个 'financial' dataset 配置覆盖全部财务表; 请求时把 table 作为参数传给上游,
-        上游根据 table 返回对应数据。字段由数据源决定, 这里只确保有 symbol 列。
-        """
-        cfg = self._dataset("financial")
-        frames: list[pl.DataFrame] = []
-        chunks = chunked(symbols, cfg.batch)
-        for i, chunk in enumerate(chunks):
-            sleep_between_batches(i, cfg.rpm)
-            # 把 table 注入到请求参数 (上游据此区分财务表)
-            extra_params = {**cfg.params, "table": table}
-            extra_body = {**cfg.body, "table": table}
-            if table == "shares":
-                extra_params["latest"] = latest_only
-                extra_body["latest"] = latest_only
-            rows = self._request_rows(
-                cfg, symbols=chunk,
-                override_params=extra_params, override_body=extra_body,
-            )
-            df = self._mapped_frame(cfg, rows)
-            if not df.is_empty():
-                frames.append(df)
-        if not frames:
-            return pl.DataFrame()
-        return pl.concat(frames, how="diagonal_relaxed")
-
     @staticmethod
     def _normalize_minute(df: pl.DataFrame) -> pl.DataFrame:
         """把映射后的 df 规范成 minute canonical 列。"""

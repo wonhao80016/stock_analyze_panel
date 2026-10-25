@@ -308,7 +308,6 @@ def test_prepare_base_market_forwards_cancel_event(monkeypatch, tmp_path) -> Non
     captured = {}
     plan = SimpleNamespace(
         base_columns=frozenset(),
-        intermediate_columns=frozenset(),
         indicator_columns=frozenset(),
         signal_columns=frozenset(),
         matrix_columns=frozenset(),

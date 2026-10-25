@@ -13,11 +13,9 @@ _instances_lock = threading.Lock()
 
 
 def _get_providers():
-    from app.data_providers.tickflow_provider import TickFlowProvider
     from app.taiwan.providers.hybrid_provider import TaiwanHybridProvider
     return {
         "taiwan": TaiwanHybridProvider,
-        "tickflow": TickFlowProvider,
     }
 
 

@@ -1,18 +1,16 @@
-"""换手率历史股本计算 + Data Manager 财务数据统计。
+"""换手率历史股本计算。
 
 注: 原 A 股「财务数据同步」产品 (services/financial_sync.py 的 FinancialScheduler
 及 sync_* 系列) 已在 Phase 8B-5.3 移除; 本文件保留的是仍被 turnover_rate 指标
-(app.indicators.pipeline) 与 Data Manager (app.api.data) 使用的通用/台股测试。
+(app.indicators.pipeline) 使用的通用/台股测试。
 """
 from __future__ import annotations
 
 from datetime import date
-from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
-from app.api import data as data_api
 from app.indicators import pipeline
 
 
@@ -138,19 +136,3 @@ def test_turnover_uses_market_volume_unit(monkeypatch):
     ).sort("symbol")
 
     assert result["turnover_rate"].to_list() == pytest.approx([1.0, 1.0])
-
-
-def test_data_status_includes_share_history(tmp_path):
-    path = tmp_path / "financials" / "shares" / "part.parquet"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH", "000001.SZ"],
-        "period_end": ["2023-12-31", "2024-06-30", "2024-06-30"],
-    }).write_parquet(path)
-
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    result = data_api._safe_aggregate_financials(repo)
-
-    assert result is not None
-    assert result["rows"] == 3
-    assert result["tables"]["shares"] == {"rows": 3, "symbols": 2}

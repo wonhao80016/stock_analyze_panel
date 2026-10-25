@@ -31,10 +31,6 @@ YAHOO_METADATA = SourceMetadata(
     volume_unit=VolumeUnit.SHARES,
     amount_unit=AmountUnit.UNAVAILABLE,
     price_semantics=PriceSemantics.RAW,
-    rate_limit_rpm=30,
-    supports_history=True,
-    supports_etf=True,
-    supports_tpex=True,
 )
 
 

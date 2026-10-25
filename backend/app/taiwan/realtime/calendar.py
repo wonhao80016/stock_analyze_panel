@@ -78,9 +78,6 @@ class TaiwanTradingCalendar:
             store = get_holiday_store()
         return store.is_holiday(d) is True
 
-    def add_holiday(self, d: date) -> None:
-        self.known_holidays.add(d)
-
     def add_trading_day(self, d: date) -> None:
         self.known_trading_days.add(d)
 

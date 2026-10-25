@@ -234,11 +234,6 @@ def _run_uvmicorn(port: int, ready_event: threading.Event) -> None:
     )
     server = uvicorn.Server(config)
 
-    # 线程结束时通知主线程 (无论正常退出还是异常)
-    def _signal_done(*exc):
-        ready_event.set()
-    server.config.callback_notify = None  # 不用 notify 机制
-
     try:
         server.run()
     except Exception:
@@ -275,7 +270,7 @@ def _open_window(url: str) -> None:
     """主线程: 用 pywebview 打开桌面窗口。"""
     import webview  # type: ignore[import-not-found]
 
-    window = webview.create_window(
+    webview.create_window(
         _APP_NAME,
         url,
         width=1440,

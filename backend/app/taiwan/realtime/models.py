@@ -16,7 +16,6 @@ from app.taiwan.enrichment.models import SourceMeta
 class RealtimeStatus(str, Enum):
     """Real-time data freshness and provenance status."""
     REALTIME = "realtime"                               # Live streaming / sub-second intraday quote
-    DELAYED = "delayed"                                 # Delayed intraday quote (e.g. 15-min delay)
     OFFICIAL_SNAPSHOT = "official_snapshot"             # Official post-close snapshot
     FALLBACK = "fallback"                               # Secondary realtime provider fallback
     DAILY_FALLBACK = "daily_fallback"                   # Fallback to latest Daily K-line
@@ -34,11 +33,9 @@ class MarketStatus(str, Enum):
     """
     PRE_OPEN = "pre_open"                   # 08:30 - 09:00 (Pre-market trial matching)
     OPEN = "open"                           # 09:00 - 13:25 (Continuous regular trading, verified)
-    REGULAR_OPEN = "open"                   # Alias for OPEN
     CLOSING_AUCTION = "closing_auction"     # 13:25 - 13:30 (Closing call auction, trial matching only)
     SCHEDULED_OPEN_UNVERIFIED = "scheduled_open_unverified" # 08:30 - 14:30 scheduled, but open state unverified
     POST_CLOSE = "post_close"               # 13:30 - 14:30 (Post-market odd-lot & fixed-price)
-    POST_CLOSE_SESSION = "post_close"       # Alias for POST_CLOSE
     CLOSED = "closed"                       # After 14:30 or before 08:30
     NON_TRADING_DAY = "non_trading_day"     # Confirmed weekend or statutory/typhoon holiday
     UNKNOWN = "unknown"                     # Unresolved status

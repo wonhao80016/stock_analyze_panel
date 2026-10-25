@@ -33,8 +33,6 @@ MAX_CANDIDATE_NAME_LENGTH = 80
 MINING_DEFAULT_SLIPPAGE_BPS = 5.0
 _MINING_FEES_PCT = 0.0002
 
-MiningProfile = Literal["exploratory", "balanced", "strict"]
-
 
 class JsonDataclassMixin:
     """Provide JSON output without coupling pure models to Pydantic."""

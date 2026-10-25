@@ -14,7 +14,6 @@ Orchestrates:
 """
 from __future__ import annotations
 
-import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -22,7 +21,7 @@ import logging
 import math
 from pathlib import Path
 import threading
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 import urllib.error
 
 import polars as pl
@@ -47,7 +46,6 @@ from app.taiwan.corporate_actions import TaiwanCorporateActionStore
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.index_daily import get_index_daily_service
 from app.taiwan.enrichment.factors import short_margin_ratio
-from app.taiwan.enrichment.index import TaiwanIndexProvider
 from app.taiwan.enrichment.institutional import TaiwanInstitutionalProvider, flow_of
 from app.taiwan.enrichment.margin import TaiwanMarginProvider
 from app.taiwan.enrichment.models import DatasetType, StalePolicy
@@ -238,7 +236,6 @@ class TaiwanStockDetailService:
         hybrid_provider: TaiwanHybridProvider | None = None,
         institutional_provider: TaiwanInstitutionalProvider | None = None,
         margin_provider: TaiwanMarginProvider | None = None,
-        index_provider: TaiwanIndexProvider | None = None,
         daily_store: TaiwanDailyStore | None = None,
         corporate_actions: TaiwanCorporateActionStore | None = None,
         repository: KlineRepository | None = None,
@@ -249,7 +246,6 @@ class TaiwanStockDetailService:
         self.hybrid_provider = hybrid_provider or TaiwanHybridProvider()
         self.institutional_provider = institutional_provider or TaiwanInstitutionalProvider()
         self.margin_provider = margin_provider or TaiwanMarginProvider()
-        self.index_provider = index_provider or TaiwanIndexProvider()
         self.security_master = get_security_master()
         self.realtime_service = get_realtime_service()
         self._live_tables = _LiveTableCache()
@@ -1014,7 +1010,7 @@ class TaiwanStockDetailService:
         try:
             raw_alerts = alert_store.list_recent(_configured_data_dir(), days=7, limit=alert_store.MAX_RECORDS)
             for a in raw_alerts:
-                if a.get("symbol") != symbol_str and a.get("rule_symbol") != symbol_str:
+                if a.get("symbol") != symbol_str:
                     continue
                 try:
                     alerts.append(self._recent_alert(a))

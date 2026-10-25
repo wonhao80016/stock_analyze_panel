@@ -19,7 +19,7 @@ NO request-time HTTP calls to external providers.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -33,7 +33,6 @@ from app.taiwan.industry_intelligence import UNCLASSIFIED_INDUSTRY, unclassified
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_rules import PriceLimitModel
-from app.taiwan.symbol import parse_symbol
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.models import MarketProfileBridge
 from app.taiwan.volume_patterns import VOLUME_PATTERN_COLUMNS

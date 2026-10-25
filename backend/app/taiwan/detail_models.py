@@ -16,7 +16,7 @@ Covers:
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -107,7 +107,6 @@ class TaiwanInstitutionalData(BaseModel):
     foreign_net_5d: Optional[int] = Field(None, description="外資近 5 日累計買賣超 (股)")
     investment_trust_net_5d: Optional[int] = Field(None, description="投信近 5 日累計買賣超 (股)")
     dealer_net_5d: Optional[int] = Field(None, description="自營商近 5 日累計買賣超 (股)")
-    trend: List[dict] = Field(default_factory=list, description="近期每日三大法人買賣超趨勢")
     meta: Optional[SectionMeta] = None
 
 
@@ -118,7 +117,6 @@ class TaiwanMarginData(BaseModel):
     short_balance: Optional[int] = Field(None, description="融券餘額 (股)")
     short_change: Optional[int] = Field(None, description="融券增減 (股)")
     short_margin_ratio: Optional[float] = Field(None, description="券資比 (%)")
-    trend: List[dict] = Field(default_factory=list, description="近期融資融券趨勢")
     meta: Optional[SectionMeta] = None
 
 

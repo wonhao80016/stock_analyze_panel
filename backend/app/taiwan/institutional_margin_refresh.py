@@ -25,13 +25,9 @@ import polars as pl
 
 from app.taiwan.enrichment.institutional import (
     TaiwanInstitutionalProvider,
-    TwseInstitutionalAdapter,
-    TpexInstitutionalAdapter,
 )
 from app.taiwan.enrichment.margin import (
     TaiwanMarginProvider,
-    TwseMarginAdapter,
-    TpexMarginAdapter,
 )
 from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore

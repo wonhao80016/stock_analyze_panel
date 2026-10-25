@@ -39,14 +39,6 @@ from app.taiwan.universe.models import MarketProfileBridge, TaiwanInstrument
 
 logger = logging.getLogger(__name__)
 
-# Row keys share their names with api/watchlist.py::_WATCHLIST_COLS; the indicator
-# fields are added from the enriched partition below.
-_TAIWAN_ROW_FIELDS = (
-    "symbol", "name", "asset_type",
-    "close", "open", "high", "low", "prev_close",
-    "change_amount", "change_pct", "amount", "turnover_rate",
-)
-
 _TAIWAN_INDICATOR_FIELDS = (
     "amplitude", "annual_vol_20d", "vol_ratio_5d",
     "ma5", "ma10", "ma20", "ma60", "vol_ma5", "vol_ma10",

@@ -553,7 +553,6 @@ def test_detail_identity_exposes_security_class():
         hybrid_provider=MagicMock(**{"get_daily.return_value": pl.DataFrame()}),
         institutional_provider=MagicMock(**{"fetch_live_day.side_effect": RuntimeError("offline")}),
         margin_provider=MagicMock(**{"fetch_live_day.side_effect": RuntimeError("offline")}),
-        index_provider=MagicMock(),
         daily_store=MagicMock(**{"scan_range.return_value": pl.DataFrame()}),
     )
     svc.security_master = _Master(TSMC, TINGYI)

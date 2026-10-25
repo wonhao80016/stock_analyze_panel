@@ -11,15 +11,9 @@ Monitor / Watchlist / Dashboard / Screener 的真实消费者。_read_ext_datafr
 仍被 watchlist.py / screener.py 直接 import 使用, 完整保留。ExtConfigStore /
 PullScheduler / ext_presets.py 均未变更, 见 backend/app/services/ext_data.py、
 ext_pull.py、ext_presets.py。
-
-FOLLOW_UP: _refresh_views() 因上述 handlers 一并移除而暂无调用方 —— 保留未删,
-因为 watchlist.py/screener.py 的 ext-column JOIN 在 config 未注册的情况下仍有
-一条走 DuckDB view (ext_{config_id}) 的 fallback 分支, 而该 view 目前只有此函数
-会建立; 是否可安全一并清理留待下一轮更细的 view-lifecycle 稽核确认。
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import re
@@ -294,58 +288,3 @@ def discover_all_schemas(request: Request):
             "columns": columns,
         })
     return {"items": result}
-
-
-# ---------------------------------------------------------------------------
-# 视图刷新
-# ---------------------------------------------------------------------------
-
-def _refresh_views(request: Request) -> None:
-    """重新注册 DuckDB 视图以包含新的扩展数据。"""
-    repo = request.app.state.repo
-    db = repo.store.db
-    d = repo.store.data_dir.as_posix()
-
-    # 注册旧路径视图（兼容）
-    for name, subdir in [("instruments_ext", "instruments_ext"), ("kline_ext", "kline_ext")]:
-        old_glob = f"{d}/{subdir}/**/*.parquet"
-        old_dir = Path(d) / subdir
-        if old_dir.exists():
-            sql = (
-                f"CREATE OR REPLACE VIEW {name} AS "
-                f"SELECT * FROM read_parquet('{old_glob}', union_by_name=true)"
-            )
-            try:
-                db.execute(sql)
-            except Exception:
-                pass
-
-    # 注册新路径视图：每个扩展表一个视图 ext_{config_id}
-    ext_base = Path(d) / "ext_data"
-    if ext_base.exists():
-        for cfg_dir in ext_base.iterdir():
-            if not cfg_dir.is_dir():
-                continue
-            cp = cfg_dir / "config.json"
-            if not cp.exists():
-                continue
-            try:
-                raw = json.loads(cp.read_text(encoding="utf-8"))
-                cfg_id = raw["id"]
-                # 检查是否有数据文件（snapshot: part.parquet, timeseries: timeseries/ 目录）
-                has_data = (cfg_dir / "part.parquet").exists() or (cfg_dir / "timeseries").exists()
-                if has_data:
-                    view_name = f"ext_{cfg_id}"
-                    # snapshot: part.parquet 在 cfg_dir/ 根下; timeseries: 在 timeseries/ 子目录
-                    mode = raw.get("mode", "snapshot")
-                    if mode == "snapshot":
-                        glob_pattern = f"{cfg_dir.as_posix()}/*.parquet"
-                    else:
-                        glob_pattern = f"{cfg_dir.as_posix()}/timeseries/**/*.parquet"
-                    sql = (
-                        f"CREATE OR REPLACE VIEW {view_name} AS "
-                        f"SELECT * FROM read_parquet('{glob_pattern}', union_by_name=true)"
-                    )
-                    db.execute(sql)
-            except Exception:
-                pass

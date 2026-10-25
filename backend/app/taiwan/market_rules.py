@@ -108,7 +108,6 @@ class SecuritiesTaxModel:
     ordinary_stock_rate: float = 0.003
     day_trade_stock_rate: float = 0.0015
     domestic_etf_rate: float = 0.001
-    foreign_etf_rate: float = 0.001
     bond_etf_rate: float = 0.0
     tdr_rate: float = 0.001
 
@@ -310,26 +309,6 @@ class TickSizeModel:
         else:
             steps = round(price / tick)
         return round(steps * tick, 4)
-
-    @classmethod
-    def round_to_valid_tick(
-        cls,
-        price: float,
-        tick_class: TickSizeClass = TickSizeClass.ORDINARY_STOCK,
-        side: Literal["buy", "sell", "round"] = "round",
-        trade_date: date | None = None,
-    ) -> float:
-        """General rounding entry point.
-
-        side='round': standard nearest tick (recommended for general orders/fills).
-        side='buy': floor to tick (conservative boundary limit).
-        side='sell': ceil to tick (conservative boundary limit).
-        """
-        if side == "buy":
-            return cls.round_price_limit_boundary(price, direction="up", tick_class=tick_class, trade_date=trade_date)
-        if side == "sell":
-            return cls.round_price_limit_boundary(price, direction="down", tick_class=tick_class, trade_date=trade_date)
-        return cls.round_order_price(price, tick_class=tick_class, mode="nearest", trade_date=trade_date)
 
 
 # ── 5. Price Limit Model ───────────────────────────────────────

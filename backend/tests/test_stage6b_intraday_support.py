@@ -54,14 +54,13 @@ def test_support_is_available_with_a_custom_minute_plugin(monkeypatch):
     assert support["source"] == "custom_minute"
 
 
-def test_fetch_never_reaches_tickflow_without_a_custom_minute_plugin(monkeypatch):
+def test_fetch_skips_the_minute_pull_without_a_custom_minute_plugin(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "taiwan")
 
-    def _no_client():
-        raise AssertionError("TickFlow client must not be used")
+    def _no_pull(*_args, **_kwargs):
+        raise AssertionError("no minute pull without a custom minute plugin")
 
-    monkeypatch.setattr(kline_sync, "get_client", _no_client)
-    monkeypatch.setattr(kline_sync, "sync_minute_batch", lambda *a, **k: _no_client())
+    monkeypatch.setattr(kline_sync, "sync_minute_batch", _no_pull)
 
     result = fetch_intraday_monitor_batch(
         ["600000.SH"], detect_capabilities(), now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),

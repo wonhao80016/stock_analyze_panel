@@ -13,13 +13,12 @@ report CRUD 持久化)—— 产品方向确认本产品不做长篇 AI 个股�
 from __future__ import annotations
 
 import logging
-import math
 from datetime import date, datetime, timedelta
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.indicators.levels import KELTNER_TIERS, compute_levels, keltner_bands, summarize_levels
+from app.indicators.levels import compute_levels
 from app.taiwan.market_rules import TickSizeClass
 from app.taiwan.realtime.calendar import get_market_status, taipei_now
 from app.taiwan.realtime.models import MarketStatus
@@ -27,67 +26,6 @@ from app.taiwan.realtime.models import MarketStatus
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stock-analysis", tags=["stock-analysis"])
-
-
-def _to_float_list(series: pl.Series) -> list:
-    """polars Series → JSON 安全的 float 列表(null/NaN → None)。"""
-    out: list = []
-    for v in series.to_list():
-        if v is None:
-            out.append(None)
-            continue
-        try:
-            f = float(v)
-            out.append(round(f, 2) if math.isfinite(f) else None)
-        except (TypeError, ValueError):
-            out.append(None)
-    return out
-
-
-def _build_series(df: pl.DataFrame) -> dict:
-    """提取带状指标(布林带 / Keltner通道 / ATR止损)的每日时间序列。
-
-    这些指标的本质是"每日一条线",随 MA/ATR/σ 漂移,画成曲线才能体现通道形态。
-    其余固定价位(枢轴/前高前低等)不在此,仍用水平 markLine。
-
-    返回结构(每个 value 都是按日期对齐的数组):
-      {
-        "boll":      {"upper": [...], "lower": [...]},
-        "keltner_s": {"upper": [...], "lower": [...]},   # EMA20 ± 2 * ATR10
-        "keltner_m": {"upper": [...], "lower": [...]},   # EMA60 ± 2.5 * ATR10
-        "keltner_l": {"upper": [...], "lower": [...]},   # EMA120 ± 3 * ATR10
-        "atr":       {"stop_loss": [...], "take_profit": [...]},  # close∓2ATR
-      }
-    """
-    if df.is_empty() or "close" not in df.columns:
-        return {}
-
-    out: dict[str, dict] = {}
-    close = df["close"]
-    has_atr = "atr_14" in df.columns
-
-    # 布林带(上/下/中轨;中轨 = MA20,数据层已预计算)
-    if "boll_upper" in df.columns and "boll_lower" in df.columns:
-        out["boll"] = {
-            "upper": _to_float_list(df["boll_upper"]),
-            "lower": _to_float_list(df["boll_lower"]),
-            "mid": _to_float_list(df["ma20"]) if "ma20" in df.columns else None,
-        }
-
-    for key, (window, mult, _label) in KELTNER_TIERS.items():
-        bands = keltner_bands(df, window, mult)
-        if bands is not None:
-            out[key] = {"upper": _to_float_list(bands[0]), "lower": _to_float_list(bands[1])}
-
-    if has_atr:
-        atr = df["atr_14"]
-        # ATR 止损/止盈: close ± 2×ATR(跟随行情漂移的动态止损线)
-        out["atr"] = {
-            "stop_loss": _to_float_list(close - 2 * atr),
-            "take_profit": _to_float_list(close + 2 * atr),
-        }
-
-    return out
 
 
 _TICK_CLASSES = {"stock": TickSizeClass.ORDINARY_STOCK, "etf": TickSizeClass.ETF}
@@ -119,8 +57,7 @@ def get_levels(
     布林带 / Keltner短中长 / ATR止损 / 缺口 / 斐波那契 / 整数关口)。
 
     返回 {levels: {sr, pivot, extreme, boll, keltner_s, keltner_m, keltner_l,
-    atr_stop, gap, fib, round}, close, summary, dates, series}。
-    前端按 levels 的 key 渲染开关按钮,逐组显隐 markLine / 曲线。
+    atr_stop, gap, fib, round}, close, symbol}。
     """
     if not symbol:
         raise HTTPException(400, "symbol 不能为空")
@@ -135,21 +72,10 @@ def get_levels(
         return {"levels": {"sr": [], "pivot": [], "extreme": [],
                            "boll": [], "keltner_s": [], "keltner_m": [], "keltner_l": [],
                            "atr_stop": [], "gap": [], "fib": [], "round": []},
-                "close": None, "summary": "無數據", "symbol": symbol,
-                "dates": [], "series": {}}
+                "close": None, "symbol": symbol}
 
     levels = compute_levels(
         df, last_bar_live=_last_bar_is_live(df), tick_class=_TICK_CLASSES.get(asset_type)
     )
     close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
-    # 日期 + 带状曲线序列(供前端画 Keltner/ATR/布林带曲线)
-    dates = df["date"].to_list()
-    series = _build_series(df)
-    return {
-        "levels": levels,
-        "close": close,
-        "summary": summarize_levels(levels, close),
-        "symbol": symbol,
-        "dates": [str(d) for d in dates],
-        "series": series,
-    }
+    return {"levels": levels, "close": close, "symbol": symbol}

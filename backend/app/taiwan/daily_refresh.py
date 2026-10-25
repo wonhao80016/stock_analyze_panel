@@ -11,7 +11,6 @@ from collections import Counter
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
-from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -403,17 +402,3 @@ class TaiwanDailyRefreshService:
             return False
         stored = self._store.read_range(None, day, day)
         return not stored.is_empty() and stored["symbol"].str.ends_with(".TWSE").any()
-
-    def refresh_today(self) -> dict[str, Any]:
-        """Refresh all universe symbols for today only."""
-        return self.refresh_symbols(start=date.today(), end=date.today())
-
-    def refresh_range(self, start: date, end: date) -> dict[str, Any]:
-        """Refresh all universe symbols for a date range."""
-        return self.refresh_symbols(start=start, end=end)
-
-    def fetch_sample(self, symbols: list[str], start: date, end: date) -> pl.DataFrame:
-        """Fetch a small sample of symbols for validation (bypasses store)."""
-        if not symbols:
-            return pl.DataFrame()
-        return self._provider.get_daily(symbols, start_time=start, end_time=end)

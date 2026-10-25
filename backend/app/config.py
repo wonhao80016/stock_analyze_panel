@@ -182,12 +182,6 @@ class Settings(BaseSettings):
             raise ValueError("ai_context_window must be positive")
         return self
 
-    @property
-    def use_free_mode(self) -> bool:
-        """是否走 Free 模式。优先看 secrets.json,其次看 .env。"""
-        from app import secrets_store
-        return not secrets_store.get_tickflow_key()
-
 
 settings = Settings()
 

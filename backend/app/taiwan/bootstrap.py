@@ -128,13 +128,8 @@ def safe_extract_zip(zip_path: Path, extract_dir: Path) -> None:
 
             target_path = (extract_dir / filename).resolve()
             # Ensure path is strictly within target directory
-            try:
-                if not target_path.is_relative_to(resolved_extract):
-                    raise ValueError(f"Zip Slip attack detected: path traversal in {filename}")
-            except AttributeError:
-                # Fallback for older python Path
-                if not str(target_path).startswith(str(resolved_extract)):
-                    raise ValueError(f"Zip Slip attack detected: path traversal in {filename}")
+            if not target_path.is_relative_to(resolved_extract):
+                raise ValueError(f"Zip Slip attack detected: path traversal in {filename}")
 
             if member.is_dir():
                 target_path.mkdir(parents=True, exist_ok=True)
@@ -352,7 +347,7 @@ class TaiwanBootstrapService:
         self._chip_service = chip_service
         self._uses_default_chip_stores = chip_service is None and store is None
 
-    def start_bootstrap(self, force: bool = False) -> str:
+    def start_bootstrap(self) -> str:
         """Start bootstrap process in a background thread."""
         global _active_job_id
         with _jobs_lock:
@@ -374,7 +369,7 @@ class TaiwanBootstrapService:
 
         thread = threading.Thread(
             target=self._run_job,
-            args=(job_id, force),
+            args=(job_id,),
             daemon=True,
             name=f"taiwan-bootstrap-{job_id[:8]}",
         )
@@ -418,7 +413,7 @@ class TaiwanBootstrapService:
                 job.total_bytes = total_bytes
             job.updated_at = datetime.now().isoformat()
 
-    def _run_job(self, job_id: str, force: bool = False) -> None:
+    def _run_job(self, job_id: str) -> None:
         logger.info("Starting Taiwan historical bootstrap job %s", job_id)
         with tempfile.TemporaryDirectory(prefix="Itoy_tw_bootstrap_", dir=str(temp_root())) as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
@@ -718,14 +713,3 @@ class TaiwanBootstrapService:
             **master_info,
             **chip_info,
         }
-
-
-_bootstrap_service_instance: TaiwanBootstrapService | None = None
-
-
-def get_bootstrap_service() -> TaiwanBootstrapService:
-    """Return singleton instance of TaiwanBootstrapService."""
-    global _bootstrap_service_instance
-    if _bootstrap_service_instance is None:
-        _bootstrap_service_instance = TaiwanBootstrapService()
-    return _bootstrap_service_instance

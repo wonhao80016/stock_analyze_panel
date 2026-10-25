@@ -8,9 +8,6 @@
 
 另一個回歸點: 視窗必須帶時區。naive datetime 會被 .timestamp() 按伺服器本地時區
 解讀, UTC 容器上整段偏移 8 小時, 分時補拉必然為空。
-
-注意: tests/test_kline_sync_timezone.py 雖然也涵蓋視窗, 但它在到達斷言前就會
-因為 provider 分流而失敗, 守不住這條回歸, 因此本檔直接測純函式。
 """
 from __future__ import annotations
 

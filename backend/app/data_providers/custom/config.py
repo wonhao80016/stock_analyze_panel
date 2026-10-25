@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import yaml
 
-DatasetName = Literal["daily", "adj_factor", "realtime", "minute", "financial"]
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 300.0
 # Fields whose unit a dataset may declare; an undeclared field is decimal (0.0366 = 3.66%).
@@ -50,9 +49,6 @@ class CustomSourceConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     datasets: dict[str, DatasetConfig] = field(default_factory=dict)
     path: Path | None = None
-
-    def has_dataset(self, name: DatasetName) -> bool:
-        return name in self.datasets
 
 
 def _auth_from_dict(raw: dict[str, Any] | None) -> AuthConfig:

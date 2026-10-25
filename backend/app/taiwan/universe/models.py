@@ -142,7 +142,7 @@ class TaiwanInstrument:
     source: str               # "TWSE_ISIN" | "TPEX_ISIN"
     updated_at: str           # ISO timestamp string
     etf_category: str | None = None  # EtfCategory value if instrument_type == "etf"
-    classification_source: str | None = None  # ClassificationSource value
+    classification_source: str | None = None  # official_metadata, cfi_code, name_heuristic or unknown
     underlying_scope: str | None = None       # "domestic" | "foreign" | "unknown"
     leverage_multiplier: float = 1.0          # e.g. 1.0, 2.0, -1.0
     etf_management_style: str | None = None   # "active" | "passive" | None

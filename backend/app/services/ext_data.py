@@ -316,54 +316,6 @@ _POLARS_DTYPE_MAP = {
     "bool": pl.Boolean,
 }
 
-_POLARS_TYPE_MAP = {
-    "Int64": "int", "Int32": "int", "Int16": "int", "Int8": "int",
-    "UInt64": "int", "UInt32": "int", "UInt16": "int", "UInt8": "int",
-    "Float64": "float", "Float32": "float",
-    "Boolean": "bool",
-    "Utf8": "string", "String": "string",
-    "Date": "string", "Datetime": "string", "Duration": "string",
-    "Categorical": "string",
-}
-
-_CODE_PAT = re.compile(r"^\d{6}$")
-_SYMBOL_PAT = re.compile(r"^\d{6}\.[A-Z]{2}$")
-
-
-def infer_fields_from_df(df: pl.DataFrame) -> list[dict]:
-    """从 DataFrame 推断扩展字段定义。"""
-    fields = []
-    for col_name in df.columns:
-        pl_type = df[col_name].dtype
-        dtype = _POLARS_TYPE_MAP.get(str(pl_type.base_type()), "string")
-        fields.append({"name": col_name, "dtype": dtype, "label": col_name})
-    return fields
-
-
-def detect_symbol_candidates(df: pl.DataFrame) -> tuple[list[str], list[str]]:
-    """识别 symbol/code 候选列。"""
-    symbol_candidates: list[str] = []
-    code_candidates: list[str] = []
-
-    for col in df.columns:
-        try:
-            col_data = df[col].cast(pl.Utf8).drop_nulls()
-        except Exception:
-            continue
-        if len(col_data) == 0:
-            continue
-        sample = col_data.head(200).to_list()
-        sym_hits = sum(1 for v in sample if _SYMBOL_PAT.match(str(v).strip()))
-        code_hits = sum(1 for v in sample if _CODE_PAT.match(str(v).strip()))
-        total = len(sample)
-        if total > 0:
-            if sym_hits / total > 0.5:
-                symbol_candidates.append(col)
-            elif code_hits / total > 0.5:
-                code_candidates.append(col)
-
-    return symbol_candidates, code_candidates
-
 
 def build_code_lookup(data_dir: Path) -> dict[str, str]:
     """从 instruments 维表构建 code → symbol 映射。"""
@@ -477,61 +429,6 @@ def apply_config_mapping(df: pl.DataFrame, config: ExtConfig, data_dir: Path) ->
     return df
 
 
-def ensure_utf8_csv(file_path: Path) -> Path:
-    """确保 CSV 文件以 UTF-8 编码可读，非 UTF-8（如 GBK/GB18030）则转换。
-
-    国内行情软件（同花顺/东财/通达信）和 Windows 中文 Excel 导出的 CSV 多为
-    GBK 系编码，Polars 的 read_csv 默认按 UTF-8 解析会抛 "invalid utf-8 sequence"。
-    这里在交给 Polars 前做一次编码规范化。
-
-    返回值：若已是 UTF-8 则返回原路径；否则在同目录写一个 *.utf8 文件并返回它
-    （调用方用临时目录，随目录一起清理）。
-    """
-    raw = file_path.read_bytes()
-    # BOM 处理：UTF-8-SIG 等带 BOM 文件直接交给 Polars（它认识 BOM）
-    try:
-        raw.decode("utf-8")
-        return file_path  # 已是合法 UTF-8
-    except UnicodeDecodeError:
-        pass
-    # 依次尝试常见中文编码，第一个能完整解码的即为命中
-    for enc in ("gb18030", "gbk", "gb2312", "big5"):
-        try:
-            text = raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-        out_path = file_path.with_suffix(file_path.suffix + ".utf8")
-        out_path.write_text(text, encoding="utf-8")
-        logger.info("CSV 编码转换 %s → %s (%s)", file_path.name, out_path.name, enc)
-        return out_path
-    # 都无法解码：返回原路径，让 Polars 抛出更精确的原始错误
-    return file_path
-
-
-def parse_upload_file(file_path: Path, symbol_col: str = "symbol", data_dir: Path | None = None) -> pl.DataFrame:
-    """解析上传的 CSV / Excel 文件为 Polars DataFrame。"""
-    suffix = file_path.suffix.lower()
-    if suffix == ".csv":
-        df = pl.read_csv(ensure_utf8_csv(file_path), infer_schema_length=10000)
-    elif suffix in (".xlsx", ".xls"):
-        df = pl.read_excel(file_path)
-    else:
-        raise ValueError(f"不支持的文件格式: {suffix}")
-
-    if symbol_col not in df.columns:
-        # 尝试模糊匹配
-        candidates = [c for c in df.columns if c.lower() in ("symbol", "code", "代码", "标的")]
-        if candidates:
-            df = df.rename({candidates[0]: symbol_col})
-        else:
-            raise ValueError(f"未找到标的代码列 (symbol)，可选列: {df.columns}")
-
-    # 确保 symbol 列为字符串并标准化
-    lookup = build_code_lookup(data_dir) if data_dir else None
-    df = df.with_columns(normalize_symbol(df[symbol_col].cast(pl.Utf8), lookup))
-    return df
-
-
 def cast_df_to_schema(df: pl.DataFrame, fields: list[ExtField]) -> pl.DataFrame:
     """按配置的字段类型转换 DataFrame 列类型。
 
@@ -616,73 +513,6 @@ def write_ext_parquet(
     df.write_parquet(out_path)
     logger.info("扩展表写入: %s → %s (%d 行)", config.id, out_path, len(df))
     return len(df)
-
-
-def delete_ext_parquet(config_id: str, data_dir: Path) -> None:
-    """删除扩展数据源关联的所有 Parquet 数据（保留 config.json）。
-
-    - snapshot: 删除 ext_data/{id}/part.parquet
-    - timeseries: 删除 ext_data/{id}/timeseries/ 目录
-    """
-    cfg_dir = _config_dir(config_id, data_dir)
-    # 删除快照文件
-    snap = cfg_dir / "part.parquet"
-    if snap.exists():
-        snap.unlink()
-    # 删除时序目录
-    ts_dir = cfg_dir / "timeseries"
-    if ts_dir.exists():
-        import shutil
-        shutil.rmtree(ts_dir, ignore_errors=True)
-
-
-def fix_symbol_format(config: ExtConfig, data_dir: Path) -> int:
-    """扫描该扩展配置的所有 Parquet 文件，将 symbol 列标准化为 代码.交易所 格式。
-
-    - snapshot: 扫描 ext_data/{id}/part.parquet
-    - timeseries: 扫描 ext_data/{id}/timeseries/date=xxx/part.parquet
-
-    Returns:
-        修复的文件数。
-    """
-    cfg_dir = _config_dir(config.id, data_dir)
-    if not cfg_dir.exists():
-        return 0
-
-    # 收集需要扫描的 parquet 文件列表
-    parquet_files: list[Path] = []
-    if config.mode == "snapshot":
-        p = cfg_dir / "part.parquet"
-        if p.exists():
-            parquet_files.append(p)
-    else:
-        ts_dir = cfg_dir / "timeseries"
-        if ts_dir.exists():
-            for part_dir in sorted(ts_dir.iterdir()):
-                if not part_dir.is_dir() or not part_dir.name.startswith("date="):
-                    continue
-                p = part_dir / "part.parquet"
-                if p.exists():
-                    parquet_files.append(p)
-
-    fixed = 0
-    lookup = build_code_lookup(data_dir)
-    for parquet_path in parquet_files:
-        try:
-            df = pl.read_parquet(parquet_path)
-            if "symbol" not in df.columns:
-                continue
-            old = df["symbol"].to_list()
-            df = df.with_columns(normalize_symbol(df["symbol"], lookup))
-            new = df["symbol"].to_list()
-            if old != new:
-                df.write_parquet(parquet_path)
-                fixed += 1
-                logger.info("代码格式修复: %s/%s (%d 行)", config.id, parquet_path.parent.name, len(df))
-        except Exception as e:
-            logger.warning("代码格式修复跳过 %s: %s", parquet_path, e)
-
-    return fixed
 
 
 def rows_to_parquet(

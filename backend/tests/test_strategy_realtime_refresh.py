@@ -46,7 +46,6 @@ def test_strategy_result_subscriber_notification_is_coalesced():
     data = sub.pop()
     assert data["strategy_results_updated"] is True
     assert data["quote_updated"] is False
-    assert data["depth_updated"] is False
     assert sub.wait(timeout=0.01) is False
 
 

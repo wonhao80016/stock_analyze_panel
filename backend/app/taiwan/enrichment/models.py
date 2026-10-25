@@ -2,7 +2,7 @@
 
 Covers:
   - SourceMeta: Detailed origin, timestamps, status, fallback reasons, and freshness.
-  - StalePolicy: Dataset-specific freshness policies (Quotes vs Daily vs Chip vs Margin vs Index).
+  - StalePolicy: Dataset-specific freshness policies (Quotes vs Chip vs Margin vs Index).
   - InstitutionalFlow: Three Major Institutional Investors (Foreign, Investment Trust, Dealer).
   - MarginTrading: Margin Trading & Short Selling with strict unit normalization (shares).
   - MarketQuote: Official closing snapshot / quote with explicit fallback metadata.
@@ -19,17 +19,9 @@ from typing import Any
 
 class DatasetType(str, Enum):
     QUOTE = "quote"
-    DAILY = "daily"
     INSTITUTIONAL = "institutional"
     MARGIN = "margin"
     INDEX = "index"
-
-
-class ClassificationSource(str, Enum):
-    OFFICIAL_METADATA = "official_metadata"  # From TWSE t187ap47_L or official fund category
-    CFI_CODE = "cfi_code"                    # From ISO 10962 CFI code in ISIN master
-    NAME_HEURISTIC = "name_heuristic"        # Degraded fallback based on multi-character keywords
-    UNKNOWN = "unknown"
 
 
 class EtfCategory(str, Enum):
@@ -49,7 +41,6 @@ class StalePolicy:
     # Default staleness thresholds by dataset
     THRESHOLDS = {
         DatasetType.QUOTE: timedelta(hours=4),           # Quote stale after 4h past session close
-        DatasetType.DAILY: timedelta(days=4),            # Daily stale after 4 calendar days (weekend buffer)
         DatasetType.INSTITUTIONAL: timedelta(days=4),    # Chip stale after 4 calendar days
         DatasetType.MARGIN: timedelta(days=4),           # Margin stale after 4 calendar days
         DatasetType.INDEX: timedelta(days=4),            # Index stale after 4 calendar days

@@ -85,8 +85,6 @@ from app.taiwan.symbol import extract_exchange
 
 logger = logging.getLogger(__name__)
 
-BENCHMARK_SYMBOL = "000001.SH"
-BENCHMARK_NAME = "上证指数"
 TAIWAN_STAMP_TAX_OVERRIDE_ERROR = "stamp_tax_pct cannot override per-instrument Taiwan tax rules"
 _EXECUTION_COLUMNS = frozenset({
     "symbol", "date", "open", "high", "low", "close", "volume", "raw_close",
@@ -114,16 +112,8 @@ def _read_local_taiex(start: date, end: date) -> pl.DataFrame:
 
 
 @dataclass(frozen=True)
-class FeaturePlan:
-    required_features: frozenset[str]
-    required_signals: frozenset[str]
-    warmup_bars: int
-
-
-@dataclass(frozen=True)
 class ResolvedFeaturePlan:
     base_columns: frozenset[str]
-    intermediate_columns: frozenset[str]
     indicator_columns: frozenset[str]
     signal_columns: frozenset[str]
     matrix_columns: frozenset[str]
@@ -152,7 +142,6 @@ def _merge_resolved_feature_plans(
 
     return ResolvedFeaturePlan(
         base_columns=_union("base_columns"),
-        intermediate_columns=_union("intermediate_columns"),
         indicator_columns=_union("indicator_columns"),
         signal_columns=_union("signal_columns"),
         matrix_columns=_union("matrix_columns"),
@@ -246,25 +235,20 @@ class StrategyDependencyResolver:
             matrix_columns.update({"ma5", "ma10", "ma20"})
             base_columns = frozenset(set(base_columns) | {"close"})
 
-        plan = FeaturePlan(
-            required_features=frozenset(required_features),
-            required_signals=frozenset(required_signals),
-            warmup_bars=max(
-                60,
-                int(strategy.lookback_days or 1),
-                scoring_warmup_bars(scoring),
-                # The panel recomputes these on the loaded window; signals also read the bar before.
-                indicators_warmup_bars(indicator_columns) + 1,
-            ),
+        warmup_bars = max(
+            60,
+            int(strategy.lookback_days or 1),
+            scoring_warmup_bars(scoring),
+            # The panel recomputes these on the loaded window; signals also read the bar before.
+            indicators_warmup_bars(indicator_columns) + 1,
         )
         return ResolvedFeaturePlan(
             base_columns=base_columns,
-            intermediate_columns=frozenset(),
             indicator_columns=indicator_columns,
-            signal_columns=plan.required_signals,
+            signal_columns=frozenset(required_signals),
             matrix_columns=frozenset(matrix_columns),
             instrument_columns=instrument_columns,
-            warmup_bars=plan.warmup_bars,
+            warmup_bars=warmup_bars,
             full_feature_fallback=full_fallback,
             execution_backend=strategy.execution_backend,
             fundamental_columns=frozenset(
@@ -323,7 +307,6 @@ class StrategyDependencyResolver:
         }
         return ResolvedFeaturePlan(
             base_columns=base_columns,
-            intermediate_columns=frozenset(),
             indicator_columns=frozenset(),
             signal_columns=frozenset({"signal_limit_up", "signal_limit_down"}),
             matrix_columns=frozenset(matrix_columns),
@@ -462,7 +445,6 @@ def prewarm_matrix_cache(
     })
     plan = ResolvedFeaturePlan(
         base_columns=prewarm_columns,
-        intermediate_columns=frozenset(),
         indicator_columns=frozenset(),
         signal_columns=frozenset(),
         matrix_columns=prewarm_columns,
@@ -1095,8 +1077,6 @@ class StrategyBacktestService:
         返回 (合并 feature_plan, [(子策略定义, 子params, 子pipeline_config_dict), ...])。
         子策略必须全为 matrix_native, 否则 fail-closed(首版硬约束)。
         """
-        from app.strategy import composite as composite_mod
-
         assert strategy.composite is not None
         children = self.strategy_engine.composite_children(strategy, overrides)
 
@@ -1151,7 +1131,6 @@ class StrategyBacktestService:
         merged_plan = _merge_resolved_feature_plans(plans)
         # composite 模块用于合并时读取权重列表(顺序对齐 resolved_children)。
         self._composite_children_weights = [(c.strategy_id, c.weight) for c in children]
-        _ = composite_mod  # 确保模块可导入(回测时由调用方使用)
         return merged_plan, resolved_children
 
     def _generate_composite_signal_matrix(
@@ -2145,7 +2124,7 @@ class StrategyBacktestService:
                 if start_text <= label[:10] <= end_text
             ]
             benchmark_curve, benchmark_info, benchmark_return = self._build_benchmark(
-                market_matrix.symbols, config.start, config.end, sessions,
+                config.start, config.end, sessions,
             )
             total_return = result.stats.get("total_return")
             # Full-mode total_return compounds candidate samples, not an account, so it has no excess.
@@ -2359,17 +2338,6 @@ class StrategyBacktestService:
             return candidate_mask
         return pl.Series("_entry", [False] * len(panel), dtype=pl.Boolean)
 
-    def _build_entry_mask(
-        self,
-        panel: pl.DataFrame,
-        s: StrategyDef,
-        params: dict,
-        entry_signals: list[str],
-    ) -> pl.Series:
-        """兼容旧调用: 候选层 AND 买点层。"""
-        candidate_mask = self._build_candidate_filter_mask(panel, s, params)
-        return self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
-
     @staticmethod
     def _build_signal_mask(panel: pl.DataFrame, signals: list[str], name: str) -> pl.Series:
         """向量化合并信号列，多个信号 OR。支持内置 signal_ 与自定义 csg_ 前缀。"""
@@ -2388,14 +2356,12 @@ class StrategyBacktestService:
             combined = combined | m
         return combined
 
-    def _load_benchmark_closes(self, symbol: str, start: date, end: date) -> dict[str, float]:
+    @staticmethod
+    def _load_benchmark_closes(start: date, end: date) -> dict[str, float]:
         try:
-            if symbol == TAIEX.symbol:
-                df = _read_local_taiex(start, end)
-            else:
-                df = self.engine.repo.get_index_daily(symbol, start, end, columns=["date", "close"])
+            df = _read_local_taiex(start, end)
         except Exception as e:
-            logger.warning("load benchmark %s failed: %s", symbol, e)
+            logger.warning("load benchmark %s failed: %s", TAIEX.symbol, e)
             return {}
 
         if df.is_empty() or "close" not in df.columns:
@@ -2409,7 +2375,6 @@ class StrategyBacktestService:
 
     def _build_benchmark(
         self,
-        symbols: list[str] | tuple[str, ...],
         start: date,
         end: date,
         sessions: list[str],
@@ -2422,11 +2387,8 @@ class StrategyBacktestService:
         out of the curve. coverage_start and coverage_end bound the index rows found
         inside the queried period, not the whole local store.
         """
-        if any(str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES) for symbol in symbols):
-            symbol, name = TAIEX.symbol, TAIEX.name
-        else:
-            symbol, name = BENCHMARK_SYMBOL, BENCHMARK_NAME
-        closes = self._load_benchmark_closes(symbol, start, end)
+        symbol, name = TAIEX.symbol, TAIEX.name
+        closes = self._load_benchmark_closes(start, end)
         curve = [
             {"date": day, "value": closes[day], "close": closes[day], "name": name, "symbol": symbol}
             for day in sessions

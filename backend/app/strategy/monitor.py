@@ -436,7 +436,6 @@ class MonitorRuleEngine:
             rule.get("direction"),
             rule.get("threshold_pct"),
             rule.get("window_minutes"),
-            rule.get("abnormal_window"),
             rule.get("group_id"),
             _conditions_signature(rule.get("conditions")),
             rule.get("logic", "and"),
@@ -940,7 +939,7 @@ class MonitorRuleEngine:
             else:
                 resolved_name = name if name else self._name_map.get(sym)
                 message = rule.get("message", "") or self._default_message(
-                    rule, ev_type=ev_type, sym=sym, name=resolved_name,
+                    rule, ev_type=ev_type, name=resolved_name,
                     pct=pct, price=price,
                     conditions=list(rule.get("conditions", [])) if rule.get("type") != "strategy" else None,
                 )
@@ -1346,7 +1345,7 @@ class MonitorRuleEngine:
             results.append((sym, row.get("name"), row.get("close"), row.get("change_pct"), hit_sigs))
         return results
 
-    def _default_message(self, rule: dict, ev_type: str = "", sym: str = "",
+    def _default_message(self, rule: dict, ev_type: str = "",
                           name: str = "", pct: Any = None, price: Any = None,
                           conditions: list[dict] | None = None) -> str:
         """生成默认 message。
@@ -1374,8 +1373,6 @@ class MonitorRuleEngine:
                 "sell_signal": "賣出訊號",
                 "pool_entry": "進入選股結果",
                 "pool_exit": "移出選股結果",
-                "new_entry": "進入選股結果",
-                "dropped": "移出選股結果",
             }.get(ev_type)
             if action:
                 pct_text = ""

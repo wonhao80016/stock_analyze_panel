@@ -76,16 +76,6 @@ def _reject_unreasonable_risk_free_rate(risk_free_rate: float) -> None:
 
 
 # ================================================================
-# 状态
-# ================================================================
-
-@router.get("/status")
-def status():
-    """前端可用此接口判断回测页是否要灰显。"""
-    return {"available": True}
-
-
-# ================================================================
 # 研究候选方案
 # ================================================================
 
@@ -147,17 +137,6 @@ def candidate_update(candidate_id: str, req: CandidateUpdateRequest):
         raise HTTPException(status_code=400, detail="至少提供一个需要更新的字段")
     try:
         return _candidate_store().update(candidate_id, name=req.name, status=req.status)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail="候选方案不存在") from exc
-    except Exception as exc:
-        _raise_candidate_error(exc)
-
-
-@router.delete("/candidates/{candidate_id}")
-def candidate_delete(candidate_id: str):
-    try:
-        _candidate_store().delete(candidate_id)
-        return {"ok": True}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="候选方案不存在") from exc
     except Exception as exc:

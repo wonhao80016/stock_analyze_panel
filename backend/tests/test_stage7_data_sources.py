@@ -69,8 +69,6 @@ def test_daily_fallback_fetch_uses_the_official_provider_under_legacy_prefs(monk
 
     assert official_calls == ["taiwan", ["2330.TWSE"]]
     assert custom_calls == []
-    assert kline_sync.fetch_adj_factor_single("2330.TWSE").is_empty()
-    assert custom_calls == []
 
 
 @pytest.mark.parametrize("body", [

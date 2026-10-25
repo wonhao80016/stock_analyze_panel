@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import polars as pl
@@ -306,43 +306,6 @@ class ScreenerService:
         df_full = self._compute_enriched_full(df, target_date)
         _report_input(CURRENT, "ok", df_full, target_date, overwrite=False)
         return df_full
-
-    def load_prior_consecutive(self, as_of: date, consec_col: str) -> pl.DataFrame:
-        """Read only [symbol, consec_col] of the previous session, pushed down to one day's parquet.
-
-        consecutive_limit_ups / consecutive_limit_downs are stored enriched columns, read straight
-        from parquet instead of through _load_enriched_for_date's full indicator recompute, which
-        for a historical date can run a market-wide compute_enriched_full up to 9 times.
-
-        The previous session is the first partition stored within the 9 days before as_of; its
-        published symbol + consec_col are read as stored.
-
-        Returns columns symbol, prev_consec; an empty DataFrame when no previous session is found.
-        """
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
-        for delta in range(1, 10):
-            candidate = as_of - timedelta(days=delta)
-            target_parquet = enriched_dir / f"date={candidate.isoformat()}" / "part.parquet"
-            if not target_parquet.exists():
-                continue
-            try:
-                lf = pl.scan_parquet(target_parquet)
-                cols = lf.collect_schema().names()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("load_prior_consecutive scan failed for %s: %s", candidate, e)
-                return pl.DataFrame()
-            # 存储列理论上必含 consec_col; 若该分区缺列则继续向前找 (与旧循环一致)
-            if "symbol" not in cols or consec_col not in cols:
-                continue
-            try:
-                return lf.select(
-                    "symbol",
-                    pl.col(consec_col).alias("prev_consec"),
-                ).collect()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("load_prior_consecutive read failed for %s: %s", candidate, e)
-                return pl.DataFrame()
-        return pl.DataFrame()
 
     def _published_day(self, target_date: date) -> pl.DataFrame | None:
         """The partition of target_date when it has every indicator column and no storage-only row, else None."""

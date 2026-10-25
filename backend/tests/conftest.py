@@ -273,12 +273,11 @@ def _security_master_is_isolated(request, monkeypatch, tmp_path_factory):
 @pytest.fixture(autouse=True)
 def _data_bound_singletons_are_fresh(monkeypatch):
     """Services built by an earlier test keep that test's stores; each test builds its own."""
-    from app.taiwan import bootstrap, chip_history, detail_service, index_daily
+    from app.taiwan import chip_history, detail_service, index_daily
 
     monkeypatch.setattr(index_daily, "_service", None)
     monkeypatch.setattr(chip_history, "_service", None)
     monkeypatch.setattr(detail_service, "_detail_service", None)
-    monkeypatch.setattr(bootstrap, "_bootstrap_service_instance", None)
 
 
 # --- Network isolation ----------------------------------------------------------------------

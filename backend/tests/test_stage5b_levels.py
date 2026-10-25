@@ -216,18 +216,6 @@ def test_short_keltner_is_ema20_plus_minus_two_atr10():
     assert band == {"短期通道上軌": round(ema20 + 2 * atr10, 2), "短期通道下軌": round(ema20 - 2 * atr10, 2)}
 
 
-def test_keltner_series_matches_the_levels():
-    df = _full_frame()
-    series = stock_analysis._build_series(df)
-    out = compute_levels(df)
-    for key in ("keltner_s", "keltner_m", "keltner_l"):
-        values = sorted(p["value"] for p in out[key])
-        assert values == sorted([series[key]["lower"][-1], series[key]["upper"][-1]]), key
-    ema60 = _ema(df["close"].to_list(), 60)[-1]
-    atr10 = _atr(df, 10)[-1]
-    assert series["keltner_m"]["upper"][-1] == round(ema60 + 2.5 * atr10, 2)
-
-
 # B120 -------------------------------------------------------------------------------------------
 
 def _new_listing() -> pl.DataFrame:

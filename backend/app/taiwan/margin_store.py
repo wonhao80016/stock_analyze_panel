@@ -18,47 +18,10 @@ import threading
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 import polars as pl
 
-from app.taiwan.providers.base import (
-    AmountUnit,
-    PriceSemantics,
-    SourceMetadata,
-    VolumeUnit,
-)
-
 logger = logging.getLogger(__name__)
-
-TAIWAN_MARGIN_COLUMNS: list[str] = [
-    "symbol",
-    "date",
-    "trade_date",
-    "margin_previous_balance",
-    "margin_buy",
-    "margin_sell",
-    "margin_cash_redemption",
-    "margin_balance",
-    "margin_change",
-    "short_previous_balance",
-    "short_sell",
-    "short_cover",
-    "short_stock_redemption",
-    "short_balance",
-    "short_change",
-    "short_margin_ratio",
-    "unit",
-    "status",
-    "source",
-]
-
-DEFAULT_MARGIN_METADATA = SourceMetadata(
-    source_name="taiwan_margin_store",
-    volume_unit=VolumeUnit.SHARES,
-    amount_unit=AmountUnit.TWD,
-    price_semantics=PriceSemantics.RAW,
-)
 
 
 def _schema() -> dict[str, pl.DataType]:
@@ -184,7 +147,7 @@ class TaiwanMarginStore:
                     try:
                         os.replace(tmp_path, target)
                         break
-                    except OSError as exc:
+                    except OSError:
                         if attempt == retries - 1:
                             raise
                         import time
@@ -201,13 +164,6 @@ class TaiwanMarginStore:
     def read_all(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """Return all persisted rows, optionally filtered by *symbols*."""
         return self.read_range(symbols, None, None)
-
-    def read_latest_date_rows(self, symbols: list[str] | None = None) -> pl.DataFrame:
-        """Return rows from the latest available trading date partition."""
-        latest = self.latest_date()
-        if latest is None:
-            return pl.DataFrame(schema=_schema())
-        return self.read_range(symbols, latest, latest)
 
     def read_latest_per_symbol(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """Return the latest available row for each symbol."""
@@ -280,16 +236,3 @@ class TaiwanMarginStore:
         """Return the maximum date partition currently stored, or None if empty."""
         dates = self.available_dates()
         return dates[-1] if dates else None
-
-    def known_symbols(self) -> list[str]:
-        """Return sorted list of all distinct symbols across all partitions."""
-        dates = self.available_dates()
-        if not dates:
-            return []
-        syms: set[str] = set()
-        for d in dates:
-            part_path = self._data_dir / f"date={d.isoformat()}" / "part.parquet"
-            if part_path.exists():
-                s_df = pl.read_parquet(part_path, columns=["symbol"])
-                syms.update(s_df["symbol"].to_list())
-        return sorted(syms)

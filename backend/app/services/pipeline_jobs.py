@@ -17,11 +17,9 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 logger = logging.getLogger(__name__)
-
-JobStatus = Literal["pending", "running", "succeeded", "failed"]
 
 # 卡死判定阈值(秒)。语义是「进度停滞」而非「总时长」:
 # running 期间只要 progress() 还在上报(每个分块都会回调), 就永远不算卡死 ——
@@ -36,8 +34,6 @@ LONG_JOB_TIMEOUT_S = 1800
 # 总时长硬上限(兜底): 进度回调持续上报但永不结束的病态循环无法靠停滞判定捕获,
 # 超过该值无条件终止。取 12h(最长合法任务分钟K补齐的历史量级远小于此)。
 HARD_JOB_TIMEOUT_S = 12 * 3600
-# 向后兼容: 旧调用方引用 STALE_JOB_TIMEOUT_S
-STALE_JOB_TIMEOUT_S = DEFAULT_JOB_TIMEOUT_S
 
 
 class JobCancelledError(BaseException):

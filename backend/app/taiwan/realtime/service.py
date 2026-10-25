@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
-from datetime import date, datetime, time as dt_time, timedelta
+from datetime import date, datetime, time as dt_time
 
 import logging
 import threading
@@ -82,11 +82,6 @@ class TaiwanRealtimeService:
         self.provider_requests = 0
 
         self._unresolvable_logged: set[str] = set()
-
-
-    def clear_cache(self) -> None:
-        with self._lock:
-            self._cache.clear()
 
     def get_quotes(
         self,

@@ -24,7 +24,6 @@ from app.config import settings
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
-from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
 from app.strategy.scoring import (
     SCORING_DIRECTIONS,
@@ -53,13 +52,6 @@ def _get_public_strategy(engine: StrategyEngine, strategy_id: str) -> StrategyDe
     if strategy.meta.get("research_only"):
         raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
     return strategy
-
-
-def _get_monitor(request: Request) -> StrategyMonitorService:
-    mon = getattr(request.app.state, "strategy_monitor", None)
-    if not mon:
-        raise HTTPException(status_code=503, detail="策略监控未初始化")
-    return mon
 
 
 def _data_dir(request: Request) -> Path:
@@ -287,10 +279,6 @@ class SaveConfigRequest(BaseModel):
     overrides: dict
 
 
-class AIGenerateRequest(BaseModel):
-    prompt: str
-
-
 class AISaveRequest(BaseModel):
     code: str
     strategy_id: str
@@ -329,10 +317,6 @@ class StrategyCompositeSaveRequest(BaseModel):
     mode: Literal["create", "update"] = "create"
 
 
-class MonitorStartRequest(BaseModel):
-    strategy_id: str
-
-
 # ── 列表 / 详情 ─────────────────────────────────────────────────────
 
 
@@ -358,14 +342,6 @@ def list_strategies(
         overrides = all_overrides.get(meta["id"])
         result.append(_strategy_detail(s, overrides, engine))
     return {"strategies": result, "load_errors": engine.load_errors()}
-
-
-@router.get("/{strategy_id}")
-def get_strategy(strategy_id: str, request: Request):
-    engine = _get_engine(request)
-    s = _get_public_strategy(engine, strategy_id)
-    overrides = strategy_config.load_override(_data_dir(request), strategy_id)
-    return _strategy_detail(s, overrides or None, engine)
 
 
 # ── 执行选股 ─────────────────────────────────────────────────────────
@@ -977,28 +953,6 @@ def _build_prompt(req: BuildRequest) -> str:
     raise ValueError(f"无效步骤: {req.step}")
 
 
-@router.post("/build")
-async def build_strategy(req: BuildRequest, request: Request):
-    """两步策略构建。
-    step1: name + description + direction + rules → 完整策略
-    step2: current_code + instruction → 修改任意部分
-    """
-    gen = AIStrategyGenerator()
-
-    try:
-        prompt = _build_prompt(req)
-        result = await gen.generate(prompt)
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if req.step == 1:
-        result = _normalize_build_result(result, req.strategy_id, req.name, req.description)
-    elif req.strategy_id:
-        result = _normalize_build_result(result, req.strategy_id)
-    return result
-
-
 @router.post("/build/stream")
 async def build_strategy_stream(req: BuildRequest, request: Request):
     try:
@@ -1035,27 +989,6 @@ async def build_strategy_stream(req: BuildRequest, request: Request):
         headers={"Content-Encoding": "identity"},
     )
 
-
-
-@router.post("/ai/generate")
-async def ai_generate(req: AIGenerateRequest, request: Request):
-    try:
-        gen = AIStrategyGenerator()
-        result = await gen.generate(req.prompt)
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI生成失败: {e}") from e
-    return result
-
-
-@router.post("/code/validate")
-def validate_strategy_code(req: StrategyCodeValidateRequest, request: Request):
-    try:
-        prepared = _prepare_strategy_code(req)
-        return {"valid": True, "error": None, **prepared}
-    except Exception as e:
-        return {"valid": False, "error": str(e), "code": req.code, "meta": {}}
 
 
 @router.post("/code/save")

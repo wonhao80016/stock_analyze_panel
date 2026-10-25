@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 import httpx
@@ -25,8 +25,6 @@ import polars as pl
 
 from app.data_providers.normalizer import DAILY_COLS
 from app.taiwan.providers.base import AmountUnit, PriceSemantics, SourceMetadata, VolumeUnit
-from app.taiwan.providers.taiwan_values import TAIPEI, parse_number
-from app.taiwan.symbol import Exchange, parse_symbol
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 
 logger = logging.getLogger(__name__)
@@ -238,11 +236,6 @@ class OfficialDailySnapshotAdapter:
             vol_val = _parse_snapshot_number(r[vol_idx]) or 0.0
             amt_val = _parse_snapshot_number(r[amt_idx]) or 0.0
 
-            # Integrity check for traded rows
-            if vol_val > 0 and (open_val is None or high_val is None or low_val is None or close_val is None):
-                # In rare cases, suspended mid-day or auction-only trades might occur
-                pass
-
             parsed.append({
                 "symbol": f"{code}.TWSE",
                 "date": target_date,
@@ -251,7 +244,7 @@ class OfficialDailySnapshotAdapter:
                 "low": low_val,
                 "close": close_val,
                 "volume": float(vol_val),
-                "amount": float(amt_val) if amt_val is not None else None,
+                "amount": float(amt_val),
                 "quote_ts": None,
             })
 
@@ -337,7 +330,7 @@ class OfficialDailySnapshotAdapter:
                 "low": low_val,
                 "close": close_val,
                 "volume": float(vol_val),
-                "amount": float(amt_val) if amt_val is not None else None,
+                "amount": float(amt_val),
                 "quote_ts": None,
             })
 

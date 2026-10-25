@@ -307,30 +307,6 @@ class TaiwanOfficialFundamentals:
             retrieved, values, "structured", None,
         )
 
-    def dividends(self, symbol: str, exchange: str, *, security_type: str = "stock") -> list[FundamentalRecord]:
-        path = "opendata/t187ap45_L" if exchange == "TWSE" else "mopsfin_t187ap39_O"
-        url, rows, retrieved = self._rows(exchange, path)
-        result = []
-        for row in rows:
-            code = str(row.get("公司代號") or row.get("SecuritiesCompanyCode") or "").strip()
-            if code != symbol.split(".")[0]:
-                continue
-            year_raw = str(row.get("股利年度") or "").strip()
-            year = int(year_raw) + (1911 if year_raw and int(year_raw) < 1911 else 0)
-            raw_status = str(row.get("決議（擬議）進度") or "").strip()
-            def total(*names: str, current: dict[str, Any] = row) -> float | None:
-                values = [parse_number(current.get(name)) for name in names]
-                present = [value for value in values if value is not None]
-                return sum(present) if present else None
-            values = {
-                "cash_dividend": total("股東配發-盈餘分配之現金股利(元/股)", "股東配發內容-盈餘分配之現金股利(元/股)"),
-                "stock_dividend": total("股東配發-盈餘轉增資配股(元/股)", "股東配發內容-盈餘轉增資配股(元/股)"),
-                "ex_date": None, "record_date": None, "payment_date": None,
-                "raw_status": raw_status, "normalized_status": normalize_dividend_status(raw_status),
-            }
-            result.append(self._record(symbol, "dividend", f"{year:04d}-12-31", row, exchange, url, retrieved, values, "TWD_per_share", None))
-        return result
-
     def dividend_lifecycle_events(
         self,
         symbol: str,

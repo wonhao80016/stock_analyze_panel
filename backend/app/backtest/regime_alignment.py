@@ -9,18 +9,6 @@ import numpy as np
 
 RegimePoint = tuple[str, float]
 
-REGIME_THREE_LEVEL_MAP = {
-    "strong": "strong",
-    "lean_strong": "strong",
-    "range": "range",
-    "lean_weak": "weak",
-    "weak": "weak",
-}
-
-
-def three_level_regime(state: str) -> str:
-    return REGIME_THREE_LEVEL_MAP.get(state, state)
-
 
 def _date_text(value: object) -> str:
     return str(value)[:10]

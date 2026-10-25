@@ -4,7 +4,7 @@
      窗口最小化 / 被遮挡 / 后台运行时都能弹通知 (不依赖前端 WebView)。
 
 平台实现:
-  - Windows: winotify, raised through PowerShell; no icon is forwarded
+  - Windows: winotify, raised through PowerShell
   - macOS:   osascript (系统已内置, 无需额外依赖)
   - Linux:   notify-send; disabled when it is not on PATH (no other fallback)
 
@@ -20,7 +20,6 @@ import shutil
 import subprocess
 import sys
 import threading
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ _backend_cache: str | None = None
 
 # osascript/notify-send may each block up to 5s; a burst beyond this many is dropped.
 _QUEUE_MAX = 50
-_queue: queue.Queue[tuple[str, str, Path | None]] = queue.Queue(maxsize=_QUEUE_MAX)
+_queue: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=_QUEUE_MAX)
 _worker: threading.Thread | None = None
 _worker_lock = threading.Lock()
 
@@ -76,13 +75,12 @@ def _truncate(text: str) -> str:
     return text[:_MAX_LEN] + ("…" if len(text) > _MAX_LEN else "")
 
 
-def notify(title: str, message: str, icon: Path | None = None) -> bool:
+def notify(title: str, message: str) -> bool:
     """推送一条系统通知。
 
     Args:
         title:   通知标题
         message: 通知正文
-        icon:    可选图标路径 (部分平台支持)
 
     Returns:
         True = handed to the platform backend, False = failed or no backend available.
@@ -105,7 +103,7 @@ def notify(title: str, message: str, icon: Path | None = None) -> bool:
         if backend == "osascript":
             return _notify_osascript(title, message)
         if backend == "notify-send":
-            return _notify_notify_send(title, message, icon)
+            return _notify_notify_send(title, message)
     except Exception as e:  # noqa: BLE001
         logger.debug("系统通知失败 (%s): %s", backend, e)
         return False
@@ -113,7 +111,7 @@ def notify(title: str, message: str, icon: Path | None = None) -> bool:
     return False
 
 
-def notify_async(title: str, message: str, icon: Path | None = None) -> bool:
+def notify_async(title: str, message: str) -> bool:
     """Queue a notification for the background sender without waiting on the platform backend.
 
     Returns False when the title is empty or the queue is full (the notification is dropped).
@@ -122,7 +120,7 @@ def notify_async(title: str, message: str, icon: Path | None = None) -> bool:
         return False
     _ensure_worker()
     try:
-        _queue.put_nowait((title, message, icon))
+        _queue.put_nowait((title, message))
     except queue.Full:
         logger.warning("system notification queue full, dropped: %s", _truncate(title))
         return False
@@ -139,11 +137,11 @@ def _ensure_worker() -> None:
             _worker.start()
 
 
-def _drain(pending: queue.Queue[tuple[str, str, Path | None]]) -> None:
+def _drain(pending: queue.Queue[tuple[str, str]]) -> None:
     while True:
-        title, message, icon = pending.get()
+        title, message = pending.get()
         try:
-            notify(title, message, icon)
+            notify(title, message)
         except Exception as e:
             logger.debug("system notification failed: %s", e)
         finally:
@@ -197,12 +195,9 @@ def _notify_osascript(title: str, message: str) -> bool:
     return result.returncode == 0
 
 
-def _notify_notify_send(title: str, message: str, icon: Path | None) -> bool:
+def _notify_notify_send(title: str, message: str) -> bool:
     """Linux 通知 (notify-send) — freedesktop.org 标准。"""
-    args = ["notify-send", title]
-    if icon and Path(icon).exists():
-        args.extend(["--icon", str(icon)])
-    args.append(message)
+    args = ["notify-send", title, message]
     result = subprocess.run(  # noqa: S603
         args,
         capture_output=True,

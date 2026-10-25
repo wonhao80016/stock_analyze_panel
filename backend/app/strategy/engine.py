@@ -1781,22 +1781,6 @@ class StrategyEngine:
                     board_exprs.append(pl.col("symbol").str.ends_with(".TWSE"))
                 elif b in ("TPEX", "上櫃", "柜买"):
                     board_exprs.append(pl.col("symbol").str.ends_with(".TPEX"))
-                elif b == "沪主板":
-                    board_exprs.append(pl.col("symbol").str.starts_with("60"))
-                elif b == "深主板":
-                    board_exprs.append(
-                        pl.col("symbol").str.starts_with("00")
-                        | pl.col("symbol").str.starts_with("001")
-                    )
-                elif b == "创业板":
-                    board_exprs.append(
-                        pl.col("symbol").str.starts_with("300")
-                        | pl.col("symbol").str.starts_with("301")
-                    )
-                elif b == "科创板":
-                    board_exprs.append(pl.col("symbol").str.starts_with("688"))
-                elif b == "北交所":
-                    board_exprs.append(pl.col("symbol").str.contains(r"\.BJ$"))
             if board_exprs:
                 exprs.append(pl.any_horizontal(board_exprs))
         min_sessions = exclude_new_days(bf)

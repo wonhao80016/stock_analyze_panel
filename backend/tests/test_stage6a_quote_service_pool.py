@@ -181,18 +181,11 @@ def test_round_with_index_quotes_replaces_the_index_cache():
     assert row.get("volume") is None
 
 
-def test_index_cache_price_reaches_the_indices_endpoint_and_the_sector_snapshot():
-    from app.api.intraday import index_quotes
+def test_index_cache_price_reaches_the_sector_snapshot():
     from app.services.sector_monitor import SectorMonitorService
 
     svc = _service()
     _poll_once(svc, _HybridFeed())
-
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(quote_service=svc)))
-    body = index_quotes(request, symbols="t00.TWSE")
-    assert body["source"] == "realtime"
-    assert body["rows"][0]["last_price"] == pytest.approx(23100.0)
-    assert body["rows"][0]["close"] == pytest.approx(23100.0)
 
     index_rows = SectorMonitorService._row_map(svc.get_index_quotes(), index_values_are_percent=True)
     snapshot = SectorMonitorService._index_snapshot({"symbol": "t00.TWSE"}, index_rows)

@@ -18,7 +18,6 @@ import threading
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 import polars as pl
 
@@ -27,47 +26,8 @@ from app.taiwan.daily_store import (
     is_provisional_mtime,
     newest_rows_per_symbol,
 )
-from app.taiwan.providers.base import (
-    AmountUnit,
-    PriceSemantics,
-    SourceMetadata,
-    VolumeUnit,
-)
 
 logger = logging.getLogger(__name__)
-
-TAIWAN_INSTITUTIONAL_COLUMNS: list[str] = [
-    "symbol",
-    "date",
-    "trade_date",
-    "foreign_buy",
-    "foreign_sell",
-    "foreign_net",
-    "investment_trust_buy",
-    "investment_trust_sell",
-    "investment_trust_net",
-    "dealer_buy",
-    "dealer_sell",
-    "dealer_net",
-    "dealer_proprietary_buy",
-    "dealer_proprietary_sell",
-    "dealer_proprietary_net",
-    "dealer_hedge_buy",
-    "dealer_hedge_sell",
-    "dealer_hedge_net",
-    "official_net",
-    "computed_net",
-    "has_discrepancy",
-    "status",
-    "source",
-]
-
-DEFAULT_INSTITUTIONAL_METADATA = SourceMetadata(
-    source_name="taiwan_institutional_store",
-    volume_unit=VolumeUnit.SHARES,
-    amount_unit=AmountUnit.TWD,
-    price_semantics=PriceSemantics.RAW,
-)
 
 
 def _schema() -> dict[str, pl.DataType]:
@@ -189,7 +149,7 @@ class TaiwanInstitutionalStore:
                         os.replace(tmp_path, target)
                         invalidate_latest_rows(self._data_dir)
                         break
-                    except OSError as exc:
+                    except OSError:
                         if attempt == retries - 1:
                             raise
                         import time
@@ -206,13 +166,6 @@ class TaiwanInstitutionalStore:
     def read_all(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """Return all persisted rows, optionally filtered by *symbols*."""
         return self.read_range(symbols, None, None)
-
-    def read_latest_date_rows(self, symbols: list[str] | None = None) -> pl.DataFrame:
-        """Return rows from the latest available trading date partition."""
-        latest = self.latest_date()
-        if latest is None:
-            return pl.DataFrame(schema=_schema())
-        return self.read_range(symbols, latest, latest)
 
     def read_latest_per_symbol(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """Return the latest available row for each symbol; an empty *symbols* means every symbol."""

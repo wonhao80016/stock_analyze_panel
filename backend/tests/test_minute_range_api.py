@@ -91,7 +91,6 @@ def test_sync_minute_single_uses_requested_days(monkeypatch):
     capset = MagicMock()
     sync = MagicMock(return_value=2400)
     refresh = MagicMock()
-    monkeypatch.setattr(kline_api, "_minute_allowed", lambda _: True)
     monkeypatch.setattr(kline_api.kline_sync, "sync_and_persist_minute", sync)
     monkeypatch.setattr("app.jobs.daily_pipeline._refresh_single_view", refresh)
 

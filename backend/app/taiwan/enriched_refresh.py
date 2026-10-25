@@ -703,19 +703,6 @@ def published_factor_through(data_dir: Path | None = None) -> date | None:
         return None
 
 
-def refresh_taiwan_enriched(full: bool = False, repo=None) -> int:
-    """Publish the enriched table, then let the shared repository pick it up."""
-    service = TaiwanEnrichedRefreshService()
-    written = service.refresh() if full else service.refresh_recent()
-    if written and repo is not None:
-        try:
-            repo.rebuild_views()
-            repo.refresh_cache()
-        except Exception as exc:
-            logger.warning("enriched cache refresh failed after publish: %s", exc)
-    return written
-
-
 def main() -> None:
     """Manual entry point for python -m app.taiwan.enriched_refresh."""
     import argparse

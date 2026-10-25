@@ -12,7 +12,7 @@ import urllib.request
 
 from app.taiwan.enrichment.models import SourceMeta
 from app.taiwan.realtime.calendar import TAIPEI_TZ, get_market_status, taipei_now
-from app.taiwan.realtime.models import MarketStatus, RealtimeStatus, TaiwanRealtimeQuote
+from app.taiwan.realtime.models import RealtimeStatus, TaiwanRealtimeQuote
 from app.taiwan.symbol import TaiwanSymbol, parse_symbol
 
 logger = logging.getLogger(__name__)

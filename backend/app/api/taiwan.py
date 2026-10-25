@@ -108,31 +108,6 @@ def get_taiwan_bootstrap_job(job_id: str):
     return job
 
 
-@router.get("/bootstrap/stream/{job_id}")
-async def stream_taiwan_bootstrap_job(job_id: str):
-    """SSE 即時推播 Bootstrap 任務進度。"""
-    import asyncio
-    from sse_starlette.sse import EventSourceResponse
-
-    svc = TaiwanBootstrapService()
-    job = svc.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail=f"找不到任務 {job_id}")
-
-    async def event_generator():
-        while True:
-            cur = svc.get_job(job_id)
-            if not cur:
-                break
-            payload = cur.model_dump_json()
-            yield {"event": "progress", "data": payload}
-            if cur.status in ("success", "failed"):
-                break
-            await asyncio.sleep(0.5)
-
-    return EventSourceResponse(event_generator())
-
-
 @router.post("/bootstrap/update-latest")
 def update_taiwan_history_to_latest():
     """已有歷史資料時，直接增量補齊至當前最新交易日（不重新下載整包）。"""
