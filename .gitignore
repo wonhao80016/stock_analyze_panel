@@ -45,11 +45,8 @@ backend/data/**
 !backend/data/.gitkeep
 data/**
 !data/.gitkeep
-# data/ 下所有内容(含 ext_data 概念/行业)均不入库:
-#   - 用户运行时数据 (K线/财务/自选/回测等) 本就不该进 git
-#   - 概念/行业改为「首次启动自动从远程接口拉取」(见 app/services/ext_presets.py)
-#     作者更新数据只需改接口 JSON, 用户下次拉取自动同步, 无需发版、无需碰 git。
-# 这样 git pull 物理上无法影响用户本地 data, 杜绝「更新后数据丢失」。
+# Everything under data/ is runtime user data and stays out of git,
+# so git pull can never touch a user's local data.
 
 # ===== Secrets =====
 .env
@@ -66,27 +63,15 @@ backend/user_prompts/
 # ===== AI IDE =====
 .trae/
 .zcode/
+CLAUDE.md
 
-# ===== TypeScript build cache =====
+# ===== TypeScript build output =====
 frontend/tsconfig*.tsbuildinfo
+# Emitted in place by tsc -b (tsconfig.node.json: composite + emitDeclarationOnly)
+frontend/vite.config.d.ts
 
 # ===== Data files =====
 *.xlsx
-
-# ===== Private deploy / 服务器私有信息(不开源) =====
-DEPLOY.md
-deploy.sh
-
-# ===== 内部设计文档(不开源) =====
-DESIGN.md
-DESIGN-proposal.md
-CLAUDE.md
-
-# ===== 私人脚本(不开源) =====
-docs/zhihu/
-
-# ===== 用户自定义策略(私有,不开源) =====
-data/strategies/custom/
 
 # ===== 临时 / 调试产物 =====
 backend._recheck*.py
@@ -99,6 +84,7 @@ backend/__tmp_test*/
 
 # ===== Acceptance screenshots (local evidence, not versioned) =====
 screenshots/
+gui-test-screenshots/
 frontend/screenshots/
 
 # ===== 打包产物 (本地构建的安装包,不入库) =====
@@ -106,12 +92,9 @@ backend/ItoyStockPanel-win-x64.zip
 backend/ItoyStockPanel-macos.zip
 backend/ItoyStockPanel-linux-x64.tar.gz
 packaging/Output/
-packaging/icon_preview.png
-packaging/designs/
 packaging/install.log
 packaging/installed_run.log
 # macOS 本地构建产物 (PyInstaller .app 与 create-dmg 产出的 .dmg,根目录产出)
 ItoyStockPanel.app/
 ItoyStockPanel-macos*.dmg
 ItoyStockPanel-macos*.zip
-reports/cursor_tickflow_pro_rate_limit_p0.bundle
