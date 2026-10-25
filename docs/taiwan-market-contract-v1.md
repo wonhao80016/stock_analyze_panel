@@ -59,7 +59,7 @@ Monthly revenue carries period, revenue, prior-month/prior-year values, MoM/YoY,
 ## 8. Contract violations and deferred work
 
 - `mystocktracer`: prior to this contract it had no executable tick, limit, tax, lot or settlement model. The v1 pure rules close the tested core gap; security-specific no-limit/leveraged classification remains deferred.
-- `TWstock`: `TradingCostModel` still defaults to 0.1425% and its docstring calls it an official ceiling. Official guidance says the broker sets the rate; callers must explicitly configure it. Changing the default is deferred because the backtest engine currently consumes it implicitly and needs a separately scoped migration.
+- `TWstock`: `TradingCostModel` still defaults to 0.1425%. Official guidance says the broker sets the rate; callers must explicitly configure it. Changing the default is deferred because the backtest engine currently consumes it implicitly and needs a separately scoped migration.
 - `TWstock`: provenance/status vocabularies are not yet record-level compatible with Phase 4; provider migration is deferred.
 - Both: warrant/bond/TDR/REIT/ETN identity v1 and official publication-time completeness are deferred.
 - Phase 4 ETF NAV/holdings/premium-discount, Windows portability tests, new UI, strategies and factor integration are explicitly out of scope.

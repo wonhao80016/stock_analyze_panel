@@ -3,6 +3,8 @@
 日期：2026-09-18
 分支：`feat/radar-strategies`
 
+> 本文件是 2026-09-18 的移植與驗證紀錄，屬於歷史文件；文中的數字與行為以當時的程式為準。之後的變更以引用框標出。
+
 ## 背景
 
 評估外部專案 [tw-stock-radar](https://github.com/b9007082-cell/tw-stock-radar) 的選股策略
@@ -76,6 +78,8 @@
 最嚴重的影響是 `backend/app/backtest/optimizer.py` 的 `VALID_OBJECTIVES`
 允許把 `profit_factor` 當成網格搜參的最大化目標——錯誤公式會把參數推向
 「低勝率、高 payoff」的區域，而那正是它讀數最虛高、實際最可能淨虧損之處。
+
+> 2026-10-25 起，參數優化與步進優化（`optimizer.py`、`walkforward.py`）已從專案移除，上段只說明當時的影響。
 
 **已修正**：4 處公式（`engine.py` 3 處、`strategy.py` 1 處）改用總額比；
 原值另存為新欄位 `payoff_ratio`（該指標本身有意義，只是名稱掛錯）。

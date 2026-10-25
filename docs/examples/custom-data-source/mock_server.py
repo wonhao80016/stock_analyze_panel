@@ -17,15 +17,15 @@ from fastapi import FastAPI, Request
 app = FastAPI(title="Mock Custom Market Data Source")
 
 SYMBOLS = {
-    "000001.SZ": "平安銀行",
-    "600000.SH": "浦發銀行",
-    "300750.SZ": "寧德時代",
+    "2330.TWSE": "台積電",
+    "2317.TWSE": "鴻海",
+    "6488.TPEX": "環球晶",
 }
 
 BASE = {
-    "000001.SZ": 10.20,
-    "600000.SH": 8.60,
-    "300750.SZ": 186.00,
+    "2330.TWSE": 1000.0,
+    "2317.TWSE": 200.0,
+    "6488.TPEX": 450.0,
 }
 
 

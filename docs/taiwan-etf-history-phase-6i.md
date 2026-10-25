@@ -2,6 +2,8 @@
 
 Investigation date: 2026-08-31 (Asia/Taipei).
 
+> Status: a one-time investigation record kept for reference. As of 2026-10-22 its decision still holds; the "Phase 6I" name is the investigation's label, not pending work.
+
 ## Decision
 
 Official TWSE and TPEx services expose historical or recent ETF NAV and

@@ -36,9 +36,9 @@ and [taiwan-share-capital-phase-6h.md](./taiwan-share-capital-phase-6h.md).
 frontend together, as described in the README's Quick Start. The Taiwan
 module needs no separate startup step.
 
-For Taiwan-specific backend work (running its tests, or the backend alone),
-**commands must be run with `backend/` as the working directory** — Taiwan's
-local data store paths are resolved relative to that directory:
+To run the backend alone, start it from `backend/` (where the `uv` project
+lives). Data paths do not depend on the working directory: they are resolved
+from `DATA_DIR` (see below).
 
 ```bash
 cd backend
@@ -55,7 +55,10 @@ pnpm dev
 ## Taiwan local data
 
 Ingested Taiwan market data (daily OHLCV, institutional, margin/short, etc.)
-is stored under `backend/data/taiwan/`. This is local runtime/cache data —
+is stored under `<DATA_DIR>/taiwan/` (`app.taiwan.data_root.taiwan_data_root()`).
+`DATA_DIR` defaults to the `data/` directory at the repo root; a relative
+`DATA_DIR` is resolved against the repo root, not the working directory. This
+is local runtime/cache data —
 it is `.gitignore`d and must never be committed. This guide does not cover
 ingesting/refreshing that data; the module only reads what's already been
 ingested locally.
@@ -67,7 +70,7 @@ upstream. Local data can lag upstream until it's next refreshed.
 
 ## Tests
 
-Run from `backend/` (per the working-directory note above):
+Run from `backend/`; `tests/conftest.py` points `DATA_DIR` at a per-session temporary directory, so tests never read the local data:
 
 ```bash
 cd backend

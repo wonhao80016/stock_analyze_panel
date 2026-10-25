@@ -14,37 +14,32 @@
 
 歷史日 K 需要先在本機建立,做法見 [操作說明書 → 歷史日 K 與 GitHub Release 資料包](../操作說明書.md#15-歷史日-k-與-github-release-資料包)。
 
-### 選配:舊 TickFlow 資料來源
-
-```ini
-TICKFLOW_API_KEY=              # 選配;一般台股使用者留空即可
-```
-
-這是專案原本的 A 股資料來源,台股功能不依賴它。只有在你確實要接這個來源時才需要填,留空不影響任何台股功能。
-
 ---
 
 ## AI(可選)
 
-AI 為選配功能,目前用在兩個地方:台股選股頁把中文條件翻譯成篩選欄位,以及多股比較頁對已呈現的數據做客觀解讀。兩者都要手動觸發。**所有設定留空即跳過**,不影響核心功能。支援任意 OpenAI 相容介面。
+AI 為選配功能,用在以下幾個地方,全部要手動觸發:台股選股頁把中文條件翻譯成篩選欄位、多股比較頁對已呈現的數據做客觀解讀、個股頁的 AI 研究報告,以及自訂訊號的 AI 生成。**所有設定留空即跳過**,不影響核心功能。支援任意 OpenAI 相容介面,也可以改用本機的 Codex CLI。
 
-`AI_BASE_URL` 與 `AI_MODEL` 沒有內建預設值。API 位址、API Key、模型任一項留空時,AI 視為未設定,相關功能回報「未設定 AI 服務」,不會連到任何預設位址。下面以 DeepSeek 為例:
+`AI_BASE_URL` 與 `AI_MODEL` 沒有內建預設值。使用 OpenAI 相容介面時,API 位址、API Key、模型任一項留空,AI 就視為未設定,相關功能回報「未設定 AI 服務」,不會連到任何預設位址。下面以 DeepSeek 為例:
 
 ```ini
-AI_PROVIDER=openai_compat              # openai_compat | ollama
+AI_PROVIDER=openai_compat              # openai_compat | openai | codex_cli
 AI_BASE_URL=https://api.deepseek.com/v1   # 留空 = 關閉 AI;OpenAI 為 https://api.openai.com/v1
 AI_API_KEY=                            # 留空 = 關閉 AI
 AI_MODEL=deepseek-chat                 # 留空 = 關閉 AI
-AI_DAILY_TOKEN_BUDGET=500000           # 每日 token 預算上限
 ```
 
 | 配置項 | 說明 |
 | :--- | :--- |
-| `AI_PROVIDER` | `openai_compat`(OpenAI 兼容,支持 DeepSeek / 通義 / OpenAI 等)或 `ollama`(本地模型) |
+| `AI_PROVIDER` | `openai_compat`(OpenAI 兼容,支持 DeepSeek / 通義 / OpenAI 等)、`openai`(OpenAI 官方介面,可另設推理強度)或 `codex_cli`(本機已登入的 Codex CLI,不需要 API 位址與 Key) |
 | `AI_BASE_URL` | 接口地址,無預設值,留空則關閉 AI 功能。如 DeepSeek `https://api.deepseek.com/v1`、OpenAI `https://api.openai.com/v1` |
 | `AI_API_KEY` | 留空則關閉 AI 功能 |
 | `AI_MODEL` | 模型名,無預設值,留空則關閉 AI 功能。如 `deepseek-chat` |
-| `AI_DAILY_TOKEN_BUDGET` | 每日 token 預算,超限後當日不再調用 |
+| `AI_CODEX_COMMAND` / `AI_CODEX_REASONING_EFFORT` | `codex_cli` 使用的命令(預設 `codex`)與推理強度(預設留空) |
+| `AI_MAX_OUTPUT_TOKENS` / `AI_CONTEXT_WINDOW` | 單次輸出上限(預設 8192)與輸入上下文窗口(預設 64000,約 token),輸入超出時直接報錯 |
+| `AI_USER_AGENT` | 呼叫 AI 介面時的 User-Agent,預設為瀏覽器風格字串 |
+
+目前沒有每日 token 預算或用量上限的設定。
 
 也可以直接在面板 **設定 → AI 設定** 填寫與測試,不必手動編輯 `.env`。
 
@@ -92,15 +87,17 @@ AUTH_PASSWORD='你的密碼'  # 至少 6 位;僅首次生效,已設過則不覆�
 ## 使用者 Python 策略(預設關閉)
 
 ```ini
-ALLOW_USER_PYTHON_STRATEGIES=false   # true = 允許儲存並載入自訂 / AI / 疊加策略的 .py
+ALLOW_USER_PYTHON_STRATEGIES=false   # true = 載入 data/strategies/{custom,ai,composite} 中的使用者 Python 策略
 ```
 
-自訂策略、AI 策略與疊加策略都存成 `data/strategies/{custom,ai,composite}` 下的 `.py`,載入時會在後端行程內以完整權限執行。存檔前的 AST 檢查只是語法提示,可以被繞過,不是安全防護。因此預設關閉:
+自訂策略、AI 策略與疊加策略都存成 `data/strategies/{custom,ai,composite}` 下的 `.py`,載入時會在後端行程內以完整權限執行。載入前的 AST 檢查只是語法提示,可以被繞過,不是安全防護。因此預設關閉:
 
-- 關閉時:`/api/strategies/code/save`、`/ai/save`、`/composite/save` 回 403,不寫入任何檔案;挖掘出的因子候選也無法發佈成新策略(發佈既有策略不受影響)。上述目錄中已有的 `.py` 不會執行,會記入後端 log,並列在 `GET /api/strategies` 與 `POST /api/strategies/reload` 回傳的 `load_errors`。內建策略照常運作;已存在的使用者策略檔仍可查看原始碼或刪除。
-- 開啟時:改成 `true` 並重啟後端才生效。三個存檔 API 與挖掘候選發佈 `POST /api/backtest/mining/runs/{run_id}/candidates/{signature}/publish` 只接受本機請求(對端與 Host 都必須是 `127.0.0.1`、`::1` 或 `localhost`),區網、公網以及經反向代理轉入的遠端請求一律回 403。
+面板與 API 都沒有儲存策略原始碼的入口,使用者策略檔只能手動放進上述目錄。這個開關只決定後端與回測 worker 是否載入它們:
 
-只有在你信任能寫入 `data/strategies/` 的每一個人與程式時才開啟。產生與校驗程式碼的端點(`/build`、`/build/stream`、`/ai/generate`、`/code/validate`)不寫檔也不執行,開關關閉時仍可使用。
+- 關閉時:上述目錄中的 `.py` 不會執行,會記入後端 log,並列在 `GET /api/strategies` 回傳的 `load_errors`。內建策略照常運作。
+- 開啟時:改成 `true` 並重啟後端才生效,目錄中的策略檔會在後端與回測 worker 載入。
+
+只有在你信任能寫入 `data/strategies/` 的每一個人與程式時才開啟。
 
 ---
 
@@ -116,8 +113,13 @@ BACKEND_EXTRAS=             # 留空默認;legacy-cpu 兼容老 CPU
 
 ## 配置優先級
 
-1. **面板設定頁**(`設定 → ...`):UI 修改後立即生效,持久化到 `data/`
-2. **`.env` 文件**:啟動時讀取
-3. **環境變量**:Docker / 系統環境變量,優先級最高
+同一個配置項有多個來源時,由高到低:
 
-> 多數設定可在面板設定頁修改,無需手動編輯 `.env`。僅 AI Key、API Key 等敏感項建議放 `.env`(不提交到 git)。
+1. **面板設定頁**(`設定 → ...`):UI 修改後立即生效。AI 設定與 Key、插件 Key 存在 `data/user_data/secrets.json`,其他偏好存在 `data/` 下的偏好檔
+2. **環境變量**:Docker / 系統環境變量,會蓋過 `.env` 中的同名項
+3. **`.env` 文件**:啟動時讀取
+4. 程式內建預設值
+
+面板一旦儲存過 AI 設定,之後改環境變量或 `.env` 都不會生效;要改用環境變量,先在 **設定 → AI 設定** 清除設定(`DELETE /api/settings/ai`)。
+
+> 多數設定可在面板設定頁修改,無需手動編輯 `.env`。`.env` 與 `secrets.json` 都含密鑰,不要提交到 git。

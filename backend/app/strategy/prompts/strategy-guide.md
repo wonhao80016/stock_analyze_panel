@@ -31,7 +31,7 @@ META = {
         "price_min": 5,               # 最低价格
         "price_max": 200,             # 最高价格
         "amount_min": 1e8,            # 最小成交额 (元)
-        "exclude_st": True,           # 排除 ST/*ST/退市
+        "exclude_st": False,          # 按名称排除 ST/*ST/退市 (A 股惯例, 台股无效, 引擎默认 False)
         "exclude_new_days": 30,       # 排除上市未满 N 个交易日的新股 (0 关闭)
     },
 
@@ -190,7 +190,7 @@ REQUIRED_FEATURES = {"ma20", "momentum_20d", "vol_ratio_5d"}
 
 | 列名 | 类型 | 说明 |
 |------|------|------|
-| symbol | string | 股票代码 (如 600519.SH) |
+| symbol | string | 股票代码 (如 2330.TWSE、6488.TPEX) |
 | date | date | 交易日期 |
 
 ### 价格相关
@@ -313,7 +313,7 @@ EMA、MACD、RSI、ATR 在每只股票最初的若干根 K 线为空：EMA 以�
 2. 信号列使用 `.fill_null(False)` 处理空值
 3. 用户可能调节的数值阈值通过 `params` 暴露；公式常数、固定窗口边界、一次性内部变量不必强行参数化
 4. `scoring` 只能使用上述真实数值字段或受控虚拟字段 `ma20_bias`，权重总和必须为 1.0；不要使用条件名称或信号列作为评分字段。某字段要低值得高分时，在 META 写 `"scoring_directions": {"字段": "low"}`（默认 `"high"`，只接受这两个值）；不要用 `descending=False`：它把整个分数倒序排列（分数最低者排最前），引用这种策略的叠加策略无法加载，保存的子策略设置里含它时运行会报错
-5. 遵循 A 股 T+1 规则 (当日买入次日才能卖出)
+5. 回测默认为台股现股模式：当日买入次日才能卖出；只有当冲模式且标的可当冲时才允许当日卖出
 6. Polars 策略允许 `import polars as pl` 和 `from datetime import date/datetime`；矩阵策略只允许 NumPy 和 `app.backtest.matrix` 协议/算子
 7. 禁止使用 `open()`, `exec()`, `eval()`, `os`, `sys`, `subprocess`
 8. **贴合用户需求优先**：第3/4节的指标列和信号列仅供参考，能用则用；如果用户需求需要自定义计算（如"前高""上次涨停价""N日内某个事件后X天"），直接在 `filter_history()` 中自行设计和计算，不需要局限于已有列
@@ -335,7 +335,7 @@ META = {
     "tags": ["反包", "短线", "放量"],
     "basic_filter": {
         "price_min": 3, "price_max": 200, "amount_min": 0.5e8,
-        "exclude_st": True, "exclude_new_days": 30,
+        "exclude_new_days": 30,
     },
     "params": [
         {"id": "prev_down_pct", "label": "前日最大跌幅", "type": "float",
@@ -389,7 +389,3 @@ def filter_history(df: pl.DataFrame, params: dict) -> pl.DataFrame:
         & ((pl.col("close") > pl.col("ma5")) | (pl.col("close") > pl.col("ma10")))
     )
 ```
-
-## 8. 完整示例
-
-见 [strategy-example.md](./strategy-example.md) — 从零创建强势反包策略的三步完整演示。

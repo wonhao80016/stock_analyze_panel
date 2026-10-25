@@ -2,6 +2,8 @@
 
 Investigation date: 2026-08-31 (Asia/Taipei).
 
+> Status: a one-time investigation record kept for reference. As of 2026-10-22 its decision still holds; the "Phase 6G" name is the investigation's label, not pending work.
+
 ## Decision
 
 No additional production availability mapping is safe from the currently

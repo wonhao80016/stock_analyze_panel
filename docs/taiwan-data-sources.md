@@ -230,8 +230,8 @@ TPEx rows), `provisional` (written on its own day, except the newest stored day)
 report only feeds the log written 30 seconds after startup: nothing is repaired,
 enabling realtime quotes is not blocked, and the legacy A-share `kline_*` tables are
 not read. Taiwan bars are not written to or read from the legacy `kline_daily` table
-either: the default start of backtest streams, the minute chart's trading day and
-`/api/data/status` take their dates from the `taiwan/daily` partition names.
+either: the default start of backtest streams and the minute chart's trading day take
+their dates from the `taiwan/daily` partition names.
 
 ## Market-wide institutional amounts
 
@@ -500,8 +500,8 @@ the exchange has published them all.
 
 These rules were checked against MIS samples recorded on 2026-10-08 at 08:45, 09:00, 09:32
 and 14:56 (`backend/tests/fixtures/mis_2026_10_08/`). No sample from 13:25–13:30 was
-recorded, so the closing-auction quotes in the tests are edited from those samples; a live
-check is planned for 2026-10-12.
+recorded, so the closing-auction quotes in the tests are edited from those samples. A live
+check was planned for 2026-10-12; no result had been recorded as of 2026-10-25.
 
 Official close-style quotes (STOCK_DAY_ALL and the TPEx close quotes) are cached for 10 minutes
 per URL with single-flight loading (a failure is cached for 30 seconds). They are a fallback

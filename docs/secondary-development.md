@@ -17,7 +17,7 @@
 
 - 自定義、AI 和疊加策略目錄：`data/strategies/`。
 - 數據源 Provider 與 `plugin.yaml` 機制：詳見 [`plugin-development.md`](plugin-development.md)。
-- 擴展數據與聲明式分析頁面：適合不需要自定義 React 交互的頁面。
+- 擴展數據表：`data/ext_data/<id>/config.json` 宣告的表，可作為自選清單與篩選的欄位；後端只開放只讀的 `/api/ext-data/schema-all` 與 `/api/ext-data/{config_id}/dimension-members`。需要自定義頁面時改用下面的前端源碼擴展。
 - 前端源碼擴展註冊：`frontend/src/custom/<namespace>/extension.tsx`，支持靜態頁面、導航和已開放插槽。
 - 後端源碼擴展註冊：`backend/app/custom/<module>.py`，支持 FastAPI 路由、啟動鉤子和通知格式化器。
 - 當前前端插槽：`layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`。
@@ -201,7 +201,6 @@ const extension: FrontendExtension = {
 - `ScoringPolicy`：評分計算。
 - `PositionSizingPolicy`：倉位計算。
 - `RiskPolicy`：風險約束。
-- `NotificationFormatter`：通知文案。
 - `StrategyProvider`：策略發現。
 - `MonitorConditionEvaluator`：自定義監控條件。
 - `BacktestCostModel`：手續費和滑點模型。

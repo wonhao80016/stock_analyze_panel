@@ -1,6 +1,6 @@
 # 自定義數據源接入
 
-本項目默認使用內建數據源。自定義數據源是一個可選擴展: 外部 HTTP 服務負責取數和整理, 本項目只把返回結果映射成內部標準字段, 然後複用現有存儲、指標、enriched、策略和前端展示邏輯。
+本項目默認使用台灣官方資料源(TWSE / TPEx)。自定義數據源是一個可選擴展: 外部 HTTP 服務負責取數和整理, 本項目只把返回結果映射成內部標準字段, 然後複用現有存儲、指標、enriched、策略和前端展示邏輯。
 
 ## 支持範圍
 
@@ -8,10 +8,12 @@
 
 | 數據集 | 配置名 | 說明 |
 | --- | --- | --- |
-| 日K | `daily` | 批量返回一組股票在指定區間內的日K |
-| 除權因子 | `adj_factor` | 批量返回一組股票的復權因子 |
+| 日K | `daily` | 批量返回一組股票在指定區間內的日K;台股固定用官方來源,只能試拉 |
+| 除權因子 | `adj_factor` | 批量返回一組股票的復權因子;台股固定用官方來源,只能試拉 |
 | 實時行情 | `realtime` | 返回全市場快照,用於盤中 enriched 增量計算 |
 | 分鐘K | `minute` | 返回 1m 分鐘K(需映射出 symbol / datetime / OHLC / 量額) |
+
+能在「設置 -> 數據源」切換到自定義源的只有 `realtime` 與 `minute`。選了自定義源、但它沒有宣告該數據集時,實時行情輪詢會跳過(不會改用官方即時行情),分鐘K 回傳空表。
 
 深度盤口(depth5)暫無數據集契約,仍由內建數據源提供。
 
@@ -100,6 +102,8 @@ datasets:
 
 ## 字段契約
 
+所有數據集的 `symbol` 都必須是台股標準代碼:上市 `<代號>.TWSE`(如 `2330.TWSE`)、上櫃 `<代號>.TPEX`(如 `6488.TPEX`)。`volume` 的單位是股(不是張),`amount` 的單位是新台幣元。
+
 ### daily 必填
 
 | 內部字段 | 含義 |
@@ -107,8 +111,8 @@ datasets:
 | `symbol` | 標準代碼,如 `2330.TWSE` |
 | `date` | 交易日 |
 | `open` / `high` / `low` / `close` | 不復權 OHLC |
-| `volume` | 成交量 |
-| `amount` | 成交額 |
+| `volume` | 成交量(股) |
+| `amount` | 成交額(元) |
 
 ### adj_factor 必填
 
@@ -126,7 +130,7 @@ datasets:
 | `last_price` | 最新價 |
 | `prev_close` | 昨收 |
 | `open` / `high` / `low` | 當日 OHLC |
-| `volume` | 成交量 |
+| `volume` | 成交量(股) |
 
 建議實時接口額外提供 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`。缺失時部分字段會由 pipeline 回算,但精度取決於可用輸入。
 
@@ -281,8 +285,8 @@ cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_sour
   symbol = 股票代碼, 格式 2330.TWSE / 6488.TPEX
   date = 交易日期
   open / high / low / close = OHLC
-  volume = 成交量
-  amount = 成交額
+  volume = 成交量 (單位: 股, 不是張)
+  amount = 成交額 (新台幣元)
 
 除權因子 (adj_factor):
   symbol = 股票代碼
