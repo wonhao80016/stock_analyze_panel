@@ -160,9 +160,9 @@ def test_close_versus_ma20_strategy_uses_the_shared_rule(monkeypatch, case):
 
 # ---- limit-down recovery -------------------------------------------------------------------
 
-def _cn_two_days(open_: float, low: float, close: float) -> pl.DataFrame:
+def _two_days(open_: float, low: float, close: float) -> pl.DataFrame:
     return pl.DataFrame({
-        "symbol": ["600001.SH"] * 2,
+        "symbol": ["2330.TWSE"] * 2,
         "date": [date(2024, 1, 2), date(2024, 1, 3)],
         "open": [10.0, open_],
         "high": [10.1, max(open_, close)],
@@ -173,7 +173,7 @@ def _cn_two_days(open_: float, low: float, close: float) -> pl.DataFrame:
     })
 
 
-CN_INSTRUMENTS = pl.DataFrame({"symbol": ["600001.SH"], "name": ["普通股"], "float_shares": [1.0e8]})
+INSTRUMENTS = pl.DataFrame({"symbol": ["2330.TWSE"], "float_shares": [1.0e8]})
 
 # Previous close 10.00, limit-down price 9.00.
 RECOVERY_CASES = [
@@ -196,25 +196,9 @@ RECOVERY_IDS = [
 
 @pytest.mark.parametrize(("open_", "low", "close", "expected"), RECOVERY_CASES, ids=RECOVERY_IDS)
 def test_publish_pipeline_recovery_needs_a_close_above_the_previous_close(open_, low, close, expected):
-    out = pipeline.compute_enriched(_cn_two_days(open_, low, close), instruments=CN_INSTRUMENTS)
+    out = pipeline.compute_enriched(_two_days(open_, low, close), instruments=INSTRUMENTS)
 
     assert out.sort("date")["signal_limit_down_recovery"][-1] is expected
-
-
-@pytest.mark.parametrize(("open_", "low", "close", "expected"), RECOVERY_CASES, ids=RECOVERY_IDS)
-def test_intraday_recovery_needs_a_close_above_the_previous_close(open_, low, close, expected):
-    rows = pl.DataFrame({
-        "symbol": ["600001.SH"],
-        "date": [date(2026, 7, 20)],
-        "open": [open_], "high": [max(open_, close)], "low": [low], "close": [close],
-        "raw_close": [close], "raw_high": [max(open_, close)], "raw_low": [low],
-        "_prev_close_raw": [10.0],
-        "volume": [1000.0],
-    })
-
-    out = pipeline._compute_limit_signals_today(rows, CN_INSTRUMENTS.drop("float_shares"))
-
-    assert out["signal_limit_down_recovery"][0] is expected
 
 
 def test_taiwan_publish_uses_the_same_recovery_rule(monkeypatch):

@@ -17,6 +17,7 @@ import pytest
 
 from app.api import stock_analysis
 from app.indicators.pipeline import invalidate_custom_signals, invalidate_taiwan_limit_profile_cache
+from app.repository import DataStore, KlineRepository
 from app.taiwan import universe
 from app.taiwan.corporate_actions import TaiwanCorporateActionStore, corporate_action_schema
 from app.taiwan.daily_store import TaiwanDailyStore
@@ -25,7 +26,6 @@ from app.taiwan.enrichment.corporate_actions import ETF_SPLIT, EXDIV
 from app.taiwan.market_rules import TickSizeClass, TickSizeModel
 from app.taiwan.universe import TaiwanSecurityMaster
 from app.taiwan.universe.models import TaiwanInstrument
-from app.tickflow.repository import DataStore, KlineRepository
 
 pytestmark = pytest.mark.usefixtures("deny_network")
 

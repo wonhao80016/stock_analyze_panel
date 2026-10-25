@@ -264,7 +264,7 @@ def test_rule_list_warns_about_a_missing_or_disabled_custom_signal(tmp_path, mon
     from app.services import kline_sync
 
     monkeypatch.setattr(kline_sync, "intraday_monitor_support",
-                        lambda caps: {"available": True, "reason": "", "max_symbols": 100})
+                        lambda: {"available": True, "reason": "", "max_symbols": 100})
     custom_signals.save_one(tmp_path, _signal("on", [_cond("close", ">", "1")]))
     custom_signals.save_one(tmp_path, {**_signal("off", [_cond("close", ">", "1")]), "enabled": False})
     _write_rule(tmp_path, _rule("uses_on", "csg_on"))

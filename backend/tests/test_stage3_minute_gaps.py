@@ -14,9 +14,9 @@ import polars as pl
 import pytest
 
 from app.api import kline as kline_api
+from app.repository import DataStore, KlineRepository
 from app.taiwan.realtime.calendar import TAIPEI_TZ
 from app.taiwan.realtime.minute_recorder import MinuteBarRecorder
-from app.tickflow.repository import DataStore, KlineRepository
 from tests.test_stage3_closing_auction import closing_result, harness, minute_bars  # noqa: F401
 from tests.test_stage3_session_model import SESSION, at, tsmc_continuous_1324
 

@@ -49,7 +49,7 @@ class _Repo:
 
 
 def _load(rows: pl.DataFrame) -> dict:
-    return BacktestEngine._load_minute_for_fills(_Repo(rows), [SYMBOL], {DAY.isoformat()}, "stock")
+    return BacktestEngine._load_minute_for_fills(_Repo(rows), [SYMBOL], {DAY.isoformat()})
 
 
 # B102: minute fills need minute bars covering the whole Taiwan session.

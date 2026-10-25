@@ -32,19 +32,18 @@ ROOT = Path(SPECPATH).parent
 FRONTEND_DIST = str(ROOT / "frontend" / "dist")
 VERSION_FILE = str(ROOT / "VERSION")
 BUILTIN_STRATEGIES = str(ROOT / "backend" / "app" / "strategy" / "builtin")
-STRATEGY_PROMPTS = str(ROOT / "backend" / "app" / "strategy" / "prompts" / "*.md")
 # 圖標按平台選: Windows 用 .ico, macOS 用 .icns (PyInstaller 對 .ico 在
 # mac 上靜默忽略, 不換格式 Dock/Finder 會顯示通用圖標)。兩者都由
 # packaging/generate_icon.py 一併生成。
 APP_ICON = str(ROOT / "packaging" / ("icon.icns" if _IS_MACOS else "icon.ico"))
 
 # ── 收集帶原生庫的依賴 (.libs/ 目錄必須完整, 否則啟動崩) ─────────────
-# polars / pyarrow / duckdb / fastexcel 都自帶共享庫子目錄
+# polars / pyarrow / duckdb 都自帶共享庫子目錄
 datas = []
 binaries = []
 hiddenimports = []
 
-for pkg in ("polars", "pyarrow", "duckdb", "fastexcel"):
+for pkg in ("polars", "pyarrow", "duckdb"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -67,11 +66,9 @@ hiddenimports += collect_submodules("polars")
 hiddenimports += collect_submodules("webview")
 hiddenimports += collect_submodules("webview.platforms")
 
-# ── 系統通知後端 (winotify/plyer 按平台動態導入) ─────────────────────
+# ── 系統通知後端 (winotify 按平台動態導入) ───────────────────────────
 if sys.platform == "win32":
     hiddenimports += collect_submodules("winotify")
-hiddenimports += collect_submodules("plyer")
-hiddenimports += collect_submodules("plyer.platforms")
 
 # ── uvicorn 動態導入的模塊 (loop/protocol/logging 按字符串加載) ──────
 hiddenimports += [
@@ -103,8 +100,8 @@ def _safe_metadata(pkg):
 for pkg in (
     "fastapi", "pydantic", "pydantic_settings", "starlette", "anyio",
     "uvicorn", "polars", "duckdb", "pyarrow", "httpx", "numpy", "pandas",
-    "openai", "platformdirs", "winotify", "plyer", "apscheduler",
-    "python-dotenv", "fastexcel",
+    "openai", "winotify", "apscheduler",
+    "python-dotenv",
 ):
     datas += _safe_metadata(pkg)
 
@@ -115,8 +112,6 @@ datas += [(FRONTEND_DIST, "static")]
 datas += [(VERSION_FILE, ".")]
 # 內置策略 → app/strategy/builtin/ (importlib 動態加載, 不能進 PYZ)
 datas += [(BUILTIN_STRATEGIES, "app/strategy/builtin")]
-# ai_generator and prompt_builder read these guides relative to their own __file__.
-datas += [(STRATEGY_PROMPTS, "app/strategy/prompts")]
 
 # app.extensions.loader discovers app.custom via importlib and pkgutil, which analysis cannot follow.
 _custom_extensions = collect_submodules("app.custom")
@@ -138,7 +133,6 @@ excludes = [
     "pytest",
     "pytest_asyncio",
     "ruff",
-    "mypy",
 ]
 
 a = Analysis(

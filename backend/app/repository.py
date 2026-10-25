@@ -31,11 +31,9 @@ from app.config import settings
 from app.enriched_generation import (
     EnrichedGenerationUnavailableError,
     EnrichedPublication,
-    bump_enriched_generation,
     enriched_publication_incomplete,
     get_enriched_generation,
 )
-from app.market_time import cn_today
 from app.parquet import (
     ENRICHED_STORAGE_SCHEMA,
     scan_enriched_parquet,
@@ -46,11 +44,6 @@ from app.strategy.scoring import CALENDAR_DAYS_PER_SESSION, indicators_warmup_ba
 from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
-
-
-def enriched_dirname(asset_type: str) -> str:
-    """asset_type → enriched parquet 目录名。ETF 走独立目录, 其余(stock)用日K enriched。"""
-    return "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
 
 
 def indicator_warmup_days() -> int:
@@ -169,14 +162,23 @@ def read_enriched_window(
     ).drop([f"__computed_{c}" for c in derived])
 
 
-def _last_available_rows(df: pl.DataFrame, cutoff: date) -> pl.DataFrame:
-    """从已按 symbol/date 排序的数据中取每只标的最后一条有效状态。"""
-    if df.is_empty():
-        return df
+# DuckDB view name -> parquet directory under the data dir.
+_PARQUET_VIEWS = {
+    "kline_daily": "kline_daily",
+    "kline_enriched": "kline_daily_enriched",
+    "kline_index_daily": "kline_index_daily",
+    "kline_index_enriched": "kline_index_enriched",
+    "kline_minute": "kline_minute",
+    "adj_factor": "adj_factor",
+    "instruments": "instruments",
+    "instruments_index": "instruments_index",
+}
+
+
+def _view_sql(data_dir: Path, name: str, directory: str) -> str:
     return (
-        df.filter(pl.col("date") <= cutoff)
-        .group_by("symbol", maintain_order=True)
-        .last()
+        f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM "
+        f"read_parquet('{Path(data_dir).as_posix()}/{directory}/**/*.parquet', union_by_name=true)"
     )
 
 
@@ -193,16 +195,11 @@ class DataStore:
             "kline_daily_enriched",
             "kline_index_daily",
             "kline_index_enriched",
-            "kline_etf_daily",
-            "kline_etf_enriched",
-            "kline_etf_minute",
             "kline_minute",
             "adj_factor",
-            "adj_factor_etf",
             "financials",
             "instruments",
             "instruments_index",
-            "instruments_etf",
             "instruments_ext",
             "kline_ext",
             "pools",
@@ -223,40 +220,8 @@ class DataStore:
 
     def _register_views(self) -> None:
         """把 Parquet 目录挂载为 DuckDB 视图(§7.3)。"""
-        d = self.data_dir.as_posix()
-        statements = [
-            f"""CREATE OR REPLACE VIEW kline_daily AS
-                SELECT * FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_enriched AS
-                SELECT * FROM read_parquet('{d}/kline_daily_enriched/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_index_daily AS
-                SELECT * FROM read_parquet('{d}/kline_index_daily/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_index_enriched AS
-                SELECT * FROM read_parquet('{d}/kline_index_enriched/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_etf_daily AS
-                SELECT * FROM read_parquet('{d}/kline_etf_daily/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_etf_enriched AS
-                SELECT * FROM read_parquet('{d}/kline_etf_enriched/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_etf_minute AS
-                SELECT * FROM read_parquet('{d}/kline_etf_minute/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_minute AS
-                SELECT * FROM read_parquet('{d}/kline_minute/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW adj_factor AS
-                SELECT * FROM read_parquet('{d}/adj_factor/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW adj_factor_etf AS
-                SELECT * FROM read_parquet('{d}/adj_factor_etf/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW instruments AS
-                SELECT * FROM read_parquet('{d}/instruments/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW instruments_index AS
-                SELECT * FROM read_parquet('{d}/instruments_index/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW instruments_etf AS
-                SELECT * FROM read_parquet('{d}/instruments_etf/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW instruments_ext AS
-                SELECT * FROM read_parquet('{d}/instruments_ext/**/*.parquet', union_by_name=true)""",
-            f"""CREATE OR REPLACE VIEW kline_ext AS
-                SELECT * FROM read_parquet('{d}/kline_ext/**/*.parquet', union_by_name=true)""",
-        ]
-        for sql in statements:
+        views = {**_PARQUET_VIEWS, "instruments_ext": "instruments_ext", "kline_ext": "kline_ext"}
+        for sql in (_view_sql(self.data_dir, name, directory) for name, directory in views.items()):
             try:
                 self.db.execute(sql)
             except Exception as e:  # noqa: BLE001
@@ -308,23 +273,14 @@ class KlineRepository:
         # Dates the exchange has actually published, used to gate realtime writes.
         # Invalidated by refresh_cache(); see _official_stock_dates().
         self._official_dates: frozenset[date] | None = None
-        self._live_agg_cache: pl.DataFrame | None = None       # 预计算聚合表 (~5500行)
-        self._live_agg_cache_date: date | None = None
-        self._live_agg_check_date: date | None = None          # 上次跨日校验时的 today (快路径节流)
         self._instruments_cache: pl.DataFrame | None = None
-        self._historical_shares_cache: pl.DataFrame | None = None
-        self._historical_shares_mtime_ns: int | None = None
         # 完整 enriched 历史 (含所有指标, 供 filter_history 策略使用)
         self._enriched_history_cache: pl.DataFrame | None = None  # ~100万行
         self._enriched_history_start: date | None = None
         self._enriched_history_generation: str | None = None
         self._index_instruments_cache: pl.DataFrame | None = None
-        self._etf_enriched_cache: pl.DataFrame | None = None
-        self._etf_enriched_cache_date: date | None = None
-        self._etf_instruments_cache: pl.DataFrame | None = None
         # symbol 集合 memo (随对应 instruments 缓存失效): 供每请求资产分流用
         self._index_symbol_set_cache: set[str] | None = None
-        self._etf_symbol_set_cache: set[str] | None = None
         # 三表合并的 symbol → name memo; 只在 clear_cache() 里重置会让
         # get_name_map 在缓存从未失效过的进程里撞上 AttributeError。
         self._name_map_cache: dict[str, str] | None = None
@@ -339,7 +295,7 @@ class KlineRepository:
 
         # ---- enriched 后台预热 ----
         # 启动时 compute_indicators (107万行, 低配机 50s+) 移出 lifespan 关键路径,
-        # 推到 daemon 线程异步完成。预热期间 get_enriched_latest / get_live_agg
+        # 推到 daemon 线程异步完成。预热期间 get_enriched_latest
         # 返回空表 (上层优雅降级), 不触发同步重算 (否则会抵消异步化收益)。
         self._enriched_warming: bool = False
         self._warmup_thread: threading.Thread | None = None
@@ -352,12 +308,9 @@ class KlineRepository:
         # parquet glob 路径
         self._enriched_glob = str(store.data_dir / "kline_daily_enriched" / "**" / "*.parquet")
         self._index_enriched_glob = str(store.data_dir / "kline_index_enriched" / "**" / "*.parquet")
-        self._etf_enriched_glob = str(store.data_dir / "kline_etf_enriched" / "**" / "*.parquet")
         self._minute_glob = str(store.data_dir / "kline_minute" / "**" / "*.parquet")
-        self._etf_minute_glob = str(store.data_dir / "kline_etf_minute" / "**" / "*.parquet")
         self._inst_glob = str(store.data_dir / "instruments" / "**" / "*.parquet")
         self._index_inst_glob = str(store.data_dir / "instruments_index" / "**" / "*.parquet")
-        self._etf_inst_glob = str(store.data_dir / "instruments_etf" / "**" / "*.parquet")
 
     def execute_all(self, sql: str, params: list | None = None) -> list[tuple]:
         """线程安全的 SELECT → fetchall。DuckDB 单 connection 非线程安全，所有读路径须走此方法。"""
@@ -385,7 +338,7 @@ class KlineRepository:
     def refresh_cache(self, background: bool = False) -> None:
         """刷新 Polars 缓存。在 pipeline 完成后、服务启动时调用。
 
-        background=True (启动时): instruments/index/ETF 同步刷新 (毫秒级),
+        background=True (启动时): instruments/index 同步刷新 (毫秒级),
         enriched 的重计算 (compute_indicators, 107万行) 推到 daemon 线程,
         不阻塞 FastAPI lifespan。预热期间上层走空表降级。
         background=False (盘后管道/手动刷新): 全部同步, 保证数据即时一致。
@@ -408,16 +361,7 @@ class KlineRepository:
         self._refresh_index_instruments()
         logger.info("cache refresh step done: index instruments (%.2fs)", time.perf_counter() - step)
 
-        step = time.perf_counter()
-        logger.info("cache refresh step start: ETF instruments")
-        self._refresh_etf_instruments()
-        logger.info("cache refresh step done: ETF instruments (%.2fs)", time.perf_counter() - step)
-
-        # ETF enriched 只失效不重建: 下次访问时按新数据懒加载,
-        # 避免自选无 ETF 的用户在管道后白付全量重算成本
-        self._etf_enriched_cache = None
-        self._etf_enriched_cache_date = None
-        # 指数 enriched 同样只失效不重建 (懒加载)
+        # 指数 enriched 只失效不重建 (懒加载)
         self._index_enriched_cache = None
         self._index_enriched_cache_date = None
 
@@ -481,11 +425,7 @@ class KlineRepository:
     @property
     def enriched_ready(self) -> bool:
         """enriched 缓存是否已就绪 (非 None 且不在后台预热中)。"""
-        return (
-            not self._enriched_warming
-            and self._enriched_cache is not None
-            and self._live_agg_cache is not None
-        )
+        return not self._enriched_warming and self._enriched_cache is not None
 
     def clear_cache(self) -> None:
         """清空所有 Polars 内存缓存。
@@ -499,16 +439,9 @@ class KlineRepository:
         self._enriched_history_cache = None
         self._enriched_history_start = None
         self._enriched_history_generation = None
-        self._live_agg_cache = None
-        self._live_agg_cache_date = None
-        self._live_agg_check_date = None
         self._instruments_cache = None
         self._index_instruments_cache = None
-        self._etf_enriched_cache = None
-        self._etf_enriched_cache_date = None
-        self._etf_instruments_cache = None
         self._index_symbol_set_cache = None
-        self._etf_symbol_set_cache = None
         self._name_map_cache = None
         self._index_enriched_cache = None
         self._index_enriched_cache_date = None
@@ -517,7 +450,7 @@ class KlineRepository:
         self._taiwan_live.invalidate()
 
     def _refresh_enriched(self) -> None:
-        """Load the latest enriched day and about 300 days of history into memory, then build the live aggregate.
+        """Load the latest enriched day and about 300 days of history into memory.
 
         The history keeps published rows as stored and recomputes only rows written without the
         publish (read_enriched_window); filter_history strategies and backtests reuse it.
@@ -566,9 +499,7 @@ class KlineRepository:
                 instruments = self._instruments_cache if self._instruments_cache is not None else pl.DataFrame()
 
                 def limit_signals(frame: pl.DataFrame) -> pl.DataFrame:
-                    return compute_limit_signals(
-                        frame, instruments, historical_shares=self.get_historical_shares()
-                    )
+                    return compute_limit_signals(frame, instruments)
 
                 step = time.perf_counter()
                 logger.info("enriched refresh step start: read history from %s", start_full)
@@ -611,12 +542,6 @@ class KlineRepository:
                     if not df_today.is_empty():
                         self._enriched_cache = df_today
                         self._enriched_cache_date = latest
-                        # 构建盘中递推基准: 若最新分区是今天的实时盘中数据,
-                        # 递推状态必须停在上一交易日, 不能把今天作为“昨日”。
-                        step = time.perf_counter()
-                        logger.info("enriched refresh step start: build live agg")
-                        self._build_live_agg(self._live_agg_baseline_date(latest))
-                        logger.info("enriched refresh step done: build live agg (%.2fs)", time.perf_counter() - step)
                         logger.info("enriched 缓存已计算: %d 只, 日期 %s (即时计算)", len(df_today), latest)
                         logger.info("enriched refresh done (%.2fs)", time.perf_counter() - started)
                         return
@@ -625,13 +550,9 @@ class KlineRepository:
             except Exception as e:  # noqa: BLE001
                 logger.warning("enriched 即时计算失败, 使用原始 14 列缓存: %s", e)
 
-            # 降级: 直接使用 14 列数据 + 构建 live_agg
+            # 降级: 直接使用 14 列数据
             self._enriched_cache = df_latest
             self._enriched_cache_date = latest
-            step = time.perf_counter()
-            logger.info("enriched refresh fallback step start: build live agg")
-            self._build_live_agg(self._live_agg_baseline_date(latest))
-            logger.info("enriched refresh fallback step done: build live agg (%.2fs)", time.perf_counter() - step)
 
             logger.info("enriched 缓存已加载: %d 只, 日期 %s", len(df_latest), latest)
             logger.info("enriched refresh done fallback (%.2fs)", time.perf_counter() - started)
@@ -648,313 +569,6 @@ class KlineRepository:
     def get_taiwan_live_enriched(self):
         """The TaiwanLiveEnriched computing today's Taiwan rows from this data dir's stored history."""
         return self._taiwan_live
-
-    def _build_live_agg(self, latest: date) -> None:
-        """从 OHLCV 即时计算递推状态 + 窗口聚合, 构建盘中实时聚合表。
-
-        优化: 优先使用 _enriched_history_cache (启动时已计算), 避免重复 compute_indicators。
-        """
-        from datetime import timedelta
-        from app.indicators.pipeline import _ema_alpha
-
-        started = time.perf_counter()
-        logger.info("live agg build start: latest=%s", latest)
-        start_60d = latest - timedelta(days=90)  # 日历90天 ≈ 60个交易日
-
-        # 优先使用已有的历史缓存 (避免重复 scan_parquet + compute_indicators)
-        if self._enriched_history_cache is not None and not self._enriched_history_cache.is_empty():
-            hist_all = self._enriched_history_cache
-            if "date" in hist_all.columns and hist_all["date"].min() <= start_60d:
-                # 从历史缓存中提取所需列 (历史缓存已有指标列)
-                base_cols = [
-                    "symbol", "date", "open", "high", "low", "close", "volume",
-                    "raw_close", "raw_high", "raw_low",
-                    "consecutive_limit_ups", "consecutive_limit_downs",
-                ]
-                needed = [c for c in base_cols if c in hist_all.columns]
-                step = time.perf_counter()
-                logger.info("live agg step start: slice history cache")
-                df_hist = hist_all.filter(
-                    (pl.col("date") >= start_60d) & (pl.col("date") <= latest)
-                ).select(needed).sort(["symbol", "date"])
-                logger.info("live agg step done: slice history cache rows=%d (%.2fs)", len(df_hist), time.perf_counter() - step)
-
-                state_cols = [
-                    "symbol",
-                    "ema5", "ema10", "ema20", "ema30", "ema60",
-                    "macd_dea",
-                    "kdj_k", "kdj_d",
-                    "atr_14",
-                    "close", "high", "low",
-                    "annual_vol_20d",
-                ]
-                existing_state = [c for c in state_cols if c in hist_all.columns]
-                state_source = _last_available_rows(
-                    hist_all.select("date", *existing_state), latest,
-                )
-                agg_a = state_source.select(existing_state)
-            else:
-                df_hist = pl.DataFrame()
-                agg_a = pl.DataFrame()
-        else:
-            # 降级: 读 parquet + compute_indicators
-            df_hist, agg_a = self._build_live_agg_from_parquet(latest, start_60d)
-
-        if df_hist.is_empty():
-            self._live_agg_cache = pl.DataFrame()
-            self._live_agg_cache_date = None
-            logger.info("live agg build skipped: empty history (%.2fs)", time.perf_counter() - started)
-            return
-
-        if agg_a.is_empty():
-            self._live_agg_cache = pl.DataFrame()
-            self._live_agg_cache_date = None
-            logger.info("live agg build skipped: empty state (%.2fs)", time.perf_counter() - started)
-            return
-
-        # 单独计算 _ema12 / _ema26 (compute_indicators 内部会 drop 掉)
-        step = time.perf_counter()
-        logger.info("live agg step start: ema state")
-        df_ema = _last_available_rows(
-            df_hist.sort(["symbol", "date"]).with_columns([
-                pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"),
-                pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"),
-            ]).select("symbol", "date", "_ema12", "_ema26"),
-            latest,
-        ).select("symbol", "_ema12", "_ema26")
-
-        agg_a = agg_a.join(df_ema, on="symbol", how="inner")
-        logger.info("live agg step done: ema state (%.2fs)", time.perf_counter() - step)
-
-        # 单独计算 RSI 状态列 (compute_indicators 内部会 drop 掉)
-        step = time.perf_counter()
-        logger.info("live agg step start: rsi state")
-        df_rsi_base = df_hist.sort(["symbol", "date"]).with_columns(
-            pl.col("close").diff().over("symbol").alias("_daily_delta")
-        )
-        gain = pl.when(pl.col("_daily_delta") > 0).then(pl.col("_daily_delta")).otherwise(0.0)
-        loss = pl.when(pl.col("_daily_delta") < 0).then(-pl.col("_daily_delta")).otherwise(0.0)
-        rsi_exprs = []
-        for n in (6, 14, 24):
-            a = 1.0 / n
-            rsi_exprs.append(gain.ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_gain_{n}"))
-            rsi_exprs.append(loss.ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"))
-        df_rsi = (
-            _last_available_rows(
-                df_rsi_base.with_columns(rsi_exprs), latest,
-            )
-            .select("symbol", *[f"_rsi_avg_gain_{n}" for n in (6, 14, 24)],
-                              *[f"_rsi_avg_loss_{n}" for n in (6, 14, 24)])
-        )
-        agg_a = agg_a.join(df_rsi, on="symbol", how="inner")
-        logger.info("live agg step done: rsi state (%.2fs)", time.perf_counter() - step)
-
-        # 前复权因子: adj_factor = close(复权) / raw_close(原始)
-        if "raw_close" in df_hist.columns:
-            step = time.perf_counter()
-            logger.info("live agg step start: adj factor state")
-            adj_factor_df = (
-                _last_available_rows(
-                    df_hist.select("symbol", "date", "close", "raw_close"), latest,
-                )
-                .select("symbol", (pl.col("close") / pl.col("raw_close")).alias("_adj_factor"))
-            )
-            agg_a = agg_a.join(adj_factor_df, on="symbol", how="left")
-            if "_adj_factor" in agg_a.columns:
-                agg_a = agg_a.with_columns(pl.col("_adj_factor").fill_null(1.0))
-            logger.info("live agg step done: adj factor state (%.2fs)", time.perf_counter() - step)
-
-        # annual_vol_20d 递推状态: 最近 19 天日收益率的部分和 / 平方和
-        step = time.perf_counter()
-        logger.info("live agg step start: annual vol state")
-        df_daily_pct = (
-            df_hist.sort(["symbol", "date"])
-            .with_columns(
-                (pl.col("close") / pl.col("close").shift(1)).log().over("symbol").alias("_daily_pct")
-            )
-        )
-        df_vol = df_daily_pct.group_by("symbol").agg([
-            pl.col("_daily_pct").tail(19).sum().alias("_vol_19d_pct_sum"),
-            (pl.col("_daily_pct") ** 2).tail(19).sum().alias("_vol_19d_pct_sq_sum"),
-        ])
-        agg_a = agg_a.join(df_vol, on="symbol", how="left")
-        logger.info("live agg step done: annual vol state (%.2fs)", time.perf_counter() - step)
-
-        # 昨日连板数: 使用每只股票最后一个有效交易日状态 (用于增量计算同向 +1)
-        step = time.perf_counter()
-        logger.info("live agg step start: consecutive state")
-        consec_cols = [c for c in ["symbol", "consecutive_limit_ups", "consecutive_limit_downs"]
-                       if c in df_hist.columns]
-        consec_source = df_hist
-        if len(consec_cols) != 3:
-            lf = (
-                scan_enriched_parquet(self._enriched_glob)
-                .filter((pl.col("date") >= start_60d) & (pl.col("date") <= latest))
-                .sort(["symbol", "date"])
-            )
-            consec_cols = [
-                c for c in ["symbol", "consecutive_limit_ups", "consecutive_limit_downs"]
-                if c in lf.collect_schema().names()
-            ]
-            consec_source = lf.select("date", *consec_cols).collect()
-        if len(consec_cols) == 3:
-            consec_df = _last_available_rows(
-                consec_source.select("date", *consec_cols), latest,
-            )
-            if not consec_df.is_empty():
-                consec = consec_df.select(
-                    "symbol",
-                    pl.col("consecutive_limit_ups").alias("_prev_consec_up"),
-                    pl.col("consecutive_limit_downs").alias("_prev_consec_down"),
-                )
-                agg_a = agg_a.join(consec, on="symbol", how="left")
-        logger.info("live agg step done: consecutive state (%.2fs)", time.perf_counter() - step)
-
-        # B类: 按 symbol 分组聚合 — 窗口统计
-        step = time.perf_counter()
-        logger.info("live agg step start: rolling windows")
-        agg_b = (
-            df_hist.sort(["symbol", "date"])
-            .group_by("symbol")
-            .agg([
-                pl.col("close").tail(4).sum().alias("_ma5_partial_sum"),
-                pl.col("close").tail(9).sum().alias("_ma10_partial_sum"),
-                pl.col("close").tail(19).sum().alias("_ma20_partial_sum"),
-                pl.col("close").tail(29).sum().alias("_ma30_partial_sum"),
-                pl.col("close").tail(59).sum().alias("_ma60_partial_sum"),
-
-                pl.col("close").tail(19).sum().alias("_boll_partial_sum"),
-                (pl.col("close").tail(19) ** 2).sum().alias("_boll_partial_sq_sum"),
-
-                pl.col("close").tail(59).max().alias("_high_59d"),
-                pl.col("close").tail(59).min().alias("_low_59d"),
-
-                pl.col("close").tail(5).first().alias("_close_5d_ago"),
-                pl.col("close").tail(10).first().alias("_close_10d_ago"),
-                pl.col("close").tail(20).first().alias("_close_20d_ago"),
-                pl.col("close").tail(30).first().alias("_close_30d_ago"),
-                pl.col("close").tail(60).first().alias("_close_60d_ago"),
-
-                pl.col("volume").tail(4).sum().alias("_vol_ma5_partial_sum"),
-                pl.col("volume").tail(9).sum().alias("_vol_ma10_partial_sum"),
-                # 标准量比分母: 前5日成交量之和(不含当天), 用于 vol_ratio_5d
-                pl.col("volume").tail(5).sum().alias("_vol_ma5_prev_sum"),
-
-                pl.col("low").tail(8).min().alias("_kdj_8d_low"),
-                pl.col("high").tail(8).max().alias("_kdj_8d_high"),
-
-                pl.col("close").tail(59).len().alias("_window_len"),
-            ])
-        )
-
-        self._live_agg_cache = agg_a.join(agg_b, on="symbol", how="inner")
-        self._live_agg_cache_date = latest
-        logger.info("live agg step done: rolling windows (%.2fs)", time.perf_counter() - step)
-        logger.info("live agg build done: rows=%d (%.2fs)", len(self._live_agg_cache), time.perf_counter() - started)
-
-    def _live_agg_baseline_date(self, latest: date) -> date:
-        """盘中递推基准日期。当天实时分区存在时使用上一可用交易日。"""
-        if latest != cn_today():
-            return latest
-        try:
-            row = self.execute_one(
-                "SELECT max(date) FROM kline_enriched WHERE date < ?",
-                [latest],
-            )
-            if row and row[0]:
-                d = row[0]
-                return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:  # noqa: BLE001
-            pass
-        return latest
-
-    def _build_live_agg_from_parquet(self, latest: date, start_60d: date) -> tuple[pl.DataFrame, pl.DataFrame]:
-        """降级路径: 从 parquet 读取数据并计算指标 (当 _enriched_history_cache 不可用时)。"""
-        from app.indicators.pipeline import compute_indicators
-
-        lf = (
-            scan_enriched_parquet(
-                self._enriched_glob,
-                cast_options=pl.ScanCastOptions(integer_cast="allow-float", float_cast="upcast"),
-            )
-            .filter(pl.col("date") >= start_60d)
-            .filter(pl.col("date") <= latest)
-            .sort(["symbol", "date"])
-        )
-
-        read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close", "volume",
-                                 "raw_close", "raw_high", "raw_low",
-                                 "consecutive_limit_ups", "consecutive_limit_downs"]
-                     if c in lf.collect_schema().names()]
-        df_hist = lf.select(read_cols).collect()
-
-        if df_hist.is_empty():
-            return df_hist, pl.DataFrame()
-
-        df_with_indicators = compute_indicators(df_hist)
-
-        state_cols = [
-            "symbol",
-            "ema5", "ema10", "ema20", "ema30", "ema60",
-            "macd_dea",
-            "kdj_k", "kdj_d",
-            "atr_14",
-            "close", "high", "low",
-            "annual_vol_20d",
-        ]
-        existing_state = [c for c in state_cols if c in df_with_indicators.columns]
-        agg_a = _last_available_rows(
-            df_with_indicators.select("date", *existing_state), latest,
-        ).select(existing_state)
-
-        return df_hist, agg_a
-
-    def _refresh_etf_enriched(self) -> None:
-        """从 ETF enriched parquet 加载最新日到内存缓存。"""
-        try:
-            enriched_dir = self.store.data_dir / "kline_etf_enriched"
-            dates = sorted(
-                p.name[5:] for p in enriched_dir.glob("date=*")
-                if p.is_dir() and p.name.startswith("date=")
-            ) if enriched_dir.exists() else []
-            if not dates:
-                self._etf_enriched_cache = None
-                self._etf_enriched_cache_date = None
-                return
-            latest = date.fromisoformat(dates[-1])
-            target_parquet = enriched_dir / f"date={dates[-1]}" / "part.parquet"
-            df_latest = pl.read_parquet(target_parquet)
-            if df_latest.is_empty():
-                return
-
-            from datetime import timedelta
-            from app.indicators.pipeline import compute_indicators, compute_signals
-            start_full = latest - timedelta(days=300)
-            read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                     "volume", "amount", "raw_close", "raw_high", "raw_low",
-                                     "ref_prev_close", "ref_limit_up", "ref_limit_down"]
-                         if c in df_latest.columns]
-            read_cols.extend(_STORED_STATE_COLUMNS)
-            df_hist = (
-                scan_enriched_parquet(
-                    self._etf_enriched_glob,
-                    cast_options=pl.ScanCastOptions(
-                        integer_cast="allow-float", float_cast="upcast"
-                    ),
-                )
-                .filter(pl.col("date") >= start_full)
-                .select(read_cols)
-                .sort(["symbol", "date"])
-                .collect()
-            )
-            if df_hist.is_empty():
-                self._etf_enriched_cache = df_latest.sort(["symbol"])
-            else:
-                df_full = compute_signals(compute_indicators(df_hist))
-                self._etf_enriched_cache = df_full.filter(pl.col("date") == latest).sort(["symbol"])
-            self._etf_enriched_cache_date = latest
-        except Exception as e:  # noqa: BLE001
-            logger.debug("ETF enriched 缓存刷新跳过: %s", e)
 
     def _refresh_index_enriched(self) -> None:
         """从指数 enriched parquet 加载最新日到内存缓存 (300天重算通用指标)。
@@ -1033,30 +647,6 @@ class KlineRepository:
         except Exception as e:  # noqa: BLE001
             logger.debug("index instruments 缓存刷新跳过: %s", e)
 
-    def _refresh_etf_instruments(self) -> None:
-        """加载 ETF instruments 到内存；兼容旧版 instruments_index 中的 ETF。"""
-        parts: list[pl.DataFrame] = []
-        try:
-            df = pl.scan_parquet(self._etf_inst_glob).collect()
-            if not df.is_empty():
-                parts.append(df)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("etf instruments 缓存刷新跳过(new): %s", e)
-        try:
-            legacy = self.get_index_instruments()
-            if not legacy.is_empty() and "asset_type" in legacy.columns:
-                legacy = legacy.filter(pl.col("asset_type") == "etf")
-                if not legacy.is_empty():
-                    parts.append(legacy)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("etf instruments legacy fallback skipped: %s", e)
-        if parts:
-            df_all = pl.concat(parts, how="diagonal_relaxed").unique(subset=["symbol"], keep="last").sort("symbol")
-            self._etf_instruments_cache = df_all
-            self._etf_symbol_set_cache = None
-            self._name_map_cache = None
-            logger.info("ETF instruments 缓存已加载: %d 只", len(df_all))
-
     def get_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
         """返回缓存的 enriched 最新日 DataFrame + 日期。如无缓存则懒加载。
 
@@ -1074,18 +664,11 @@ class KlineRepository:
     def get_enriched_latest_asset(self, asset_type: str, refresh: bool = True) -> tuple[pl.DataFrame, date | None]:
         """按资产类型返回最新 enriched 缓存。stock 保持旧缓存语义。
 
-        refresh=False: 缓存冷时不触发同步 _refresh_etf_enriched(300 天 scan+compute)。
-        供行情轮询线程使用 —— 避免在热路径上做重活阻塞股票行情/告警;缓存由 ETF 实时
-        flush 焐热, 未焐热(无 ETF 实时数据)时返回空表, 本轮跳过 ETF 评估即可。
+        refresh=False: 缓存冷时不触发同步 _refresh_index_enriched(300 天 scan+compute),
+        供行情轮询线程使用。Taiwan ETFs are stock rows, so the etf asset type has no cache.
         """
         if asset_type == "stock":
             return self.get_enriched_latest()
-        if asset_type == "etf":
-            if self._etf_enriched_cache is None and refresh:
-                self._refresh_etf_enriched()
-            if self._etf_enriched_cache is None:
-                return pl.DataFrame(), self._etf_enriched_cache_date
-            return self._etf_enriched_cache, self._etf_enriched_cache_date
         if asset_type == "index":
             if self._index_enriched_cache is None and refresh:
                 self._refresh_index_enriched()
@@ -1157,48 +740,6 @@ class KlineRepository:
             df = df.select(existing)
         return df.sort(["symbol", "date"])
 
-    def get_live_agg(self) -> pl.DataFrame:
-        """返回盘中实时指标预计算聚合表。如无缓存则懒加载。
-
-        live_agg 的核心列 _prev_consec_up/down (昨日连板数) 取自基准日 enriched。
-        基准日由 _live_agg_baseline_date 决定: 盘中(today 有实时分区) 取上一交易日,
-        非盘中(磁盘最新日 < today) 取该最新日本身。一旦跨日, 期望基准日会前移,
-        旧缓存会把连板数整体少算一档, 故这里除首次懒加载外还要校验基准日是否仍
-        符合当前预期, 不符则重建 (无需等盘后管道刷缓存)。
-
-        性能: get_live_agg 被每轮实时行情调用 (expert 档 1s 一次)。跨日只在
-        date.today() 翻天时发生, 故先用 today 做廉价的 fast-path (μs 级),
-        仅当 today 变化时才查磁盘确认 (DuckDB 扫 132 万行约 100ms+) 并按需重建。
-        """
-        if self._live_agg_cache is None:
-            if self._enriched_warming:
-                # 后台预热中: 返回空表, 不触发同步重算 (同 get_enriched_latest 守卫)
-                return pl.DataFrame()
-            self._refresh_enriched()
-            self._live_agg_check_date = cn_today()  # 刚建过, 当天不必再查磁盘
-        else:
-            today = cn_today()
-            if self._live_agg_check_date != today:
-                # today 翻天了 (次日开盘首次轮询): 校验基准日是否需要前移重建。
-                # 同一天内多次调用直接跳过, 避免每轮都扫 parquet。
-                self._live_agg_check_date = today
-                disk_latest = self._latest_enriched_date_duckdb()
-                if disk_latest is not None:
-                    expected = self._live_agg_baseline_date(disk_latest)
-                    if self._live_agg_cache_date != expected:
-                        logger.info(
-                            "live_agg 跨日失效, 重建: 缓存基准=%s, 期望基准=%s",
-                            self._live_agg_cache_date, expected,
-                        )
-                        self._refresh_enriched()
-        if self._live_agg_cache is None:
-            return pl.DataFrame()
-        return self._live_agg_cache
-
-    def get_live_agg_date(self) -> date | None:
-        """The session get_live_agg()'s state ends on, or None before it is built."""
-        return self._live_agg_cache_date
-
     def get_instruments(self) -> pl.DataFrame:
         """返回缓存的 instruments DataFrame。如无缓存则懒加载。"""
         if self._instruments_cache is None:
@@ -1207,16 +748,6 @@ class KlineRepository:
             return pl.DataFrame()
         return self._instruments_cache
 
-    def get_historical_shares(self) -> pl.DataFrame:
-        """读取财务股本历史，并在文件更新后自动刷新缓存。"""
-        path = self.store.data_dir / "financials" / "shares" / "part.parquet"
-        mtime_ns = path.stat().st_mtime_ns if path.exists() else None
-        if self._historical_shares_cache is None or mtime_ns != self._historical_shares_mtime_ns:
-            from app.share_capital import load_share_history
-            self._historical_shares_cache = load_share_history(self.store.data_dir)
-            self._historical_shares_mtime_ns = mtime_ns
-        return self._historical_shares_cache
-
     def get_index_instruments(self) -> pl.DataFrame:
         """返回缓存的指数 instruments DataFrame。如无缓存则懒加载。"""
         if self._index_instruments_cache is None:
@@ -1224,14 +755,6 @@ class KlineRepository:
         if self._index_instruments_cache is None:
             return pl.DataFrame()
         return self._index_instruments_cache
-
-    def get_etf_instruments(self) -> pl.DataFrame:
-        """返回缓存的 ETF instruments DataFrame；兼容旧版 instruments_index 中的 ETF。"""
-        if self._etf_instruments_cache is None:
-            self._refresh_etf_instruments()
-        if self._etf_instruments_cache is None:
-            return pl.DataFrame()
-        return self._etf_instruments_cache
 
     def get_instruments_asset(self, asset_type: str) -> pl.DataFrame:
         """按资产类型返回 instruments；老 stock 路径保持原样。"""
@@ -1242,8 +765,6 @@ class KlineRepository:
             if not df.is_empty() and "asset_type" in df.columns:
                 return df.filter(pl.col("asset_type") != "etf")
             return df
-        if asset_type == "etf":
-            return self.get_etf_instruments()
         return pl.DataFrame()
 
     def get_index_symbol_set(self) -> set[str]:
@@ -1255,33 +776,22 @@ class KlineRepository:
             self._index_symbol_set_cache = set(df["symbol"].cast(pl.Utf8).to_list())
         return self._index_symbol_set_cache
 
-    def get_etf_symbol_set(self) -> set[str]:
-        """返回已缓存 ETF symbol 集合 (memo, 随 instruments 缓存失效)。"""
-        if self._etf_symbol_set_cache is None:
-            df = self.get_etf_instruments()
-            if df.is_empty() or "symbol" not in df.columns:
-                return set()
-            self._etf_symbol_set_cache = set(df["symbol"].cast(pl.Utf8).to_list())
-        return self._etf_symbol_set_cache
-
     def resolve_asset_type(self, symbol: str) -> str:
-        """按 symbol 判定资产类型: etf / index / stock(默认)。
+        """按 symbol 判定资产类型: index / stock(默认)。
 
-        供 API 层对单标的查询做资产分流 (get_daily_asset 等)。
-        ETF/指数集合为 memo, 每请求查询成本可忽略。
+        供 API 层对单标的查询做资产分流 (get_daily_asset 等)。Taiwan ETFs resolve to stock: their
+        bars share the stock tables. 指数集合为 memo, 每请求查询成本可忽略。
         """
-        if symbol in self.get_etf_symbol_set():
-            return "etf"
         if symbol in self.get_index_symbol_set():
             return "index"
         return "stock"
 
     def get_name_map(self, symbols: list[str] | None = None) -> dict[str, str]:
-        """返回 {symbol: name} 映射, 合并股票 + ETF + 指数 instruments (股票优先去重)。
+        """返回 {symbol: name} 映射, 合并股票 + 指数 instruments (股票优先去重)。
 
         自选列表/名称批查等场景的统一名称解析入口, 避免各调用方自行合并两份缓存。
         symbols 非 None 时只返回命中的条目。
-        全量结果缓存在 _name_map_cache (随三份 instruments 维表刷新失效),
+        全量结果缓存在 _name_map_cache (随两份 instruments 维表刷新失效),
         避免每请求对 ~7000 行维表做 iter_rows 重建。
         """
         if self._name_map_cache is not None:
@@ -1293,7 +803,7 @@ class KlineRepository:
         # 若把过滤后的结果写入缓存, 后续不同 symbols 的查询会命中残缺缓存,
         # 导致新加入自选的标的查不到名称。
         name_map: dict[str, str] = {}
-        for df in (self.get_instruments(), self.get_etf_instruments(), self.get_instruments_asset("index")):
+        for df in (self.get_instruments(), self.get_instruments_asset("index")):
             if df.is_empty() or "symbol" not in df.columns or "name" not in df.columns:
                 continue
             for symbol, name in df.select(["symbol", "name"]).iter_rows():
@@ -1503,36 +1013,6 @@ class KlineRepository:
             df = df.select(existing)
         return df
 
-    def get_etf_daily(
-        self,
-        symbol: str,
-        start: date,
-        end: date,
-        columns: list[str] | None = None,
-    ) -> pl.DataFrame:
-        """ETF 日K查询 — 优先读独立 ETF enriched，兼容旧版 index enriched 中的 ETF。"""
-        from datetime import timedelta
-
-        # 快路径: 独立 ETF 数据 + 请求列全是 parquet 存储列 → 直接 scan 列下推, 跳过 warmup + compute。
-        # 无独立 ETF 数据 (旧版存入 index enriched) 时 df 为空, 自然回退到下方完整路径。
-        if columns:
-            df = self._scan_etf_daily_symbol(symbol, start, end, columns)
-            if not df.is_empty() and all(c in df.columns for c in columns):
-                return df
-
-        warmup_start = start - timedelta(days=indicator_warmup_days())
-        df = self._scan_etf_daily_symbol(symbol, warmup_start, end, None)
-        if df.is_empty():
-            # 旧版 ETF 曾存入 kline_index_enriched；没有独立数据时回退读取。
-            df = self._scan_index_daily_symbol(symbol, warmup_start, end, None)
-        if not df.is_empty():
-            df = self._compute_index_enriched_range(df)
-            df = df.filter((pl.col("date") >= start) & (pl.col("date") <= end))
-        if columns and not df.is_empty():
-            existing = [c for c in columns if c in df.columns]
-            df = df.select(existing)
-        return df
-
     def get_daily_asset(
         self,
         asset_type: str,
@@ -1545,13 +1025,7 @@ class KlineRepository:
             return self.get_daily(symbol, start, end, columns)
         if asset_type == "index":
             return self.get_index_daily(symbol, start, end, columns)
-        if asset_type == "etf":
-            return self.get_etf_daily(symbol, start, end, columns)
         return pl.DataFrame()
-
-    def _minute_glob_for(self, asset_type: str) -> str:
-        """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
-        return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
 
     @staticmethod
     def _scan_minute(source: str | list[str]) -> pl.LazyFrame:
@@ -1560,15 +1034,10 @@ class KlineRepository:
         schema.setdefault("unattributed_volume", pl.Float64)
         return pl.scan_parquet(source, schema=schema, missing_columns="insert", extra_columns="ignore")
 
-    def get_minute(
-        self,
-        symbol: str,
-        trade_date: date,
-        asset_type: str = "stock",
-    ) -> pl.DataFrame:
+    def get_minute(self, symbol: str, trade_date: date) -> pl.DataFrame:
         """分钟K查询 — Polars scan_parquet + predicate pushdown。"""
         try:
-            return self._scan_minute(self._minute_glob_for(asset_type)).filter(
+            return self._scan_minute(self._minute_glob).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort("datetime").collect()
@@ -1576,12 +1045,7 @@ class KlineRepository:
             logger.warning("分钟K查询失败: %s", e)
             return pl.DataFrame()
 
-    def get_minute_batch(
-        self,
-        symbols: list[str],
-        trade_date: date,
-        asset_type: str = "stock",
-    ) -> pl.DataFrame:
+    def get_minute_batch(self, symbols: list[str], trade_date: date) -> pl.DataFrame:
         """批量分钟K查询 — 多 symbol 一次 scan_parquet。
 
         用于自选列表分时图: 一次 predicate pushdown 读多只股票当日分钟K,
@@ -1590,7 +1054,7 @@ class KlineRepository:
         if not symbols:
             return pl.DataFrame()
         try:
-            return self._scan_minute(self._minute_glob_for(asset_type)).filter(
+            return self._scan_minute(self._minute_glob).filter(
                 pl.col("symbol").is_in(symbols)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort(["symbol", "datetime"]).collect()
@@ -1598,13 +1062,7 @@ class KlineRepository:
             logger.warning("批量分钟K查询失败: %s", e)
             return pl.DataFrame()
 
-    def get_minute_range(
-        self,
-        symbols: list[str],
-        start: date,
-        end: date,
-        asset_type: str = "stock",
-    ) -> pl.DataFrame:
+    def get_minute_range(self, symbols: list[str], start: date, end: date) -> pl.DataFrame:
         """多 symbol × 日期范围的分钟K查询 (分钟K精确回测用)。
 
         一次 scan_parquet + predicate pushdown 读多只股票在 [start, end] 内的所有分钟K。
@@ -1613,10 +1071,10 @@ class KlineRepository:
         """
         if not symbols:
             return pl.DataFrame()
-        base = Path(self.store.data_dir) / ("kline_etf_minute" if asset_type == "etf" else "kline_minute")
+        base = Path(self.store.data_dir) / "kline_minute"
         if next(base.rglob("*.parquet"), None) is None:
             return pl.DataFrame()
-        lf = self._scan_minute(self._minute_glob_for(asset_type))
+        lf = self._scan_minute(self._minute_glob)
         return (
             lf.select(_available_minute_columns(lf))
             .filter(
@@ -1628,12 +1086,7 @@ class KlineRepository:
             .collect(engine="streaming")
         )
 
-    def get_minute_by_dates(
-        self,
-        symbols: list[str],
-        dates: list[date],
-        asset_type: str = "stock",
-    ) -> pl.DataFrame:
+    def get_minute_by_dates(self, symbols: list[str], dates: list[date]) -> pl.DataFrame:
         """按日期列表精确读取分钟K分区文件 (分钟K精确回测用)。
 
         与 get_minute_range 的区别: 后者扫描 [start, end] 区间全部日期的 parquet
@@ -1647,7 +1100,7 @@ class KlineRepository:
         """
         if not symbols or not dates:
             return pl.DataFrame()
-        base = Path(self.store.data_dir) / ("kline_etf_minute" if asset_type == "etf" else "kline_minute")
+        base = Path(self.store.data_dir) / "kline_minute"
         # 收集存在的分区文件路径, 避免对不存在的文件 scan 报错
         parts: list[str] = []
         for d in dates:
@@ -1681,11 +1134,7 @@ class KlineRepository:
             df = compute_indicators(df)
             df = compute_signals(df)
             instruments = self.get_instruments()
-            df = compute_limit_signals(
-                df,
-                instruments,
-                historical_shares=self.get_historical_shares(),
-            )
+            df = compute_limit_signals(df, instruments)
         except Exception as e:  # noqa: BLE001
             logger.warning("on-demand compute failed: %s", e)
         return df
@@ -1883,40 +1332,14 @@ class KlineRepository:
             logger.warning("指数日K查询失败: %s", e)
             return pl.DataFrame()
 
-    def _scan_etf_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
-        try:
-            lf = (
-                scan_enriched_parquet(
-                    self._etf_enriched_glob,
-                    cast_options=pl.ScanCastOptions(
-                        integer_cast="allow-float", float_cast="upcast"
-                    ),
-                )
-                .filter(
-                    (pl.col("symbol") == symbol)
-                    & (pl.col("date") >= start)
-                    & (pl.col("date") <= end)
-                )
-                .sort("date")
-            )
-            if columns:
-                schema_names = lf.collect_schema().names()
-                existing = [c for c in columns if c in schema_names]
-                lf = lf.select(existing)
-            return lf.collect()
-        except Exception as e:  # noqa: BLE001
-            logger.debug("ETF 日K查询跳过: %s", e)
-            return pl.DataFrame()
-
     # ================================================================
     # DuckDB 查询 (冷路径: 统计/元数据/自定义SQL)
     # ================================================================
 
-    def latest_minute_date(self, symbol: str, asset_type: str = "stock") -> date | None:
-        table = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
+    def latest_minute_date(self, symbol: str) -> date | None:
         try:
             row = self.execute_one(
-                f"SELECT max(CAST(datetime AS DATE)) FROM {table} WHERE symbol = ?",
+                "SELECT max(CAST(datetime AS DATE)) FROM kline_minute WHERE symbol = ?",
                 [symbol],
             )
             if row and row[0]:
@@ -1969,9 +1392,11 @@ class KlineRepository:
         return dates[-1] if dates else None
 
     def latest_enriched_date(self, asset_type: str = "stock") -> date | None:
-        """Return the newest partition available to matrix-native consumers."""
-        dirname = enriched_dirname(asset_type)
-        root = self.store.data_dir / dirname
+        """Return the newest partition available to matrix-native consumers.
+
+        Stocks and ETFs share the daily enriched partitions, so every asset type reads the same root.
+        """
+        root = self.store.data_dir / "kline_daily_enriched"
         latest: date | None = None
         if not root.exists():
             return None
@@ -1989,9 +1414,6 @@ class KlineRepository:
         """Return the stable generation for managed enriched readers."""
         return get_enriched_generation(self.store.data_dir, asset_type)
 
-    def _bump_matrix_data_generation(self, asset_type: str) -> str:
-        return bump_enriched_generation(self.store.data_dir, asset_type)
-
     def _latest_enriched_date_duckdb(self) -> date | None:
         try:
             res = self.execute_one(
@@ -2008,53 +1430,18 @@ class KlineRepository:
     # 写入 (Pipeline / Sync)
     # ================================================================
 
-    def append_daily(self, df: pl.DataFrame) -> None:
-        """按日分区写入日K数据 (merge-upsert)。"""
-        if df.is_empty():
-            return
-        self._write_daily_partition(df, "kline_daily")
-
-    def append_enriched(self, df: pl.DataFrame) -> None:
-        """按日分区写入 enriched 数据 (merge-upsert)。磁盘仅写入 14 列存储列。"""
-        if df.is_empty():
-            return
-        from app.indicators.pipeline import ENRICHED_STORAGE_COLS
-        storage_cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
-        df_storage = df.select(storage_cols)
-        self._write_daily_partition(df_storage, "kline_daily_enriched")
-
     def rebuild_views(self) -> None:
-        """重建全部 13 张 parquet 视图 —— 唯一权威实现。
+        """Re-register every _PARQUET_VIEWS view; an emptied directory (after a clear) remounts safely."""
+        for name in _PARQUET_VIEWS:
+            self.refresh_view(name)
 
-        原先 daily_pipeline._refresh_views(盘后管道) 与 /api/data/clear(清库) 各自
-        内联了同一份视图重建 SQL, 清库那份还漏了几张视图导致漂移。此处收敛为单一入口:
-        覆盖全部 13 张视图 (二者的超集), 空目录 (清库后) 也能安全重挂。
-        """
-        d = self.store.data_dir.as_posix()
-        views = {
-            "kline_daily": f"{d}/kline_daily/**/*.parquet",
-            "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
-            "kline_index_daily": f"{d}/kline_index_daily/**/*.parquet",
-            "kline_index_enriched": f"{d}/kline_index_enriched/**/*.parquet",
-            "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
-            "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
-            "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
-            "kline_minute": f"{d}/kline_minute/**/*.parquet",
-            "adj_factor": f"{d}/adj_factor/**/*.parquet",
-            "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",
-            "instruments": f"{d}/instruments/**/*.parquet",
-            "instruments_index": f"{d}/instruments_index/**/*.parquet",
-            "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
-        }
-        for name, path in views.items():
-            try:
-                with self._lock:
-                    self.db.execute(
-                        f"CREATE OR REPLACE VIEW {name} AS "
-                        f"SELECT * FROM read_parquet('{path}', union_by_name=true)"
-                    )
-            except Exception as e:  # noqa: BLE001
-                logger.warning("rebuild view %s failed: %s", name, e)
+    def refresh_view(self, name: str) -> None:
+        """Re-register one _PARQUET_VIEWS view so DuckDB sees partitions written since it was created."""
+        try:
+            with self._lock:
+                self.db.execute(_view_sql(self.store.data_dir, name, _PARQUET_VIEWS[name]))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("rebuild view %s failed: %s", name, e)
 
     @staticmethod
     def _atomic_write_parquet(df: pl.DataFrame, out: Path) -> None:
@@ -2068,74 +1455,9 @@ class KlineRepository:
         df.write_parquet(tmp)
         tmp.replace(out)  # 同目录 rename, POSIX/NTFS 均为原子操作
 
-    def _write_daily_partition(self, df: pl.DataFrame, table: str) -> None:
-        """按 date 分区写入 parquet，每个日期一个文件，支持 merge-upsert。"""
-        base = self.store.data_dir / table
-        generation_asset = {
-            "kline_daily_enriched": "stock",
-            "kline_etf_enriched": "etf",
-        }.get(table)
-        # recover=True: 外部进程残留的僵死 publishing 标记不应阻塞实时/管道
-        # enriched 落盘, 首次写入即接管自愈; 活进程的发布仍会抛错保护竞态。
-        publication = (
-            EnrichedPublication(self.store.data_dir, generation_asset, recover=True)
-            if generation_asset is not None
-            else None
-        )
-        with self._write_lock:
-            for date_df in df.partition_by("date"):
-                dt = date_df["date"][0]
-                ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
-                out = base / f"date={ds}" / "part.parquet"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                existing = pl.DataFrame()
-                if out.exists():
-                    existing = pl.read_parquet(out)
-                    date_df = pl.concat([existing, date_df], how="diagonal_relaxed").unique(
-                        subset=["symbol", "date"], keep="last"
-                    )
-                date_df = date_df.sort(["symbol", "date"])
-                if not existing.is_empty() and existing.equals(date_df):
-                    continue
-                if publication is None:
-                    self._atomic_write_parquet(date_df, out)
-                else:
-                    publication.write_parquet(date_df, out)
-            if publication is not None:
-                publication.commit()
-
-    def merge_live_daily_asset(
-        self, asset_type: str, df: pl.DataFrame, *, force: bool = False
-    ) -> None:
-        """按 symbol 合并当天指定资产日K分区。用于少量自选实时，不覆盖全市场。"""
-        if df.is_empty() or "date" not in df.columns:
-            return
-        if not self._live_write_allowed(df["date"][0], force=force):
-            return
-        table = {
-            "stock": "kline_daily",
-            "index": "kline_index_daily",
-            "etf": "kline_etf_daily",
-        }.get(asset_type)
-        if not table:
-            return
-        base = self.store.data_dir / table
-        dt = df["date"][0]
-        ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
-        out = base / f"date={ds}" / "part.parquet"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        with self._write_lock:
-            date_df = df.sort(["symbol", "date"])
-            if out.exists():
-                existing = pl.read_parquet(out)
-                date_df = pl.concat([existing, date_df], how="diagonal_relaxed").unique(
-                    subset=["symbol", "date"], keep="last"
-                )
-            self._atomic_write_parquet(date_df.sort(["symbol", "date"]), out)
-
     def _with_instrument_metadata(self, asset_type: str, df: pl.DataFrame) -> pl.DataFrame:
         """补齐实时内存缓存所需的维表字段；这些字段不会写入 enriched 分区。"""
-        if asset_type not in {"stock", "etf"} or df.is_empty():
+        if asset_type != "stock" or df.is_empty():
             return df
         instruments = self.get_instruments_asset(asset_type)
         if instruments.is_empty() or "symbol" not in instruments.columns:
@@ -2168,9 +1490,6 @@ class KlineRepository:
         if asset_type == "stock":
             table = "kline_daily_enriched"
             existing_cache = self._enriched_cache if self._enriched_cache_date == dt else pl.DataFrame()
-        elif asset_type == "etf":
-            table = "kline_etf_enriched"
-            existing_cache = self._etf_enriched_cache if self._etf_enriched_cache_date == dt else pl.DataFrame()
         elif asset_type == "index":
             table = "kline_index_enriched"
             existing_cache = self._index_enriched_cache if self._index_enriched_cache_date == dt else pl.DataFrame()
@@ -2203,7 +1522,7 @@ class KlineRepository:
             out.parent.mkdir(parents=True, exist_ok=True)
             publication = (
                 EnrichedPublication(self.store.data_dir, asset_type, recover=True)
-                if asset_type in {"stock", "etf"}
+                if asset_type == "stock"
                 else None
             )
             with self._write_lock:
@@ -2225,23 +1544,9 @@ class KlineRepository:
         if asset_type == "stock":
             self._enriched_cache = merged_cache
             self._enriched_cache_date = dt
-        elif asset_type == "etf":
-            self._etf_enriched_cache = merged_cache
-            self._etf_enriched_cache_date = dt
         elif asset_type == "index":
             self._index_enriched_cache = merged_cache
             self._index_enriched_cache_date = dt
-
-    def flush_live_daily_asset(
-        self, asset_type: str, df: pl.DataFrame, *, force: bool = False
-    ) -> None:
-        """合并当天指定资产日K分区。
-
-        Formerly a whole-partition overwrite, which was safe only while the live
-        feed really did carry the whole market. Under Taiwan it carries the
-        watchlist, so an overwrite dropped every other symbol; merging keeps them.
-        """
-        self.merge_live_daily_asset(asset_type, df, force=force)
 
     def flush_live_enriched_asset(
         self, asset_type: str, df: pl.DataFrame, *, force: bool = False

@@ -39,15 +39,13 @@ from app.extensions.loader import (
     start_backend_extensions,
 )
 from app.jobs import daily_pipeline
+from app.repository import DataStore, KlineRepository
 from app.services.auth import AuthStoreCorruptError
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
 from app.services.preferences import PREFERENCES_STORE_UNAVAILABLE_DETAIL, PreferencesStoreError
 from app.services.quote_service import QuoteService
 from app.taiwan.universe.service import SecurityMasterUnavailableError
-from app.tickflow import client as tf_client
-from app.tickflow.policy import detect_capabilities
-from app.tickflow.repository import DataStore, KlineRepository
 
 logging.basicConfig(
     level=settings.log_level,
@@ -96,10 +94,7 @@ def _build_strategy_engine(data_dir: Path):
 
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
-    logger.info(
-        "Itoy 的台股監控看板 v%s starting (mode=%s)",
-        __version__, tf_client.current_mode(),
-    )
+    logger.info("Itoy 的台股監控看板 v%s starting", __version__)
 
     # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
     # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
@@ -134,11 +129,6 @@ async def _application_lifespan(app: FastAPI):
     # instruments/index/ETF 仍同步 (毫秒级)。应用立即 ready, 指标算完后自动替换。
     repo.refresh_cache(background=True)
 
-    # 能力探测
-    capset = detect_capabilities()
-    app.state.capabilities = capset
-    logger.info("ready; %d capabilities active", len(capset.all()))
-
     # 自定义数据源配置(可选): 失败只记录错误, 不影响 TickFlow 基准路径。
     try:
         from app.data_providers import custom as custom_sources
@@ -153,17 +143,8 @@ async def _application_lifespan(app: FastAPI):
     qs.set_repo(repo)
     qs.boot_check()
 
-    # QuoteService 需要访问 strategy_monitor 等单例
-    # 先创建 strategy_monitor，再注入 app.state
-    from app.strategy.monitor import StrategyMonitorService
-    strategy_monitor = StrategyMonitorService()
-    app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
 
-    # 启动调度器: 台股 taiwan_daily_update 与通用 reprobe_capabilities job
-    # 都注册在 start_scheduler() 里,详见 jobs/daily_pipeline.py:start_scheduler。
-    # A 股盘前维表同步(pre_market_instruments)与盘后管道(daily_pipeline)job
-    # 已随 A 股功能整体下线,不再注册。
     try:
         daily_pipeline.set_app_state(app.state)
         scheduler = daily_pipeline.start_scheduler()
@@ -183,17 +164,8 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("integrity boot check scheduling failed: %s", e)
 
-    # Phase 8B-5.14 — 内置扩展表 (概念/行业, ext_gn_ths/ext_hy_ths) 为纯中国
-    # A 股同花顺概念/行业分类资料, 对台股产品无必要性 (见 Phase 8B-5.13 audit)。
-    # 停止 ensure_builtin_presets() 的自动调用: 全新安装不再自动创建这两个
-    # config.json / 不再自动排程 / 不再对 shy313.com 发起启动期请求。
-    # 已有旧 config (曾经启动过本产品早期版本的使用者) 完全不动 —— 不改写、
-    # 不删除其 config.json / 既有 parquet 数据, 只是让 PullScheduler 对这两个
-    # id "自动拉取惰性"(见下方 set_excluded_ids), 使既有安装与全新安装行为一致。
-    # extDataSchemaAll / dimensionMembers / _read_ext_dataframe 等唯读消费路径
-    # 完全不受影响, 现有数据仍可被读取, 只是不再自动刷新。
-    # 手动拉取入口 POST /api/ext-data/presets/{id}/fetch (fetch_preset) 未变更,
-    # 仍可按需手动触发 (该端点自行确保 config.json 存在)。
+    # Installs from earlier versions may still hold these A-share presets: their data stays
+    # readable and manually fetchable, but the pull scheduler never refreshes them.
     _ASHARE_EXT_PRESET_IDS = (
         "ext_gn_ths",
         "ext_hy_ths",
@@ -207,7 +179,6 @@ async def _application_lifespan(app: FastAPI):
     app.state.pull_scheduler = pull_scheduler
 
     # 策略引擎
-    from app.strategy.monitor import StrategyMonitorService
     from app.services.screener import ScreenerService
 
     _screener_svc = ScreenerService(repo)
@@ -285,7 +256,7 @@ async def _application_lifespan(app: FastAPI):
     # 复用 ScreenerService 的历史窗口加载器 (三级缓存, 启动预计算命中 ~0ms),
     # 让声明 filter_history 的策略 (如反包) 也能在实时监控里跑选股 → 盘中触发通知。
     monitor_engine.set_history_loader(_screener_svc._load_enriched_history)
-    # ETF 版历史加载器: asset_type=etf 的 strategy 型规则用 (读 kline_etf_enriched)。
+    # ETF 版历史加载器: asset_type=etf 的 strategy 型规则用 (只取日K enriched 中证券主档的 ETF)。
     monitor_engine.set_history_loader_etf(_etf_screener_svc._load_enriched_history)
 
     # 自动迁移: 把旧 strategy_monitor_ids 同步为 type=strategy 规则 (统一到监控页)

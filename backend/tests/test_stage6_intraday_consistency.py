@@ -6,7 +6,7 @@ the "closure" scenario also leaves ten weekdays untraded inside the last 90 cale
 history is longer than the 300-calendar-day window the repository recomputes on start-up. The
 batch row comes from TaiwanEnrichedRefreshService.refresh through that session; the intraday row
 from the repository state published through the previous session (KlineRepository._refresh_enriched)
-and QuoteService._enrich_today_incremental, fed the provider's prev_close, change_pct,
+and quote_service._taiwan_live_rows, fed the provider's prev_close, change_pct,
 change_amount and amplitude as the realtime loop does.
 """
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import polars as pl
@@ -28,8 +27,8 @@ from app.indicators.pipeline import (
     invalidate_custom_signals,
     invalidate_taiwan_limit_profile_cache,
 )
+from app.repository import DataStore, KlineRepository
 from app.services import quote_service
-from app.services.quote_service import QuoteService
 from app.taiwan import universe
 from app.taiwan.corporate_actions import TaiwanCorporateActionStore, corporate_action_schema
 from app.taiwan.daily_store import TaiwanDailyStore
@@ -38,7 +37,6 @@ from app.taiwan.enrichment.corporate_actions import EXDIV, PAR_CHANGE
 from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.universe import TaiwanSecurityMaster
 from app.taiwan.universe.models import TaiwanInstrument
-from app.tickflow.repository import DataStore, KlineRepository
 
 pytestmark = pytest.mark.usefixtures("deny_network")
 
@@ -208,8 +206,6 @@ def _intraday(
     mp.setattr(quote_service, "cn_today", lambda: today)
     repo = KlineRepository(DataStore(root))
     repo._refresh_enriched()
-    assert repo.get_live_agg_date() == days[-2]
-    live_agg = repo.get_live_agg()
     prev_enriched, prev_date = repo.get_enriched_latest()
     assert prev_date == days[-2]
 
@@ -222,10 +218,7 @@ def _intraday(
         .with_columns(pl.lit(closing).alias("quote_ts"))
     )
     quote_extra = pl.DataFrame([_quote_extra(symbol) for symbol in SYMBOLS])
-    service = SimpleNamespace(_repo=repo)
-    live = QuoteService._enrich_today_incremental(
-        service, bars, quote_extra, live_agg, prev_enriched
-    )
+    live = quote_service._taiwan_live_rows(repo, bars, quote_extra)
     return live, prev_enriched
 
 

@@ -87,14 +87,6 @@ def _parse(year: int, payload: object) -> HolidaySchedule | None:
     return HolidaySchedule(year, frozenset(holidays), frozenset(trading_days - holidays))
 
 
-def parse_schedule(year: int, payload: object) -> HolidaySchedule | None:
-    """Parse a TWSE schedule payload; None when *year* is unpublished or the payload is unrecognised."""
-    try:
-        return _parse(year, payload)
-    except ValueError:
-        return None
-
-
 def _default_root() -> Path:
     from app.taiwan.data_root import taiwan_data_root
 

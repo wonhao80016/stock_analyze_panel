@@ -19,7 +19,6 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Literal
 
-import numpy as np
 import polars as pl
 
 
@@ -31,7 +30,6 @@ class TaxClass(str, Enum):
     ORDINARY_STOCK = "ordinary_stock"  # 0.3%
     DOMESTIC_ETF = "domestic_etf"      # 0.1%
     BOND_ETF = "bond_etf"              # 0.0% (effective until 2026-12-31)
-    FOREIGN_ETF = "foreign_etf"        # 0.1%
     TDR = "tdr"                        # 0.1% (Taiwan depositary receipt)
 
 
@@ -66,7 +64,6 @@ class RegulatoryRuleUnavailableError(ValueError):
 # ── 1. Trading Cost (Commission) Model ─────────────────────────
 
 TAIWAN_SIMULATION_COMMISSION_RATE: float = 0.001425
-EXAMPLE_BROKER_MIN_COMMISSION: float = 20.0  # Common broker floor for reference only
 
 
 @dataclass(frozen=True)
@@ -140,7 +137,7 @@ class SecuritiesTaxModel:
                 return self.domestic_etf_rate
             return self.bond_etf_rate
 
-        if tax_class in (TaxClass.DOMESTIC_ETF, TaxClass.FOREIGN_ETF):
+        if tax_class == TaxClass.DOMESTIC_ETF:
             return self.domestic_etf_rate
 
         return self.ordinary_stock_rate
@@ -226,11 +223,6 @@ def _polars_ladder(price: pl.Expr, ladder: TickLadder) -> pl.Expr:
     return expr.otherwise(last_tick)
 
 
-def _numpy_ladder(price: np.ndarray, ladder: TickLadder) -> np.ndarray:
-    *bounded, (_, last_tick) = ladder
-    return np.select([price < bound for bound, _ in bounded], [tick for _, tick in bounded], default=last_tick)
-
-
 class TickSizeModel:
     """Price tick size model adhering to TWSE Rule 62 & ETF regulations."""
 
@@ -255,13 +247,6 @@ class TickSizeModel:
         """Vectorised get_tick_size over a price expression and a boolean ETF-ladder flag."""
         stock, etf = _tick_ladders(trade_date)
         return pl.when(is_etf).then(_polars_ladder(price, etf)).otherwise(_polars_ladder(price, stock))
-
-    @staticmethod
-    def numpy_tick_size(price: np.ndarray, is_etf: np.ndarray | bool, trade_date: date | None = None) -> np.ndarray:
-        """Vectorised get_tick_size over a price array and a boolean ETF-ladder flag."""
-        stock, etf = _tick_ladders(trade_date)
-        price = np.asarray(price, dtype=np.float64)
-        return np.where(np.asarray(is_etf, dtype=bool), _numpy_ladder(price, etf), _numpy_ladder(price, stock))
 
     @classmethod
     def round_price_limit_boundary(
@@ -419,25 +404,6 @@ class PriceLimitModel:
         """Whether *trade_date* falls inside the [ipo_start, ipo_end] window; false without a window."""
         return trade_date.cast(pl.Date).is_between(ipo_start, ipo_end).fill_null(False)
 
-    @staticmethod
-    def numpy_limit_prices(
-        ref_price: np.ndarray,
-        limit_pct: np.ndarray | float,
-        is_etf: np.ndarray | bool,
-        trade_date: date | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """NumPy counterpart of polars_limit_prices; a NaN percentage yields NaN limits."""
-        ref = np.round(np.asarray(ref_price, dtype=np.float64), 4)
-        pct = np.asarray(limit_pct, dtype=np.float64)
-        up_raw = ref * (1.0 + pct)
-        down_floor = ref * (1.0 - pct)
-        down_raw = np.where(down_floor < _MIN_LIMIT_DOWN_PRICE, _MIN_LIMIT_DOWN_PRICE, down_floor)
-        up_tick = TickSizeModel.numpy_tick_size(up_raw, is_etf, trade_date)
-        down_tick = TickSizeModel.numpy_tick_size(down_raw, is_etf, trade_date)
-        limit_up = np.round(np.floor(up_raw / up_tick + _LIMIT_ROUNDING_TOLERANCE) * up_tick, 4)
-        limit_down = np.round(np.ceil(down_raw / down_tick - _LIMIT_ROUNDING_TOLERANCE) * down_tick, 4)
-        return limit_up, limit_down
-
     @classmethod
     def calc_limits(
         cls,
@@ -453,20 +419,7 @@ class PriceLimitModel:
 
 
 
-# ── 6. Settlement Model ────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class SettlementModel:
-    """Settlement cycle model (T+2 cash/stock delivery).
-
-    Settlement cycle is purely for delivery timing and cash accounting.
-    It does NOT govern position same-day exit restrictions.
-    """
-    settlement_days: int = 2
-
-
-# ── 7. Unified Taiwan Market Profile ───────────────────────────
+# ── 6. Unified Taiwan Market Profile ───────────────────────────
 
 
 @dataclass
@@ -476,9 +429,6 @@ class TaiwanMarketProfile:
     cost: TradingCostModel = field(default_factory=TradingCostModel)
     tax: SecuritiesTaxModel = field(default_factory=SecuritiesTaxModel)
     lot: LotModel = field(default_factory=LotModel)
-    settlement: SettlementModel = field(default_factory=SettlementModel)
-    tick_size_model: TickSizeModel = field(default_factory=TickSizeModel)
-    price_limit_model: PriceLimitModel = field(default_factory=PriceLimitModel)
 
     def can_same_day_exit(
         self,

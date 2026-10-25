@@ -26,7 +26,7 @@ import polars as pl
 
 from app.taiwan.benchmarks import TAIEX
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore
-from app.taiwan.enriched_refresh import ENRICHED_DIR_NAME
+from app.taiwan.enriched_reader import ENRICHED_DIR_NAME
 from app.taiwan.realtime.calendar import taipei_today
 
 logger = logging.getLogger(__name__)
@@ -137,16 +137,6 @@ def integrity_report(
 
     issues.sort(key=lambda i: (i.day, KIND_ORDER.index(i.kind)))
     return IntegrityReport(tuple(checked), index_through, tuple(issues))
-
-
-def scan_recent_integrity(
-    data_dir: Path,
-    *,
-    today: date | None = None,
-    sessions: int = SCAN_WINDOW_SESSIONS,
-) -> list[IntegrityIssue]:
-    """The issues of integrity_report."""
-    return list(integrity_report(data_dir, today=today, sessions=sessions).issues)
 
 
 def describe_issues(issues: list[IntegrityIssue]) -> str:

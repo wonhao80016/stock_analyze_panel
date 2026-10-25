@@ -257,16 +257,3 @@ class TaiwanInstitutionalStore:
         """Return the maximum date partition currently stored, or None if empty."""
         dates = self.available_dates()
         return dates[-1] if dates else None
-
-    def known_symbols(self) -> list[str]:
-        """Return sorted list of all distinct symbols across all partitions."""
-        dates = self.available_dates()
-        if not dates:
-            return []
-        syms: set[str] = set()
-        for d in dates:
-            part_path = self._data_dir / f"date={d.isoformat()}" / "part.parquet"
-            if part_path.exists():
-                s_df = pl.read_parquet(part_path, columns=["symbol"])
-                syms.update(s_df["symbol"].to_list())
-        return sorted(syms)

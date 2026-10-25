@@ -196,17 +196,6 @@ class TaiwanDailyStore:
         """
         return self.read_range(symbols, None, None)
 
-    def read_latest_date_rows(self, symbols: list[str] | None = None) -> pl.DataFrame:
-        """Return rows from the latest available trading date.
-
-        This reads only the partition with the maximum date in storage.
-        Useful for "today's snapshot" queries.
-        """
-        latest = self.latest_date()
-        if latest is None:
-            return pl.DataFrame(schema=_schema())
-        return self.read_range(symbols, latest, latest)
-
     def read_latest_per_symbol(self, symbols: list[str] | None = None) -> pl.DataFrame:
         """Return the latest available row for each symbol.
 
@@ -428,33 +417,6 @@ class TaiwanDailyStore:
         return dict(zip(frame["symbol"].to_list(), frame["date"].to_list(), strict=True))
 
     # ── Symbol / date helpers ──────────────────────────────────────
-
-    def has_symbol_date(self, symbol: str, d: date) -> bool:
-        """Return *True* if *symbol* has a row for *d*."""
-        partition_path = self._data_dir / f"date={d.isoformat()}" / "part.parquet"
-        if not partition_path.exists():
-            return False
-        try:
-            df = pl.scan_parquet(partition_path, missing_columns="insert", extra_columns="ignore")
-            df = df.filter(pl.col("symbol") == symbol)
-            return not df.collect().is_empty()
-        except Exception:
-            return False
-
-    def known_symbols(self) -> list[str]:
-        """Return all distinct symbols present in storage."""
-        frames: list[pl.DataFrame] = []
-        for f in self._data_dir.glob("date=*/part.parquet"):
-            try:
-                lf = pl.scan_parquet(f, missing_columns="insert", extra_columns="ignore")
-                df = lf.collect().select(["symbol"]).unique()
-                if not df.is_empty():
-                    frames.append(df)
-            except Exception:
-                continue
-        if not frames:
-            return []
-        return sorted(pl.concat(frames, how="diagonal_relaxed")["symbol"].unique().to_list())
 
 
 # A write through TaiwanDailyStore drops its directory's entry at once; a write from another

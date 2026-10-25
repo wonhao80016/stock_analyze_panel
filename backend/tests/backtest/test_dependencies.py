@@ -96,7 +96,6 @@ def test_load_panel_for_backtest_supplies_raw_low_for_recovery(monkeypatch, tmp_
         store=types.SimpleNamespace(data_dir=tmp_path),
         get_enriched_range=lambda *a, **k: None,
         get_instruments_asset=lambda at: instruments,
-        get_historical_shares=lambda: pl.DataFrame(),
     )
     plan = StrategyDependencyResolver().resolve(
         _strategy(),

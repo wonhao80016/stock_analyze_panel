@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import date, datetime
 from types import SimpleNamespace
@@ -112,7 +113,7 @@ def _set_now(monkeypatch, moment: datetime) -> None:
 
 
 def test_parse_2026_schedule_splits_holidays_and_trading_days():
-    schedule = holidays.parse_schedule(2026, TWSE_2026_PAYLOAD)
+    schedule = holidays._parse(2026, TWSE_2026_PAYLOAD)
 
     assert schedule is not None
     for day in ("2026-10-09", "2026-10-26", "2026-01-01", "2026-02-12", "2026-02-13", "2026-02-20"):
@@ -134,8 +135,9 @@ def test_parse_2026_schedule_splits_holidays_and_trading_days():
         None,
     ],
 )
-def test_unpublished_year_parses_to_none(payload):
-    assert holidays.parse_schedule(2027, payload) is None
+def test_unpublished_or_unrecognised_year_yields_no_schedule(payload):
+    with contextlib.suppress(ValueError):
+        assert holidays._parse(2027, payload) is None
 
 
 # ── per-year cache ──────────────────────────────────────────────────
@@ -205,7 +207,7 @@ def test_columns_are_located_by_field_name():
         "fields": ["名稱", "說明", "日期"],
         "data": [["國慶日", "", "2026-10-09"], ["國曆新年開始交易日", "", "2026-01-02"]],
     }
-    schedule = holidays.parse_schedule(2026, payload)
+    schedule = holidays._parse(2026, payload)
 
     assert schedule.holidays == frozenset({date(2026, 10, 9)})
     assert schedule.trading_days == frozenset({date(2026, 1, 2)})

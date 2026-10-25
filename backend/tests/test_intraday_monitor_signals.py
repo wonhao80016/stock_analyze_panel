@@ -10,7 +10,6 @@ from app.services.kline_sync import fetch_intraday_monitor_batch, intraday_monit
 from app.strategy import monitor_rules
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 from app.strategy.monitor import MonitorRuleEngine
-from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 
 def _minute_rows(prices: list[float]) -> pl.DataFrame:
@@ -148,22 +147,17 @@ def test_intraday_rule_rejects_non_symbol_scope():
         monitor_rules.validate(_intraday_rule("all"))
 
 
-def test_intraday_support_ignores_tickflow_capabilities(monkeypatch):
+def test_intraday_support_is_unavailable_for_the_tickflow_provider(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "tickflow")
-    capset = CapabilitySet({Cap.KLINE_MINUTE_BATCH: CapabilityLimits(batch=25, rpm=30)})
-    support = intraday_monitor_support(capset)
+    support = intraday_monitor_support()
     assert support["available"] is False
     assert support["source"] is None
     assert support["max_symbols"] == 0
 
-    denied = intraday_monitor_support(CapabilitySet())
-    assert denied["available"] is False
-
 
 def test_unresolved_custom_minute_source_returns_no_minutes(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "custom_source")
-    capset = CapabilitySet({Cap.INTRADAY_BATCH: CapabilityLimits(batch=20, rpm=30)})
     result = fetch_intraday_monitor_batch(
-        ["600000.SH"], capset, now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),
+        ["600000.SH"], now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),
     )
     assert result.is_empty()

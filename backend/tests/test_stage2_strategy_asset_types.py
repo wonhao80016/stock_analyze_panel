@@ -476,36 +476,6 @@ def test_master_cache_file_is_read_again_only_after_it_changes(master, monkeypat
     assert len(reads) == 2
 
 
-@pytest.mark.parametrize(
-    ("path", "body"),
-    [
-        ("/api/strategies/run", {"strategy_id": "every_symbol", "as_of": AS_OF.isoformat()}),
-        ("/api/strategies/run-all", {"as_of": AS_OF.isoformat()}),
-        ("/api/screener/run_preset", {"strategy_id": "every_symbol", "as_of": AS_OF.isoformat()}),
-    ],
-)
-def test_strategy_endpoints_answer_503_when_the_master_is_unavailable(
-    tmp_path, monkeypatch, path, body
-):
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    def broken():
-        raise OSError("disk gone")
-
-    monkeypatch.setattr("app.taiwan.universe.get_security_master", broken)
-    engine = _custom_engine(tmp_path, "polars_expr", ["stock"])
-    repo = _FakeRepo(tmp_path, _history().filter(pl.col("date") == AS_OF))
-    monkeypatch.setattr(app.state, "repo", repo, raising=False)
-    monkeypatch.setattr(app.state, "strategy_engine", engine, raising=False)
-
-    response = TestClient(app).post(path, json=body)
-
-    assert response.status_code == 503
-    assert "Taiwan Security Master unavailable" in response.json()["detail"]
-
-
 def test_realtime_monitor_skips_a_strategy_while_the_master_is_unavailable(tmp_path, monkeypatch):
     def broken():
         raise OSError("disk gone")

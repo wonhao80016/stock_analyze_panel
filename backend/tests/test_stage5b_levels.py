@@ -12,7 +12,7 @@ import pytest
 
 from app.api import stock_analysis
 from app.indicators import levels as levels_module
-from app.indicators.levels import LEVEL_TYPES, compute_levels, summarize_levels
+from app.indicators.levels import LEVEL_TYPES, compute_levels
 from app.taiwan.market_rules import TickSizeModel
 from app.taiwan.realtime.calendar import TAIPEI_TZ
 from app.taiwan.realtime.models import MarketStatus
@@ -173,12 +173,11 @@ def _full_frame() -> pl.DataFrame:
     )
 
 
-def test_labels_and_summary_are_traditional_chinese():
+def test_labels_are_traditional_chinese():
     out = compute_levels(_full_frame())
     labels = [p["label"] for group in out.values() for p in group]
     assert len(labels) > 20
-    text = "".join(labels) + "".join(LEVEL_TYPES.values()) + summarize_levels(out, 40.0)
-    text += summarize_levels({}, None)
+    text = "".join(labels) + "".join(LEVEL_TYPES.values())
     assert not (_SIMPLIFIED & set(text)), sorted(_SIMPLIFIED & set(text))
     assert {"樞軸位 P", "壓力位 R1", "支撐位 S1"} <= set(labels)
 

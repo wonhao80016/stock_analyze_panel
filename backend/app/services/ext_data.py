@@ -276,17 +276,6 @@ class ExtConfigStore:
         # An edit that keeps the size can land within the filesystem's mtime resolution.
         _load_all_cache.pop(str(self._base), None)
 
-    def delete(self, config_id: str) -> bool:
-        import shutil
-        try:
-            cp = self._config_path(config_id)
-        except ValueError:
-            return False
-        if not cp.exists():
-            return False
-        shutil.rmtree(cp.parent, ignore_errors=True)
-        return True
-
     def _migrate_legacy(self, old_path: Path) -> None:
         """一次性迁移旧版 ext_configs.json 到独立目录结构。"""
         try:

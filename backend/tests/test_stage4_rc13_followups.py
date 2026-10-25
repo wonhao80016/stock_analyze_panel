@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from types import SimpleNamespace
 
 import polars as pl
 import pytest
-from fastapi import HTTPException
 
-from app.api import strategy as strategy_api
 from app.backtest.mining import (
     FactorMetric,
     MiningBudget,
@@ -17,8 +14,6 @@ from app.backtest.mining import (
     MiningService,
     NestedValidationConfig,
 )
-from app.backtest.optimizer import _no_best_reason
-from app.backtest.walkforward import WalkForwardConfig, WalkForwardService
 from app.strategy.engine import StrategyDataContext, StrategyEngine
 
 pytestmark = pytest.mark.usefixtures("deny_network")
@@ -181,8 +176,8 @@ def filter(df, params):
 
 def test_app_context_carries_stored_turnover_for_scoring_and_filters(tmp_path, monkeypatch):
     from app.config import settings
+    from app.repository import DataStore, KlineRepository
     from app.services.screener import ScreenerService
-    from app.tickflow.repository import DataStore, KlineRepository
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     sessions = [date(2026, 9, 1) + timedelta(days=offset) for offset in range(5)]
@@ -201,112 +196,6 @@ def test_app_context_carries_stored_turnover_for_scoring_and_filters(tmp_path, m
 
     assert as_of == sessions[-1]
     assert results["turnover_scored"].scores == {"600000.SH": 100.0, "000001.SZ": 0.0}
-
-
-_MISSING_FIELD = """import polars as pl
-META = {
-    "id": "missing_field",
-    "name": "missing_field",
-    "asset_types": ["stock"],
-    "timeframes": ["1d"],
-    "basic_filter": {"enabled": False},
-    "scoring": {"no_such_field": 1.0},
-}
-EXECUTION_BACKEND = "polars_expr"
-def filter(df, params):
-    return pl.lit(True)
-"""
-
-
-def _failing_engine(tmp_path) -> StrategyEngine:
-    (tmp_path / "missing_field.py").write_text(_MISSING_FIELD, encoding="utf-8")
-    return StrategyEngine(strategy_dirs=[tmp_path])
-
-
-def test_strategy_run_reports_a_validation_error_as_400(tmp_path, monkeypatch):
-    from app.services import screener as screener_module
-
-    engine = _failing_engine(tmp_path)
-    monkeypatch.setattr(
-        screener_module.ScreenerService,
-        "build_strategy_context",
-        lambda self, engine, as_of, ids, **kwargs: _context(_frame()),
-    )
-    request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                strategy_engine=engine,
-                repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-            )
-        )
-    )
-
-    with pytest.raises(HTTPException) as error:
-        strategy_api.run_strategy(
-            strategy_api.RunRequest(strategy_id="missing_field", as_of=AS_OF), request
-        )
-    assert error.value.status_code == 400
-    assert "no_such_field" in error.value.detail
-
-    with pytest.raises(HTTPException) as unknown:
-        strategy_api.run_strategy(
-            strategy_api.RunRequest(strategy_id="not_a_strategy", as_of=AS_OF), request
-        )
-    assert unknown.value.status_code == 404
-
-
-def test_optimizer_reports_the_error_every_combination_hit():
-    ranked = [{"params": {"p": value}, "error": "turnover_rate 0.00%"} for value in (1, 2)]
-
-    assert "turnover_rate 0.00%" in _no_best_reason(ranked, "sharpe")
-    mixed = [{"error": "a"}, {"error": "b"}]
-    assert _no_best_reason(mixed, "sharpe") == "every parameter combination failed"
-
-
-class _FailingOptimizer:
-    def optimize(self, cfg, progress_cb=None, cancel_event=None):
-        return {
-            "best_params": None,
-            "best_score": None,
-            "results": [],
-            "n_completed": 2,
-            "error": "every parameter combination failed: turnover_rate 0.00%",
-        }
-
-
-class _CacheStats:
-    def cache_stats(self):
-        return {"compute_seconds": 0.0, "compute_count": 0, "hit_count": 0, "reuse_count": 0}
-
-
-def test_walkforward_reports_the_error_every_fold_hit():
-    sessions = [date(2024, 1, 1) + timedelta(days=offset) for offset in range(200)]
-    service = WalkForwardService(
-        _FailingOptimizer(),
-        SimpleNamespace(engine=_CacheStats()),
-        strategy_engine=None,
-        trading_dates_loader=lambda asset_type, start, end: [
-            day for day in sessions if start <= day <= end
-        ],
-    )
-
-    out = service.run(
-        WalkForwardConfig(
-            strategy_id="s",
-            symbols=None,
-            start=sessions[0],
-            end=sessions[-1],
-            param_grid={"p": [1, 2]},
-            objective="sortino",
-            train_days=90,
-            test_days=30,
-            step_days=30,
-        )
-    )
-
-    assert out["n_folds"] == 0
-    assert out["n_skipped"] > 1
-    assert "turnover_rate 0.00%" in out["error"]
 
 
 def test_mining_reports_the_error_every_candidate_hit():

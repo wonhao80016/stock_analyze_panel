@@ -89,11 +89,11 @@ def test_a_stale_quote_never_reaches_a_daily_bar():
 
 
 def test_the_gate_is_wired_into_every_daily_build():
-    """A gate nobody calls stops nothing; three call sites must all use it."""
+    """A gate nobody calls stops nothing; the only daily build must use it."""
     import inspect
 
     src = inspect.getsource(QuoteService._process_full_market_records)
-    assert src.count("_records_datable_today(") == 3
+    assert src.count("_records_datable_today(") == 1
     assert "_build_daily(stock_records)" not in src
 
 

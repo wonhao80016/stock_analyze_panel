@@ -17,7 +17,6 @@ from typing import Any, ClassVar
 from app.taiwan.enrichment.models import EtfCategory
 from app.taiwan.market_rules import (
     ListingSessions,
-    PriceLimitClass,
     TaxClass,
     TickSizeClass,
     ipo_no_limit_until,
@@ -365,15 +364,6 @@ class MarketProfileBridge:
             raise ValueError(f"Unrecognized underlying scope {scope!r} for ETF {instrument.symbol}.")
 
         return 0.10
-
-    @classmethod
-    def get_price_limit_class(cls, instrument: TaiwanInstrument) -> PriceLimitClass:
-        pct = cls.get_price_limit_pct(instrument)
-        if pct is None:
-            return PriceLimitClass.NO_LIMIT
-        if pct == 0.10 and abs(instrument.leverage_multiplier - 1.0) < 1e-6:
-            return PriceLimitClass.ORDINARY_TEN_PERCENT
-        return PriceLimitClass.LEVERAGED_DOMESTIC
 
     @classmethod
     def calc_limits(

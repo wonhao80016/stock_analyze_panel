@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.api import kline as kline_api
-from app.tickflow.repository import DataStore, KlineRepository
+from app.repository import DataStore, KlineRepository
 from tests.test_stage3_minute_gaps import DAY, SYMBOL, _record_gap_day, _write_old_partition
 
 pytestmark = pytest.mark.usefixtures("deny_network")

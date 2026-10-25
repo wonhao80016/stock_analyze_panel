@@ -60,10 +60,6 @@ class BackendExtensionRegistry:
         return self._frozen
 
     @property
-    def has_customizations(self) -> bool:
-        return bool(self._extension_ids)
-
-    @property
     def has_notification_formatters(self) -> bool:
         return bool(self._notification_formatters)
 

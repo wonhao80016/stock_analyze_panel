@@ -7,7 +7,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from app.api.backtest import StrategyBacktestRequest, _opt_backtest_kwargs
+from app.api.backtest import StrategyBacktestRequest
 from app.backtest.candidates import CandidateStore
 from app.backtest.engine import BacktestEngine, MatcherConfig
 from app.backtest.strategy import (
@@ -296,36 +296,7 @@ def test_same_day_exit_requires_an_eligible_day_trading_profile() -> None:
     assert eligible.can_exit_after_sessions("2330.TWSE", 0) is True
 
 
-def test_job_key_includes_execution_policy_fields() -> None:
-    from app.api.backtest import _make_job_key
-
-    args = (
-        "strategy",
-        None,
-        None,
-        None,
-        "open_t+1",
-        None,
-        None,
-        0.0002,
-        5.0,
-        10,
-        1.0,
-        1_000_000.0,
-        "equal",
-        None,
-        None,
-    )
-
-    base = _make_job_key(*args)
-    assert base != _make_job_key(*args, minimum_holding_sessions=0)
-    assert base != _make_job_key(*args, minimum_commission=20)
-    assert base != _make_job_key(*args, lot_mode="odd_lot")
-    assert base != _make_job_key(*args, commission_discount=0.5)
-    assert base != _make_job_key(*args, day_trade_eligible_symbols="2330.TWSE")
-
-
-def test_commission_discount_round_trips_api_worker_optimizer_and_candidate(tmp_path) -> None:
+def test_commission_discount_round_trips_api_worker_and_candidate(tmp_path) -> None:
     request = StrategyBacktestRequest(strategy_id="test", commission_discount=0.5)
     config = StrategyBacktestConfig(
         strategy_id=request.strategy_id,
@@ -336,21 +307,6 @@ def test_commission_discount_round_trips_api_worker_optimizer_and_candidate(tmp_
         day_trade_eligible_symbols=("2330.TWSE",),
     )
     decoded = _decode_backtest_config(encode_backtest_config(config))
-    optimized = _opt_backtest_kwargs(
-        "open_t+1",
-        0.0002,
-        0.001425,
-        None,
-        5.0,
-        10,
-        1.0,
-        1_000_000,
-        "equal",
-        "position",
-        5,
-        commission_discount=0.5,
-        day_trade_eligible_symbols="2330.TWSE",
-    )
     candidate = CandidateStore(tmp_path).create(
         kind="strategy",
         name="discount",
@@ -366,8 +322,6 @@ def test_commission_discount_round_trips_api_worker_optimizer_and_candidate(tmp_
 
     assert decoded.commission_discount == 0.5
     assert decoded.day_trade_eligible_symbols == ("2330.TWSE",)
-    assert optimized["commission_discount"] == 0.5
-    assert optimized["day_trade_eligible_symbols"] == ("2330.TWSE",)
     assert candidate["config"]["commission_discount"] == 0.5
     assert candidate["config"]["day_trade_eligible_symbols"] == ["2330.TWSE"]
 

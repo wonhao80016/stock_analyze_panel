@@ -16,13 +16,11 @@ from app.api import watchlist as wl_api
 class _FakeRepo:
     """镜像 test_watchlist_enriched_join.py 的最小 repo mock。"""
 
-    def __init__(self, enriched_df=None, enriched_date=None, name_map=None,
-                 etf_set=None, index_set=None):
+    def __init__(self, enriched_df=None, enriched_date=None, name_map=None, index_set=None):
         self._enriched = enriched_df if enriched_df is not None else pl.DataFrame(schema={"symbol": pl.Utf8})
         self._enriched_date = enriched_date
         self._instruments = pl.DataFrame()
         self._name_map = name_map or {}
-        self._etf_set = etf_set or set()
         self._index_set = index_set or set()
 
     def get_enriched_latest(self):
@@ -30,9 +28,6 @@ class _FakeRepo:
 
     def get_enriched_latest_asset(self, asset):
         return pl.DataFrame(schema={"symbol": pl.Utf8}), None
-
-    def get_etf_symbol_set(self):
-        return self._etf_set
 
     def get_index_symbol_set(self):
         return self._index_set

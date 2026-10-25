@@ -345,43 +345,11 @@ def parse_isin_html(
     return instruments
 
 
-def fetch_official_twse_etf_products(timeout: float = 10.0) -> dict[str, OfficialEtfProductMeta]:
-    """Fetch official TWSE ETF product categories and underlying index from t187ap47_L.
-
-    Returns:
-        dict[code, OfficialEtfProductMeta]
-    """
-    try:
-        response = httpx.get(TWSE_ETF_PRODUCTS_URL, headers=OFFICIAL_HEADERS, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
-        product_map: dict[str, OfficialEtfProductMeta] = {}
-        for r in data:
-            code = r.get("基金代號") or r.get("證券代號") or list(r.values())[1]
-            cat = r.get("基金類型") or list(r.values())[3]
-            idx_name = r.get("標的指數/追蹤指數名稱") or list(r.values())[6] or ""
-            if code and cat:
-                product_map[str(code).strip()] = OfficialEtfProductMeta(
-                    fund_type=str(cat).strip(),
-                    underlying_index=str(idx_name).strip(),
-                    underlying_scope=scope_from_foreign_flag(r.get("是否包含國外成分股")),
-                )
-        return product_map
-    except Exception as e:
-        logger.warning("Could not fetch official TWSE ETF product metadata: %s", e)
-        return {}
-
-
 class TwseInstrumentAdapter:
     """Fetches and parses TWSE official ISIN securities list."""
 
     def __init__(self, url: str = TWSE_ISIN_URL) -> None:
         self.url = url
-
-    def fetch_live_html(self, timeout: float = 15.0) -> str:
-        response = httpx.get(self.url, headers=OFFICIAL_HEADERS, timeout=timeout)
-        response.raise_for_status()
-        return response.content.decode("cp950", errors="ignore")
 
     def get_instruments(
         self,
@@ -436,12 +404,6 @@ class TpexInstrumentAdapter:
         self._transport = transport
         # TPEx answers bursts of ETF/detail requests with a redirect to its error page.
         self.detail_request_interval = detail_request_interval
-
-    def fetch_etf_management_styles(
-        self, detail_types: dict[str, str], **kwargs: float
-    ) -> dict[str, str | None]:
-        """iter_etf_management_styles() collected into a dict."""
-        return dict(self.iter_etf_management_styles(detail_types, **kwargs))
 
     def iter_etf_management_styles(
         self,

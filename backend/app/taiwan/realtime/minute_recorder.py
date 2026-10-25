@@ -6,9 +6,8 @@ process was running for can be covered; missing stretches stay missing rather
 than being interpolated, so a gap in the chart means "we were not watching"
 rather than "no trading happened".
 
-Partition layout mirrors the daily stores:
+Partition layout mirrors the daily stores, stocks and ETFs together:
     data/kline_minute/date=YYYY-MM-DD/part.parquet
-    data/kline_etf_minute/date=YYYY-MM-DD/part.parquet
 """
 from __future__ import annotations
 
@@ -48,7 +47,7 @@ MINUTE_COLUMNS = [
 # Volume that accumulated over a longer unobserved stretch cannot be placed in one minute.
 MAX_ATTRIBUTABLE_GAP = timedelta(seconds=60)
 
-_DIR_BY_ASSET = {"etf": "kline_etf_minute", "stock": "kline_minute"}
+_DIR_BY_ASSET = {"stock": "kline_minute"}
 
 
 @dataclass

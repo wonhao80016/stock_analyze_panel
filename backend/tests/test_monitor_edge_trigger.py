@@ -157,20 +157,6 @@ def test_validate_rejects_non_numeric_rearm_value():
 
 # ── 狀態清理: 避免記憶體洩漏與跨規則污染 ────────────────────
 
-def test_remove_rule_clears_condition_state():
-    engine = MonitorRuleEngine()
-    engine.set_rules([_price_rule()])
-    engine.evaluate(_df({"A": 12.0}))
-    assert any(key[0] == "r_price" for key in engine._condition_state)
-
-    engine.remove_rule("r_price")
-    assert not any(key[0] == "r_price" for key in engine._condition_state)
-
-    # 重新装载同一条规则: 状态已清空, 相同的持续为真条件应重新触发一次
-    engine.set_rules([_price_rule()])
-    refired = engine.evaluate(_df({"A": 12.0}))
-    assert len(refired) == 1
-
 
 def test_set_rules_edit_resets_condition_state():
     engine = MonitorRuleEngine()
@@ -184,15 +170,6 @@ def test_set_rules_edit_resets_condition_state():
     engine.set_rules([edited])
     second = engine.evaluate(_df({"A": 12.0, "B": 1.0}))
     assert any(e["symbol"] == "A" for e in second)
-
-
-def test_clear_wipes_condition_state():
-    engine = MonitorRuleEngine()
-    engine.set_rules([_price_rule()])
-    engine.evaluate(_df({"A": 12.0}))
-    assert engine._condition_state
-    engine.clear()
-    assert engine._condition_state == {}
 
 
 # ── 回归: strategy 路径不套边缘触发, 行为不变 ────────

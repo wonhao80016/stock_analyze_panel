@@ -221,10 +221,6 @@ def set_realtime_quote_interval(interval: float) -> float:
     return interval
 
 
-def get_minute_sync_enabled() -> bool:
-    return load().get("minute_sync_enabled", False)
-
-
 def get_minute_intraday_refresh() -> bool:
     """自选列表分时图是否跟随实时行情刷新。
 
@@ -307,19 +303,10 @@ def get_minute_sync_days() -> int:
     return max(1, min(30, load().get("minute_sync_days", 5)))
 
 
-def get_minute_sync_segment_days() -> int:
-    """分钟 K 拉取的单段大小(交易日)。默认 20,范围 [5, 30]。
+# ===== 数据源选择 =====
 
-    每段拉完后立即落盘(流式),避免全量攒内存导致 OOM。
-    段越小内存峰值越低但总耗时越长(限速 sleep 随段数线性增加);
-    物理上限 ~41 交易日(TickFlow 单次 10000 根 / 一天 241 根 ≈ 41 天),max=30 留出余量。
-    """
-    return max(5, min(30, load().get("minute_sync_segment_days", 20)))
-
-
-# ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
-
-_ALLOWED_DATA_PROVIDERS = {"taiwan", "tickflow"}
+# Stored "tickflow" values from older installs read back as "taiwan" in the getters below.
+_ALLOWED_DATA_PROVIDERS = {"taiwan"}
 
 
 def _allowed_data_providers() -> set[str]:
@@ -359,33 +346,6 @@ def get_financial_provider() -> str:
     if provider == "tickflow":
         return "taiwan"
     return provider if provider in _allowed_data_providers() else "taiwan"
-
-
-# ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====
-
-def get_pipeline_pull_a_share() -> bool:
-    """A 股日K固定拉取。"""
-    return True
-
-
-def get_pipeline_pull_etf() -> bool:
-    """是否拉取 ETF 日K。默认 False(标的多,首次较慢)。"""
-    return load().get("pipeline_pull_etf", False)
-
-
-def get_pipeline_pull_index() -> bool:
-    """是否拉取指数日K。默认 True。"""
-    return load().get("pipeline_pull_index", True)
-
-
-def get_pipeline_regime_enabled() -> bool:
-    """盘后管道是否自动计算市场环境(regime)。默认 False。
-
-    regime 是本地聚合计算(非拉取), 首次/regime 表为空时需全量回填多日,
-    内存与耗时较高, 故默认关闭; 用户可在数据页「市场环境」卡片设置里开启,
-    或直接在该页面点「重算」手动触发(不受此开关影响)。
-    """
-    return load().get("pipeline_regime_enabled", False)
 
 
 # regime 全量回填分批参数范围:
@@ -433,31 +393,9 @@ def get_sentiment_exclude_st() -> bool:
     return bool(load().get("sentiment_exclude_st", True))
 
 
-def get_pipeline_index_symbols() -> str:
-    """指数自定义拉取代码(逗号/换行/空格分隔)。空串表示全量。"""
-    return str(load().get("pipeline_index_symbols", "") or "").strip()
-
-
-def get_pipeline_schedule() -> dict:
-    """返回盘后管道调度时间 {"hour": 15, "minute": 30}。"""
-    d = load().get("pipeline_schedule", {"hour": 15, "minute": 30})
-    return {"hour": d.get("hour", 15), "minute": d.get("minute", 30)}
-
-
-def get_instruments_schedule() -> dict:
-    """返回盘前标的维表调度时间 {"hour": 8, "minute": 10}。"""
-    d = load().get("instruments_schedule", {"hour": 8, "minute": 10})
-    return {"hour": d.get("hour", 8), "minute": d.get("minute", 10)}
-
-
 def get_enriched_batch_size() -> int:
     """返回 enriched 全量计算每批 symbol 数量。"""
     return max(1, min(10000, load().get("enriched_batch_size", 1000)))
-
-
-def get_index_daily_batch_size() -> int:
-    """返回指数日 K 同步每批 symbol 数量。"""
-    return max(1, min(10000, load().get("index_daily_batch_size", 100)))
 
 
 # 监控规则可选的外部推播渠道。多选: 不推播 = 空数组, 而非 'none'。
@@ -517,15 +455,6 @@ SIDEBAR_INDEX_SYMBOLS_DEFAULT = ["t00.TWSE", "o00.TPEX"]
 # ===== 盘中实时行情范围 (独立于盘后管道范围) =====
 
 
-def get_realtime_pull_stock() -> bool:
-    return load().get("realtime_pull_stock", True)
-
-
-def get_realtime_pull_etf() -> bool:
-    # 老用户兼容: ETF 实时默认关闭，避免升级后请求量/写盘量突然增加。
-    return load().get("realtime_pull_etf", False)
-
-
 def get_realtime_pull_index() -> bool:
     return load().get("realtime_pull_index", True)
 
@@ -541,16 +470,6 @@ def get_realtime_index_symbols() -> list[str]:
         import re
         stored = [s.strip() for s in re.split(r"[,\s]+", stored) if s.strip()]
     return [str(s) for s in stored if str(s).strip()]
-
-
-def get_realtime_quote_scope() -> dict:
-    return {
-        "realtime_pull_stock": get_realtime_pull_stock(),
-        "realtime_pull_etf": get_realtime_pull_etf(),
-        "realtime_pull_index": get_realtime_pull_index(),
-        "realtime_index_mode": get_realtime_index_mode(),
-        "realtime_index_symbols": get_realtime_index_symbols(),
-    }
 
 
 def get_sse_refresh_pages() -> dict[str, bool]:
@@ -632,14 +551,6 @@ def get_telegram_bot_token() -> str:
 
 def set_telegram_bot_token(token: str) -> str:
     return _set_notification_secret("telegram_bot_token", token)
-
-
-def get_webhook_enabled_default() -> bool:
-    """新建监控规则时是否默认勾选推送 (老布尔, 已由 webhook_default_channels 取代)。
-
-    保留向后兼容: 读取 webhook_default_channels 非空时返回 True。
-    """
-    return bool(get_webhook_default_channels())
 
 
 def get_webhook_default_channels() -> list[str]:
@@ -757,11 +668,6 @@ def set_watchlist_columns(columns: list[dict]) -> list[dict]:
     """保存自选列表列配置。"""
     save({"watchlist_columns": columns})
     return columns
-
-
-def get_screener_result_columns() -> list[dict] | None:
-    """返回策略结果列表列配置。"""
-    return load().get("screener_result_columns")
 
 
 # ===== 首次使用引导 =====

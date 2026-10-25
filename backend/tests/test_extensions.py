@@ -94,7 +94,6 @@ def test_registry_rejects_version_mismatch_without_partial_registration() -> Non
         registry.register(registrar)
 
     registry.freeze()
-    assert not registry.has_customizations
     assert not registry.has_notification_formatters
 
 

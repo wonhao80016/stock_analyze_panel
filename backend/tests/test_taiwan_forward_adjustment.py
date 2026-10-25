@@ -203,9 +203,9 @@ def test_volume_is_restated_only_across_share_count_events():
 
 def test_factors_without_a_volume_column_leave_volume_alone():
     """Regression guard: A-share adj_factor tables carry only ex_factor."""
-    factors = pl.DataFrame({"symbol": ["600000.SH"], "trade_date": [D[2]], "ex_factor": [2.0]})
+    factors = pl.DataFrame({"symbol": ["2330.TWSE"], "trade_date": [D[2]], "ex_factor": [2.0]})
 
-    adjusted = _apply_adj_factor(_bars("600000.SH", [20.0, 20.0, 10.0, 10.0]), factors).sort("date")
+    adjusted = _apply_adj_factor(_bars("2330.TWSE", [20.0, 20.0, 10.0, 10.0]), factors).sort("date")
 
     assert adjusted["volume"].to_list() == [1000.0] * 4
     assert adjusted["close"].to_list() == [10.0, 10.0, 10.0, 10.0]
@@ -219,11 +219,11 @@ def test_every_past_ex_rights_bar_takes_its_limits_from_its_own_reference_price(
     """Three events of 1.05 (00878 had eleven): each session closes at the limit down from its reference."""
     raw = [105.0, 90.0, 94.5, 81.0, 84.0, 72.0, 75.0]
     factors = pl.DataFrame({
-        "symbol": ["600000.SH"] * 3, "trade_date": [D[1], D[3], D[5]], "ex_factor": [1.05, 1.05, 1.05],
+        "symbol": ["2330.TWSE"] * 3, "trade_date": [D[1], D[3], D[5]], "ex_factor": [1.05, 1.05, 1.05],
     })
-    enriched = _limit_frame("600000.SH", raw, factors)
+    enriched = _limit_frame("2330.TWSE", raw, factors)
 
-    signals = compute_limit_signals(enriched, pl.DataFrame({"symbol": ["600000.SH"], "name": ["PF Bank"]}))
+    signals = compute_limit_signals(enriched, pl.DataFrame({"symbol": ["2330.TWSE"], "name": ["台積電"]}))
 
     by_date = dict(zip(signals["date"].to_list(), signals["signal_limit_down"].to_list(), strict=True))
     assert [by_date[D[1]], by_date[D[3]], by_date[D[5]]] == [True, True, True]
@@ -231,22 +231,22 @@ def test_every_past_ex_rights_bar_takes_its_limits_from_its_own_reference_price(
 
 
 def test_published_limits_win_on_corporate_action_bars():
-    enriched = compute_enriched(_bars("600000.SH", [100.0, 99.0, 100.0]), factors=pl.DataFrame()).with_columns(
+    enriched = compute_enriched(_bars("2330.TWSE", [100.0, 99.0, 100.0]), factors=pl.DataFrame()).with_columns(
         pl.when(pl.col("date") == D[1]).then(99.0).otherwise(None).alias("ref_limit_up"),
         pl.lit(None, dtype=pl.Float64).alias("ref_limit_down"),
     )
 
-    signals = compute_limit_signals(enriched, pl.DataFrame({"symbol": ["600000.SH"], "name": ["PF Bank"]})).sort("date")
+    signals = compute_limit_signals(enriched, pl.DataFrame({"symbol": ["2330.TWSE"], "name": ["台積電"]})).sort("date")
 
     assert signals["signal_limit_up"].to_list() == [None, True, False]
 
 
 def test_bars_without_factors_compute_as_before():
     """Regression guard: no factors leave every price raw and every limit base the previous raw close."""
-    raw = _bars("600000.SH", [10.0, 11.0, 9.9, 10.89])
+    raw = _bars("2330.TWSE", [10.0, 11.0, 9.9, 10.89])
 
     out = compute_enriched(raw, factors=pl.DataFrame()).sort("date")
-    signals = compute_limit_signals(out, pl.DataFrame({"symbol": ["600000.SH"], "name": ["PF Bank"]})).sort("date")
+    signals = compute_limit_signals(out, pl.DataFrame({"symbol": ["2330.TWSE"], "name": ["台積電"]})).sort("date")
 
     assert out["close"].to_list() == out["raw_close"].to_list() == [10.0, 11.0, 9.9, 10.89]
     assert out["prev_close"].to_list() == [None, 10.0, 11.0, 9.9]
@@ -400,7 +400,7 @@ def test_a_full_publish_succeeds_after_the_repository_cache_read_the_table(world
     tmp_path, daily, actions = world
     service = _publisher(tmp_path, daily, actions)
     service.refresh()
-    from app.tickflow.repository import DataStore, KlineRepository
+    from app.repository import DataStore, KlineRepository
 
     repo = KlineRepository(DataStore(tmp_path))
     repo.refresh_cache()
@@ -642,7 +642,7 @@ def _quotes(closes: dict[str, float]) -> pl.DataFrame:
 
 def _published_repo(data_dir: Path, history_start: date, latest: tuple[pl.DataFrame, date | None]):
     """A repository whose history cache holds every published partition."""
-    from app.tickflow.repository import DataStore, KlineRepository
+    from app.repository import DataStore, KlineRepository
 
     repo = KlineRepository(DataStore(data_dir))
     partitions = sorted((data_dir / "kline_daily_enriched").glob("date=*/part.parquet"))
@@ -833,7 +833,7 @@ def test_a_share_count_event_today_multiplies_earlier_volumes(tmp_path, monkeypa
 
 
 def _cached_repo(tmp_path: Path):
-    from app.tickflow.repository import DataStore, KlineRepository
+    from app.repository import DataStore, KlineRepository
 
     repo = KlineRepository(DataStore(tmp_path))
     repo._enriched_history_cache = pl.DataFrame({
@@ -887,11 +887,9 @@ def test_the_screener_slow_paths_refuse_to_read_mid_rewrite(tmp_path, monkeypatc
         service._load_enriched_history(D[2], 20)
 
 
-def test_run_all_answers_503_mid_rewrite_and_keeps_the_last_strategy_cache(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from app.enriched_generation import EnrichedPublication
-    from app.main import app
+def test_run_all_fails_mid_rewrite_and_keeps_the_last_strategy_cache(tmp_path):
+    from app.api.screener import compute_and_cache_all
+    from app.enriched_generation import EnrichedGenerationUnavailableError, EnrichedPublication
     from app.services import strategy_cache
     from app.services.screener import ScreenerResult
 
@@ -906,12 +904,10 @@ def test_run_all_answers_503_mid_rewrite_and_keeps_the_last_strategy_cache(tmp_p
     engine.list_strategies.return_value = [{"id": "s1"}]
     engine.required_history_bars.return_value = 20
     engine.run_all.return_value = {"s1": ScreenerResult(as_of=date(2026, 9, 30), strategy="s1")}
-    monkeypatch.setattr(app.state, "repo", repo, raising=False)
-    monkeypatch.setattr(app.state, "strategy_engine", engine, raising=False)
     EnrichedPublication(tmp_path, "stock", recover=True).begin()
 
-    response = TestClient(app, client=("127.0.0.1", 50000)).post("/api/screener/run_all", json={"as_of": "2026-09-30"})
+    with pytest.raises(EnrichedGenerationUnavailableError):
+        compute_and_cache_all(repo, engine, as_of=date(2026, 9, 30))
 
-    assert response.status_code == 503
     assert strategy_cache.read_cache(tmp_path) == last
     engine.run_all.assert_not_called()

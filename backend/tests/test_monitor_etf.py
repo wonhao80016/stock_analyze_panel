@@ -84,3 +84,42 @@ def test_evaluate_default_asset_type_is_stock():
     eng.set_rules([_signal_rule("r_etf", "etf", "510300")])
     # 默认 asset_type=stock → ETF 规则不评估
     assert eng.evaluate(_etf_df()) == []
+
+
+def test_etf_round_reads_the_taiwan_etf_rows_of_the_stock_snapshot():
+    """Taiwan ETFs are polled as stocks, so ETF rules see the ETF rows of the stock snapshot."""
+    from datetime import date
+    from unittest.mock import MagicMock, patch
+
+    import polars as pl
+
+    from app.services.quote_service import QuoteService
+
+    svc = QuoteService.__new__(QuoteService)
+    svc._repo = MagicMock()
+    engine = MagicMock()
+    engine.rule_count = 1
+    engine.has_asset_rules.side_effect = lambda asset_type: asset_type == "etf"
+    engine.has_rule_type.return_value = False
+    engine.evaluate.return_value = []
+    engine.consume_strategy_result_updates.return_value = False
+    svc._app_state = MagicMock()
+    svc._app_state.monitor_engine = engine
+    svc._app_state.repo = svc._repo
+    today = date(2026, 8, 28)
+    snapshot = pl.DataFrame({
+        "symbol": ["2330.TWSE", "0050.TWSE"], "close": [500.0, 150.0], "rsi_14": [50.0, 40.0],
+    })
+
+    with (
+        patch.object(QuoteService, "_is_continuous_trading", return_value=True),
+        patch.object(QuoteService, "get_enriched_today", return_value=(snapshot, today)),
+        patch.object(QuoteService, "_inject_intraday_signals", side_effect=lambda df, e, at: df),
+        patch("app.services.quote_service.cn_today", return_value=today),
+    ):
+        svc._evaluate_monitors(pl.DataFrame(), None)
+
+    etf_calls = [c for c in engine.evaluate.call_args_list if c.kwargs.get("asset_type") == "etf"]
+    assert len(etf_calls) == 1
+    assert etf_calls[0].args[0]["symbol"].to_list() == ["0050.TWSE"]
+    svc._repo.get_enriched_latest_asset.assert_not_called()

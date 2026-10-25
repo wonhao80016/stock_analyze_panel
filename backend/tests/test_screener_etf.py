@@ -112,16 +112,8 @@ def test_custom_strategy_defaults_to_stock_and_daily(tmp_path):
     assert strategy.meta["timeframes"] == ["1d"]
 
 
-def test_service_defaults_to_stock_dir(tmp_path):
-    svc = ScreenerService(_FakeRepo(tmp_path))
-    assert svc.asset_type == "stock"
-    assert svc._enriched_dirname == "kline_daily_enriched"
-
-
-def test_service_etf_uses_etf_dir(tmp_path):
-    svc = ScreenerService(_FakeRepo(tmp_path), asset_type="etf")
-    assert svc.asset_type == "etf"
-    assert svc._enriched_dirname == "kline_etf_enriched"
+def test_service_defaults_to_stock(tmp_path):
+    assert ScreenerService(_FakeRepo(tmp_path)).asset_type == "stock"
 
 
 def test_etf_strategy_runs_through_engine_context(tmp_path):

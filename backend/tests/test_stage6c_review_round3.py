@@ -131,7 +131,7 @@ def test_rule_warnings_are_merged_not_overwritten(tmp_path, monkeypatch):
     from app.strategy import monitor_rules
 
     monkeypatch.setattr(kline_sync, "intraday_monitor_support",
-                        lambda caps: {"available": True, "reason": "", "max_symbols": 100})
+                        lambda: {"available": True, "reason": "", "max_symbols": 100})
     monkeypatch.setattr(monitor_rules, "taiwan_index_condition_error", lambda rule: "指數條件不支援")
     rules_dir = tmp_path / "user_data" / "monitor_rules"
     rules_dir.mkdir(parents=True)

@@ -10,18 +10,12 @@ from typing import Annotated, Any, Literal
 
 import polars as pl
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.auth import _is_local_request
 from app.api.strategy import USER_STRATEGIES_LOCAL_ONLY_DETAIL
-from app.backtest.factor import FACTOR_COLUMNS
-from app.backtest.mining import (
-    MAX_BEAM_WIDTH,
-    MAX_COMBINATION_SIZE,
-    MAX_FINALISTS,
-    evaluate_candidate_gate,
-)
+from app.backtest.mining import evaluate_candidate_gate
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.services import preferences
@@ -42,75 +36,9 @@ from app.services.mining_schedule import (
 )
 
 router = APIRouter(prefix="/api/backtest/mining", tags=["backtest"])
-_FACTOR_IDS = frozenset(str(item["id"]) for item in FACTOR_COLUMNS)
 _MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _SSE_POLL_SECONDS = 0.5
 _SSE_HEARTBEAT_SECONDS = 15.0
-
-
-class MiningStartRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    factor_names: list[str] = Field(min_length=1, max_length=48)
-    strategy_ids: list[str] = Field(default_factory=list, max_length=8)
-    symbols: list[str] | None = None
-    asset_type: Literal["stock", "etf"] = "stock"
-    start: date | None = None
-    end: date | None = None
-    budget_profile: Literal["exploratory", "balanced", "strict"] = "balanced"
-    commission_pct: float | None = Field(None, ge=0.0, le=0.05, allow_inf_nan=False)
-    stamp_tax_pct: None = None
-    slippage_bps: float = Field(5.0, ge=0.0, le=1000.0, allow_inf_nan=False)
-    correlation_threshold: float = Field(0.75, gt=0.0, le=1.0, allow_inf_nan=False)
-    max_combination_factors: int = Field(4, ge=1, le=MAX_COMBINATION_SIZE)
-    beam_width: int = Field(12, ge=1, le=MAX_BEAM_WIDTH)
-    max_finalists: int = Field(MAX_FINALISTS, ge=1, le=MAX_FINALISTS)
-    force: bool = False
-
-    @field_validator("start", "end", mode="before")
-    @classmethod
-    def _iso_dates(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            try:
-                return date.fromisoformat(value)
-            except ValueError as exc:
-                raise ValueError("dates must use ISO YYYY-MM-DD format") from exc
-        return value
-
-    @field_validator("factor_names", "strategy_ids")
-    @classmethod
-    def _unique_ids(cls, values: list[str]) -> list[str]:
-        if any(not value or len(value) > 120 for value in values):
-            raise ValueError("IDs must contain 1 to 120 characters")
-        if len(set(values)) != len(values):
-            raise ValueError("IDs must be unique")
-        return values
-
-    @field_validator("factor_names")
-    @classmethod
-    def _known_factors(cls, values: list[str]) -> list[str]:
-        unknown = sorted(set(values) - _FACTOR_IDS)
-        if unknown:
-            raise ValueError(f"unknown mining factors: {unknown}")
-        return values
-
-    @field_validator("symbols")
-    @classmethod
-    def _symbols(cls, values: list[str] | None) -> list[str] | None:
-        if values is None:
-            return None
-        cleaned = [value for value in values if value]
-        if len(cleaned) > 10_000:
-            raise ValueError("symbols contains more than 10000 entries")
-        if len(set(cleaned)) != len(cleaned):
-            raise ValueError("symbols must be unique")
-        return cleaned or None
-
-    @model_validator(mode="after")
-    def _date_range(self) -> MiningStartRequest:
-        if self.start is not None and self.end is not None and self.start > self.end:
-            raise ValueError("start must not be after end")
-        return self
 
 
 class MiningSchedulePatch(BaseModel):
@@ -141,63 +69,6 @@ def get_availability(
         ).to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.post("/runs")
-def start_run(payload: MiningStartRequest, request: Request) -> dict[str, Any]:
-    manager = _manager(request)
-    worker_request = payload.model_dump(mode="json", exclude={"force"})
-    try:
-        _validate_selected_strategies(
-            request.app.state.strategy_engine,
-            payload.strategy_ids,
-            payload.asset_type,
-        )
-        require_mining_availability(
-            request.app.state.repo.store.data_dir,
-            asset_type=payload.asset_type,
-            budget_profile=payload.budget_profile,
-            start=payload.start,
-            end=payload.end,
-        )
-        fingerprint = build_data_fingerprint(
-            request.app.state.repo,
-            request.app.state,
-            worker_request,
-        )
-        existing = None
-        if not payload.force:
-            from app.services.mining_jobs import (
-                ACTIVE_RUN_STATUSES,
-                SUCCESS_RUN_STATUSES,
-                compute_run_signature,
-            )
-
-            signature = compute_run_signature(worker_request, fingerprint)
-            existing = manager.store.find_by_signature(
-                signature,
-                statuses=ACTIVE_RUN_STATUSES | SUCCESS_RUN_STATUSES,
-            )
-        manifest = manager.start(
-            worker_request,
-            fingerprint,
-            force=payload.force,
-            source="manual",
-        )
-        projected = _project_run(manager.store, manifest)
-        projected["reused"] = existing is not None
-        return projected
-    except (MiningRunValidationError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except EnrichedGenerationUnavailableError as exc:
-        # build_data_fingerprint 读世代时撞上正在进行的 enriched 发布 (如盘后更新):
-        # 映射为 400 带指引, 而不是 500 英文堆栈。
-        raise HTTPException(
-            status_code=400,
-            detail="行情数据正在更新(enriched 发布中), 请等数据更新完成后再开始挖掘",
-        ) from exc
-    except MiningRunStoreError as exc:
-        raise HTTPException(status_code=500, detail="failed to persist mining run") from exc
 
 
 @router.get("/runs/{run_id}/result")

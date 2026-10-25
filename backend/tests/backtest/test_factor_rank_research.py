@@ -7,12 +7,9 @@ from types import SimpleNamespace
 import numpy as np
 import polars as pl
 import pytest
-from fastapi import HTTPException
 
-from app.api import screener as screener_api
 from app.api import strategy as strategy_api
 from app.backtest.matrix import build_market_data_matrix, validate_signal_matrix
-from app.backtest.optimizer import expand_param_grid
 from app.backtest.strategy import StrategyDependencyResolver
 from app.strategy.engine import StrategyEngine
 
@@ -43,7 +40,7 @@ def _market():
     )
 
 
-def test_strategy_loads_as_builtin_matrix_native_and_grid_params_validate():
+def test_strategy_loads_as_builtin_matrix_native():
     strategy = StrategyEngine._load_file(STRATEGY_PATH)
 
     assert strategy.meta["id"] == "factor_rank_research"
@@ -51,15 +48,6 @@ def test_strategy_loads_as_builtin_matrix_native_and_grid_params_validate():
     assert strategy.execution_backend == "matrix_native"
     assert strategy.matrix_strategy is not None
     assert strategy.meta["scoring"] == {}
-    combos = expand_param_grid(
-        strategy.meta["params"],
-        {
-            "entry_score": [50.0, 75.0],
-            "exit_score": [20.0],
-            "top_rank": [1, 2],
-        },
-    )
-    assert len(combos) == 4
     assert strategy.matrix_strategy.required_warmup_bars({}) == 60
     assert {"amount", "turnover_rate", "close"}.issubset(
         strategy.matrix_strategy.required_fields()
@@ -73,7 +61,6 @@ def test_research_template_is_hidden_from_ordinary_strategy_apis(tmp_path):
         app=SimpleNamespace(state=SimpleNamespace(strategy_engine=engine, repo=repo))
     )
 
-    screener_payload = screener_api.strategies(request)
     strategy_payload = strategy_api.list_strategies(request)
 
     assert engine.has("factor_rank_research")
@@ -81,31 +68,8 @@ def test_research_template_is_hidden_from_ordinary_strategy_apis(tmp_path):
         item["id"] for item in engine.list_strategies(include_research=True)
     }
     assert "factor_rank_research" not in {
-        item["id"] for item in screener_payload["presets"]
-    }
-    assert "factor_rank_research" not in {
         item["id"] for item in strategy_payload["strategies"]
     }
-
-    with pytest.raises(HTTPException) as screener_error:
-        screener_api.run_preset(
-            screener_api.PresetRequest(
-                strategy_id="factor_rank_research",
-                as_of=date(2024, 1, 2),
-            ),
-            request,
-        )
-    assert screener_error.value.status_code == 404
-
-    with pytest.raises(HTTPException) as strategy_error:
-        strategy_api.run_strategy(
-            strategy_api.RunRequest(
-                strategy_id="factor_rank_research",
-                as_of=date(2024, 1, 2),
-            ),
-            request,
-        )
-    assert strategy_error.value.status_code == 404
 
 
 def test_dependency_resolver_includes_parameter_scoring_fields():

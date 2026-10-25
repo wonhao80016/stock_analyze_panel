@@ -14,7 +14,6 @@ from app.market_time import CN_TZ
 from app.services import kline_sync
 from app.services.kline_sync import fetch_intraday_monitor_batch, intraday_monitor_support
 from app.strategy import monitor_rules
-from app.tickflow.policy import detect_capabilities
 
 NO_MINUTE_SOURCE = "台股沒有分鐘資料源, 分時訊號需要設定分鐘資料插件"
 
@@ -36,7 +35,7 @@ def test_support_is_unavailable_without_a_custom_minute_plugin(monkeypatch, prov
         lambda name: (None, True, "no such provider" if name == "missing_plugin" else None),
     )
 
-    support = intraday_monitor_support(detect_capabilities())
+    support = intraday_monitor_support()
 
     assert support["available"] is False
     assert support["source"] is None
@@ -48,7 +47,7 @@ def test_support_is_available_with_a_custom_minute_plugin(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "my_minutes")
     monkeypatch.setattr(kline_sync, "_resolve_minute_provider", lambda name: (object(), False, None))
 
-    support = intraday_monitor_support(None)
+    support = intraday_monitor_support()
 
     assert support["available"] is True
     assert support["source"] == "custom_minute"
@@ -63,7 +62,7 @@ def test_fetch_skips_the_minute_pull_without_a_custom_minute_plugin(monkeypatch)
     monkeypatch.setattr(kline_sync, "sync_minute_batch", _no_pull)
 
     result = fetch_intraday_monitor_batch(
-        ["600000.SH"], detect_capabilities(), now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),
+        ["600000.SH"], now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),
     )
     assert result.is_empty()
 
@@ -82,7 +81,6 @@ def client(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(router)
     app.state.repo = _FakeRepo(tmp_path)
-    app.state.capabilities = detect_capabilities()
     return TestClient(app), tmp_path
 
 
@@ -122,6 +120,6 @@ def test_custom_minute_plugin_path_still_fetches(monkeypatch):
     monkeypatch.setattr(kline_sync, "sync_minute_batch", lambda *a, **k: frame)
 
     result = fetch_intraday_monitor_batch(
-        ["600000.SH"], None, now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),
+        ["600000.SH"], now=datetime(2026, 7, 17, 10, 0, tzinfo=CN_TZ),
     )
     assert result.equals(frame)

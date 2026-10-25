@@ -107,7 +107,7 @@ jobs:
 
       - name: 安裝後端依賴 (含 desktop + legacy-cpu)
         working-directory: backend
-        # --no-dev 排除 pytest/ruff/mypy; --extra desktop 裝 pywebview
+        # --no-dev 排除 pytest/ruff; --extra desktop 裝 pywebview
         # --extra legacy-cpu 裝 polars[rtcompat] 運行時兼容內核:
         #   讓安裝包同時兼容 AVX2 新 CPU 和無 AVX2 的老 CPU (NAS/老服務器/國產 CPU)。
         #   rtcompat 會在運行時自動探測 CPU 能力 —— 有 AVX2 用 AVX2, 沒有則回退,

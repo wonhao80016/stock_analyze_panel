@@ -87,31 +87,7 @@ def _install_api_fakes(monkeypatch):
     _CapturingStrategyEngine.calls = []
     monkeypatch.setattr(screener_api, "ScreenerService", _CapturingScreenerService)
     monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *_args: {})
-    monkeypatch.setattr(screener_api, "_update_cache_strategy", lambda *_args: None)
     monkeypatch.setattr(screener_api.strategy_cache, "write_cache", lambda *_args: None)
-
-
-def test_single_run_passes_saved_params_to_strategy_engine(monkeypatch, tmp_path):
-    engine = _CapturingStrategyEngine()
-    request = _api_request(tmp_path, engine)
-    _install_api_fakes(monkeypatch)
-    saved = {"params": {"threshold": 3.0, "enabled": False}}
-    monkeypatch.setattr(screener_api.strategy_config, "load_override", lambda *_args: saved)
-
-    screener_api.run_preset(
-        screener_api.PresetRequest(
-            strategy_id="builtin_strategy",
-            as_of=date(2026, 7, 15),
-        ),
-        request,
-    )
-
-    context_call = _CapturingScreenerService.calls[0]
-    run_call = _CapturingStrategyEngine.calls[0]
-    assert context_call["params_map"] == {"builtin_strategy": saved["params"]}
-    assert context_call["overrides_map"] == {"builtin_strategy": saved}
-    assert run_call["params"] == saved["params"]
-    assert run_call["overrides"] == saved
 
 
 def test_batch_run_passes_saved_params_to_strategy_engine(monkeypatch, tmp_path):
@@ -125,9 +101,11 @@ def test_batch_run_passes_saved_params_to_strategy_engine(monkeypatch, tmp_path)
         lambda *_args: {"builtin_strategy": saved},
     )
 
-    screener_api.run_all(
-        request,
-        body={"as_of": "2026-07-15", "strategy_ids": ["builtin_strategy"]},
+    screener_api.compute_and_cache_all(
+        request.app.state.repo,
+        engine,
+        as_of=date(2026, 7, 15),
+        strategy_ids=["builtin_strategy"],
     )
 
     context_call = _CapturingScreenerService.calls[0]
@@ -141,27 +119,3 @@ def test_batch_run_passes_saved_params_to_strategy_engine(monkeypatch, tmp_path)
     # The cache is written unattended after the close, so one unrunnable strategy
     # must not cost the page every other one.
     assert run_all_call["skip_failed"] is True
-
-
-def test_batch_summary_response_still_writes_full_cache(monkeypatch, tmp_path):
-    engine = _CapturingStrategyEngine()
-    request = _api_request(tmp_path, engine)
-    _install_api_fakes(monkeypatch)
-    written = []
-    monkeypatch.setattr(screener_api.strategy_config, "list_overrides", lambda *_args: {})
-    monkeypatch.setattr(screener_api.strategy_cache, "write_cache", lambda *args: written.append(args))
-
-    payload = screener_api.run_all(
-        request,
-        body={
-            "as_of": "2026-07-15",
-            "strategy_ids": ["builtin_strategy"],
-            "summary_only": True,
-        },
-    )
-
-    assert payload == {
-        "as_of": "2026-07-15",
-        "results": {"builtin_strategy": {"total": 0, "as_of": "2026-07-15"}},
-    }
-    assert written[0][2]["builtin_strategy"]["rows"] == []

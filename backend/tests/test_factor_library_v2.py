@@ -31,7 +31,7 @@ def _single_symbol_panel(n_days: int = 70) -> pl.DataFrame:
         if offset % 15 == 0:
             consecutive = 1 + (offset // 15) % 3 if offset % 30 == 0 else 1
         rows.append({
-            "symbol": "000001.SZ",
+            "symbol": "2330.TWSE",
             "date": start + timedelta(days=offset),
             "open": close * 0.99,
             "high": close * 1.02,
@@ -39,7 +39,7 @@ def _single_symbol_panel(n_days: int = 70) -> pl.DataFrame:
             "close": close,
             "raw_close": close,
             "volume": volume,
-            "amount": volume * 100.0 * close,
+            "amount": volume * close,
             "turnover_rate": 1.0 + (offset % 7) * 0.3,
             "consecutive_limit_ups": consecutive,
         })
@@ -101,7 +101,7 @@ def test_vwap_bias_and_vol_trend():
     frame = materialize_scoring_columns(panel, {"vwap_bias", "vol_trend_5_60"})
 
     last = panel.tail(1).to_dicts()[0]
-    vwap = last["amount"] / (last["volume"] * 100.0)
+    vwap = last["amount"] / last["volume"]
     assert math.isclose(_tail_value(frame, "vwap_bias"), last["close"] / vwap - 1, rel_tol=1e-9)
 
     volumes = panel["volume"].to_list()
@@ -110,14 +110,14 @@ def test_vwap_bias_and_vol_trend():
     assert math.isclose(_tail_value(frame, "vol_trend_5_60"), fast / slow - 1, rel_tol=1e-9)
 
 
-def test_vwap_bias_uses_market_volume_unit():
+def test_vwap_bias_divides_amount_by_share_volume():
     panel = pl.DataFrame({
-        "symbol": ["2330.TWSE", "600000.SH"],
+        "symbol": ["2330.TWSE", "6488.TPEX"],
         "date": [date(2026, 8, 28)] * 2,
         "close": [100.0, 100.0],
         "raw_close": [100.0, 100.0],
-        "volume": [1_000_000.0, 10_000.0],
-        "amount": [100_000_000.0, 100_000_000.0],
+        "volume": [1_000_000.0, 2_000_000.0],
+        "amount": [100_000_000.0, 200_000_000.0],
     })
 
     result = materialize_scoring_columns(panel, {"vwap_bias"}).sort("symbol")
@@ -125,14 +125,14 @@ def test_vwap_bias_uses_market_volume_unit():
     assert result["vwap_bias"].to_list() == pytest.approx([0.0, 0.0])
 
 
-def test_relative_volume_is_unit_invariant_across_markets():
+def test_relative_volume_compares_each_symbol_with_its_own_history():
     start = date(2026, 8, 1)
     rows = []
     for offset in range(11):
         ratio = 2.0 if offset == 10 else 1.0
         rows.extend([
             {"symbol": "2330.TWSE", "date": start + timedelta(days=offset), "volume": 1_000_000.0 * ratio},
-            {"symbol": "600000.SH", "date": start + timedelta(days=offset), "volume": 10_000.0 * ratio},
+            {"symbol": "6488.TPEX", "date": start + timedelta(days=offset), "volume": 10_000.0 * ratio},
         ])
 
     result = materialize_scoring_columns(pl.DataFrame(rows), {"vol_ratio_10d"})
@@ -149,7 +149,7 @@ def test_ret_skew_matches_population_skew():
     for offset, change in enumerate(changes):
         close = close * (1 + change)
         rows.append({
-            "symbol": "000001.SZ",
+            "symbol": "2330.TWSE",
             "date": start + timedelta(days=offset),
             "open": close * 0.99,
             "high": close * 1.02,

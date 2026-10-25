@@ -72,7 +72,6 @@ class TestTaiwanInstitutionalStore:
         assert all_rows.height == 3
         assert inst_store.available_dates() == [d1, d2]
         assert inst_store.latest_date() == d2
-        assert inst_store.known_symbols() == ["2330.TWSE", "8069.TPEX"]
 
     def test_dedup_on_same_partition(self, inst_store: TaiwanInstitutionalStore):
         d = date(2026, 8, 28)

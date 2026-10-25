@@ -8,8 +8,8 @@ from datetime import date
 import polars as pl
 import pytest
 
+from app.repository import DataStore, KlineRepository
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
-from app.tickflow.repository import DataStore, KlineRepository
 from tests.test_taiwan_share_capital_store import TPEX_ROWS, TWSE_ROWS, _client
 
 

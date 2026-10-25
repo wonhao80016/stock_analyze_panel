@@ -50,6 +50,7 @@ from app.taiwan.corporate_actions import (
     attach_reference_prices,
 )
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore, listing_sessions
+from app.taiwan.enriched_reader import _enriched_root
 from app.taiwan.market_rules import ListingSessions, PriceLimitModel
 from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
@@ -57,7 +58,6 @@ from app.taiwan.volume_patterns import add_volume_patterns
 
 logger = logging.getLogger(__name__)
 
-ENRICHED_DIR_NAME = "kline_daily_enriched"
 FACTOR_SET_FILE = ".taiwan_enriched_factors.json"
 LIMIT_RULES_KEY = "limit_rules"
 INDICATOR_VERSION_KEY = "indicator_version"
@@ -65,12 +65,6 @@ NO_LIMIT_RULE = "none"
 OPEN_WINDOW = "open"
 LOGGED_SYMBOLS = 10
 PUBLISHED_TURNOVER = "_published_turnover_rate"
-
-
-def _enriched_root() -> Path:
-    from app.config import settings
-
-    return Path(settings.data_dir) / ENRICHED_DIR_NAME
 
 
 class TaiwanEnrichedRefreshService:

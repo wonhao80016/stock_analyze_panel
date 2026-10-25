@@ -2,8 +2,7 @@
 
 The two coincide only at a 50% win rate. Using avg_win/avg_loss made a strategy
 with many small losses and few large wins read above 1.0 while actually losing
-money, and optimizer.py accepts profit_factor as a maximisation objective, so the
-wrong formula actively steered parameter search toward losing configurations.
+money.
 """
 from __future__ import annotations
 

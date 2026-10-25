@@ -12,7 +12,7 @@ from app.backtest.mining import (
     required_trading_bars,
     validation_config_for_profile,
 )
-from app.tickflow.repository import enriched_dirname
+from app.taiwan.enriched_reader import ENRICHED_DIR_NAME
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,8 @@ def enriched_partition_dates(
     start: date | None = None,
     end: date | None = None,
 ) -> list[date]:
-    root = data_dir / enriched_dirname(asset_type)
+    """Published enriched sessions; stocks and ETFs share these partitions, so asset_type picks no other root."""
+    root = data_dir / ENRICHED_DIR_NAME
     values: set[date] = set()
     for partition in root.glob("date=*"):
         try:

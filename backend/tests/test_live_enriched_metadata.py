@@ -6,9 +6,9 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import cn_today
+from app.repository import DataStore, KlineRepository
 from app.strategy.engine import StrategyEngine
 from app.strategy.monitor import MonitorRuleEngine
-from app.tickflow.repository import DataStore, KlineRepository
 
 
 def _repo(tmp_path) -> KlineRepository:

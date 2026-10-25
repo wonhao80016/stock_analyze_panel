@@ -84,7 +84,6 @@ def test_entrypoints_the_engine_refuses_are_invalid(code, fragment):
 
     assert result["valid"] is False
     assert fragment in result["error"]
-    assert AIStrategyGenerator.needs_structural_repair(result)
 
 
 @pytest.mark.parametrize(
@@ -96,14 +95,13 @@ def test_entrypoints_the_engine_refuses_are_invalid(code, fragment):
         (', "scoring": {"close": 1.0}, "scoring_directions": {"close": "down"}', "scoring_directions"),
     ],
 )
-def test_meta_values_the_engine_refuses_are_invalid_and_repaired(meta_extra, fragment):
+def test_meta_values_the_engine_refuses_are_invalid(meta_extra, fragment):
     code = _polars(meta_extra).replace('"scoring": {}, "scoring"', '"scoring"')
 
     result = AIStrategyGenerator().validate_code(code)
 
     assert result["valid"] is False
     assert fragment in result["error"]
-    assert AIStrategyGenerator.needs_structural_repair(result)
 
 
 def test_a_valid_polars_strategy_still_validates():

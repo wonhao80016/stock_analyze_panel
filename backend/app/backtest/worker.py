@@ -1,4 +1,4 @@
-"""Spawn-isolated strategy backtest and optimizer task runner."""
+"""Spawn-isolated strategy backtest and mining task runner."""
 from __future__ import annotations
 
 import json
@@ -122,32 +122,8 @@ def _decode_backtest_config(payload: dict[str, Any]):
     return StrategyBacktestConfig(**values)
 
 
-def _decode_optimize_config(payload: dict[str, Any]):
-    from app.backtest.optimizer import OptimizeConfig
-
-    values = dict(payload)
-    values["start"] = date.fromisoformat(values["start"])
-    values["end"] = date.fromisoformat(values["end"])
-    return OptimizeConfig(**values)
-
-
-def _decode_walkforward_config(payload: dict[str, Any]):
-    from app.backtest.walkforward import WalkForwardConfig
-
-    values = dict(payload)
-    values["start"] = date.fromisoformat(values["start"])
-    values["end"] = date.fromisoformat(values["end"])
-    return WalkForwardConfig(**values)
-
-
 def encode_backtest_config(config) -> dict[str, Any]:
-    payload = asdict(config)
-    payload["start"] = config.start.isoformat()
-    payload["end"] = config.end.isoformat()
-    return payload
-
-
-def encode_optimize_config(config) -> dict[str, Any]:
+    """Encode a backtest config dataclass for the worker."""
     payload = asdict(config)
     payload["start"] = config.start.isoformat()
     payload["end"] = config.end.isoformat()
@@ -157,12 +133,6 @@ def encode_optimize_config(config) -> dict[str, Any]:
 def make_worker_task(kind: str, data_dir: Path, config) -> dict[str, Any]:
     if kind == "backtest":
         encoded = encode_backtest_config(config)
-    elif kind == "optimize":
-        encoded = encode_optimize_config(config)
-    elif kind == "walkforward":
-        encoded = asdict(config)
-        encoded["start"] = config.start.isoformat()
-        encoded["end"] = config.end.isoformat()
     elif kind == "mining":
         if not isinstance(config, dict):
             raise TypeError("mining worker config must be a dict")
@@ -195,12 +165,11 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
     store = None
     try:
         from app.backtest.engine import BacktestEngine
-        from app.backtest.optimizer import StrategyOptimizer
         from app.backtest.strategy import StrategyBacktestService
         from app.config import settings
+        from app.repository import DataStore, KlineRepository
         from app.strategy import config as strategy_config
         from app.strategy.engine import StrategyEngine, user_strategy_dirs
-        from app.tickflow.repository import DataStore, KlineRepository
 
         data_dir = Path(task["data_dir"])
         store = DataStore(data_dir)
@@ -221,22 +190,6 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         if kind == "backtest":
             config = _decode_backtest_config(task["config"])
             result = asdict(service.run(config, _progress, cancel_event))
-        elif kind == "optimize":
-            config = _decode_optimize_config(task["config"])
-            optimizer = StrategyOptimizer(service, strategy_engine)
-            result = optimizer.optimize(
-                config,
-                _progress,
-                cancel_event,
-                rss_sampler=sampler,
-            )
-        elif kind == "walkforward":
-            from app.backtest.walkforward import WalkForwardService
-
-            config = _decode_walkforward_config(task["config"])
-            optimizer = StrategyOptimizer(service, strategy_engine)
-            walkforward = WalkForwardService(optimizer, service, strategy_engine)
-            result = walkforward.run(config, _progress, cancel_event)
         elif kind == "mining":
             from app.backtest.mining_runtime import run_mining_runtime
 

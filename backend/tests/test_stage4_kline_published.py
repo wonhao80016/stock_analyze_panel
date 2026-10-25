@@ -10,6 +10,7 @@ import polars as pl
 import pytest
 from polars.testing import assert_frame_equal
 
+from app.enriched_generation import bump_enriched_generation
 from app.indicators.pipeline import ENRICHED_STORAGE_COLS, compute_indicators, compute_signals
 from app.repository import DataStore, KlineRepository
 
@@ -178,6 +179,6 @@ def test_repeated_kline_request_is_served_from_cache_until_a_publication(
     assert len(calls) == 1
     assert_frame_equal(first, second)
 
-    repo._bump_matrix_data_generation("stock")
+    bump_enriched_generation(repo.store.data_dir, "stock")
     repo.get_daily(SYMBOL, start, end)
     assert len(calls) == 2

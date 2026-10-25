@@ -66,7 +66,7 @@ def get_levels(
     end = date.today()
     start = end - timedelta(days=days * 2)
     asset_type = repo.resolve_asset_type(symbol)
-    # 按资产类型分流: ETF/指数走独立 enriched 存储, 股票保持原路径
+    # 按资产类型分流: 指数走独立 enriched 存储, 股票与 ETF 保持原路径
     df = repo.get_daily_asset(asset_type, symbol, start, end)
     if df.is_empty():
         return {"levels": {"sr": [], "pivot": [], "extreme": [],

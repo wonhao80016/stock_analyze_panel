@@ -24,7 +24,7 @@ from app.config import settings
 from app.strategy import monitor_rules as mr_store
 from app.taiwan.detail_models import TaiwanStockDetailResponse
 from app.taiwan.detail_service import TaiwanStockDetailService
-from app.taiwan.enrichment.models import InstitutionalFlow, MarginTrading, MarketIndex, SourceMeta
+from app.taiwan.enrichment.models import InstitutionalFlow, MarginTrading, SourceMeta
 from app.taiwan.realtime.models import RealtimeStatus, TaiwanRealtimeQuote
 from app.taiwan.universe.models import TaiwanInstrument
 

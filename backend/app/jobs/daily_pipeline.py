@@ -1,9 +1,7 @@
-"""台股调度管道 — 周期性能力重探 + 台股盘后增量更新。
+"""台股调度管道 — 台股盘后增量更新与假日表刷新。
 
 A 股日K/enriched 盘后管道(run_now)、盘前维表同步(pre_market_instruments)
 与其配套调度、job 追踪、市场环境/主线计算触发已随 A 股功能整体下线。
-_refresh_single_view 仍被 api/kline.py 的个股分时"获取数据"按钮真实使用,
-故保留。
 """
 from __future__ import annotations
 
@@ -15,39 +13,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.tickflow.repository import KlineRepository, enriched_dirname
+from app.taiwan.enriched_reader import ENRICHED_DIR_NAME
 
 logger = logging.getLogger(__name__)
-
-
-def _refresh_single_view(repo: KlineRepository, name: str) -> None:
-    """刷新单个 DuckDB 视图。"""
-    d = repo.store.data_dir.as_posix()
-    paths = {
-        "kline_daily": f"{d}/kline_daily/**/*.parquet",
-        "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
-        "kline_index_daily": f"{d}/kline_index_daily/**/*.parquet",
-        "kline_index_enriched": f"{d}/kline_index_enriched/**/*.parquet",
-        "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
-        "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
-        "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
-        "kline_minute": f"{d}/kline_minute/**/*.parquet",
-        "adj_factor": f"{d}/adj_factor/**/*.parquet",
-        "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",
-        "instruments": f"{d}/instruments/**/*.parquet",
-        "instruments_index": f"{d}/instruments_index/**/*.parquet",
-        "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
-    }
-    path = paths.get(name)
-    if not path:
-        return
-    try:
-        repo.db.execute(
-            f"CREATE OR REPLACE VIEW {name} AS "
-            f"SELECT * FROM read_parquet('{path}', union_by_name=true)"
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("refresh view %s failed: %s", name, e)
 
 
 def refresh_enriched_cache(label: str) -> None:
@@ -154,7 +122,7 @@ def refresh_benchmark_index(label: str) -> date | None:
 def _enriched_partition_mtime(data_dir: Path, day: date) -> float | None:
     """Never raises: a missing or unreadable mtime only disables the stale-input check."""
     try:
-        path = Path(data_dir) / enriched_dirname("stock") / f"date={day.isoformat()}" / "part.parquet"
+        path = Path(data_dir) / ENRICHED_DIR_NAME / f"date={day.isoformat()}" / "part.parquet"
         return path.stat().st_mtime
     except FileNotFoundError:
         return None
@@ -288,7 +256,7 @@ _app_state_ref = None
 
 
 def set_app_state(app_state) -> None:
-    """lifespan 注册 app.state 引用, 供 scheduled job (如周期能力重探) 访问单例。"""
+    """lifespan 注册 app.state 引用, 供 scheduled job 访问单例。"""
     global _app_state_ref
     _app_state_ref = app_state
 

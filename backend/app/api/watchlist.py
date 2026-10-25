@@ -54,15 +54,11 @@ class GroupReorderRequest(BaseModel):
     ordered_ids: list[str]
 
 
-class GroupAssignRequest(BaseModel):
-    group_id: str | None = None
-
-
 def _with_names(rows: list[dict], request: Request) -> list[dict]:
     if not rows:
         return rows
     try:
-        # 股票 + ETF 名称统一由 repo.get_name_map 解析, 自选列表可混合持有
+        # 股票 + 指数名称统一由 repo.get_name_map 解析, 自选列表可混合持有
         name_by_symbol = request.app.state.repo.get_name_map([r.get("symbol") for r in rows])
         if not name_by_symbol:
             return rows
@@ -200,18 +196,6 @@ def move_one_to_top(symbol: str, request: Request):
     return {"symbols": _with_names(rows, request)}
 
 
-@router.put("/{symbol}/group")
-def assign_group(symbol: str, req: GroupAssignRequest, request: Request):
-    """互斥设定分组(仅保留此组; None=移出全部分组)。多组操作用 members 端点。"""
-    try:
-        rows = watchlist.set_group(symbol, req.group_id)
-    except KeyError as e:
-        raise HTTPException(404, "自选标的不存在") from e
-    except ValueError as e:
-        raise HTTPException(400, str(e)) from e
-    return {"symbols": _with_names(rows, request)}
-
-
 @router.post("/groups/{group_id}/members/{symbol}")
 def add_member(group_id: str, symbol: str, request: Request):
     """把标的加入分组(多组成员关系: 不影响其他分组)。"""
@@ -298,13 +282,9 @@ def watchlist_enriched(
     taiwan_symbols = [s for s in symbols if is_taiwan_symbol(s)]
     legacy_symbols = [s for s in symbols if not is_taiwan_symbol(s)]
 
-    # 按资产拆分自选 symbol; ETF enriched 是独立缓存, 仅自选真的含 ETF 才去加载
-    # (避免无 ETF 用户在缓存冷启动时触发 ETF 全量懒加载)
-    etf_set = repo.get_etf_symbol_set()
     index_set = repo.get_index_symbol_set()
-    etf_symbols = [s for s in legacy_symbols if s in etf_set]
-    index_symbols = [s for s in legacy_symbols if s not in etf_set and s in index_set]
-    stock_symbols = [s for s in legacy_symbols if s not in etf_set and s not in index_set]
+    index_symbols = [s for s in legacy_symbols if s in index_set]
+    stock_symbols = [s for s in legacy_symbols if s not in index_set]
 
     df_e, cache_date = repo.get_enriched_latest()
 
@@ -321,19 +301,7 @@ def watchlist_enriched(
     else:
         df = pl.DataFrame()
 
-    # ETF 行合并; 缺失列 (换手率/涨跌停信号等) 为 null
-    etf_date = None
-    if etf_symbols:
-        df_etf_all, etf_date = repo.get_enriched_latest_asset("etf")
-        etf_watchlist_df = pl.DataFrame({"symbol": etf_symbols})
-        if not df_etf_all.is_empty():
-            # ETF 同样以自选为主表 LEFT JOIN, 缺失标的指标为 null
-            df_etf = etf_watchlist_df.join(df_etf_all, on="symbol", how="left")
-        else:
-            df_etf = etf_watchlist_df
-        df = df_etf if df.is_empty() else pl.concat([df, df_etf], how="diagonal_relaxed")
-
-    # 指数行合并 (镜像 ETF 分支); 缺失列 (换手率/涨跌停信号等) 为 null
+    # 指数行合并; 缺失列 (换手率/涨跌停信号等) 为 null
     index_date = None
     if index_symbols:
         df_idx_all, index_date = repo.get_enriched_latest_asset("index")
@@ -344,8 +312,8 @@ def watchlist_enriched(
             df_idx = idx_watchlist_df
         df = df_idx if df.is_empty() else pl.concat([df, df_idx], how="diagonal_relaxed")
 
-    # as_of 取三类缓存中较旧者
-    dates = [d for d in (cache_date if stock_symbols else None, etf_date, index_date) if d is not None]
+    # as_of 取两类缓存中较旧者
+    dates = [d for d in (cache_date if stock_symbols else None, index_date) if d is not None]
     as_of = min(dates) if dates else None
     if df.is_empty() and not taiwan_symbols:
         return {"rows": [], "as_of": str(as_of) if as_of else None, "elapsed_ms": 0}
@@ -368,7 +336,7 @@ def watchlist_enriched(
         )
 
         # 标注资产类型: 前端据此渲染徽标/豁免板块筛选/分时列降级
-        asset_map = {**{s: "etf" for s in etf_symbols}, **{s: "index" for s in index_symbols}}
+        asset_map = {s: "index" for s in index_symbols}
         df = df.with_columns(
             pl.col("symbol").replace_strict(asset_map, default="stock", return_dtype=pl.Utf8).alias("asset_type")
         )

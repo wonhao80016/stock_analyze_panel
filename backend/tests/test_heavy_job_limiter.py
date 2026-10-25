@@ -9,7 +9,6 @@ from app.services.heavy_job_limiter import (
     HeavyJobCancelledError,
     HeavyJobLimiter,
     HeavyJobLimitTimeoutError,
-    heavy_job_limiter,
     shared_heavy_job_limiter,
 )
 
@@ -91,6 +90,5 @@ def test_invalid_release_does_not_overfill_capacity() -> None:
     limiter.release("normal")
 
 
-def test_module_aliases_share_the_capacity_two_singleton() -> None:
-    assert heavy_job_limiter is shared_heavy_job_limiter
+def test_shared_singleton_has_capacity_two() -> None:
     assert shared_heavy_job_limiter.capacity == 2

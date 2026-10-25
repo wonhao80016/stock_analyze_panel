@@ -92,14 +92,3 @@ def test_compression_is_registered_on_the_real_app():
     from app.main import app
 
     assert any(m.cls is GZipMiddleware for m in app.user_middleware)
-
-
-def test_the_build_stream_marks_itself_identity():
-    """Without this the AI build progress arrives in one burst at the end."""
-    import inspect
-
-    from app.api import strategy
-
-    src = inspect.getsource(strategy)
-    assert 'media_type="application/x-ndjson"' in src
-    assert '"Content-Encoding": "identity"' in src

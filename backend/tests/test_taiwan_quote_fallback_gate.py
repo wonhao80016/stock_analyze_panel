@@ -8,7 +8,6 @@ official.fetch_quote / get_daily (status != "realtime"); 这些数据此前未�
 """
 from __future__ import annotations
 
-from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import polars as pl
@@ -16,7 +15,6 @@ import pytest
 
 from app.market_time import cn_today
 from app.services.quote_service import QuoteService
-from tests.test_realtime_enriched_resume import _live_state, _previous_enriched
 
 # ── A1: 回退来源闸门 ──────────────────────────────────────
 
@@ -225,7 +223,6 @@ def test_taiwan_realtime_branch_normalizes_change_pct_to_decimal():
     svc = _svc_for_fetch()
     svc._app_state.monitor_engine = None
     svc._repo.get_index_symbol_set.return_value = set()
-    svc._repo.get_etf_instruments.return_value = pl.DataFrame()
 
     captured_records: list[dict] = []
 
@@ -393,13 +390,8 @@ def test_fetch_live_bar_none_and_no_provider_call_when_source_is_not_taiwan():
         mock_get_provider.assert_not_called()
 
 
-def _repo_with_state(symbol: str) -> MagicMock:
+def _repo_with_state() -> MagicMock:
     repo = MagicMock()
-    repo.get_live_agg.return_value = _live_state().with_columns(pl.lit(symbol).alias("symbol"))
-    repo.get_enriched_latest.return_value = (
-        _previous_enriched().with_columns(pl.lit(symbol).alias("symbol")),
-        cn_today() - timedelta(days=1),
-    )
     repo.get_instruments.return_value = pl.DataFrame()
     return repo
 
@@ -426,21 +418,21 @@ _LIVE_ROW = {
 _OTHER_MARKET_ROW = {**_LIVE_ROW, "symbol": "600001.SH"}
 
 
-def test_fetch_live_bar_carries_indicators_from_the_incremental_pipeline_outside_taiwan():
+def test_fetch_live_bar_keeps_the_bare_bar_outside_taiwan():
     svc = _svc_for_fetch()
-    svc._repo = _repo_with_state("600001.SH")
+    svc._repo = _repo_with_state()
 
     out = _fetch_live_bar_with_row(svc, _OTHER_MARKET_ROW)
 
     assert out["close"] == 10.2
     assert out["change_pct"] == pytest.approx(0.02)
-    assert out["ma5"] == pytest.approx((40.0 + 10.2) / 5)
-    assert out["macd_dif"] is not None
+    assert out.get("ma5") is None
+    svc._repo.get_taiwan_live_enriched.return_value.rows.assert_not_called()
 
 
 def test_fetch_live_bar_takes_a_taiwan_row_from_the_publish_pipeline():
     svc = _svc_for_fetch()
-    svc._repo = _repo_with_state("6196.TWSE")
+    svc._repo = _repo_with_state()
     engine = svc._repo.get_taiwan_live_enriched.return_value
     engine.rows.side_effect = lambda bars: bars.with_columns(pl.lit(11.0).alias("ma5"))
 
@@ -449,12 +441,11 @@ def test_fetch_live_bar_takes_a_taiwan_row_from_the_publish_pipeline():
     assert out["close"] == 10.2
     assert out["ma5"] == 11.0
     assert engine.rows.call_args.args[0]["symbol"].to_list() == ["6196.TWSE"]
-    svc._repo.get_live_agg.assert_not_called()
 
 
 def test_fetch_live_bar_keeps_the_bare_bar_without_the_prepared_history():
     svc = _svc_for_fetch()
-    svc._repo = _repo_with_state("6196.TWSE")
+    svc._repo = _repo_with_state()
     svc._repo.get_taiwan_live_enriched.return_value.rows.return_value = None
 
     out = _fetch_live_bar_with_row(svc, _LIVE_ROW)
@@ -472,28 +463,10 @@ def test_fetch_live_bar_none_when_building_the_bar_fails():
 
 def test_fetch_live_bar_keeps_the_bare_bar_when_the_pipeline_fails():
     svc = _svc_for_fetch()
-    svc._repo = _repo_with_state("6196.TWSE")
+    svc._repo = _repo_with_state()
     svc._repo.get_taiwan_live_enriched.return_value.rows.side_effect = RuntimeError("history unreadable")
 
     out = _fetch_live_bar_with_row(svc, _LIVE_ROW)
 
     assert out["close"] == 10.2
     assert out.get("ma5") is None
-
-
-def test_enrich_today_incremental_leaves_a_share_turnover_rate_untouched(monkeypatch):
-    """Issued Taiwan shares must never price a non-Taiwan symbol's turnover_rate."""
-    svc = _svc_for_fetch()
-    svc._repo = _repo_with_state("600000.SH")
-    schema = {"symbol": pl.Utf8, "float_shares": pl.Float64}
-
-    class _Store:
-        def as_instruments(self):
-            return pl.DataFrame([{"symbol": "600000.SH", "float_shares": 999.0}], schema=schema)
-
-    monkeypatch.setattr("app.taiwan.share_capital_store.TaiwanShareCapitalStore", _Store)
-    row = {**_LIVE_ROW, "symbol": "600000.SH", "volume": 1_000_000.0}
-
-    out = _fetch_live_bar_with_row(svc, row)
-
-    assert out.get("turnover_rate") is None

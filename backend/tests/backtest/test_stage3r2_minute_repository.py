@@ -7,8 +7,8 @@ import polars as pl
 import pytest
 
 from app.backtest.engine import BacktestEngine
+from app.repository import DataStore, KlineRepository
 from app.taiwan.realtime.calendar import TAIPEI_TZ
-from app.tickflow.repository import DataStore, KlineRepository
 
 pytestmark = pytest.mark.usefixtures("deny_network")
 
@@ -47,7 +47,7 @@ def _write(tmp_path, frame: pl.DataFrame, day: date = DAY) -> KlineRepository:
 
 
 def _fill_rows(repo: KlineRepository) -> dict:
-    return BacktestEngine._load_minute_for_fills(repo, [SYMBOL], {DAY.isoformat()}, "stock")
+    return BacktestEngine._load_minute_for_fills(repo, [SYMBOL], {DAY.isoformat()})
 
 
 # B102: the repository hands the recorder's gap column to the minute-fill coverage check.

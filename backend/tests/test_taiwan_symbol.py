@@ -14,12 +14,8 @@ import pytest
 
 from app.taiwan.symbol import (
     Exchange,
-    InstrumentType,
     TaiwanSymbol,
-    extract_code,
     extract_exchange,
-    format_display,
-    from_provider_symbol,
     is_taiwan_symbol,
     parse_symbol,
     to_provider_symbol,
@@ -239,153 +235,6 @@ class TestToProviderSymbol:
             to_provider_symbol(sym, "nonexistent")
 
 
-# ── from_provider_symbol ───────────────────────────────────────
-
-
-class TestFromProviderSymbol:
-    """Test from_provider_symbol conversion."""
-
-    def test_from_yahoo_twse(self):
-        sym = from_provider_symbol("2330.TW", "yahoo")
-        assert sym.code == "2330"
-        assert sym.exchange == Exchange.TWSE
-
-    def test_from_yahoo_tpex(self):
-        sym = from_provider_symbol("8069.TWO", "yahoo")
-        assert sym.code == "8069"
-        assert sym.exchange == Exchange.TPEX
-
-    def test_from_yahoo_etf(self):
-        sym = from_provider_symbol("0050.TW", "yahoo")
-        assert sym.code == "0050"
-        assert sym.exchange == Exchange.TWSE
-
-    def test_from_yahoo_six_digit(self):
-        sym = from_provider_symbol("006208.TW", "yahoo")
-        assert sym.code == "006208"
-        assert sym.exchange == Exchange.TWSE
-
-    def test_from_yahoo_case_insensitive(self):
-        sym = from_provider_symbol("2330.tw", "yahoo")
-        assert sym.exchange == Exchange.TWSE
-
-    def test_from_yahoo_two_not_confused_with_tw(self):
-        """Ensure .TWO is matched before .TW to avoid extracting code='8069.T'."""
-        sym = from_provider_symbol("8069.TWO", "yahoo")
-        assert sym.code == "8069"
-        assert sym.exchange == Exchange.TPEX
-
-    def test_from_yahoo_invalid_suffix_raises(self):
-        with pytest.raises(ValueError, match="expected suffix"):
-            from_provider_symbol("2330.XX", "yahoo")
-
-    def test_from_twse(self):
-        sym = from_provider_symbol("2330", "twse")
-        assert sym.code == "2330"
-        assert sym.exchange == Exchange.TWSE
-
-    def test_from_tpex(self):
-        sym = from_provider_symbol("8069", "tpex")
-        assert sym.code == "8069"
-        assert sym.exchange == Exchange.TPEX
-
-    def test_from_finmind_with_exchange(self):
-        sym = from_provider_symbol("2330", "finmind", exchange=Exchange.TWSE)
-        assert sym.code == "2330"
-        assert sym.exchange == Exchange.TWSE
-
-    def test_from_finmind_without_exchange_raises(self):
-        with pytest.raises(ValueError, match="exchange must be provided"):
-            from_provider_symbol("2330", "finmind")
-
-    def test_from_unknown_provider_raises(self):
-        with pytest.raises(ValueError, match="Unknown provider"):
-            from_provider_symbol("2330", "nonexistent")
-
-    def test_empty_symbol_raises(self):
-        with pytest.raises(ValueError, match="Empty provider symbol"):
-            from_provider_symbol("", "yahoo")
-
-    def test_whitespace_stripped(self):
-        sym = from_provider_symbol("  2330.TW  ", "yahoo")
-        assert sym.code == "2330"
-
-
-# ── Roundtrip consistency ──────────────────────────────────────
-
-
-class TestRoundtrip:
-    """Verify that canonical → provider → canonical is identity."""
-
-    @pytest.mark.parametrize("code,exchange,_name", REFERENCE_STOCKS)
-    def test_yahoo_roundtrip(self, code: str, exchange: Exchange, _name: str):
-        original = TaiwanSymbol(code=code, exchange=exchange)
-        yahoo_sym = to_provider_symbol(original, "yahoo")
-        back = from_provider_symbol(yahoo_sym, "yahoo")
-        assert back == original
-        assert back.canonical == original.canonical
-
-    @pytest.mark.parametrize("code,exchange,_name", REFERENCE_STOCKS)
-    def test_twse_tpex_roundtrip(self, code: str, exchange: Exchange, _name: str):
-        original = TaiwanSymbol(code=code, exchange=exchange)
-        provider = "twse" if exchange == Exchange.TWSE else "tpex"
-        raw = to_provider_symbol(original, provider)
-        back = from_provider_symbol(raw, provider)
-        assert back == original
-
-
-# ── format_display ─────────────────────────────────────────────
-
-
-class TestFormatDisplay:
-    """Test format_display function."""
-
-    @pytest.mark.parametrize("code,exchange,name", REFERENCE_STOCKS)
-    def test_display_with_name(self, code: str, exchange: Exchange, name: str):
-        canonical = f"{code}.{exchange.value}"
-        result = format_display(canonical, name)
-        assert result == f"{code} {name}"
-        assert result.startswith(code)
-
-    def test_display_without_name(self):
-        assert format_display("2330.TWSE") == "2330"
-
-    def test_display_none_name(self):
-        assert format_display("2330.TWSE", None) == "2330"
-
-    def test_display_empty_name(self):
-        assert format_display("2330.TWSE", "") == "2330"
-
-    def test_display_raw_code_with_name(self):
-        assert format_display("2330", "台積電") == "2330 台積電"
-
-    def test_display_raw_code_without_name(self):
-        assert format_display("2330") == "2330"
-
-
-# ── extract_code ───────────────────────────────────────────────
-
-
-class TestExtractCode:
-    """Test extract_code helper."""
-
-    def test_canonical(self):
-        assert extract_code("2330.TWSE") == "2330"
-
-    def test_six_digit(self):
-        assert extract_code("006208.TWSE") == "006208"
-
-    def test_raw_code(self):
-        assert extract_code("2330") == "2330"
-
-    def test_index(self):
-        assert extract_code("TAIEX.TWSE") == "TAIEX"
-
-    def test_a_share_format(self):
-        """Code extraction works for any dot-delimited format."""
-        assert extract_code("600519.SH") == "600519"
-
-
 # ── extract_exchange ───────────────────────────────────────────
 
 
@@ -459,25 +308,6 @@ class TestEnums:
     def test_exchange_invalid_raises(self):
         with pytest.raises(ValueError):
             Exchange("SH")
-
-    def test_instrument_type_values(self):
-        assert InstrumentType.STOCK.value == "stock"
-        assert InstrumentType.ETF.value == "etf"
-        assert InstrumentType.INDEX.value == "index"
-
-    def test_instrument_type_string_comparison(self):
-        """InstrumentType(str, Enum) enables string comparison."""
-        assert InstrumentType.STOCK == "stock"
-        assert InstrumentType("etf") is InstrumentType.ETF
-
-    def test_instrument_type_compatibility_with_asset_type(self):
-        """InstrumentType values match existing AssetType literals."""
-        from app.data_providers.base import AssetType  # noqa: F401
-
-        # AssetType is Literal["stock", "index", "etf"]
-        # InstrumentType values should match:
-        for it in InstrumentType:
-            assert it.value in ("stock", "index", "etf")
 
 
 # ── Canonical format contract ──────────────────────────────────

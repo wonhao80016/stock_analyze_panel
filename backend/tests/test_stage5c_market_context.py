@@ -8,7 +8,6 @@ import pytest
 
 from app.taiwan import detail_service
 from app.taiwan.detail_service import TaiwanStockDetailService
-from app.taiwan.enrichment.index import TaiwanIndexProvider
 
 D1, D2, D3 = date(2026, 10, 20), date(2026, 10, 21), date(2026, 10, 22)
 
@@ -120,28 +119,3 @@ def test_card_is_unavailable_without_stored_bars(svc, monkeypatch):
 
     assert ctx.close is None
     assert ctx.meta.status == "unavailable"
-
-
-def _taiex_row(raw_date: str, open_: str, close: str) -> dict[str, str]:
-    return {"Date": raw_date, "OpeningIndex": open_, "HighestIndex": close, "LowestIndex": open_, "ClosingIndex": close}
-
-
-def test_taiex_first_row_is_not_measured_against_its_own_open():
-    rows = [_taiex_row("1151021", "21,950.00", "22,000.00"), _taiex_row("1151022", "22,100.00", "22,200.00")]
-
-    series = TaiwanIndexProvider().parse_taiex_rows(rows)
-
-    assert [idx.date for idx in series] == [D3]
-    assert series[0].previous_close == 22000.0
-    assert series[0].change == 200.0
-
-
-def test_taiex_first_row_uses_the_given_previous_close():
-    rows = [_taiex_row("1151022", "22,100.00", "22,200.00")]
-
-    series = TaiwanIndexProvider().parse_taiex_rows(rows, previous_close=22000.0)
-
-    assert len(series) == 1
-    assert series[0].previous_close == 22000.0
-    assert series[0].change == 200.0
-    assert series[0].change_pct == round(200.0 / 22000.0 * 100.0, 2)

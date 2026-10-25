@@ -95,7 +95,6 @@ backend/_desktop_run.log
 backend/_check*.py
 backend/__tmp_dbg*/
 backend/__tmp_test*/
-reports/tickflow_pro_probe/
 .cursor/debug-*.log
 
 # ===== Acceptance screenshots (local evidence, not versioned) =====

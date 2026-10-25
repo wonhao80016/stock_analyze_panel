@@ -51,7 +51,6 @@ from app.indicators.pipeline import (
     LIMIT_SIGNAL_OUTPUTS,
     get_signal_dependencies,
 )
-from app.price_limits import TAIWAN_SYMBOL_SUFFIXES
 from app.strategy.engine import (
     RAW_PRICE_BOUND_KEYS,
     StrategyDataContext,
@@ -82,6 +81,7 @@ from app.taiwan.share_capital_store import (
     eligible_coverage,
 )
 from app.taiwan.symbol import extract_exchange
+from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -831,7 +831,7 @@ def _asset_scope_mask(symbols: tuple[str, ...] | list[str], asset_types: list[st
 
     A Taiwan symbol counts only when the security master types it in *asset_types*.
     """
-    taiwan = [str(symbol) for symbol in symbols if str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES)]
+    taiwan = [str(symbol) for symbol in symbols if str(symbol).endswith(TAIWAN_SUFFIXES)]
     instruments = {}
     if taiwan:
         from app.taiwan.universe import get_security_master
@@ -859,7 +859,7 @@ def _unsupported_asset_type_symbols(
     Symbols missing from the master are left to taiwan_limit_rule_exclusions, which excludes them.
     """
     taiwan_symbols = [
-        str(symbol) for symbol in symbols if str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES)
+        str(symbol) for symbol in symbols if str(symbol).endswith(TAIWAN_SUFFIXES)
     ]
     if not taiwan_symbols:
         return set()
@@ -957,7 +957,7 @@ class StrategyBacktestResult:
 
 @dataclass(frozen=True)
 class BacktestResultPolicy:
-    """Explicit result contract for full backtests and lightweight optimizer trials."""
+    """Explicit result contract for full backtests and lightweight mining trials."""
 
     required_stats: frozenset[str] | None = None
     include_monte_carlo: bool = True
@@ -968,19 +968,6 @@ class BacktestResultPolicy:
     include_benchmark: bool = True
     include_strategy_info: bool = True
     min_annualized_sessions: int = MIN_ANNUALIZED_SESSIONS
-
-    @classmethod
-    def optimizer_trial(cls, objective: str) -> BacktestResultPolicy:
-        return cls(
-            required_stats=frozenset({str(objective)}),
-            include_monte_carlo=str(objective).startswith("mc_maxdd_"),
-            include_curves=False,
-            include_trades=False,
-            include_per_symbol_stats=False,
-            include_return_distribution=False,
-            include_benchmark=False,
-            include_strategy_info=False,
-        )
 
     def simulation_options(self) -> SimulationOptions:
         return SimulationOptions(
@@ -1021,7 +1008,7 @@ class BacktestResultPolicy:
 
 @dataclass(frozen=True)
 class PreparedMatrixBacktest:
-    """Job-scoped immutable market data reused by every optimizer trial."""
+    """Job-scoped immutable market data reused by every trial of one job."""
 
     signature: tuple
     market_data: MarketDataMatrix
@@ -1196,11 +1183,11 @@ class StrategyBacktestService:
         history window for strict out-of-sample evaluation.
         """
         if not configs:
-            raise ValueError("optimizer preparation requires at least one backtest config")
+            raise ValueError("matrix preparation requires at least one backtest config")
 
         signature = self._matrix_prepare_signature(configs[0])
         if any(self._matrix_prepare_signature(config) != signature for config in configs[1:]):
-            raise ValueError("optimizer trials must share strategy, universe, range and overrides")
+            raise ValueError("matrix preparation configs must share strategy, universe, range and overrides")
 
         first = configs[0]
         strategy = self.strategy_engine.get(first.strategy_id)

@@ -2,11 +2,8 @@
 
 Responsibilities (and *nothing* else):
   - Canonical symbol representation
-  - Raw stock code extraction
   - Exchange / market identification
-  - Instrument type classification (enum definition)
   - Provider-specific symbol conversion (adapters)
-  - Display formatting interface
 
 This module does NOT handle:
   - Market data / quotes / prices
@@ -34,8 +31,8 @@ Design rationale:
 
 2. **Provider-agnostic**: ``TWSE`` / ``TPEX`` are official exchange names,
    not Yahoo's ``.TW`` / ``.TWO`` convention.  Provider-specific formats
-   are confined to adapter functions (:func:`to_provider_symbol` /
-   :func:`from_provider_symbol`) and never leak into the domain model.
+   are confined to the adapter function :func:`to_provider_symbol` and
+   never leak into the domain model.
 
 3. **Unambiguous**: ``TWSE`` and ``TPEX`` cannot be confused with any
    A-share exchange suffix (``SH`` / ``SZ`` / ``BJ``), enabling a future
@@ -60,21 +57,6 @@ class Exchange(str, Enum):
 
     TWSE = "TWSE"  # Taiwan Stock Exchange (臺灣證券交易所) — listed (上市)
     TPEX = "TPEX"  # Taipei Exchange (財團法人中華民國證券櫃檯買賣中心) — OTC (上櫃)
-
-
-class InstrumentType(str, Enum):
-    """Instrument classification.
-
-    Defined here as part of the Symbol Layer's domain vocabulary.
-    The *association* between a specific symbol and its instrument type
-    comes from the instruments / security-master provider, not from the
-    symbol string itself.
-    """
-
-    STOCK = "stock"
-    ETF = "etf"
-    INDEX = "index"
-    # Extensible: WARRANT = "warrant", BOND = "bond", TDR = "tdr", ...
 
 
 # ── Canonical Symbol ───────────────────────────────────────────
@@ -120,9 +102,6 @@ def parse_symbol(raw: str, *, exchange: Exchange | None = None) -> TaiwanSymbol:
     - Canonical: ``"2330.TWSE"``, ``"8069.TPEX"``
     - Raw code + explicit exchange:
       ``parse_symbol("2330", exchange=Exchange.TWSE)``
-
-    For provider-specific formats (e.g. Yahoo's ``2330.TW``), use
-    :func:`from_provider_symbol` instead.
 
     Raises:
         ValueError: If the symbol cannot be parsed unambiguously.
@@ -195,93 +174,10 @@ def to_provider_symbol(symbol: TaiwanSymbol | str, provider: str) -> str:
     raise ValueError(f"Unknown provider: {provider!r}")
 
 
-def from_provider_symbol(
-    provider_symbol: str,
-    provider: str,
-    *,
-    exchange: Exchange | None = None,
-) -> TaiwanSymbol:
-    """Convert a provider-specific symbol to a canonical :class:`TaiwanSymbol`.
-
-    Args:
-        provider_symbol: Symbol in the provider's native format.
-        provider: Provider name (``"yahoo"``, ``"twse"``, ``"tpex"``,
-            ``"finmind"``).
-        exchange: Required for providers whose symbol format does not
-            encode the exchange (e.g. ``"finmind"``).
-
-    Raises:
-        ValueError: If conversion cannot be performed.
-    """
-    provider_symbol = provider_symbol.strip()
-    if not provider_symbol:
-        raise ValueError("Empty provider symbol")
-
-    provider_lower = provider.lower()
-
-    if provider_lower == "yahoo":
-        upper = provider_symbol.upper()
-        # Try longest suffix first to avoid ".TW" matching ".TWO" symbols
-        for suffix in sorted(_YAHOO_TO_EXCHANGE, key=len, reverse=True):
-            if upper.endswith(suffix):
-                code = provider_symbol[: -len(suffix)]
-                return TaiwanSymbol(code=code, exchange=_YAHOO_TO_EXCHANGE[suffix])
-        raise ValueError(
-            f"Cannot parse Yahoo symbol {provider_symbol!r}: "
-            f"expected suffix .TW or .TWO"
-        )
-
-    if provider_lower == "twse":
-        return TaiwanSymbol(code=provider_symbol, exchange=Exchange.TWSE)
-
-    if provider_lower == "tpex":
-        return TaiwanSymbol(code=provider_symbol, exchange=Exchange.TPEX)
-
-    if provider_lower == "finmind":
-        if exchange is None:
-            raise ValueError(
-                "FinMind symbols are raw codes; exchange must be provided explicitly."
-            )
-        return TaiwanSymbol(code=provider_symbol, exchange=exchange)
-
-    raise ValueError(f"Unknown provider: {provider!r}")
-
-
 # ── Display Formatting ─────────────────────────────────────────
 
 
-def format_display(canonical_symbol: str, name: str | None = None) -> str:
-    """Format a canonical symbol for UI display.
-
-    The ``name`` parameter should come from the instruments / security-master
-    provider, **not** from hardcoded mappings.
-
-    Examples::
-
-        format_display("2330.TWSE", "台積電")   # "2330 台積電"
-        format_display("2330.TWSE")              # "2330"
-    """
-    code = extract_code(canonical_symbol)
-    if name:
-        return f"{code} {name}"
-    return code
-
-
 # ── Utility Helpers ────────────────────────────────────────────
-
-
-def extract_code(canonical_symbol: str) -> str:
-    """Extract the raw stock code from a canonical symbol string.
-
-    Mirrors the existing codebase pattern ``symbol.split(".")[0]``.
-
-    Examples::
-
-        extract_code("2330.TWSE")   # "2330"
-        extract_code("006208.TWSE") # "006208"
-        extract_code("2330")        # "2330"
-    """
-    return canonical_symbol.split(".")[0] if "." in canonical_symbol else canonical_symbol
 
 
 def extract_exchange(canonical_symbol: str) -> Exchange | None:

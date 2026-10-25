@@ -1,13 +1,7 @@
-"""策略实时监控 — 订阅行情更新，检查策略买卖信号。
+"""策略实时监控 — 订阅行情更新，检查监控规则并推送告警。
 
-职责: 接收实时行情 DataFrame → 检查监控中策略的信号 → 推送告警。
-不知道: 策略加载逻辑、AI、API、配置持久化、回测。
-依赖: 外部调用 on_quote_update() 传入实时数据。
-
-本模块含两个评估器:
-  1. StrategyMonitorService — 旧的策略监控 (type=strategy),第二步迁移到 MonitorRuleEngine
-  2. MonitorRuleEngine — 通用规则引擎,覆盖 signal/price/market/strategy 四类,
-     支持 scope (symbols/all/sector) + 多条件 AND/OR + cooldown 去重
+MonitorRuleEngine 是通用规则引擎,覆盖 signal/price/market/strategy 四类,
+支持 scope (symbols/all/sector) + 多条件 AND/OR + cooldown 去重。
 """
 from __future__ import annotations
 
@@ -16,7 +10,6 @@ import logging
 import math
 import threading
 import time
-from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import polars as pl
@@ -31,156 +24,10 @@ from app.strategy.intraday_signals import uses_intraday_signals
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class StrategyAlert:
-    """策略告警"""
-    type: str              # "entry" | "exit"
-    strategy_id: str
-    symbol: str
-    name: str | None
-    message: str
-    price: float | None = None
-    change_pct: float | None = None
-    signals: list[str] = field(default_factory=list)
-
-
-class StrategyMonitorService:
-    """策略实时监控服务"""
-
-    def __init__(self, alert_handler: Callable[[StrategyAlert], None] | None = None):
-        """
-        Args:
-            alert_handler: 告警回调 (如推 SSE)
-        """
-        self._alert_handler = alert_handler
-        # strategy_id → 监控配置
-        self._watching: dict[str, dict] = {}
-        # _watching 跨线程锁: on_quote_update 跑在行情轮询线程迭代 _watching,
-        # API 线程同时 start/stop 增删会抛 "dict changed size during iteration"。
-        # 增删与迭代前的快照都持此锁 (镜像 MonitorRuleEngine.evaluate 的 list 快照)。
-        self._watching_lock = threading.Lock()
-
-    def start(self, strategy_id: str, config: dict) -> None:
-        """开始监控一个策略
-
-        config: {
-            "entry_signals": ["signal_n_day_high", ...],
-            "exit_signals": ["signal_ma20_breakdown", ...],
-        }
-        """
-        with self._watching_lock:
-            self._watching[strategy_id] = config
-        logger.info("strategy monitor started: %s", strategy_id)
-
-    def stop(self, strategy_id: str) -> None:
-        with self._watching_lock:
-            self._watching.pop(strategy_id, None)
-        logger.info("strategy monitor stopped: %s", strategy_id)
-
-    def stop_all(self) -> None:
-        with self._watching_lock:
-            self._watching.clear()
-
-    @property
-    def watching(self) -> dict[str, dict]:
-        with self._watching_lock:
-            return dict(self._watching)
-
-    def on_quote_update(self, df: pl.DataFrame) -> list[StrategyAlert]:
-        """行情更新后调用。向量化检查所有监控策略。
-
-        Args:
-            df: 实时 enriched 数据 (~5500行)
-        Returns:
-            触发的告警列表
-        """
-        if not self._watching or df.is_empty():
-            return []
-
-        all_alerts: list[StrategyAlert] = []
-
-        # 迭代前持锁快照, 避免行情线程迭代时 API 线程 start/stop 改变字典大小
-        with self._watching_lock:
-            watching_items = list(self._watching.items())
-
-        for strategy_id, cfg in watching_items:
-            # 买入信号
-            entry_sigs = cfg.get("entry_signals", [])
-            if entry_sigs:
-                for sym, name, price, pct, hit_sigs in self._check_signals(df, entry_sigs):
-                    alert = StrategyAlert(
-                        type="entry",
-                        strategy_id=strategy_id,
-                        symbol=sym,
-                        name=name,
-                        message="入場訊號觸發",
-                        price=price,
-                        change_pct=pct,
-                        signals=hit_sigs,
-                    )
-                    all_alerts.append(alert)
-                    self._emit(alert)
-
-            # 卖出信号
-            exit_sigs = cfg.get("exit_signals", [])
-            if exit_sigs:
-                for sym, name, price, pct, hit_sigs in self._check_signals(df, exit_sigs):
-                    alert = StrategyAlert(
-                        type="exit",
-                        strategy_id=strategy_id,
-                        symbol=sym,
-                        name=name,
-                        message="出場訊號觸發",
-                        price=price,
-                        change_pct=pct,
-                        signals=hit_sigs,
-                    )
-                    all_alerts.append(alert)
-                    self._emit(alert)
-
-        return all_alerts
-
-    def _emit(self, alert: StrategyAlert) -> None:
-        if self._alert_handler:
-            try:
-                self._alert_handler(alert)
-            except Exception as e:
-                logger.warning("alert handler failed: %s", e)
-
-    @staticmethod
-    def _check_signals(
-        df: pl.DataFrame,
-        signals: list[str],
-    ) -> list[tuple[str, str | None, float | None, float | None, list[str]]]:
-        """检查信号列，返回 [(symbol, name, price, change_pct, [hit_signals])]。
-        支持内置 signal_ 与自定义 csg_ 前缀。"""
-        cols = set(df.columns)
-        resolved: list[tuple[str, str]] = []  # (原值, 列名)
-        for s in signals:
-            col = s if (s.startswith("signal_") or s.startswith("csg_")) else f"signal_{s}"
-            if col in cols:
-                resolved.append((s, col))
-        if not resolved:
-            return []
-
-        mask = pl.any_horizontal(pl.col(c).fill_null(False) for _, c in resolved)
-        hit_df = df.filter(mask)
-
-        results = []
-        for row in hit_df.iter_rows(named=True):
-            sym = row.get("symbol", "")
-            name = row.get("name")
-            price = row.get("close")
-            pct = row.get("change_pct")
-            hit_sigs = [orig for orig, col in resolved if row.get(col)]
-            results.append((sym, name, price, pct, hit_sigs))
-        return results
-
 # ================================================================
 # 通用监控规则引擎 MonitorRuleEngine
 # ================================================================
 
-_SIGNAL_PREFIXES = ("signal_", "csg_")
 _CONDITION_RULE_TYPES = frozenset({"signal", "price", "market"})
 
 
@@ -235,10 +82,6 @@ def _group_members_or_none(rule: dict) -> frozenset[str] | None:
                 rule.get("id"), group_id,
             )
     return members
-
-
-def _is_signal_field(field: str) -> bool:
-    return any(field.startswith(p) for p in _SIGNAL_PREFIXES)
 
 
 def _condition_mask_expr(cols: set[str], conditions: list[dict], logic: str) -> pl.Expr | None:
@@ -319,11 +162,7 @@ def _format_condition_value(field: str, value: Any) -> str:
 class MonitorRuleEngine:
     """通用监控规则引擎 — 接收实时行情 DataFrame,评估所有规则,返回 AlertEvent。
 
-    与 StrategyMonitorService 的区别:
-      - 规则来自 monitor_rules 存储 (用户可配), 而非写死的 strategy config
-      - 支持 scope (symbols/all/sector) 过滤作用域
-      - 支持 conditions + logic (AND/OR) 任意组合
-      - ★ cooldown 去重: 同一 (rule_id, symbol, event_type) 在冷却期内不重复触发
+    规则来自 monitor_rules 存储; 同一 (rule_id, symbol, event_type) 在冷却期内不重复触发。
     """
 
     def __init__(self, alert_handler: Callable[[dict], None] | None = None):
@@ -534,34 +373,6 @@ class MonitorRuleEngine:
             self._rules[rule["id"]] = rule
         else:
             self._rules.pop(rule["id"], None)
-
-    def remove_rule(self, rule_id: str) -> None:
-        self._rules.pop(rule_id, None)
-        self._last_fire = {k: v for k, v in list(self._last_fire.items()) if k[0] != rule_id}
-        self._strategy_pools = {
-            k: v for k, v in list(self._strategy_pools.items()) if k[0] != rule_id
-        }
-        self._strategy_signal_state = {
-            k: v for k, v in list(self._strategy_signal_state.items()) if k[0] != rule_id
-        }
-        self._strategy_signal_seen = {
-            k: v for k, v in list(self._strategy_signal_seen.items()) if k[0] != rule_id
-        }
-        self._sector_condition_state = {
-            k: v for k, v in self._sector_condition_state.items() if k[0] != rule_id
-        }
-        self._condition_state = {
-            k: v for k, v in self._condition_state.items() if k[0] != rule_id
-        }
-
-    def clear(self) -> None:
-        self._rules.clear()
-        self._last_fire.clear()
-        self._strategy_pools.clear()
-        self._strategy_signal_state.clear()
-        self._strategy_signal_seen.clear()
-        self._sector_condition_state.clear()
-        self._condition_state.clear()
 
     @property
     def rules(self) -> dict[str, dict]:

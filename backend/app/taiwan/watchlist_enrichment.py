@@ -71,8 +71,8 @@ def _sanitize_float(value: Any) -> float | None:
 def _to_fraction_pct(value: Any) -> float | None:
     """把 Taiwan 的「已乘 100」涨跌幅换成 watchlist 契约的小数涨跌幅。
 
-    TaiwanRealtimeQuote.change_pct 在 mis_provider / yahoo_provider /
-    enrichment.quote 三处 provider 里统一是 round(change/prev_close*100, N)
+    TaiwanRealtimeQuote.change_pct 在 mis_provider / yahoo_provider
+    两处 provider 里统一是 round(change/prev_close*100, N)
     (即 0.21 代表 0.21%); 但 A 股 enriched 管线的 change_pct 列是纯小数
     (pipeline.py: change_pct = close/prev_close - 1, 0.05 代表 5%), 前端
     fmtPct() 也是按小数 * 100 来渲染 (frontend/src/lib/format.ts)。两边单位

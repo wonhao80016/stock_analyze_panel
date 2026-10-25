@@ -10,9 +10,7 @@ import pytest
 
 from app.backtest import worker as worker_module
 from app.backtest.mining import benchmark_candidate
-from app.backtest.optimizer import OptimizeConfig
 from app.backtest.strategy import StrategyBacktestConfig
-from app.backtest.walkforward import WalkForwardConfig
 from app.backtest.worker import BacktestWorkerError, make_worker_task, run_worker_task
 from app.enriched_generation import bump_enriched_generation, get_enriched_generation
 from app.services.mining_jobs import MiningRunStore
@@ -208,83 +206,6 @@ def test_spawn_worker_runs_user_strategies_only_when_enabled(tmp_path, monkeypat
     else:
         assert result["error"] == "unknown strategy: worker_always_entry"
         assert not marker.exists()
-
-
-def test_spawn_optimizer_reuses_one_matrix_and_exits(tmp_path):
-    start = date(2024, 1, 1)
-    data_dir = tmp_path / "data"
-    _write_worker_strategy(data_dir)
-    _write_market_data(data_dir, start)
-    config = OptimizeConfig(
-        strategy_id="worker_always_entry",
-        symbols=["600000.SH"],
-        start=start,
-        end=start + timedelta(days=2),
-        param_grid={"gate": [1, 2]},
-        objective="total_return",
-        max_workers=4,
-        overrides={"basic_filter": {"enabled": False}},
-        backtest_kwargs={
-            "matching": "close_t",
-            "fees_pct": 0,
-            "slippage_bps": 0,
-            "max_positions": 1,
-        },
-    )
-
-    result = run_worker_task(make_worker_task("optimize", data_dir, config))
-
-    assert result["n_completed"] == 2
-    assert result["effective_workers"] == 1
-    assert result["shared_market_data"] is True
-    assert result["shared_market_data_bytes"] > 0
-    assert result["best_backtest"]["equity_curve"]
-    assert result["best_backtest"]["trades"]
-    assert "mc_maxdd_p50" in result["best_backtest"]["stats"]
-    assert result["matrix_compute_cache"]["released"] is True
-    assert result["performance"]["trial_peak_rss_bytes"] > 0
-    assert result["performance"]["best_backtest_peak_rss_bytes"] > 0
-    assert result["performance"]["trials_per_second"] > 0
-    assert result["worker"]["worker_exitcode"] == 0
-
-
-def test_spawn_walkforward_reuses_shared_matrix_across_folds(tmp_path):
-    start = date(2024, 1, 1)
-    data_dir = tmp_path / "data"
-    _write_worker_strategy(data_dir)
-    _write_market_data(data_dir, start, days=8)
-    config = WalkForwardConfig(
-        strategy_id="worker_always_entry",
-        symbols=["600000.SH"],
-        start=start,
-        end=start + timedelta(days=7),
-        param_grid={"gate": [1, 2]},
-        objective="total_return",
-        train_days=2,
-        test_days=1,
-        step_days=2,
-        overrides={"basic_filter": {"enabled": False}},
-        backtest_kwargs={
-            "matching": "close_t",
-            "fees_pct": 0,
-            "slippage_bps": 0,
-            "max_positions": 1,
-        },
-    )
-
-    result = run_worker_task(make_worker_task("walkforward", data_dir, config))
-
-    assert result["window_unit"] == "trading_days"
-    assert result["n_folds"] == 3
-    assert [(f["train_start"], f["test_end"]) for f in result["folds"]] == [
-        ("2024-01-01", "2024-01-03"),
-        ("2024-01-03", "2024-01-05"),
-        ("2024-01-05", "2024-01-07"),
-    ]
-    assert result["shared_market_data"] is True
-    assert result["shared_market_data_bytes"] > 0
-    assert all(fold["oos_stats"]["shared_market_data"] for fold in result["folds"])
-    assert result["worker"]["worker_exitcode"] == 0
 
 
 def test_spawn_mining_writes_four_artifacts_and_returns_compact_summary(tmp_path):
@@ -550,101 +471,13 @@ def test_worker_accepts_delivered_result_when_child_exit_is_slow(monkeypatch, tm
     assert process.exitcode == -15
 
 
-def test_spawn_walkforward_folds_start_at_first_available_session(tmp_path):
-    configured_start = date(2024, 1, 1)
-    market_start = configured_start + timedelta(days=4)
-    data_dir = tmp_path / "data"
-    _write_worker_strategy(data_dir)
-    _write_market_data(data_dir, market_start, days=8)
-    config = WalkForwardConfig(
-        strategy_id="worker_always_entry",
-        symbols=["600000.SH"],
-        start=configured_start,
-        end=configured_start + timedelta(days=11),
-        param_grid={"gate": [1, 2]},
-        objective="total_return",
-        train_days=2,
-        test_days=1,
-        step_days=2,
-        overrides={"basic_filter": {"enabled": False}},
-        backtest_kwargs={
-            "matching": "close_t",
-            "fees_pct": 0,
-            "slippage_bps": 0,
-            "max_positions": 1,
-        },
-    )
-
-    result = run_worker_task(make_worker_task("walkforward", data_dir, config))
-
-    assert result["n_planned_folds"] == 3
-    assert result["n_skipped"] == 0
-    assert result["n_folds"] == 3
-    assert result["folds"][0]["train_start"] == market_start.isoformat()
-    assert result["folds"][-1]["test_end"] == "2024-01-11"
-    assert result["worker"]["worker_exitcode"] == 0
-
-
-def test_spawn_walkforward_skips_folds_before_selected_symbol_has_data(tmp_path):
-    configured_start = date(2024, 1, 1)
-    listing_date = configured_start + timedelta(days=4)
-    data_dir = tmp_path / "data"
-    _write_worker_strategy(data_dir)
-    _write_market_data(data_dir, listing_date, days=8)
-    for offset in range(4):
-        current = configured_start + timedelta(days=offset)
-        partition = data_dir / "kline_daily_enriched" / f"date={current.isoformat()}"
-        partition.mkdir(parents=True)
-        pl.DataFrame([{
-            "symbol": "600001.SH", "date": current,
-            "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
-            "volume": 1000.0, "amount": 1_000_000.0,
-            "raw_close": 10.0, "raw_high": 10.0, "raw_low": 10.0,
-            "turnover_rate": 1.0, "consecutive_limit_ups": 0, "consecutive_limit_downs": 0,
-        }]).write_parquet(partition / "part.parquet")
-    config = WalkForwardConfig(
-        strategy_id="worker_always_entry",
-        symbols=["600000.SH"],
-        start=configured_start,
-        end=configured_start + timedelta(days=11),
-        param_grid={"gate": [1, 2]},
-        objective="total_return",
-        train_days=2,
-        test_days=1,
-        step_days=2,
-        overrides={"basic_filter": {"enabled": False}},
-        backtest_kwargs={
-            "matching": "close_t",
-            "fees_pct": 0,
-            "slippage_bps": 0,
-            "max_positions": 1,
-        },
-    )
-
-    result = run_worker_task(make_worker_task("walkforward", data_dir, config))
-
-    assert result["n_planned_folds"] == 5
-    assert result["n_skipped"] == 2
-    assert [(s["train_start"], s["train_end"], s["reason"]) for s in result["skipped"]] == [
-        ("2024-01-01", "2024-01-02", "训练区间无可用行情数据"),
-        ("2024-01-03", "2024-01-04", "训练区间无可用行情数据"),
-    ]
-    assert result["n_folds"] == 3
-    assert [(f["train_start"], f["test_end"]) for f in result["folds"]] == [
-        ("2024-01-05", "2024-01-07"),
-        ("2024-01-07", "2024-01-09"),
-        ("2024-01-09", "2024-01-11"),
-    ]
-    assert result["worker"]["worker_exitcode"] == 0
-
-
 def _mining_runtime_services(data_dir):
     """按 worker._worker_entry 的方式在进程内构造挖掘运行时依赖 (便于 monkeypatch)。"""
     from app.backtest.engine import BacktestEngine
     from app.backtest.strategy import StrategyBacktestService
+    from app.repository import DataStore, KlineRepository
     from app.strategy import config as strategy_config
     from app.strategy.engine import StrategyEngine
-    from app.tickflow.repository import DataStore, KlineRepository
 
     store = DataStore(data_dir)
     repo = KlineRepository(store)

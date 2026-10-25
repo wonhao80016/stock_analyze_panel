@@ -53,7 +53,6 @@ def harness(tmp_path):
     engine.set_rules([])
     repo = MagicMock()
     repo.get_index_symbol_set.return_value = set()
-    repo.get_etf_instruments.return_value = pl.DataFrame()
     repo.get_enriched_latest.return_value = (pl.DataFrame(), None)
     repo.get_enriched_latest_asset.return_value = (pl.DataFrame(), None)
     repo.get_name_map.return_value = {"t00.TWSE": "發行量加權股價指數"}
@@ -83,10 +82,7 @@ def harness(tmp_path):
 
 
 def _assert_nothing_stored(repo: MagicMock) -> None:
-    for writer in (
-        repo.flush_live_daily_asset, repo.merge_live_daily_asset,
-        repo.flush_live_enriched_asset, repo.merge_live_enriched_asset,
-    ):
+    for writer in (repo.flush_live_enriched_asset, repo.merge_live_enriched_asset):
         assert not any(call.args and call.args[0] == "index" for call in writer.call_args_list), writer
 
 

@@ -279,21 +279,6 @@ class TaiwanRealtimeService:
             logger.debug("Unresolvable Taiwan symbol %r marked unavailable", raw)
 
 
-    def get_quote(
-        self,
-        symbol: TaiwanSymbol | str,
-        force_refresh: bool = False,
-        daily_kline_fallback_fn: Any | None = None,
-    ) -> TaiwanRealtimeQuote | None:
-        """Fetch quote for a single symbol."""
-        res = self.get_quotes(
-            [symbol],
-            force_refresh=force_refresh,
-            daily_kline_fallback_fn=daily_kline_fallback_fn,
-        )
-        ts = symbol if isinstance(symbol, TaiwanSymbol) else parse_symbol(symbol)
-        return res.get(ts.canonical)
-
 
 def _unavailable_quote(
     raw: str, now_tpe: datetime, market_status: MarketStatus, reason: str,

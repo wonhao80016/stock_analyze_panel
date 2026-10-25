@@ -11,29 +11,18 @@ Data.tsx/EndpointTestDialog.tsx 一并删除的端点诊断功能, zero 消费�
 setter(zero 前端消费者, 且会持久化配置并呼叫 scheduler.reschedule_job 操作
 已被 Phase 8B-5.0.2 从调度器移除的 daily_pipeline/pre_market_instruments
 job——目前虽因 job 不存在而实际上会抛错, 但一旦该 job id 未来被重新注册即
-恢复危险)。tf_client / capability detection /
-preferences.get_pipeline_schedule() 与 get_instruments_schedule()(供
-daily_pipeline.py 的 start_scheduler() 读取排程时间)等底层能力完全未动。
+恢复危险)。
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from app import secrets_store
 from app.data_providers.custom.config import MAX_TIMEOUT
-from app.tickflow import client as tf_client
-from app.tickflow.policy import (
-    detect_capabilities,
-    extras_caps,
-    missing_caps,
-    probe_log,
-    tier_label,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -56,17 +45,8 @@ def get_settings() -> dict:
         current_ai_max_output_tokens,
     )
 
-    key = secrets_store.get_tickflow_key()
     ai_provider = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
     return {
-        "mode": tf_client.current_mode(),
-        "tickflow_api_key_masked": secrets_store.mask(key),
-        "has_tickflow_key": bool(key),
-        "tier_label": tier_label(),
-        "current_endpoint": tf_client.current_endpoint(),
-        "probe_log": probe_log(),
-        "missing_caps": missing_caps(),
-        "extras_caps": extras_caps(),
         # 首次使用引导
         "onboarding_completed": preferences.get_onboarding_completed(),
         # AI 配置
@@ -316,9 +296,9 @@ def _realtime_allowed() -> bool:
     return QuoteService.is_realtime_allowed()
 
 
-_OFFICIAL_PROVIDERS = {"taiwan", "tickflow"}
+_OFFICIAL_PROVIDERS = {"taiwan"}
 # Routing values and settings-page keys that a custom source name must not shadow.
-_RESERVED_SOURCE_NAMES = _OFFICIAL_PROVIDERS | {"same_as_daily", "__new__"}
+_RESERVED_SOURCE_NAMES = _OFFICIAL_PROVIDERS | {"tickflow", "same_as_daily", "__new__"}
 
 
 class DataProvidersIn(BaseModel):
@@ -377,14 +357,6 @@ class CustomSourceTestIn(BaseModel):
     config: CustomSourceIn | None = None
 
 
-class MiningSchedulePrefs(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    mining_schedule_enabled: bool
-    mining_schedule_weekday: int = Field(ge=0, le=4)
-    mining_budget_profile: Literal["balanced", "strict"]
-
-
 @router.get("/preferences")
 def get_preferences() -> dict:
     """返回用户偏好设置。"""
@@ -394,29 +366,12 @@ def get_preferences() -> dict:
         "realtime_allowed": _realtime_allowed(),
         "taiwan_market_closed_today": _taiwan_market_closed_today(),
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
-        "minute_sync_enabled": preferences.get_minute_sync_enabled(),
-        "minute_sync_days": preferences.get_minute_sync_days(),
-        "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
-        "realtime_watchlist_symbols": preferences.get_realtime_watchlist_symbols(),
-        **preferences.get_realtime_quote_scope(),
-        "pipeline_pull_a_share": preferences.get_pipeline_pull_a_share(),
-        "pipeline_pull_etf": preferences.get_pipeline_pull_etf(),
-        "pipeline_pull_index": preferences.get_pipeline_pull_index(),
-        "pipeline_regime_enabled": preferences.get_pipeline_regime_enabled(),
-        "regime_batch_days": preferences.get_regime_batch_days(),
-        "regime_warmup_days": preferences.get_regime_warmup_days(),
-        "pipeline_index_symbols": preferences.get_pipeline_index_symbols(),
-        "pipeline_schedule": preferences.get_pipeline_schedule(),
-        "instruments_schedule": preferences.get_instruments_schedule(),
-        "enriched_batch_size": preferences.get_enriched_batch_size(),
-        "index_daily_batch_size": preferences.get_index_daily_batch_size(),
         "watchlist_columns": preferences.get_watchlist_columns(),
-        "screener_result_columns": preferences.get_screener_result_columns(),
         "sse_refresh_pages": preferences.get_sse_refresh_pages(),
         "strategy_monitor_enabled": preferences.get_strategy_monitor_enabled(),
         "strategy_monitor_ids": preferences.get_strategy_monitor_ids(),
@@ -427,7 +382,6 @@ def get_preferences() -> dict:
         "telegram_chat_id": preferences.get_telegram_chat_id(),
         "telegram_bot_token_masked": secrets_store.mask(preferences.get_telegram_bot_token()),
         "telegram_configured": bool(preferences.get_telegram_chat_id() and preferences.get_telegram_bot_token()),
-        "webhook_enabled_default": preferences.get_webhook_enabled_default(),
         "webhook_default_channels": preferences.get_webhook_default_channels(),
         "sidebar_index_symbols": preferences.get_sidebar_index_symbols(),
         "minute_intraday_refresh": preferences.get_minute_intraday_refresh(),
@@ -436,7 +390,6 @@ def get_preferences() -> dict:
         "nav_order": preferences.get_nav_order(),
         "nav_hidden": preferences.get_nav_hidden(),
         "screener_auto_run": preferences.get_screener_auto_run(),
-        **preferences.get_mining_schedule(),
     }
 
 
@@ -531,19 +484,19 @@ def install_plugin(name: str) -> dict:
 def uninstall_plugin(name: str) -> dict:
     """卸载指定插件的依赖 (删除 node_modules / pip uninstall), 完成后重新扫描。
 
-    如果该插件当前正被使用, 自动回退到 tickflow。
+    如果该插件当前正被使用, 自动回退到 taiwan。
     """
     from app.data_providers import custom as custom_sources
     from app.services import preferences
     if not custom_sources.is_builtin(name):
         raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
     ok, message = custom_sources.uninstall_plugin(name)
-    # 卸载后若该插件正被使用, 回退 tickflow
+    # 卸载后若该插件正被使用, 回退 taiwan
     for getter, key, default in [
-        (preferences.get_daily_data_provider, "daily_data_provider", "tickflow"),
-        (preferences.get_minute_data_provider, "minute_data_provider", "tickflow"),
-        (preferences.get_realtime_data_provider, "realtime_data_provider", "tickflow"),
-        (preferences.get_financial_provider, "financial_data_provider", "tickflow"),
+        (preferences.get_daily_data_provider, "daily_data_provider", "taiwan"),
+        (preferences.get_minute_data_provider, "minute_data_provider", "taiwan"),
+        (preferences.get_realtime_data_provider, "realtime_data_provider", "taiwan"),
+        (preferences.get_financial_provider, "financial_data_provider", "taiwan"),
     ]:
         if getter() == name:
             preferences.save({key: default})
@@ -655,10 +608,10 @@ def _write_data_source(req: CustomSourceIn, target: Path) -> dict:
 
 
 @router.delete("/data-sources/{name}")
-def delete_data_source(name: str, request: Request) -> dict:
+def delete_data_source(name: str) -> dict:
     """删除一个自定义数据源 yaml, 保存后自动 reload。
 
-    若当前总开关选中的就是被删的源, 回退到 tickflow。
+    若当前总开关选中的就是被删的源, 回退到 taiwan。
     """
     from app.data_providers import custom as custom_sources
     from app.services import preferences
@@ -670,18 +623,16 @@ def delete_data_source(name: str, request: Request) -> dict:
     # 回退被删源的偏好
     updates: dict = {}
     if preferences.get_daily_data_provider() == name:
-        updates["daily_data_provider"] = "tickflow"
+        updates["daily_data_provider"] = "taiwan"
     if preferences.get_realtime_data_provider() == name:
-        updates["realtime_data_provider"] = "tickflow"
+        updates["realtime_data_provider"] = "taiwan"
     if preferences.get_financial_provider() == name:
-        updates["financial_data_provider"] = "tickflow"
+        updates["financial_data_provider"] = "taiwan"
     adj = preferences.get_adj_factor_provider()
     if adj == name:
         updates["adj_factor_provider"] = "same_as_daily"
     if updates:
         preferences.save(updates)
-    # 删除源可能触发偏好回退 tickflow, 同步刷新能力快照
-    request.app.state.capabilities = detect_capabilities()
     return list_data_sources()
 
 
@@ -711,7 +662,7 @@ def test_data_source(req: CustomSourceTestIn) -> dict:
 
 
 @router.put("/preferences/data-providers")
-def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
+def update_data_providers(req: DataProvidersIn) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
@@ -721,8 +672,6 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="台股除權因子固定來自公司行動表, 不能切換")
     if updates:
         preferences.save(updates)
-    # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
-    request.app.state.capabilities = detect_capabilities()
     return {
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
@@ -730,18 +679,6 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
     }
-
-
-@router.put("/preferences/mining-schedule")
-def update_mining_schedule(req: MiningSchedulePrefs) -> dict:
-    """一次更新周度自动 mining 配置。"""
-    from app.services import preferences
-
-    return preferences.set_mining_schedule(
-        req.mining_schedule_enabled,
-        req.mining_schedule_weekday,
-        req.mining_budget_profile,
-    )
 
 
 @router.get("/preferences/watchlist-columns")
@@ -830,9 +767,6 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     if req.realtime_quotes_enabled and qs and qs.is_paused():
         # Realtime quotes stay off while the quote service is paused, to avoid write races.
         raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
-    if req.realtime_quotes_enabled and qs and qs.realtime_mode() == "watchlist" and not preferences.get_realtime_watchlist_symbols():
-        preferences.save({"realtime_quotes_enabled": False})
-        return {"realtime_quotes_enabled": False, "realtime_allowed": True, "mode": "watchlist", "error": "watchlist_empty"}
 
     if qs and not req.realtime_quotes_enabled:
         qs.disable()

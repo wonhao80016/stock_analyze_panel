@@ -14,10 +14,9 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.api import backtest as backtest_api
 from app.api import kline
+from app.repository import DataStore, KlineRepository
 from app.taiwan import universe
-from app.tickflow.repository import DataStore, KlineRepository
 
 TAIPEI = timezone(timedelta(hours=8))
 FIRST_SESSION = date(2024, 1, 2)
@@ -75,100 +74,13 @@ def test_daily_dates_are_none_without_taiwan_sessions(tmp_path, monkeypatch, den
     assert repo.latest_daily_date() is None
 
 
-class _ImmediateThread:
-    def __init__(self, *, target, daemon):
-        self.target = target
-
-    def start(self):
-        self.target()
-
-
-class _NoopTimer:
-    daemon = False
-
-    def __init__(self, interval, callback):
-        pass
-
-    def start(self):
-        return None
-
-
-class _Request:
-    def __init__(self, repo):
-        self.app = SimpleNamespace(state=SimpleNamespace(repo=repo))
-
-    async def is_disconnected(self):
-        return False
-
-
-async def _consume(response) -> None:
-    async for _ in response.body_iterator:
-        pass
-
-
-@pytest.fixture
-def capture_worker(monkeypatch):
-    captured = []
-    monkeypatch.setattr(
-        "app.backtest.worker.make_worker_task",
-        lambda kind, data_dir, config: captured.append((kind, config)) or {"kind": kind},
-    )
-    monkeypatch.setattr(
-        "app.backtest.worker.run_worker_task",
-        lambda task, progress_cb=None, cancel_event=None: {"ok": True},
-    )
-    monkeypatch.setattr(backtest_api.threading, "Thread", _ImmediateThread)
-    monkeypatch.setattr(backtest_api.threading, "Timer", _NoopTimer)
-    backtest_api._running_jobs.clear()
-    yield captured
-    backtest_api._running_jobs.clear()
-
-
-@pytest.mark.asyncio
-async def test_backtest_streams_without_start_begin_at_the_first_taiwan_session(
-    repo, capture_worker
-):
-    request = _Request(repo)
-    await _consume(await backtest_api.strategy_stream(request, strategy_id="s8", end="2026-10-07"))
-    await _consume(
-        await backtest_api.optimize_stream(
-            request,
-            strategy_id="s8",
-            param_grid='{"window":[5]}',
-            end="2026-10-07",
-        )
-    )
-    await _consume(
-        await backtest_api.walkforward_stream(
-            request,
-            strategy_id="s8",
-            param_grid='{"window":[5]}',
-            end="2026-10-07",
-            objective="total_return",
-            train_days=2,
-            test_days=1,
-            step_days=1,
-        )
-    )
-
-    starts = {kind: config.start for kind, config in capture_worker}
-    assert starts == {
-        "backtest": FIRST_SESSION,
-        "optimize": FIRST_SESSION,
-        "walkforward": FIRST_SESSION,
-    }
-
-
 @pytest.fixture
 def minute_request(repo, monkeypatch):
     monkeypatch.setattr(kline, "_get_stock_info", lambda _repo, _symbol: {})
     monkeypatch.setattr(kline, "_session_price_limit", lambda *a, **k: (None, None))
     monkeypatch.setattr(kline.kline_sync, "fetch_minute_single", lambda *a, **k: pl.DataFrame())
     monkeypatch.setattr(kline.kline_sync, "sync_minute_batch", lambda *a, **k: pl.DataFrame())
-    capabilities = SimpleNamespace(has=lambda _cap: True, limits=lambda _cap: None)
-    return SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(repo=repo, capabilities=capabilities))
-    )
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
 
 
 def _at(monkeypatch, now: datetime) -> None:
@@ -212,9 +124,9 @@ def test_minute_batch_trading_day_follows_the_taiwan_store(
     seen: list[date] = []
     real_batch = repo.get_minute_batch
 
-    def spy(symbols, trade_date, asset_type="stock"):
+    def spy(symbols, trade_date):
         seen.append(trade_date)
-        return real_batch(symbols, trade_date, asset_type=asset_type)
+        return real_batch(symbols, trade_date)
 
     monkeypatch.setattr(repo, "get_minute_batch", spy)
 
@@ -244,7 +156,7 @@ def _live_bar(symbol: str, d: date = TODAY) -> pl.DataFrame:
 
 
 class _WarmingRepo:
-    """A repository still warming up: no recursive state and no latest enriched day yet.
+    """A repository still warming up: no latest enriched day yet.
 
     Its Taiwan live history is prepared first, as KlineRepository._refresh_enriched does.
     """
@@ -259,17 +171,11 @@ class _WarmingRepo:
     def get_taiwan_live_enriched(self):
         return self.taiwan_live
 
-    def get_live_agg(self) -> pl.DataFrame:
-        return pl.DataFrame()
-
     def get_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
         return pl.DataFrame(), None
 
     def get_instruments(self) -> pl.DataFrame:
         return pl.DataFrame()
-
-    def get_historical_shares(self):
-        return None
 
     def flush_live_enriched_asset(self, asset_type, df, *, force=False) -> None:
         self.enriched_writes.append(df)
@@ -323,23 +229,10 @@ def test_taiwan_rows_wait_for_a_prepared_history(warming_service, monkeypatch):
     assert scheduled == [True]
 
 
-def test_warm_up_fallback_never_scans_kline_daily_for_taiwan(warming_service, monkeypatch):
-    from app.services import quote_service
-
-    scanned: list[str] = []
-
-    def spy(glob):
-        scanned.append(glob)
-        return pl.LazyFrame(schema={"symbol": pl.String, "date": pl.Date})
-
-    monkeypatch.setattr(quote_service, "scan_daily_parquet", spy)
-
-    warming_service._flush_live_enriched(_live_bar("2330.TWSE"))
-    warming_service._flush_live_enriched(_live_bar("0050.TWSE"))
-    assert scanned == []
-
+def test_a_non_taiwan_bar_gets_no_live_enriched_row(warming_service):
     warming_service._flush_live_enriched(_live_bar("600000.SH"))
-    assert len(scanned) == 1 and "kline_daily" in scanned[0]
+
+    assert warming_service._repo.enriched_writes == []
 
 
 @pytest.fixture
@@ -353,18 +246,13 @@ def post_close_service(tmp_path, monkeypatch, deny_network):
     monkeypatch.setattr(quote_service, "_persist_last_fetch", lambda _ms: None)
     _write_partition(tmp_path, "taiwan/daily", TODAY)
     repo = KlineRepository(DataStore(tmp_path))
-    monkeypatch.setattr(
-        repo, "get_etf_instruments", lambda: pl.DataFrame({"symbol": ["0050.TWSE"]})
-    )
     service = quote_service.QuoteService()
     service._repo = repo
-    enriched_calls: list[tuple[str, list[str]]] = []
+    enriched_calls: list[list[str]] = []
     monkeypatch.setattr(
         service,
         "_flush_live_enriched",
-        lambda df, extra=None, asset_type="stock", merge=False: enriched_calls.append(
-            (asset_type, df["symbol"].to_list())
-        ),
+        lambda df, extra=None: enriched_calls.append(df["symbol"].to_list()),
     )
     monkeypatch.setattr(service, "_evaluate_monitors", lambda *a, **k: None)
     monkeypatch.setattr(service, "_broadcast_quote_updated", lambda: None)
@@ -392,42 +280,16 @@ def test_taiwan_poll_with_official_day_stored_writes_nothing_to_kline_daily(post
     service._process_full_market_records(records, t0=0.0, now_ts=0.0)
 
     assert not list((root / "kline_daily").rglob("*.parquet"))
-    assert not list((root / "kline_etf_daily").rglob("*.parquet"))
-    assert enriched_calls == [("stock", ["2330.TWSE"]), ("etf", ["0050.TWSE"])]
+    # Taiwan ETFs are polled as stock rows; the ETF monitor round picks them out of these.
+    assert enriched_calls == [["2330.TWSE", "0050.TWSE"]]
 
 
-def test_non_taiwan_poll_still_writes_kline_daily(post_close_service):
+def test_a_non_taiwan_quote_writes_no_daily_partition_either(post_close_service):
     service, root, _ = post_close_service
 
     service._process_full_market_records([_quote("600000.SH")], t0=0.0, now_ts=0.0)
 
-    written = pl.read_parquet(root / "kline_daily" / f"date={TODAY.isoformat()}" / "part.parquet")
-    assert written["symbol"].to_list() == ["600000.SH"]
-
-
-class _IncrementalStockRepo(_WarmingRepo):
-    """Stock has its incremental state; index has no latest enriched day and always falls back."""
-
-    def get_live_agg(self) -> pl.DataFrame:
-        return pl.DataFrame({"symbol": ["2330.TWSE"]})
-
-    def get_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
-        return pl.DataFrame({"symbol": ["2330.TWSE"]}), date(2026, 10, 6)
-
-    def get_enriched_latest_asset(self, asset_type) -> tuple[pl.DataFrame, date | None]:
-        return pl.DataFrame(), None
-
-
-def test_index_fallback_writes_nothing_beside_the_taiwan_stock_rows(warming_service, monkeypatch):
-    warming_service._repo = _IncrementalStockRepo(warming_service._repo.store.data_dir)
-    warming_service._repo.taiwan_live.prepare()
-    monkeypatch.setattr(warming_service, "_enrich_today_incremental", lambda daily, *a, **k: daily)
-
-    for _ in range(3):
-        warming_service._flush_live_enriched(_live_bar("2330.TWSE"), asset_type="stock")
-        warming_service._flush_live_enriched(_live_bar("t00.TWSE"), asset_type="index")
-
-    assert [len(df) for df in warming_service._repo.enriched_writes] == [1, 1, 1]
+    assert not list((root / "kline_daily").rglob("*.parquet"))
 
 
 def test_taiwan_daily_dates_read_the_repository_data_dir_without_creating_it(

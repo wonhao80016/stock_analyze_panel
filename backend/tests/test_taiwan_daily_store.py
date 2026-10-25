@@ -68,13 +68,6 @@ class TestTaiwanDailyStoreWriteRead:
         assert all_rows.height == 5
         assert (all_rows["symbol"] == "2330.TWSE").all()
 
-    def test_read_latest_date_rows(self, store):
-        df = _make_df("2330.TWSE")
-        store.write_batch(df)
-        latest = store.read_latest_date_rows()
-        assert latest.height == 1
-        assert latest["date"][0] == date(2026, 8, 5)
-
     def test_read_latest_per_symbol(self, store):
         """Screener needs latest row per symbol, even if symbols have
         different max dates."""
@@ -126,12 +119,6 @@ class TestTaiwanDailyStoreWriteRead:
 
     def test_latest_date_empty(self, store):
         assert store.latest_date() is None
-
-    def test_has_symbol_date(self, store):
-        df = _make_df("2330.TWSE", n=3)
-        store.write_batch(df)
-        assert store.has_symbol_date("2330.TWSE", date(2026, 8, 2)) is True
-        assert store.has_symbol_date("2330.TWSE", date(2026, 8, 10)) is False
 
 
 # ── Dedup ─────────────────────────────────────────────────────────────
@@ -186,15 +173,6 @@ class TestTaiwanDailyStoreCanonicalSymbols:
         df = _make_df("00631L.TWSE")
         store.write_batch(df)
         assert (store.read_latest_per_symbol()["symbol"] == "00631L.TWSE").all()
-
-    def test_known_symbols(self, store):
-        df1 = _make_df("2330.TWSE")
-        df2 = _make_df("8069.TPEX")
-        store.write_batch(df1)
-        store.write_batch(df2)
-        symbols = store.known_symbols()
-        assert "2330.TWSE" in symbols
-        assert "8069.TPEX" in symbols
 
 
 # ── Missing amount = null ─────────────────────────────────────────────
@@ -292,7 +270,6 @@ class TestTaiwanDailyStoreAtomicWrite:
     def test_read_empty_store(self, store):
         assert store.read_all().height == 0
         assert store.read_latest_per_symbol().height == 0
-        assert store.read_latest_date_rows().height == 0
         assert store.read_range(["2330.TWSE"], date(2026, 8, 1), date(2026, 8, 5)).height == 0
         assert store.available_dates() == []
 

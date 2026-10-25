@@ -365,7 +365,8 @@ def test_direct_parquet_matrix_reports_actionable_error_when_enriched_is_empty(t
         )
 
 
-def test_direct_parquet_matrix_uses_taiwan_share_volume_for_turnover(tmp_path):
+def test_direct_parquet_matrix_never_derives_turnover_from_the_share_count(tmp_path):
+    """Only the publish prices turnover (CONTRIBUTING 3.4); vwap_bias divides by share volume."""
     market_root = tmp_path / "kline_daily_enriched"
     partition = market_root / "date=2026-08-28"
     partition.mkdir(parents=True)
@@ -397,7 +398,7 @@ def test_direct_parquet_matrix_uses_taiwan_share_volume_for_turnover(tmp_path):
     )
 
     assert market.volume_unit == "shares"
-    assert float(market.field("turnover_rate")[0, 0]) == pytest.approx(1.0)
+    assert np.isnan(market.field("turnover_rate")[0, 0])
     assert float(matrix_feature(market, "vwap_bias")[0, 0]) == pytest.approx(0.0)
 
 

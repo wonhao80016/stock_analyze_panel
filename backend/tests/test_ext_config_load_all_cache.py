@@ -54,16 +54,6 @@ def test_upsert_edit_invalidates_cache(tmp_path):
     assert store.load_all()[0].label == "new"
 
 
-def test_delete_invalidates_cache(tmp_path):
-    store = ExtConfigStore(tmp_path)
-    store.upsert(_config("cfg_a", "A"))
-    store.upsert(_config("cfg_b", "B"))
-    assert {c.id for c in store.load_all()} == {"cfg_a", "cfg_b"}
-
-    assert store.delete("cfg_a") is True
-    assert {c.id for c in store.load_all()} == {"cfg_b"}
-
-
 def test_external_config_change_visible(tmp_path):
     import os
 

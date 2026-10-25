@@ -275,25 +275,6 @@ class TestPipelinePaths:
         assert out["signal_limit_up"].to_list()[5:] == [True, True]
         assert out["consecutive_limit_ups"].to_list() == [0] * 5 + [1, 2]
 
-    def _today(self, day: date, prev_close: float, close: float) -> pl.DataFrame:
-        return pl.DataFrame({
-            "symbol": [IPO], "date": [day], "open": [close], "high": [close], "low": [close], "close": [close],
-            "raw_close": [close], "raw_high": [close], "raw_low": [close],
-            "_prev_close_raw": pl.Series([prev_close], dtype=pl.Float64), "volume": [1000.0],
-        })
-
-    def test_listing_session_quoted_against_the_offer_price_is_not_a_limit_board(self, master, stored_sessions):
-        """The quote's previous close on the listing session is the offer price; the session itself is not stored yet."""
-        stored_sessions(SESSIONS[:2])
-        out = pipeline._compute_limit_signals_today(self._today(LISTED, 100.0, 130.0), pl.DataFrame({"symbol": [IPO]}))
-        assert out["signal_limit_up"][0] is not True
-        assert out["consecutive_limit_ups"][0] == 0
-
-    def test_sixth_session_intraday_is_a_limit_board(self, master, stored_sessions):
-        stored_sessions()
-        out = pipeline._compute_limit_signals_today(self._today(SIXTH, 220.0, 242.0), pl.DataFrame({"symbol": [IPO]}))
-        assert out["signal_limit_up"][0] is True
-
     def test_batch_signals_ignore_published_limits_inside_the_window(self, master, stored_sessions):
         stored_sessions()
         prices = [125.0, 242.0]

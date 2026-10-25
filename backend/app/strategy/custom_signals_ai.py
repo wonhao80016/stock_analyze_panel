@@ -16,19 +16,6 @@ from app.indicators.pipeline import ENRICHED_COLUMNS_BY_CATEGORY
 from app.strategy import custom_signals
 from app.strategy.field_labels import field_label
 
-# Category groups in the order of the /api/custom-signals/options groups.
-_GROUP_LABELS = {
-    "basic": "基礎", "ma": "均線 MA", "ema": "指數均線 EMA",
-    "macd": "MACD", "boll": "布林通道 BOLL", "kdj": "KDJ",
-    "atr": "ATR", "volume": "量價", "extremes": "極值",
-    "momentum": "動量", "volatility": "波動率", "rsi": "RSI",
-}
-# 行情类字段不在 ENRICHED_COLUMNS_BY_CATEGORY 里, 单独归一组
-_QUOTE_FIELDS = {
-    "open", "high", "low", "close", "volume", "amount", "turnover_rate",
-    "consecutive_limit_ups", "consecutive_limit_downs",
-}
-
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
 
 
@@ -41,10 +28,10 @@ def _format_fields() -> str:
     """Whitelisted fields by category as key(label; unit), for the LLM."""
     allowed = custom_signals.ALLOWED_FIELDS
     lines: list[str] = []
-    quote = sorted(f for f in _QUOTE_FIELDS if f in allowed)
+    quote = sorted(f for f in custom_signals.QUOTE_FIELDS if f in allowed)
     lines.append("行情: " + ", ".join(_describe(f) for f in quote))
     listed = set(quote)
-    for cat, label in _GROUP_LABELS.items():
+    for cat, label in custom_signals.FIELD_GROUP_LABELS.items():
         fields = [f for f in ENRICHED_COLUMNS_BY_CATEGORY.get(cat, []) if f in allowed]
         if fields:
             lines.append(f"{label}: " + ", ".join(_describe(f) for f in fields))

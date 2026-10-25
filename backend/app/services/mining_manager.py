@@ -28,7 +28,6 @@ WorkerRunner = Callable[
 ]
 TaskFactory = Callable[[str, Path, dict[str, Any]], dict[str, Any]]
 
-_SUCCESS_STATUSES = {"succeeded", "succeeded_with_budget_exhausted"}
 _SHUTDOWN_JOIN_SECONDS = 1.0
 
 
@@ -230,7 +229,7 @@ class MiningJobManager:
         cancel_event: threading.Event,
     ) -> None:
         status = result.get("status", "succeeded")
-        if status not in _SUCCESS_STATUSES:
+        if status not in SUCCESS_RUN_STATUSES:
             raise ValueError(f"unsupported mining worker status: {status!r}")
         with self._lock:
             if cancel_event.is_set():

@@ -192,7 +192,6 @@ def _repo(data_dir: Path, instruments: pl.DataFrame | None = None) -> SimpleName
         get_instruments_asset=lambda asset_type: (
             pl.DataFrame() if instruments is None else instruments
         ),
-        get_historical_shares=lambda: pl.DataFrame(),
     )
 
 

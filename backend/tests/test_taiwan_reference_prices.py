@@ -251,7 +251,7 @@ def test_a_full_republish_adds_the_column_to_partitions_published_before_it(dail
 
 
 def test_the_repository_recomputes_an_event_session_from_the_stored_reference(daily, tmp_path):
-    from app.tickflow.repository import DataStore, KlineRepository
+    from app.repository import DataStore, KlineRepository
 
     _publish_events()
     _publisher(daily, tmp_path / "kline_daily_enriched").refresh()
@@ -267,7 +267,7 @@ def test_the_repository_recomputes_an_event_session_from_the_stored_reference(da
 
 
 def test_the_repository_history_cache_reads_the_stored_reference(daily, tmp_path):
-    from app.tickflow.repository import DataStore, KlineRepository
+    from app.repository import DataStore, KlineRepository
 
     _publish_events()
     _publisher(daily, tmp_path / "kline_daily_enriched").refresh()
@@ -532,7 +532,6 @@ def test_the_strategy_screener_takes_the_published_limits_of_a_corporate_action_
     repo = MagicMock()
     repo.store.data_dir = tmp_path
     repo.get_instruments_asset.return_value = pl.DataFrame({"symbol": list(CLOSES), "name": ["s"] * len(CLOSES)})
-    repo.get_historical_shares.return_value = pl.DataFrame()
     target = pl.read_parquet(tmp_path / "kline_daily_enriched" / f"date={EVENT.isoformat()}" / "part.parquet")
 
     full = ScreenerService(repo)._compute_enriched_full(target, EVENT)

@@ -11,7 +11,7 @@ import pytest
 from app.services.data_integrity import (
     IntegrityIssue,
     describe_issues,
-    scan_recent_integrity,
+    integrity_report,
 )
 from app.taiwan.realtime.calendar import TAIPEI_TZ
 
@@ -68,7 +68,7 @@ def _store(data_dir, days=DAYS) -> None:
 
 def test_complete_history_reports_nothing(tmp_path):
     _store(tmp_path)
-    assert scan_recent_integrity(tmp_path, today=TODAY) == []
+    assert list(integrity_report(tmp_path, today=TODAY).issues) == []
 
 
 def test_an_unreadable_partition_counts_as_one_exchange(tmp_path):
@@ -79,7 +79,7 @@ def test_an_unreadable_partition_counts_as_one_exchange(tmp_path):
         (_final_mtime(DAYS[2]),) * 2,
     )
 
-    kinds = {(i.day, i.kind) for i in scan_recent_integrity(tmp_path, today=TODAY)}
+    kinds = {(i.day, i.kind) for i in integrity_report(tmp_path, today=TODAY).issues}
     assert (DAYS[2], "one_exchange") in kinds
 
 
@@ -96,7 +96,7 @@ def test_issues_are_sorted_by_day_then_kind(tmp_path):
     (tmp_path / "taiwan" / "daily" / "date=2026-09-17").rmdir()
     _store(tmp_path, (date(2026, 9, 10),))
 
-    issues = scan_recent_integrity(tmp_path, today=TODAY)
+    issues = list(integrity_report(tmp_path, today=TODAY).issues)
     assert [(i.day, i.table, i.kind) for i in issues] == [
         (DAYS[0], "taiwan_daily", "missing"),
         (DAYS[1], "taiwan_daily", "one_exchange"),
@@ -109,8 +109,8 @@ def test_only_the_newest_sessions_are_scanned(tmp_path):
     _store(tmp_path)
     (tmp_path / "kline_daily_enriched" / "date=2026-09-17" / "part.parquet").unlink()
 
-    assert scan_recent_integrity(tmp_path, today=TODAY, sessions=4) == []
-    assert [i.day for i in scan_recent_integrity(tmp_path, today=TODAY, sessions=5)] == [DAYS[0]]
+    assert list(integrity_report(tmp_path, today=TODAY, sessions=4).issues) == []
+    assert [i.day for i in integrity_report(tmp_path, today=TODAY, sessions=5).issues] == [DAYS[0]]
 
 
 def test_describe_issues_groups_days_by_kind():

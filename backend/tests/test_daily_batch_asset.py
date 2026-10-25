@@ -4,7 +4,7 @@ import datetime as _dt
 import polars as pl
 import pytest
 
-from app.tickflow.repository import DataStore, KlineRepository
+from app.repository import DataStore, KlineRepository
 
 
 @pytest.fixture()
@@ -31,7 +31,6 @@ def test_daily_batch_groups_index_symbols(repo, monkeypatch):
     monkeypatch.setattr(repo, "get_daily_batch", fake_stock_batch)
     monkeypatch.setattr(repo, "get_index_daily", fake_index_daily)
     monkeypatch.setattr(repo, "get_index_symbol_set", lambda: {"000001.SH"})
-    monkeypatch.setattr(repo, "get_etf_symbol_set", lambda: set())
 
     state = type("S", (), {"repo": repo})()
     req = type("R", (), {"app": type("A", (), {"state": state})()})()

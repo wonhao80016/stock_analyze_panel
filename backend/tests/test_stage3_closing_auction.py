@@ -87,9 +87,6 @@ class FakeRepo:
     def get_index_symbol_set(self):
         return set()
 
-    def get_etf_instruments(self):
-        return pl.DataFrame()
-
     def resolve_asset_type(self, symbol):
         return "stock"
 

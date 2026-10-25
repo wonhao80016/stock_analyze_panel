@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 from app import config as app_config
 from app.api.mining import router
 from app.backtest.mining import compute_candidate_signature
-from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.services.mining_jobs import MiningRunStore
 from app.services.mining_schedule import MINING_ALGORITHM_VERSION
 from app.strategy.engine import StrategyEngine
@@ -75,13 +74,11 @@ def _write_enriched_dates(
     data_dir: Path,
     count: int,
     *,
-    asset_type: str = "stock",
     first: date = date(2020, 1, 1),
 ) -> list[date]:
-    dirname = "kline_etf_enriched" if asset_type == "etf" else "kline_daily_enriched"
     values = [first + timedelta(days=index) for index in range(count)]
     for value in values:
-        partition = data_dir / dirname / f"date={value.isoformat()}"
+        partition = data_dir / "kline_daily_enriched" / f"date={value.isoformat()}"
         partition.mkdir(parents=True, exist_ok=True)
         (partition / "part.parquet").touch()
     return values
@@ -203,67 +200,6 @@ def _successful_run(store: MiningRunStore, run_id: str = "result-run"):
     return manifest
 
 
-def test_start_is_strict_and_projects_server_signature(tmp_path):
-    client, store = _client(tmp_path)
-    payload = {
-        "factor_names": ["turnover_rate"],
-        "budget_profile": "exploratory",
-        "force": False,
-    }
-
-    response = client.post("/api/backtest/mining/runs", json=payload)
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "queued"
-    assert body["signature"] == store.get(body["run_id"])["run_signature"]
-    assert body["request"]["factor_names"] == ["turnover_rate"]
-    assert body["request"]["commission_pct"] is None
-    assert body["request"]["stamp_tax_pct"] is None
-    assert "force" not in body["request"]
-    assert body["source"] == "manual"
-    assert client.post(
-        "/api/backtest/mining/runs",
-        json={**payload, "matching": "close_t"},
-    ).status_code == 422
-    assert client.post(
-        "/api/backtest/mining/runs",
-        json={"factor_names": ["unknown_factor"]},
-    ).status_code == 422
-    assert client.post(
-        "/api/backtest/mining/runs",
-        json={"factor_names": ["turnover_rate"], "stamp_tax_pct": 0.0005},
-    ).status_code == 422
-
-
-def test_start_accepts_iso_dates_and_persists_json_safe_request(tmp_path):
-    client, store = _client(tmp_path)
-
-    response = client.post(
-        "/api/backtest/mining/runs",
-        json={
-            "factor_names": ["turnover_rate"],
-            "budget_profile": "exploratory",
-            "start": "2022-08-15",
-            "end": "2026-08-15",
-        },
-    )
-
-    assert response.status_code == 200
-    run_id = response.json()["run_id"]
-    manifest = store.get(run_id)
-    assert manifest is not None
-    assert manifest["request"]["start"] == "2022-08-15"
-    assert manifest["request"]["end"] == "2026-08-15"
-    assert client.post(
-        "/api/backtest/mining/runs",
-        json={
-            "factor_names": ["turnover_rate"],
-            "start": "2022/08/15",
-        },
-    ).status_code == 422
-
-
 @pytest.mark.parametrize(
     ("profile", "required_bars"),
     [("exploratory", 219), ("balanced", 786), ("strict", 1164)],
@@ -320,41 +256,17 @@ def test_availability_enforces_exact_profile_boundaries(
     assert insufficient.json()["suggested_start"] == dates[0].isoformat()
 
 
-def test_start_rejects_balanced_625_bar_range_before_creating_run(tmp_path):
-    client, store = _client(tmp_path)
-    dates = _write_enriched_dates(tmp_path, 625, first=date(2024, 1, 15))
-
-    response = client.post(
-        "/api/backtest/mining/runs",
-        json={
-            "factor_names": ["turnover_rate"],
-            "budget_profile": "balanced",
-            "start": dates[0].isoformat(),
-            "end": dates[-1].isoformat(),
-            "force": True,
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == (
-        "balanced mining requires at least 786 enriched trading bars for 3 outer "
-        "folds; effective range 2024-01-15 to 2025-09-30 has 625"
-    )
-    assert store.list_runs() == []
-
-
-def test_availability_uses_asset_specific_valid_partitions(tmp_path):
+def test_etf_availability_counts_the_valid_shared_partitions(tmp_path):
     client, _store = _client(tmp_path)
     etf_dates = _write_enriched_dates(
         tmp_path,
         219,
-        asset_type="etf",
         first=date(2024, 1, 1),
     )
-    malformed = tmp_path / "kline_etf_enriched" / "date=not-a-date"
+    malformed = tmp_path / "kline_daily_enriched" / "date=not-a-date"
     malformed.mkdir(parents=True)
     (malformed / "part.parquet").touch()
-    (tmp_path / "kline_etf_enriched" / "date=2023-12-31").mkdir(parents=True)
+    (tmp_path / "kline_daily_enriched" / "date=2023-12-31").mkdir(parents=True)
 
     response = client.get(
         "/api/backtest/mining/availability",
@@ -588,32 +500,6 @@ def test_sse_recovers_progress_snapshot_when_history_is_truncated(tmp_path):
     assert "event: failed" in response.text
 
 
-def test_start_rejects_incompatible_strategy_before_creating_run(tmp_path):
-    client, store = _client(tmp_path)
-    client.app.state.strategy_engine = SimpleNamespace(
-        get=lambda _strategy_id: SimpleNamespace(
-            meta={
-                "research_only": True,
-                "asset_types": ["stock"],
-                "timeframes": ["1d"],
-            },
-            execution_backend="matrix_native",
-        )
-    )
-
-    response = client.post(
-        "/api/backtest/mining/runs",
-        json={
-            "factor_names": ["turnover_rate"],
-            "strategy_ids": ["factor_rank_research"],
-            "budget_profile": "exploratory",
-        },
-    )
-
-    assert response.status_code == 400
-    assert store.list_runs() == []
-
-
 def test_config_patch_merges_current_values(tmp_path, monkeypatch):
     client, _store = _client(tmp_path)
     current = {
@@ -645,36 +531,6 @@ def test_config_patch_merges_current_values(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert saved == [(True, 4, "balanced")]
     assert client.patch("/api/backtest/mining/config", json={}).status_code == 400
-
-
-class _PublishingRepo(_Repo):
-    """模拟 enriched 发布进行中: 世代读取抛 EnrichedGenerationUnavailableError。"""
-
-    @staticmethod
-    def get_matrix_data_generation(asset_type="stock"):
-        raise EnrichedGenerationUnavailableError(
-            "enriched data is being published; retry after the update finishes"
-        )
-
-
-def test_start_returns_400_with_guidance_while_enriched_publication_active(
-    tmp_path,
-):
-    _write_enriched_dates(tmp_path, 219, first=date(2022, 8, 15))
-    app = FastAPI()
-    app.include_router(router)
-    app.state.repo = _PublishingRepo(tmp_path)
-    app.state.mining_manager = _Manager(tmp_path)
-    app.state.strategy_engine = SimpleNamespace()
-    client = TestClient(app)
-
-    response = client.post(
-        "/api/backtest/mining/runs",
-        json={"factor_names": ["turnover_rate"], "budget_profile": "exploratory"},
-    )
-
-    assert response.status_code == 400
-    assert "数据更新" in response.json()["detail"]
 
 
 def test_result_labels_backtest_statistics_methodology(tmp_path):

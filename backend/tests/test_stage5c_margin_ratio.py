@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-import polars as pl
 import pytest
 
 from app.taiwan import detail_service
@@ -81,15 +80,3 @@ def test_live_margin_ratio_is_unknown_without_margin_balance(svc, monkeypatch):
 )
 def test_short_margin_ratio_helper(short_balance, margin_balance, expected):
     assert chip_factors.short_margin_ratio(short_balance, margin_balance) == expected
-
-
-def test_margin_factor_pipeline_leaves_ratio_null_without_margin_balance():
-    df = pl.DataFrame([
-        {"symbol": "2330.TWSE", "trade_date": DAY, "margin_previous_balance": 0, "margin_balance": 0, "short_balance": 5000},
-        {"symbol": "2454.TWSE", "trade_date": DAY, "margin_previous_balance": 0, "margin_balance": 10_300_000,
-         "short_balance": 73_000},
-    ])
-
-    factored = chip_factors.compute_margin_factors(df)
-
-    assert factored["short_margin_ratio"].to_list() == [None, 0.71]

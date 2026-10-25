@@ -30,8 +30,8 @@ from app.backtest.matrix import (
 from app.config import settings
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.parquet import ENRICHED_STORAGE_SCHEMA, scan_enriched_parquet
-from app.repository import taiwan_limit_signals
-from app.tickflow.repository import KlineRepository
+from app.repository import KlineRepository, taiwan_limit_signals
+from app.taiwan.enriched_reader import ENRICHED_DIR_NAME
 from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,22 @@ def _security_master_names(symbols: list[str]) -> pl.DataFrame:
         {"symbol": list(names), "name": list(names.values())},
         schema={"symbol": pl.Utf8, "name": pl.Utf8},
     )
+
+
+def _asset_symbols(asset_type: str, symbols: list[str] | None) -> list[str] | None:
+    """*symbols* (None: all) narrowed to the asset type; ETF rows share the stock partitions."""
+    if asset_type != "etf":
+        return symbols
+    from app.services.screener import taiwan_etf_symbols
+    from app.taiwan.universe.service import SecurityMasterUnavailableError
+
+    try:
+        etfs = taiwan_etf_symbols()
+    except SecurityMasterUnavailableError as exc:
+        raise ValueError(str(exc)) from exc
+    if symbols is None:
+        return sorted(etfs)
+    return [symbol for symbol in symbols if symbol in etfs]
 
 
 # Minutes of the day bounding a complete Taiwan session of minute bars (bar start times).
@@ -272,13 +288,11 @@ class _MinuteBars:
         self,
         engine: BacktestEngine,
         matrix: MarketMatrix,
-        asset_type: str,
         enabled: bool,
         exit_line: np.ndarray | None,
     ) -> None:
         self._engine = engine
         self._matrix = matrix
-        self._asset_type = asset_type
         self.enabled = enabled
         triggers = (matrix.entry != 0) | (matrix.exit != 0)
         self._trigger_times = triggers.any(axis=1)
@@ -313,7 +327,7 @@ class _MinuteBars:
         day = self._matrix.timestamp_labels[time_id][:10]
         symbols = [self._matrix.symbols[asset] for asset in assets]
         loaded = self._engine._load_minute_for_fills(
-            self._engine.repo, symbols, {day}, self._asset_type, incomplete=self.incomplete,
+            self._engine.repo, symbols, {day}, incomplete=self.incomplete,
         )
         for asset, symbol in zip(assets, symbols, strict=True):
             self._read.add((asset, time_id))
@@ -332,8 +346,7 @@ class _MinuteBars:
         symbol = self._matrix.symbols[asset_id]
         days = {int(t): self._matrix.timestamp_labels[int(t)][:10] for t in times}
         loaded = self._engine._load_minute_for_fills(
-            self._engine.repo, [symbol], set(days.values()), self._asset_type,
-            incomplete=self.incomplete,
+            self._engine.repo, [symbol], set(days.values()), incomplete=self.incomplete,
         )
         for time_id, day in days.items():
             self._read.add((asset_id, time_id))
@@ -620,7 +633,7 @@ class PanelCache:
         # 用实例锁守护所有 OrderedDict 变更; compute_fn (重扫盘) 放锁外避免串行化。
         self._lock = threading.Lock()
         # single-flight: 同 key 只让一个线程 compute, 其余等其结果复用。
-        # 否则优化器/walk-forward 的 max_workers 个线程冷启动同时 miss, 会并行加载 N 份同一面板。
+        # Without it, concurrent cold misses would each load the same panel.
         self._inflight: dict[str, _InFlight] = {}
         # 轻量遥测: 累加真实扫盘耗时与命中/复用次数, 用于量化 IO 占比 (是否值得进一步优化)。
         # compute_seconds 只计 leader 的实际 compute_fn 耗时, follower 复用不计 —— 反映真实 IO。
@@ -867,7 +880,8 @@ class BacktestEngine:
         *,
         expected_generation: str | None = None,
     ) -> pl.DataFrame:
-        """加载 enriched 数据面板，带缓存。asset_type='etf' 时读 ETF enriched。"""
+        """加载 enriched 数据面板，带缓存。asset_type='etf' 时只取证券主档的 ETF。"""
+        symbols = _asset_symbols(asset_type, symbols)
         attempts = 1 if expected_generation is not None else 2
         for attempt in range(attempts):
             generation = (
@@ -975,11 +989,6 @@ class BacktestEngine:
                 df.rename({flag: f"_published_{flag}" for flag in stored}),
                 instruments,
                 needed=limit_outputs - (set(published_flags) - set(unpublished)),
-                historical_shares=(
-                    self.repo.get_historical_shares()
-                    if asset_type == "stock" and self.repo is not None
-                    else None
-                ),
             )
             df = _published_or_computed(df, stored, "_published_", "")
             join_cols = ["symbol"] if "symbol" in instruments.columns else []
@@ -1036,9 +1045,8 @@ class BacktestEngine:
         """Load a matrix-native backtest directly from projected parquet batches."""
         if feature_plan.execution_backend != "matrix_native":
             raise ValueError("direct market matrix loading requires matrix_native backend")
-        from app.tickflow.repository import enriched_dirname
-
-        parquet_root = self.repo.store.data_dir / enriched_dirname(asset_type)
+        symbols = _asset_symbols(asset_type, symbols)
+        parquet_root = self.repo.store.data_dir / ENRICHED_DIR_NAME
         instruments = self.repo.get_instruments_asset(asset_type)
         field_columns = (
             set(feature_plan.base_columns)
@@ -1144,8 +1152,7 @@ class BacktestEngine:
         except Exception as e:  # noqa: BLE001
             logger.debug("backtest load panel cache miss: %s", e)
 
-        from app.tickflow.repository import enriched_dirname
-        enriched_glob = str(self.repo.store.data_dir / enriched_dirname(asset_type) / "**" / "*.parquet")
+        enriched_glob = str(self.repo.store.data_dir / ENRICHED_DIR_NAME / "**" / "*.parquet")
 
         published_flags = sorted(_PUBLISHED_LIMIT_FLAGS.intersection(columns or ()))
         lf = scan_enriched_parquet(
@@ -1180,8 +1187,6 @@ class BacktestEngine:
             return df
 
         from app.indicators.pipeline import compute_all
-        # 按 asset_type 取维表: ETF 回测须用 ETF 维表, 否则名称 JOIN 失败(全 null)、
-        # 涨停信号算在错误的 instruments 上。
         instruments = self.repo.get_instruments_asset(asset_type)
         df = compute_all(df, instruments=instruments)
         if not instruments.is_empty() and "name" not in df.columns:
@@ -1263,9 +1268,7 @@ class BacktestEngine:
         minute_exit_line = matrix.minute_exit_line if config.exit_fill == "signal_next_minute" else None
         # Candidates run asset by asset: each asset's estimated held sessions are read in one
         # call, others on first use, and all are released before the next asset.
-        minute_bars = _MinuteBars(
-            self, matrix, config.asset_type, bool(config.minute_fill), minute_exit_line,
-        )
+        minute_bars = _MinuteBars(self, matrix, bool(config.minute_fill), minute_exit_line)
         held_sessions = (
             self._independent_held_sessions(matrix, raw_candidates, config)
             if minute_bars.enabled else {}
@@ -1836,7 +1839,6 @@ class BacktestEngine:
         repo,
         symbols: list[str],
         dates_needed: set,
-        asset_type: str,
         incomplete: set | None = None,
     ) -> dict:
         """按触发日加载分钟K, 返回 {(symbol, date_str): float64 2D ndarray}。
@@ -1864,7 +1866,7 @@ class BacktestEngine:
         numeric_cols = BacktestEngine._MINUTE_NUMERIC_COLS
         for i in range(0, len(date_objs), BATCH):
             batch = date_objs[i:i + BATCH]
-            df = repo.get_minute_by_dates(symbols, batch, asset_type=asset_type)
+            df = repo.get_minute_by_dates(symbols, batch)
             if df.is_empty():
                 continue
             # 按 (symbol, 日期) 分组, 每组转紧凑 float64 数组存入 cache
@@ -1970,9 +1972,7 @@ class BacktestEngine:
 
         minute_exit_line = matrix.minute_exit_line if config.exit_fill == "signal_next_minute" else None
         # Each session reads the minute bars of its held and selected assets, then releases them.
-        minute_bars = _MinuteBars(
-            self, matrix, config.asset_type, bool(config.minute_fill), minute_exit_line,
-        )
+        minute_bars = _MinuteBars(self, matrix, bool(config.minute_fill), minute_exit_line)
         # An open_t+1 buy sees only what is known at the open; later same-bar exits free their
         # slot, cash and exposure from the next bar.
         defer_late_releases = config.entry_fill == "open_t+1"

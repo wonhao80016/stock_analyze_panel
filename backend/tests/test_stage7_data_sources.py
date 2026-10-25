@@ -35,10 +35,9 @@ def sources_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(monkeypatch):
+def client():
     app = FastAPI()
     app.include_router(settings_api.router)
-    monkeypatch.setattr(settings_api, "detect_capabilities", lambda: None)
     return TestClient(app)
 
 

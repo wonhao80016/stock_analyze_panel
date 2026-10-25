@@ -12,7 +12,7 @@ from datetime import date
 import polars as pl
 import pytest
 
-from app.tickflow.repository import DataStore, KlineRepository
+from app.repository import DataStore, KlineRepository
 
 PUBLISHED = date(2026, 9, 17)
 UNPUBLISHED = date(2026, 9, 18)
@@ -38,16 +38,6 @@ def _partition(repo: KlineRepository, table: str, d: date):
     return repo.store.data_dir / table / f"date={d.isoformat()}" / "part.parquet"
 
 
-def test_daily_write_for_unpublished_day_does_not_reach_disk(repo):
-    repo.flush_live_daily_asset("stock", _row("2330.TWSE", UNPUBLISHED))
-    assert not _partition(repo, "kline_daily", UNPUBLISHED).exists()
-
-
-def test_daily_write_for_published_day_reaches_disk(repo):
-    repo.flush_live_daily_asset("stock", _row("2330.TWSE", PUBLISHED))
-    assert _partition(repo, "kline_daily", PUBLISHED).exists()
-
-
 def test_enriched_write_for_unpublished_day_still_updates_cache(repo):
     repo.flush_live_enriched_asset("stock", _row("2330.TWSE", UNPUBLISHED))
 
@@ -57,14 +47,14 @@ def test_enriched_write_for_unpublished_day_still_updates_cache(repo):
 
 
 def test_force_bypasses_the_gate(repo):
-    repo.flush_live_daily_asset("stock", _row("2330.TWSE", UNPUBLISHED), force=True)
-    assert _partition(repo, "kline_daily", UNPUBLISHED).exists()
+    repo.flush_live_enriched_asset("stock", _row("2330.TWSE", UNPUBLISHED), force=True)
+    assert _partition(repo, "kline_daily_enriched", UNPUBLISHED).exists()
 
 
 def test_write_merges_instead_of_replacing_the_partition(repo):
     """A watchlist-sized write must not drop the symbols already on disk."""
-    repo.flush_live_daily_asset("stock", _row("2330.TWSE", PUBLISHED, 100.0))
-    repo.flush_live_daily_asset("stock", _row("2454.TWSE", PUBLISHED, 200.0))
+    repo.flush_live_enriched_asset("stock", _row("2330.TWSE", PUBLISHED, 100.0), force=True)
+    repo.flush_live_enriched_asset("stock", _row("2454.TWSE", PUBLISHED, 200.0), force=True)
 
-    persisted = pl.read_parquet(_partition(repo, "kline_daily", PUBLISHED))
+    persisted = pl.read_parquet(_partition(repo, "kline_daily_enriched", PUBLISHED))
     assert set(persisted["symbol"].to_list()) == {"2330.TWSE", "2454.TWSE"}

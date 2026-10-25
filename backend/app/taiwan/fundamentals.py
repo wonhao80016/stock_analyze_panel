@@ -8,13 +8,10 @@ verifiable publication time.  Such live records are retained with provenance but
 from __future__ import annotations
 
 import atexit
-import json
 import re
 import threading
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -128,65 +125,6 @@ class FundamentalRecord:
         for name in ("published_at", "available_at", "retrieved_at"):
             data[name] = _datetime(data[name])
         return cls(**data)
-
-
-@dataclass(frozen=True)
-class ShareCapital:
-    """Distinct capital concepts; absent official float data stays absent."""
-
-    total_shares: int | None = None
-    issued_shares: int | None = None
-    float_shares: int | None = None
-    capital_twd: int | None = None
-    status: str = "data_insufficient"
-
-
-def latest_as_of(
-    records: Iterable[FundamentalRecord], symbol: str, query_at: datetime,
-    *, dataset: str | None = None,
-) -> FundamentalRecord | None:
-    """Return the newest revision that was available strictly before query_at."""
-    query_at = _datetime(query_at)
-    eligible = [
-        record for record in records
-        if record.symbol == symbol
-        and (dataset is None or record.dataset == dataset)
-        and record.available_at is not None
-        and query_at > record.available_at
-    ]
-    if not eligible:
-        return None
-    return max(eligible, key=lambda row: (row.period_end, row.available_at, row.revision))
-
-
-class TaiwanFundamentalStore:
-    """Small append-only JSONL store; revisions are never overwritten."""
-
-    def __init__(self, data_dir: Path) -> None:
-        self.path = data_dir / "taiwan" / "fundamentals" / "records.jsonl"
-
-    def load(self) -> list[FundamentalRecord]:
-        if not self.path.exists():
-            return []
-        return [FundamentalRecord.from_dict(json.loads(line)) for line in self.path.read_text(encoding="utf-8").splitlines() if line]
-
-    def save(self, records: Iterable[FundamentalRecord]) -> int:
-        merged = {self._identity(row): row for row in self.load()}
-        for row in records:
-            merged[self._identity(row)] = row
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = "\n".join(json.dumps(row.to_dict(), ensure_ascii=False, sort_keys=True) for row in sorted(merged.values(), key=self._identity))
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
-        temporary.replace(self.path)
-        return len(merged)
-
-    def get_as_of(self, symbol: str, query_at: datetime, *, dataset: str | None = None) -> FundamentalRecord | None:
-        return latest_as_of(self.load(), symbol, query_at, dataset=dataset)
-
-    @staticmethod
-    def _identity(row: FundamentalRecord) -> tuple[str, str, str, str, str]:
-        return row.symbol, row.dataset, row.period_end, _iso(row.available_at) or "", row.revision
 
 
 _shared_client: httpx.Client | None = None
@@ -368,17 +306,3 @@ class TaiwanOfficialFundamentals:
                 del self._rows_cache[stale]
             self._rows_cache[key] = (rows, retrieved)
         return url, rows, retrieved
-
-
-def normalize_dividend_status(raw: str) -> str:
-    if "股東會" in raw and "通過" in raw:
-        return "shareholder_approved"
-    if "董事會" in raw and ("決議" in raw or "通過" in raw):
-        return "board_approved"
-    if "擬議" in raw:
-        return "board_proposed"
-    if "除息" in raw or "除權" in raw:
-        return "ex_date_announced"
-    if "發放" in raw or "已付" in raw:
-        return "paid"
-    return "unknown"

@@ -1,9 +1,4 @@
-"""Selection and the realtime monitor refuse an unscreenable session as the backtest does (stage 4, D3).
-
-The API builds a whole-market context and narrows it to the requested pool afterwards, so the
-framework judges the screened session on the pool and the strategy's asset scope, never on the
-whole market, with the backtest's eligibility, NaN rule and threshold.
-"""
+"""The realtime monitor refuses an unscreenable session as the backtest does (stage 4, D3)."""
 
 from __future__ import annotations
 
@@ -33,9 +28,6 @@ UNCOVERED = ("1104.TWSE", "1105.TWSE")
 TDR = "9103.TWSE"
 ETF = "0050.TWSE"
 TURNOVER = {"1101.TWSE": 2.1, "1102.TWSE": 2.2, "1103.TWSE": 2.3}
-
-NO_ELIGIBLE = f"{LAST.isoformat()} 所選範圍內沒有可計算換手率的股票"
-UNCOVERED_POOL = f"{LAST.isoformat()} 只有 0% 的股票有換手率資料"
 
 NEEDS_TURNOVER = """
 import numpy as np
@@ -135,128 +127,6 @@ def taiwan(tmp_path, monkeypatch):
         schema=share_capital_store.SCHEMA,
     ).write_parquet(tmp_path / "taiwan" / "share_capital.parquet")
     return tmp_path
-
-
-class _Repo:
-    """The enriched caches the screener service reads first, holding the whole market."""
-
-    def __init__(self, data_dir: Path, frame: pl.DataFrame, as_of: date) -> None:
-        self.store = SimpleNamespace(data_dir=data_dir)
-        self._frame = frame.filter(pl.col("date") <= as_of)
-        self._as_of = as_of
-
-    def get_enriched_latest_asset(self, asset_type):
-        return self._frame.filter(pl.col("date") == self._as_of), self._as_of
-
-    def get_enriched_history(self, target_date, lookback_days):
-        return self._frame.filter(pl.col("date") <= target_date)
-
-    def get_instruments_asset(self, asset_type):
-        return pl.DataFrame()
-
-
-@pytest.fixture
-def client(taiwan, monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    def serve(frame: pl.DataFrame, as_of: date = LAST, strategy_dirs=None) -> TestClient:
-        engine = StrategyEngine(strategy_dirs=strategy_dirs or [BUILTIN_DIR])
-        monkeypatch.setattr(app.state, "repo", _Repo(taiwan, frame, as_of), raising=False)
-        monkeypatch.setattr(app.state, "strategy_engine", engine, raising=False)
-        return TestClient(app)
-
-    return serve
-
-
-def _run(client, pool=None, as_of: date = LAST):
-    body = {"strategy_id": "high_turnover_surge", "as_of": as_of.isoformat()}
-    if pool is not None:
-        body["pool"] = list(pool)
-    return client.post("/api/strategies/run", json=body)
-
-
-def _run_preset(client, pool=None, as_of: date = LAST):
-    body = {"strategy_id": "high_turnover_surge", "as_of": as_of.isoformat()}
-    if pool is not None:
-        body["pool"] = list(pool)
-    return client.post("/api/screener/run_preset", json=body)
-
-
-def _picks(response) -> list[str]:
-    assert response.status_code == 200, response.text
-    return sorted(row["symbol"] for row in response.json()["rows"])
-
-
-@pytest.mark.parametrize("run", [_run, _run_preset], ids=["run", "run_preset"])
-def test_a_tdr_only_pool_is_refused_although_the_market_is_covered(client, run):
-    response = run(client(_market()), pool=[TDR])
-
-    assert response.status_code == 400
-    assert response.json()["detail"].startswith(NO_ELIGIBLE)
-
-
-@pytest.mark.parametrize("run", [_run, _run_preset], ids=["run", "run_preset"])
-def test_an_etf_and_stock_pool_counts_only_the_stock(client, run):
-    served = client(_market())
-
-    covered = run(served, pool=[ETF, COVERED[0]])
-    uncovered = run(served, pool=[ETF, UNCOVERED[0]])
-
-    assert _picks(covered) == [COVERED[0]]
-    assert uncovered.status_code == 400
-    assert uncovered.json()["detail"].startswith(UNCOVERED_POOL)
-
-
-def test_a_pool_of_stocks_without_turnover_is_refused_on_a_covered_market(client):
-    response = _run(client(_market()), pool=UNCOVERED)
-
-    assert response.status_code == 400
-    assert response.json()["detail"].startswith(UNCOVERED_POOL)
-
-
-@pytest.mark.parametrize("run", [_run, _run_preset], ids=["run", "run_preset"])
-def test_the_whole_market_is_judged_on_its_eligible_stocks(client, run):
-    covered = run(client(_market()))
-    thin = run(client(_market(dict.fromkeys(COVERED[1:]))))
-
-    assert _picks(covered) == sorted(COVERED)
-    assert thin.status_code == 400
-    assert thin.json()["detail"].startswith(f"{LAST.isoformat()} 只有 20% 的股票有換手率資料")
-
-
-def test_run_all_reports_the_refusal_as_a_failure_and_runs_the_rest(client):
-    earlier = LAST - timedelta(days=1)
-
-    response = client(_market(), as_of=earlier).post(
-        "/api/strategies/run-all", json={"as_of": earlier.isoformat()}
-    )
-
-    assert response.status_code == 200, response.text
-    payload = response.json()
-    assert payload["failures"]["high_turnover_surge"]["error"].startswith(
-        f"{earlier.isoformat()} 只有 0% 的股票有換手率資料"
-    )
-    assert "trend_breakout" in payload["results"]
-
-
-def test_a_strategy_declaring_coverage_fields_is_checked_by_the_framework(client, tmp_path):
-    custom = tmp_path / "custom"
-    custom.mkdir()
-    (custom / "custom_needs_turnover.py").write_text(NEEDS_TURNOVER, encoding="utf-8")
-    served = client(_market(), strategy_dirs=[BUILTIN_DIR, custom])
-
-    def run(pool):
-        return served.post(
-            "/api/strategies/run",
-            json={"strategy_id": "custom_needs_turnover", "as_of": LAST.isoformat(), "pool": pool},
-        )
-
-    assert _picks(run([COVERED[0], UNCOVERED[0]])) == [COVERED[0], UNCOVERED[0]]
-    refused = run([TDR])
-    assert refused.status_code == 400
-    assert refused.json()["detail"].startswith(NO_ELIGIBLE)
 
 
 # --------------------------------------------------------------------------------------------

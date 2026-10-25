@@ -1,29 +1,26 @@
-"""Minute reads by date, unscheduled-closure probing and the non-Taiwan volume scaling."""
+"""Minute reads by date and unscheduled-closure probing."""
 
 from __future__ import annotations
 
 from datetime import date, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
-import polars as pl
 import pytest
 
+from app.repository import DataStore, KlineRepository
 from app.services import preferences
 from app.services import quote_service as qs_module
 from app.services.quote_service import QuoteService
 from app.taiwan.realtime import calendar
 from app.taiwan.realtime.calendar import TAIPEI_TZ
 from app.taiwan.realtime.minute_recorder import MinuteBarRecorder
-from app.tickflow.repository import DataStore, KlineRepository
 from tests.test_stage3_closing_auction import run_one_poll
 from tests.test_stage3_session_model import SESSION, TSMC, at, wall_clock
 
 pytestmark = pytest.mark.usefixtures("deny_network")
 
 
-@pytest.mark.parametrize("asset_type", ["stock", "etf"])
-def test_minute_bars_are_read_by_date(tmp_path, asset_type):
+def test_minute_bars_are_read_by_date(tmp_path):
     day = date(2026, 9, 17)
     quote_time = datetime(2026, 9, 17, 10, 0, 5, tzinfo=TAIPEI_TZ)
     recorder = MinuteBarRecorder(data_dir=tmp_path)
@@ -36,44 +33,15 @@ def test_minute_bars_are_read_by_date(tmp_path, asset_type):
                 "quote_ts": int(quote_time.timestamp() * 1000),
             }
         ],
-        resolve_asset_type=lambda symbol: asset_type,
+        resolve_asset_type=lambda symbol: "stock",
     )
-    recorder.flush(resolve_asset_type=lambda symbol: asset_type)
+    recorder.flush(resolve_asset_type=lambda symbol: "stock")
 
     repo = KlineRepository(DataStore(tmp_path))
-    bars = repo.get_minute_by_dates([TSMC], [day, date(2026, 9, 18)], asset_type=asset_type)
+    bars = repo.get_minute_by_dates([TSMC], [day, date(2026, 9, 18)])
 
     assert bars["symbol"].to_list() == [TSMC]
     assert bars["close"].to_list() == [50.0]
-
-
-def test_a_non_taiwan_row_gets_no_taiwan_session_scaling(monkeypatch):
-    from app.indicators import pipeline
-
-    seen: list[float | None] = []
-
-    def capture(**kwargs):
-        seen.append(kwargs["session_progress"])
-        return kwargs["today_ohlcv"]
-
-    monkeypatch.setattr(pipeline, "compute_enriched_today", capture)
-    svc = QuoteService.__new__(QuoteService)
-    svc._repo = MagicMock()
-    svc._repo.get_instruments.return_value = pl.DataFrame()
-    quote_time = datetime(2026, 10, 8, 9, 10, tzinfo=TAIPEI_TZ)
-    bar = pl.DataFrame(
-        {
-            "symbol": ["600000.SH"],
-            "date": [date(2026, 10, 8)],
-            "close": [10.0],
-            "volume": [1_000.0],
-            "quote_ts": [int(quote_time.timestamp() * 1000)],
-        }
-    )
-
-    svc._enrich_today_incremental(bar, None, pl.DataFrame(), pl.DataFrame())
-
-    assert seen == [None]
 
 
 @pytest.fixture

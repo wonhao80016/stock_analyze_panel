@@ -1,31 +1,4 @@
-"""K 线 / 同步 API。
-
-Phase 8B-5.19: 移除已确认 zero 前端/后端/scheduler/脚本消费者的全市场批量维护
-端点 sync_minute(全市场分钟K批量同步)、clear_minute(清空分钟K)、
-extend_history(向前扩展历史日K)、repair_daily(修正日K)、rebuild_enriched
-(全量重算 enriched)——均原供已删除的 Data.tsx 使用。
-
-sync_minute_single(个股分时图"获取数据"按钮用, 与被删的批量 sync_minute 是
-不同端点)完全未动。kline_sync.py 的 sync_and_persist_minute 仍被
-sync_minute_single 与 daily_pipeline.py 真实使用; run_pipeline
-(app/indicators/pipeline.py)仍被 daily_pipeline.py / quote_service.py 真实
-使用——均完全未动。extend_history.py 保留(其 run_extend_history 现无其他
-调用方, 留待后续独立的 service-level orphan 稽核, 本 phase 不处理)。
-_long_task_executor 仍被 sync_minute_single 使用, 完整保留。
-
-Phase 8B-5.21: 移除已确认 zero 前端/后端/scheduler/脚本/测试消费者的相邻维护
-端点 sync_batch(全市场批量日K同步, 原供已删除的 Data.tsx 使用)、
-refresh_views(手动刷新 DuckDB 视图)。sync_and_persist_daily_batch 仍被
-daily_pipeline.py / extend_history.py / 本文件的 sync(单股同步)真实使用;
-daily_pipeline._refresh_views → repository.rebuild_views() 仍被 daily_pipeline
-盘后管道每次运行时直接调用(非 HTTP 路径), 完全未动。
-
-Phase 8B-FINAL: 移除已确认 zero 前端/后端/scheduler/脚本/测试消费者、且可
-对呼叫者提供的任意 symbol 触发真实网络拉取 + parquet 落盘的孤儿端点 sync
-(单股同步, 与 8B-5.21 已移除的 sync_batch 同源同险, 仅批量/单股之别)。
-sync_and_persist_daily_batch 仍被 daily_pipeline.py / extend_history.py 真实
-使用, 完全未动。
-"""
+"""K 线 / 同步 API。"""
 from __future__ import annotations
 
 import logging
@@ -33,7 +6,6 @@ import math
 from datetime import date, datetime, timedelta
 from typing import Annotated, Optional
 
-import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.indicators.pipeline import (
@@ -43,7 +15,6 @@ from app.indicators.pipeline import (
     compute_indicators,
 )
 from app.market_time import cn_now, cn_today
-from app.price_limits import is_risk_warning_name, numpy_limit_price, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.repository import indicator_warmup_days
 from app.services import kline_sync
@@ -228,7 +199,7 @@ def _get_taiwan_stock_info(symbol: str) -> dict:
 
 
 def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
-    """非股票标的 (ETF / 指数) 的名称信息 — 从对应 instruments 缓存查, 无股本概念。"""
+    """非股票标的 (指数) 的名称信息 — 从对应 instruments 缓存查, 无股本概念。"""
     import polars as pl
     try:
         df = repo.get_instruments_asset(asset_type)
@@ -243,11 +214,9 @@ def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
 
 
 def _get_price_limit_info(
-    repo,
     symbol: str,
     trade_date: date,
     asset_type: str,
-    instrument_name: str | None,
     prev_close: float | None = None,
     official_limits: tuple[float, float] | None = None,
 ) -> dict | None:
@@ -258,66 +227,7 @@ def _get_price_limit_info(
     """
     if asset_type == "index":
         return None
-    if symbol.endswith(TAIWAN_SUFFIXES):
-        return _taiwan_price_limit_info(symbol, trade_date, prev_close, official_limits)
-
-    info = {
-        "rate": price_limit_pct(
-            symbol,
-            trade_date,
-            is_risk_warning=(
-                asset_type == "stock" and is_risk_warning_name(instrument_name)
-            ),
-        ),
-        "limit_up": None,
-        "limit_down": None,
-        "source": "rule",
-    }
-    if trade_date == cn_today() and _apply_instrument_limit_prices(info, repo, symbol, asset_type):
-        return info
-    if prev_close is not None and info["rate"] is not None:
-        previous = np.array([prev_close], dtype=np.float64)
-        rate = np.array([info["rate"]], dtype=np.float64)
-        info["limit_up"] = float(numpy_limit_price(previous, rate, up=True)[0])
-        info["limit_down"] = float(numpy_limit_price(previous, rate, up=False)[0])
-        info["source"] = "model"
-    return info
-
-
-def _apply_instrument_limit_prices(info: dict, repo, symbol: str, asset_type: str) -> bool:
-    try:
-        import polars as pl
-
-        instruments = repo.get_instruments_asset(asset_type)
-        available = [
-            column
-            for column in ("symbol", "limit_up", "limit_down")
-            if column in instruments.columns
-        ]
-        if "symbol" not in available or len(available) == 1:
-            return False
-        hit = instruments.filter(pl.col("symbol") == symbol).select(available).head(1)
-        row = hit.to_dicts()[0] if not hit.is_empty() else None
-    except Exception:
-        return False
-    if row is None:
-        return False
-
-    has_authoritative_price = False
-    for field in ("limit_up", "limit_down"):
-        value = row.get(field)
-        if value is None:
-            continue
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(numeric) and numeric > 0:
-            info[field] = numeric
-            has_authoritative_price = True
-    if has_authoritative_price:
-        info["source"] = "instrument"
-    return has_authoritative_price
+    return _taiwan_price_limit_info(symbol, trade_date, prev_close, official_limits)
 
 
 def _taiwan_price_limit_info(
@@ -353,12 +263,12 @@ def _taiwan_price_limit_info(
 
 
 def _session_price_limit(
-    repo, symbol: str, trade_date: date, asset_type: str, instrument_name: str | None
+    repo, symbol: str, trade_date: date, asset_type: str
 ) -> tuple[float | None, dict | None]:
     closes, official_limits = _get_session_bases(repo, symbol, [trade_date], asset_type)
     prev_close = closes.get(trade_date)
     price_limit = _get_price_limit_info(
-        repo, symbol, trade_date, asset_type, instrument_name,
+        symbol, trade_date, asset_type,
         prev_close=prev_close, official_limits=official_limits.get(trade_date),
     )
     return prev_close, price_limit
@@ -611,7 +521,7 @@ def get_daily(
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
     stock_name = stock_info.get("name")
 
-    # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
+    # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); 指数走独立存储
     df = repo.get_daily_asset(asset_type, symbol, start, end)
 
     if _needs_local_history(df, start):
@@ -631,7 +541,7 @@ def get_daily(
         try:
             raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
+            raise HTTPException(status_code=502, detail=f"daily data fetch failed: {e}") from e
         if raw.is_empty():
             return {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []}
         enriched = compute_enriched(raw)
@@ -799,18 +709,14 @@ def _mark_taiwan_live_volume(live_row: dict, q: dict, *, polled: bool) -> None:
 def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], asset_type: str = "stock") -> list[dict]:
     """如果有当日实时 enriched 数据, 用实时数据生成今日蜡烛并追加/覆盖。
 
-    stock 走 QuoteService 的股票实时缓存; etf 走 ETF enriched 缓存 (开启实时 ETF
-    拉取时为盘中数据, 否则为磁盘最新日, 由下方"非今日不注入"守卫自然跳过)。
+    Only stocks have a live cache (QuoteService); Taiwan ETFs are polled as stocks.
     """
-    if asset_type == "stock":
-        qs = getattr(request.app.state, "quote_service", None)
-        if not qs:
-            return rows
-        df_today, enriched_date = qs.get_enriched_today()
-    elif asset_type == "etf":
-        df_today, enriched_date = request.app.state.repo.get_enriched_latest_asset("etf")
-    else:
+    if asset_type != "stock":
         return rows
+    qs = getattr(request.app.state, "quote_service", None)
+    if not qs:
+        return rows
+    df_today, enriched_date = qs.get_enriched_today()
     if df_today.is_empty():
         return rows
 
@@ -826,14 +732,12 @@ def _maybe_inject_live_candle(request: Request, symbol: str, rows: list[dict], a
         return rows
     if matches:
         q = matches[0]
-    elif asset_type == "stock":
+    else:
         # The poll covers only watchlist and rule symbols; any other stock opened
         # from a list would otherwise never get today's candle.
         q = qs.fetch_live_bar(symbol)
         if not q:
             return rows
-    else:
-        return rows
 
     close_price = q.get("close")
     if not close_price or close_price <= 0:
@@ -910,15 +814,11 @@ def get_daily_batch(request: Request, body: dict):
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
 
-    # 按资产类型分组: stock 走批量缓存; etf/index 逐只查独立存储 (数量少, 成本可忽略)
+    # 按资产类型分组: stock 走批量缓存; index 逐只查独立存储 (数量少, 成本可忽略)
     stock_symbols: list[str] = []
-    etf_symbols: list[str] = []
     index_symbols: list[str] = []
     for s in symbols:
-        t = repo.resolve_asset_type(s)
-        if t == "etf":
-            etf_symbols.append(s)
-        elif t == "index":
+        if repo.resolve_asset_type(s) == "index":
             index_symbols.append(s)
         else:
             stock_symbols.append(s)
@@ -928,10 +828,6 @@ def get_daily_batch(request: Request, body: dict):
         df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=[*cols, "raw_close", "ref_prev_close"])
         if not df_stock.is_empty():
             frames.append(df_stock)
-    for sym in etf_symbols:
-        sub = repo.get_etf_daily(sym, start, end, columns=cols)
-        if not sub.is_empty():
-            frames.append(sub)
     for sym in index_symbols:
         sub = repo.get_index_daily(sym, start, end, columns=cols)
         if not sub.is_empty():
@@ -997,17 +893,8 @@ def get_minute_batch(request: Request, body: dict):
             if recent_date is not None:
                 trade_date = recent_date
 
-    # Step 1: 本地优先 — 一次 scan 读全部 symbol 当日分钟K (股票 / ETF 分钟数据分开存储)
-    etf_set = repo.get_etf_symbol_set()
-    stock_syms = [s for s in symbols if s not in etf_set]
-    etf_syms = [s for s in symbols if s in etf_set]
-    df_local = repo.get_minute_batch(stock_syms, trade_date)
-    if etf_syms:
-        df_etf = repo.get_minute_batch(etf_syms, trade_date, asset_type="etf")
-        if df_local.is_empty():
-            df_local = df_etf
-        elif not df_etf.is_empty():
-            df_local = pl.concat([df_local, df_etf], how="diagonal_relaxed")
+    # Step 1: 本地优先 — 一次 scan 读全部 symbol 当日分钟K
+    df_local = repo.get_minute_batch(symbols, trade_date)
 
     expected = _expected_minute_rows(trade_date)
 
@@ -1028,34 +915,15 @@ def get_minute_batch(request: Request, body: dict):
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
     if incomplete:
         start_time, end_time = kline_sync.intraday_window(trade_date)
-        # etf_set 已在上方获取, 直接复用 — 按 asset_type 拆分调用 sync_minute_batch
-        # (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)
-        # 契约: 本端点只接受 stock/ETF (指数分钟K已随 Phase 8B-5.1 一并移除),
-        # 故两分支已覆盖全部 incomplete。若未来重新支持指数, 需额外加 index 分支
-        # 以避免被误路由为 stock。
-        stock_incomplete = [s for s in incomplete if s not in etf_set]
-        etf_incomplete = [s for s in incomplete if s in etf_set]
-        live_parts: list[pl.DataFrame] = []
-        if stock_incomplete:
-            df_s = kline_sync.sync_minute_batch(
-                stock_incomplete,
-                start_time=start_time,
-                end_time=end_time,
-                asset_type="stock",
-            )
-            if not df_s.is_empty():
-                live_parts.append(df_s)
-        if etf_incomplete:
-            df_e = kline_sync.sync_minute_batch(
-                etf_incomplete,
-                start_time=start_time,
-                end_time=end_time,
-                asset_type="etf",
-            )
-            if not df_e.is_empty():
-                live_parts.append(df_e)
-        if live_parts:
-            live_df = pl.concat(live_parts, how="diagonal_relaxed")
+        # 契约: 本端点只接受股票与 ETF (指数分钟K已随 Phase 8B-5.1 一并移除);
+        # 若未来重新支持指数, 需拆出 index 分支以免被误路由为 stock。
+        live_df = kline_sync.sync_minute_batch(
+            incomplete,
+            start_time=start_time,
+            end_time=end_time,
+            asset_type="stock",
+        )
+        if not live_df.is_empty():
             live_map: dict[str, pl.DataFrame] = {
                 part["symbol"][0]: part.sort("datetime")
                 for part in live_df.partition_by("symbol", maintain_order=True)
@@ -1108,7 +976,7 @@ def get_minute_range(
 
     end = cn_today()
     start = end - timedelta(days=days * 3 + 20)
-    minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
+    minute = repo.get_minute_range([symbol], start, end)
     if minute.is_empty() or "datetime" not in minute.columns:
         return {**base_response, "sessions": [], "source": "none"}
 
@@ -1175,15 +1043,15 @@ def get_minute(
                 if latest_daily is None or latest_daily < today:
                     need_fallback = True
         if need_fallback:
-            recent = repo.latest_minute_date(symbol, asset_type=asset_type)
+            recent = repo.latest_minute_date(symbol)
             if recent is None:
                 recent = repo.latest_daily_date()
             trade_date = recent if recent is not None else today
         else:
             trade_date = today
 
-    prev_close, price_limit = _session_price_limit(repo, symbol, trade_date, asset_type, stock_name)
-    df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
+    prev_close, price_limit = _session_price_limit(repo, symbol, trade_date, asset_type)
+    df = repo.get_minute(symbol, trade_date)
 
     expected = _expected_minute_rows(trade_date)
 
@@ -1244,7 +1112,6 @@ async def sync_minute_single(request: Request, body: dict):
             raise HTTPException(status_code=400, detail="days 必须在 1 到 30 之间")
 
     repo = request.app.state.repo
-    capset = request.app.state.capabilities
 
     # 指数分钟K无本地存储, 落库会污染股票分钟表 kline_minute, 此端点显式拒绝。
     # (Phase 8B-5.1: 指数分钟K只读端点 /api/index/minute 已随 Indices.tsx 一并删除,
@@ -1256,13 +1123,11 @@ async def sync_minute_single(request: Request, body: dict):
     loop = asyncio.get_event_loop()
 
     def _run():
-        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days, force_full_days=True)
+        return kline_sync.sync_and_persist_minute([symbol], repo, days=days, force_full_days=True)
 
     written = await loop.run_in_executor(_long_task_executor, _run)
 
-    # 刷新视图
-    from app.jobs.daily_pipeline import _refresh_single_view
-    _refresh_single_view(repo, "kline_minute")
+    repo.refresh_view("kline_minute")
 
     return {"status": "ok", "symbol": symbol, "rows": written}
 

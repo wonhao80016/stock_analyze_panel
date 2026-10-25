@@ -70,18 +70,9 @@ def get_options():
 
     fields = [_field(f) for f in sorted(allowed)]
     # 字段分组 (只包含白名单内的字段, 供前端 optoptgroup 渲染)
-    _GROUP_LABELS = {
-        "basic": "基础", "ma": "均线 MA", "ema": "指数均线 EMA",
-        "macd": "MACD", "boll": "布林带 BOLL", "kdj": "KDJ",
-        "atr": "ATR", "volume": "量价", "extremes": "极值",
-        "momentum": "动量", "volatility": "波动率", "rsi": "RSI",
-    }
-    # 行情类字段不在 ENRICHED_COLUMNS_BY_CATEGORY 里, 单独归一组
-    quote_fields = {"open", "high", "low", "close", "volume", "amount",
-                    "turnover_rate", "consecutive_limit_ups", "consecutive_limit_downs"}
     groups = [{"key": "quote", "label": "行情",
-               "fields": [_field(f) for f in sorted(allowed & quote_fields)]}]
-    for cat, label in _GROUP_LABELS.items():
+               "fields": [_field(f) for f in sorted(allowed & custom_signals.QUOTE_FIELDS)]}]
+    for cat, label in custom_signals.FIELD_GROUP_LABELS.items():
         cat_fields = [f for f in ENRICHED_COLUMNS_BY_CATEGORY.get(cat, []) if f in allowed]
         if cat_fields:
             groups.append({"key": cat, "label": label,

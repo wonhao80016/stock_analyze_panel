@@ -1,46 +1,16 @@
-"""AI 策略生成器 — 读取策略开发文档 + 调用 LLM 生成策略代码。
+"""Static strategy-source checks: safety lint, META parsing and the execution entrypoint.
 
-职责: 接收用户自然语言描述 → 读取 prompts/strategy-guide-compact.md → 调用 LLM → 返回策略代码。
-prompts/strategy-guide.md is the full reference for people and never enters a prompt.
-不知道: 引擎内部、API、前端、配置持久化、回测。
+Code is never executed here. The engine lints every strategy file it loads, and mining runs
+validate_code on a rendered candidate before publishing it.
 """
 from __future__ import annotations
 
 import ast
-import logging
 import math
 import re
-from pathlib import Path
 
 from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.strategy.scoring import VIRTUAL_SCORING_DEPENDENCIES
-
-logger = logging.getLogger(__name__)
-
-# 策略开发精简指南路径 (随 backend/app 打包进 Docker, 避免 .dockerignore 排除 docs/ 导致运行时缺失)
-GUIDE_PATH = Path(__file__).resolve().parent / "prompts" / "strategy-guide-compact.md"
-
-_SYSTEM_PREFIX = """你是台股量化策略設計專家。依使用者描述的需求, 參考下方的《策略開發指南》生成一個完整的策略 Python 檔。
-
-檔案與範圍鐵律 (不可違反):
-1. 只建立這一個策略檔: 只生成一個 .py 檔, 絕不建立多檔、不拆分模組、不跨檔引用
-2. 絕不觸碰專案原始碼: 不要寫任何會修改 backend/、docs/、frontend/ 等現有檔案的程式碼; 不要 import os/sys/pathlib 等檔案系統模組
-3. 不得放入內建策略目錄: AI 生成的策略只屬於 data/strategies/ai/, 檔名/ID 用 ai_ 前綴; 內建目錄 backend/app/strategy/builtin/ 由專案維護, AI 不得改動
-4. polars 策略只 import polars 和 datetime; matrix_native 策略只允許 import numpy 以及 from app.backtest.matrix import 所需矩陣協定和算子
-
-要求:
-1. 使用者可能調整的策略門檻透過 META["params"] 暴露, 每項使用 id/label/type/default/min/max/step; 公式常數、固定窗口邊界、布林開關不必強行參數化
-2. 遵循指南中的檔案結構, 但優先貼合使用者規則, 不要為了套範本扭曲策略含義
-3. ENTRY_SIGNALS/EXIT_SIGNALS 依策略邏輯自行選擇匹配的訊號列, 不要照搬範例
-4. scoring 權重依策略核心邏輯訂定, 總和 = 1.0; 鍵只能使用指南中的真實數值欄位或受控虛擬評分欄位 ma20_bias, 不得自創條件名稱作為評分欄
-5. 優先使用 Polars 表達式、窗口函數、聚合和 with_columns/filter 實作, 避免逐列/逐股 Python 迴圈; 只有表達式難以描述的複雜狀態機才使用 partition_by/to_dicts
-6. 直接輸出 Python 程式碼, 不要輸出其他內容
-7. 中繼資料必須使用模組頂層的 META = {...} 或 META: dict = {...}, 不得省略或改名; 並且必須定義所選執行後端要求的策略入口
-8. name、description、RULES 與參數 label 一律使用繁體中文; 欄位單位依指南的台股口徑
-
---- 策略開發指南 ---
-
-"""
 
 # Accepted META assignment names, in lookup order; the engine reads the same names.
 META_NAMES = ("META", "STRATEGY_META", "meta")
@@ -167,49 +137,7 @@ def _strategy_entrypoint_error(code: str, meta: dict | None = None) -> str | Non
 
 
 class AIStrategyGenerator:
-    """AI 策略生成器"""
-
-    def __init__(self) -> None:
-        self._guide_cache: str | None = None
-
-    def _get_guide(self) -> str:
-        if self._guide_cache is None:
-            if GUIDE_PATH.exists():
-                self._guide_cache = GUIDE_PATH.read_text(encoding="utf-8")
-            else:
-                logger.warning("strategy guide not found at %s", GUIDE_PATH)
-                self._guide_cache = ""
-        return self._guide_cache
-
-    async def generate(self, user_prompt: str) -> dict:
-        """根据用户描述生成策略代码
-
-        Returns: {"code": str, "meta": dict, "valid": bool, "error": str | None}
-        """
-        guide = self._get_guide()
-
-        # 调用 LLM
-        code = await self._call_llm(user_prompt, guide)
-        result = self.validate_code(code)
-        if self.needs_structural_repair(result):
-            return await self.repair_code(result["code"], result["error"])
-        return result
-
-    async def stream(self, user_prompt: str):
-        """Yield generated strategy code deltas from the configured AI provider."""
-        from app.services.ai_provider import stream_ai_text
-
-        guide = self._get_guide()
-        async for chunk in stream_ai_text(
-            [
-                {"role": "system", "content": _SYSTEM_PREFIX + guide},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            # None = 不传上限: 策略代码较长, 推理模型思考 token 计入预算会截断代码
-            max_tokens=None,
-        ):
-            yield chunk
+    """Static checks for strategy source: safety lint, META and the execution entrypoint."""
 
     def validate_code(self, code: str) -> dict:
         code = self._extract_code_block(code)
@@ -270,17 +198,6 @@ class AIStrategyGenerator:
         }
 
     @staticmethod
-    def needs_structural_repair(result: dict) -> bool:
-        error = result.get("error") or ""
-        return error.startswith("解析META失败:") or error in {
-            _POLARS_ENTRYPOINT_ERROR,
-            _MATRIX_ENTRYPOINT_ERROR,
-            *_ENTRYPOINT_ERRORS.values(),
-        } or error.startswith((
-            _BACKEND_ERROR_PREFIX, "META.params", "META.scoring", "META.asset_types", "META.timeframes",
-        ))
-
-    @staticmethod
     def _validate_meta_semantics(code: str, meta: dict) -> None:
         from app.strategy.engine import STRATEGY_ASSET_TYPES
         from app.strategy.scoring import meta_scoring_directions
@@ -335,50 +252,6 @@ class AIStrategyGenerator:
                 f"META.scoring 引用了不可用字段: {unknown}; "
                 "请使用真实数值字段或受控虚拟字段 ma20_bias"
             )
-
-    async def repair_code(self, code: str, error: str) -> dict:
-        """Ask the model once for a complete replacement after a structural error."""
-        try:
-            backend = _strategy_execution_backend(ast.parse(code))
-        except SyntaxError:
-            backend = "polars_expr"
-        if backend == "matrix_native":
-            entrypoint_requirement = (
-                '保留 EXECUTION_BACKEND = "matrix_native", 定義 MATRIX_STRATEGY, '
-                "不得新增 filter() 或 filter_history()"
-            )
-        else:
-            entrypoint_requirement = (
-                "保留原執行後端, polars_expr 只定義 filter(), python_history_legacy 只定義 filter_history()"
-            )
-        prompt = f"""上一次生成的策略程式碼未通過結構檢查。
-
-檢查錯誤: {error}
-
-請輸出修正後的完整策略 Python 檔。必須保留原策略意圖和參數, 使用模組頂層
-META = {{...}}, {entrypoint_requirement}。名稱、說明、RULES 與參數 label 使用繁體中文。只輸出完整 Python 程式碼。
-
-上一次程式碼:
-```python
-{code}
-```"""
-        repaired = await self._call_llm(prompt, self._get_guide())
-        return self.validate_code(repaired)
-
-    async def _call_llm(self, user_prompt: str, guide: str) -> str:
-        """Call the configured AI provider and return generated strategy code."""
-        from app.services.ai_provider import generate_ai_text
-
-        content = await generate_ai_text(
-            [
-                {"role": "system", "content": _SYSTEM_PREFIX + guide},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.3,
-            # None = 不传上限: 策略代码较长, 推理模型思考 token 计入预算会截断代码
-            max_tokens=None,
-        )
-        return self._extract_code_block(content)
 
     @staticmethod
     def _extract_code_block(content: str) -> str:

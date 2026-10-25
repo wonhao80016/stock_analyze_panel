@@ -117,5 +117,3 @@ class HeavyJobLimiter:
 
 
 shared_heavy_job_limiter = HeavyJobLimiter(capacity=2)
-# Short alias for entry points that prefer the existing module-singleton naming style.
-heavy_job_limiter = shared_heavy_job_limiter

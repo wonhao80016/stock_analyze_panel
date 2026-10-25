@@ -42,7 +42,6 @@ from app.taiwan.providers.taiwan_values import (
     parse_taiwan_date,
 )
 from app.taiwan.symbol import Exchange, TaiwanSymbol, parse_symbol
-from app.tickflow.repository import DataStore, KlineRepository
 
 # ── Sample Raw Fixtures ────────────────────────────────────────
 
@@ -361,12 +360,12 @@ class TestParquetStorageAndIndicatorPipeline:
         df = normalize_taiwan_daily(rows, metadata=FINMIND_METADATA, default_symbol="2330.TWSE")
         assert df.height == 30
 
-        # 2. Write to temp Parquet repository
+        # 2. Write to temp date partitions
         with tempfile.TemporaryDirectory() as tmp_dir:
-            store = DataStore(data_dir=Path(tmp_dir))
-            repo = KlineRepository(store=store)
-
-            repo.append_daily(df)
+            for (day,), part in df.partition_by("date", as_dict=True).items():
+                out = Path(tmp_dir) / "kline_daily" / f"date={day.isoformat()}" / "part.parquet"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                part.write_parquet(out)
 
             # 3. Read back
             glob_path = str(Path(tmp_dir) / "kline_daily" / "**" / "*.parquet")

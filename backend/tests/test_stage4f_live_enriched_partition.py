@@ -5,7 +5,7 @@ import polars as pl
 import pytest
 
 from app.market_time import cn_today
-from app.tickflow.repository import DataStore, KlineRepository
+from app.repository import DataStore, KlineRepository
 
 
 def _live_row(symbol: str, close: float) -> pl.DataFrame:
@@ -29,7 +29,6 @@ def _live_row(symbol: str, close: float) -> pl.DataFrame:
     [
         ("stock", "2330.TWSE", "kline_daily_enriched"),
         ("stock", "600000.SH", "kline_daily_enriched"),
-        ("etf", "0050.TWSE", "kline_etf_enriched"),
         ("index", "TAIEX.TWSE", "kline_index_enriched"),
     ],
 )

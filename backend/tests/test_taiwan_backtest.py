@@ -19,6 +19,7 @@ from app.backtest.matrix import MarketDataMatrix
 from app.taiwan.market_rules import (
     BacktestMode,
     LotModel,
+    PriceLimitModel,
     SecuritiesTaxModel,
     TaiwanMarketProfile,
     TaxClass,
@@ -242,6 +243,6 @@ class TestTPExBacktestVerification:
         assert tax == 600.0
 
         # Price limit +-10%
-        up, down = profile.price_limit_model.calc_limits(160.0)
+        up, down = PriceLimitModel.calc_limits(160.0)
         assert up == 176.0  # 160 * 1.10 = 176.0 (valid 0.50 tick)
         assert down == 144.0  # 160 * 0.90 = 144.0

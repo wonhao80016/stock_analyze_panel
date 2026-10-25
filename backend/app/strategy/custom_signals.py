@@ -3,7 +3,7 @@
 职责:
   - 从 data/user_data/custom_signals/*.json 加载信号定义
   - 把每个信号的 conditions 编译成一条 Polars 布尔表达式（AND 组合）
-  - 供 pipeline 在 compute_signals / compute_enriched_today 末尾注入为列
+  - 供 pipeline.inject_custom_signals 注入为列
 
 不知道: 引擎、AI、API、回测、监控。纯函数 + 模块级缓存。
 
@@ -51,7 +51,7 @@ ALLOWED_FIELDS: frozenset[str] = frozenset({
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
     "annual_vol_20d",
     "rsi_6", "rsi_14", "rsi_24",
-    # 距涨跌停距离 (台股法定涨跌幅, 运行时列, 由 compute_enriched_today 计算)
+    # 距涨跌停距离 (台股法定涨跌幅, 运行时列, 由 pipeline.add_limit_distance_columns 计算)
     "distance_to_upper_limit", "distance_to_lower_limit",
 })
 
@@ -85,6 +85,19 @@ FIELD_UNITS: dict[str, str] = {
     "rsi_6": "index", "rsi_14": "index", "rsi_24": "index",
     "consecutive_limit_ups": "count", "consecutive_limit_downs": "count",
 }
+
+# Display order and labels of the ENRICHED_COLUMNS_BY_CATEGORY groups offered for signal fields.
+FIELD_GROUP_LABELS: dict[str, str] = {
+    "basic": "基礎", "ma": "均線 MA", "ema": "指數均線 EMA",
+    "macd": "MACD", "boll": "布林通道 BOLL", "kdj": "KDJ",
+    "atr": "ATR", "volume": "量價", "extremes": "極值",
+    "momentum": "動量", "volatility": "波動率", "rsi": "RSI",
+}
+# Quote fields are absent from ENRICHED_COLUMNS_BY_CATEGORY and form their own group.
+QUOTE_FIELDS: frozenset[str] = frozenset({
+    "open", "high", "low", "close", "volume", "amount", "turnover_rate",
+    "consecutive_limit_ups", "consecutive_limit_downs",
+})
 
 # 运算符 → Polars 表达式构造器（输入 col_expr, value）
 _OP_BUILDERS = {
@@ -238,13 +251,11 @@ def _col(name: str, days: int = 0) -> pl.Expr:
     return expr
 
 
-def build_expressions(signals: list[dict], allow_shift: bool = True) -> dict[str, pl.Expr]:
+def build_expressions(signals: list[dict]) -> dict[str, pl.Expr]:
     """把多个自定义信号编译成 {column_name: pl.Expr}。
 
     - 只处理 enabled != False 的信号。
     - 单个信号内多条件用 ``&`` 串联（AND）。
-    - allow_shift=False 时, 跳过带日期偏移 (leftDays/rightDays>0) 的信号
-      (盘中单日快照上 .shift 跨 symbol 语义不正确, 优雅降级)。
     - 编译失败的信号被跳过并告警（不影响其它信号）。
     """
     out: dict[str, pl.Expr] = {}
@@ -258,9 +269,6 @@ def build_expressions(signals: list[dict], allow_shift: bool = True) -> dict[str
             for c in conds:
                 left_days = int(c.get("leftDays", 0) or 0)
                 right_days = int(c.get("rightDays", 0) or 0)
-                # 盘中路径不支持偏移 → 跳过整个信号
-                if not allow_shift and (left_days > 0 or right_days > 0):
-                    raise ValueError("盘中实时路径不支持日期偏移条件, 已跳过")
                 left = c["left"]
                 op = c["op"]
                 kind, val = _parse_right(c["right"])

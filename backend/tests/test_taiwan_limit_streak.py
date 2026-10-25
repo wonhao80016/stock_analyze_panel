@@ -225,67 +225,6 @@ def test_pipeline_signals_skip_rows_without_a_positive_reference():
     assert out["consecutive_limit_ups"].to_list() == [0, 0, 0]
 
 
-def _today_rows(prev_close: list[float | None], close: list[float], symbol: str = "2454.TWSE") -> pl.DataFrame:
-    n = len(close)
-    return pl.DataFrame({
-        "symbol": [symbol] * n,
-        "date": [DAYS[-1]] * n,
-        "open": close,
-        "high": close,
-        "low": close,
-        "close": close,
-        "raw_close": close,
-        "raw_high": close,
-        "raw_low": close,
-        "_prev_close_raw": pl.Series(prev_close, dtype=pl.Float64),
-        "volume": [1000.0] * n,
-    })
-
-
-def test_intraday_limit_prices_follow_the_taiwan_tick_ladder():
-    up = pipeline._compute_limit_signals_today(_today_rows([5180.0], [5695.0]), pl.DataFrame({"symbol": ["2454.TWSE"]}))
-    down = pipeline._compute_limit_signals_today(_today_rows([5180.0], [4665.0]), pl.DataFrame({"symbol": ["2454.TWSE"]}))
-
-    assert up["signal_limit_up"][0] is True
-    assert up["consecutive_limit_ups"][0] == 1
-    assert down["signal_limit_down"][0] is True
-    assert down["consecutive_limit_downs"][0] == 1
-
-
-def test_intraday_event_session_measures_limits_from_the_quoted_reference():
-    """On 2026-09-08 2379.TWSE quoted a 704 reference against a 729 close; its limits were 774 / 634."""
-    rows = _today_rows([704.0], [634.0], symbol="2379.TWSE")
-
-    out = pipeline._compute_limit_signals_today(rows, pl.DataFrame({"symbol": ["2379.TWSE"]}))
-
-    assert out["signal_limit_down"][0] is True
-
-
-def test_intraday_signals_skip_rows_without_a_positive_reference():
-    rows = pl.concat([
-        _today_rows([value], [10.0], symbol="2330.TWSE") for value in (0.0, -1.0, None)
-    ])
-
-    out = pipeline._compute_limit_signals_today(rows, pl.DataFrame({"symbol": ["2330.TWSE"]}))
-
-    for column in ("signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"):
-        assert True not in out[column].to_list(), column
-    assert out["consecutive_limit_ups"].to_list() == [0, 0, 0]
-
-
-def test_intraday_streak_continues_the_published_streak():
-    published = _published(_one_price_bars("2454.TWSE", [3925.0, 4315.0, 4745.0]), with_share_capital=True)
-    yesterday, today = published.row(1, named=True), published.row(2, named=True)
-    rows = _today_rows([yesterday["raw_close"]], [today["raw_close"]]).with_columns(
-        pl.lit(yesterday["consecutive_limit_ups"], dtype=pl.UInt32).alias("_prev_consec_up"),
-        pl.lit(yesterday["consecutive_limit_downs"], dtype=pl.UInt32).alias("_prev_consec_down"),
-    )
-
-    out = pipeline._compute_limit_signals_today(rows, pl.DataFrame({"symbol": ["2454.TWSE"]}))
-
-    assert out["consecutive_limit_ups"][0] == today["consecutive_limit_ups"] == 2
-
-
 def _above_ten_thousand(symbol: str) -> tuple[pl.DataFrame, pl.DataFrame]:
     daily = pl.DataFrame({
         "symbol": [symbol, symbol],
@@ -308,29 +247,22 @@ def _above_ten_thousand(symbol: str) -> tuple[pl.DataFrame, pl.DataFrame]:
     return daily, instruments
 
 
-@pytest.mark.parametrize("symbol", ["2454.TWSE", "600519.SH"])
-def test_a_limit_above_ten_thousand_is_a_real_limit(symbol):
-    daily, instruments = _above_ten_thousand(symbol)
-    today = daily.tail(1).with_columns(pl.lit(11264.0).alias("_prev_close_raw"))
+def test_a_limit_above_ten_thousand_is_a_real_limit():
+    daily, instruments = _above_ten_thousand("2454.TWSE")
 
     batch = pipeline.compute_limit_signals(daily, instruments)
-    intraday = pipeline._compute_limit_signals_today(today, instruments)
 
     assert batch["signal_limit_up"][-1] is True
     assert batch["consecutive_limit_ups"][-1] == 1
-    assert intraday["signal_limit_up"][0] is True
 
 
 def test_taiwan_limits_ignore_instrument_table_prices():
     daily, instruments = _above_ten_thousand("2454.TWSE")
     stale = instruments.with_columns(pl.lit(13000.0).alias("limit_up"), pl.lit(9000.0).alias("limit_down"))
-    today = daily.tail(1).with_columns(pl.lit(11264.0).alias("_prev_close_raw"))
 
     batch = pipeline.compute_limit_signals(daily, stale)
-    intraday = pipeline._compute_limit_signals_today(today, stale)
 
     assert batch["signal_limit_up"][-1] is True
-    assert intraday["signal_limit_up"][0] is True
 
 
 class _Adapter:

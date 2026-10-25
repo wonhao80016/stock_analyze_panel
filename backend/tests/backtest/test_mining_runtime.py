@@ -25,6 +25,12 @@ from app.backtest.mining_runtime import (
 from app.services import regime_builder
 
 
+def _write_regime_history(data_dir, rows: pl.DataFrame) -> None:
+    path = regime_builder.regime_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows.sort("date").write_parquet(path)
+
+
 @pytest.mark.parametrize("commission_pct", [None, 0.0008])
 def test_mining_candidate_uses_taiwan_cost_profile_defaults(
     tmp_path,
@@ -389,7 +395,7 @@ def test_training_metric_provider_uses_only_supplied_fold() -> None:
 def test_regime_date_count_uses_t_minus_one_market_labels(tmp_path) -> None:
     labels = [date(2024, 1, 2) + timedelta(days=offset) for offset in range(4)]
     panel = pl.DataFrame({"date": labels})
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
+    _write_regime_history(tmp_path, pl.DataFrame({
         "date": labels[:3],
         "state": ["weak", "strong", "lean_strong"],
         "score": [20, 80, 70],
@@ -423,7 +429,7 @@ def _regime_panel(n: int = 20) -> tuple[list[date], pl.DataFrame]:
 
 
 def _upsert_regime(tmp_path, labels, states: list[str]) -> None:
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
+    _write_regime_history(tmp_path, pl.DataFrame({
         "date": labels,
         "state": states,
         "score": [50] * len(labels),

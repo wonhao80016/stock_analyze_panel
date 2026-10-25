@@ -18,7 +18,6 @@ def _service() -> QuoteService:
     svc._app_state = None
     svc._repo = MagicMock()
     svc._repo.get_index_symbol_set.return_value = set()
-    svc._repo.get_etf_instruments.return_value = pl.DataFrame()
     return svc
 
 

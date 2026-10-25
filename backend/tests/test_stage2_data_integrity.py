@@ -90,9 +90,9 @@ def _healthy_day(data_dir, d: date) -> None:
 
 
 def _scan(data_dir, today: date = TODAY):
-    from app.services.data_integrity import scan_recent_integrity
+    from app.services.data_integrity import integrity_report
 
-    return {(i.day, i.kind) for i in scan_recent_integrity(data_dir, today=today)}
+    return {(i.day, i.kind) for i in integrity_report(data_dir, today=today).issues}
 
 
 def test_a_partition_with_one_exchange_is_reported(tmp_path):
@@ -166,9 +166,9 @@ def test_leftover_kline_daily_partitions_are_not_reported(tmp_path):
             _taipei_ts(d, time(11, 0)),
         )
 
-    from app.services.data_integrity import scan_recent_integrity
+    from app.services.data_integrity import integrity_report
 
-    assert scan_recent_integrity(tmp_path, today=TODAY) == []
+    assert list(integrity_report(tmp_path, today=TODAY).issues) == []
 
 
 def test_dates_before_the_stored_daily_history_and_today_are_not_reported(tmp_path):
@@ -269,27 +269,12 @@ def _write_leftover_snapshot(data_dir) -> None:
         )
 
 
-def _record_job_creation(monkeypatch) -> list:
-    from app.services import pipeline_jobs
-
-    created: list = []
-
-    def fake_create(*args, **kwargs):
-        created.append((args, kwargs))
-        return "job-x", False
-
-    monkeypatch.setattr(pipeline_jobs.job_store, "create", fake_create)
-    return created
-
-
 def test_enabling_realtime_is_not_blocked_by_integrity_gaps(tmp_path, monkeypatch):
     from app.api import settings as settings_api
-    from app.tickflow.policy import detect_capabilities
 
     _write_leftover_snapshot(tmp_path)
     _write_index(tmp_path)
     _write_daily(tmp_path, THU, ("2330.TWSE",))
-    created = _record_job_creation(monkeypatch)
     saved: dict = {}
     monkeypatch.setattr("app.services.preferences.save", lambda payload: saved.update(payload))
 
@@ -300,7 +285,6 @@ def test_enabling_realtime_is_not_blocked_by_integrity_gaps(tmp_path, monkeypatc
                 quote_service=qs,
                 depth_service=None,
                 repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-                capabilities=detect_capabilities(),
             )
         )
     )
@@ -313,29 +297,24 @@ def test_enabling_realtime_is_not_blocked_by_integrity_gaps(tmp_path, monkeypatc
     assert result == {"realtime_quotes_enabled": True, "realtime_allowed": True}
     assert qs.enabled is True
     assert saved == {"realtime_quotes_enabled": True}
-    assert created == []
 
 
-def test_boot_check_logs_issues_without_creating_a_job(tmp_path, monkeypatch, caplog):
+def test_boot_check_logs_issues(tmp_path, monkeypatch, caplog):
     from app.services import data_integrity
-    from app.tickflow.policy import detect_capabilities
 
     _write_leftover_snapshot(tmp_path)
     today = taipei_today()
     yesterday = today - timedelta(days=1)
     _write_index(tmp_path, (yesterday - timedelta(days=1), yesterday))
     _healthy_day(tmp_path, yesterday - timedelta(days=1))
-    created = _record_job_creation(monkeypatch)
 
     state = SimpleNamespace(
         repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-        capabilities=detect_capabilities(),
         quote_service=None,
     )
     with caplog.at_level(logging.INFO, logger="app.services.data_integrity"):
         data_integrity.boot_integrity_check(state)
 
-    assert created == []
     assert any(
         yesterday.isoformat() in r.getMessage() and "missing" in r.getMessage()
         for r in caplog.records

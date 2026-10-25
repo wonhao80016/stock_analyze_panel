@@ -6,7 +6,6 @@ import json
 import logging
 import math
 import os
-import re
 import time
 from dataclasses import asdict
 from datetime import date, datetime
@@ -29,15 +28,6 @@ from app.strategy import config as strategy_config
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/screener", tags=["screener"])
-
-
-class PresetRequest(BaseModel):
-    strategy_id: str
-    pool: Optional[list[str]] = None
-    as_of: Optional[date] = None
-    ext_columns: Optional[str] = None
-    asset_type: str = "stock"
-    timeframe: str = "1d"
 
 
 def _safe(result_dict: dict) -> dict:
@@ -190,97 +180,6 @@ def _cache_payload_with_ext(cached: dict, ext_values: dict[str, dict[str, Any]])
         payload["today_ever_rows"] = enriched_ever
 
     return payload
-
-
-def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict) -> None:
-    """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。"""
-    from app.services import strategy_cache
-    cached = strategy_cache.read_cache(data_dir)
-    if cached and cached.get("as_of") == as_of:
-        results = cached.get("results", {})
-        results[strategy_id] = {
-            "total": safe_data.get("total", 0),
-            "as_of": as_of,
-            "rows": safe_data.get("rows", []),
-        }
-        strategy_cache.write_cache(data_dir, as_of, results)
-
-
-@router.get("/strategies")
-def strategies(
-    request: Request,
-    asset_type: str = Query("stock"),
-    timeframe: str = Query("1d"),
-):
-    """兼容策略清单端点；唯一数据源为 StrategyEngine。"""
-    data_dir = request.app.state.repo.store.data_dir
-    engine = getattr(request.app.state, "strategy_engine", None)
-    if engine is None:
-        raise HTTPException(status_code=503, detail="策略引擎未初始化")
-    presets = []
-    for meta in engine.list_strategies():
-        if meta.get("research_only"):
-            continue
-        if asset_type not in meta.get("asset_types", ["stock"]):
-            continue
-        if timeframe not in meta.get("timeframes", ["1d"]):
-            continue
-        sid = meta["id"]
-        overrides = strategy_config.load_override(data_dir, sid)
-        presets.append({
-            **meta,
-            "name": overrides.get("name") or meta["name"],
-            "description": overrides.get("description") or meta.get("description", ""),
-        })
-
-    return {"presets": presets, "load_errors": engine.load_errors()}
-
-
-@router.post("/run_preset")
-def run_preset(req: PresetRequest, request: Request):
-    repo = request.app.state.repo
-    svc = ScreenerService(repo, asset_type=req.asset_type)
-    as_of = req.as_of or svc.latest_date()
-    if not as_of:
-        raise HTTPException(status_code=400, detail="无可用数据日期")
-
-    # 加载用户保存的策略配置
-    data_dir = request.app.state.repo.store.data_dir
-    ext_values = _load_ext_value_maps(repo, req.ext_columns)
-    overrides = strategy_config.load_override(data_dir, req.strategy_id)
-    engine = getattr(request.app.state, "strategy_engine", None)
-    if not engine:
-        raise HTTPException(status_code=404, detail=f"策略引擎未初始化或策略 {req.strategy_id} 不存在")
-
-    try:
-        if not engine.has(req.strategy_id):
-            raise ValueError(f"unknown strategy: {req.strategy_id}")
-        if engine.get(req.strategy_id).meta.get("research_only"):
-            raise ValueError(f"unknown strategy: {req.strategy_id}")
-        params = dict(overrides.get("params") or {})
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            [req.strategy_id],
-            timeframe=req.timeframe,
-            params_map={req.strategy_id: params},
-            overrides_map={req.strategy_id: overrides or {}},
-        )
-        result = engine.run(
-            req.strategy_id,
-            context,
-            pool=req.pool,
-            params=params,
-            overrides=overrides or None,
-        )
-    except ValueError as e:
-        status_code = 404 if "unknown strategy" in str(e) else 400
-        raise HTTPException(status_code=status_code, detail=str(e)) from e
-
-    safe_data = _safe(asdict(result))
-    _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
-
-    return _result_with_ext(safe_data, ext_values)
 
 
 def _realtime_overrides(cached: dict, realtime_results: dict[str, dict]) -> dict[str, dict]:
@@ -470,64 +369,6 @@ def get_cached_summary(request: Request):
         # Changes whenever the cache file is rewritten: the scheduled post-close runs, run_all and
         # single-strategy runs. Realtime overlays restamp updated_at on every read but never this.
         "cache_updated_at": on_disk.get("updated_at") if on_disk else None,
-    }
-
-
-@router.get("/cached-result/{strategy_id}")
-def get_cached_result(
-    strategy_id: str,
-    request: Request,
-    ext_columns: Optional[str] = Query(None, description="逗号分隔: config_id.field_name"),
-):
-    """按需返回单个策略的完整明细及其今日失效行。"""
-    cached = _cached_with_realtime(request)
-    raw_result = (cached.get("results") or {}).get(strategy_id)
-    if not isinstance(raw_result, dict):
-        return {
-            "result": None,
-            "today_ever_rows": None,
-            "strategy_ids_by_symbol": {},
-            "updated_at": cached.get("updated_at"),
-        }
-
-    ext_values = _load_ext_value_maps(request.app.state.repo, ext_columns)
-    result = {
-        "as_of": raw_result.get("as_of"),
-        "strategy": strategy_id,
-        "rows": _rows_with_ext(raw_result.get("rows") or [], ext_values),
-        "total": int(raw_result.get("total") or 0),
-        "elapsed_ms": 0.0,
-    }
-
-    ever_rows = None
-    if cached.get("as_of") == result["as_of"]:
-        strategy_ever_rows = (cached.get("today_ever_rows") or {}).get(strategy_id)
-        if isinstance(strategy_ever_rows, dict):
-            ever_rows = {
-                symbol: _row_with_ext(row, ext_values, symbol=symbol)
-                for symbol, row in strategy_ever_rows.items()
-                if isinstance(row, dict)
-            }
-
-    selected_symbols = {
-        str(row["symbol"])
-        for row in raw_result.get("rows") or []
-        if isinstance(row, dict) and row.get("symbol")
-    }
-    strategy_ids_by_symbol: dict[str, list[str]] = {symbol: [] for symbol in selected_symbols}
-    for sid, cached_result in (cached.get("results") or {}).items():
-        if not isinstance(cached_result, dict) or cached_result.get("as_of") != result["as_of"]:
-            continue
-        for row in cached_result.get("rows") or []:
-            symbol = str(row.get("symbol")) if isinstance(row, dict) and row.get("symbol") else None
-            if symbol in strategy_ids_by_symbol:
-                strategy_ids_by_symbol[symbol].append(sid)
-
-    return {
-        "result": result,
-        "today_ever_rows": ever_rows,
-        "strategy_ids_by_symbol": strategy_ids_by_symbol,
-        "updated_at": cached.get("updated_at"),
     }
 
 
@@ -826,65 +667,6 @@ def compute_and_cache_all(
             logger.exception("write strategy cache failed for %s", as_of)
 
     return as_of, results
-
-
-@router.post("/run_all")
-def run_all(request: Request, body: Optional[dict] = None):
-    """批量运行指定策略；注册、路由和执行均由 StrategyEngine 负责。"""
-    from datetime import date as date_type
-
-    body = body or {}
-    repo = request.app.state.repo
-    asset_type = str(body.get("asset_type") or "stock")
-    timeframe = str(body.get("timeframe") or "1d")
-    engine = getattr(request.app.state, "strategy_engine", None)
-    if engine is None:
-        raise HTTPException(status_code=503, detail="策略引擎未初始化")
-
-    raw_date = body.get("as_of")
-    requested_as_of: date | None = None
-    if raw_date:
-        requested_as_of = (
-            date_type.fromisoformat(str(raw_date)) if isinstance(raw_date, str) else raw_date
-        )
-
-    requested_ids = body.get("strategy_ids")
-    strategy_ids = (
-        [str(sid) for sid in requested_ids]
-        if requested_ids and isinstance(requested_ids, list)
-        else None
-    )
-
-    try:
-        as_of, results = compute_and_cache_all(
-            repo,
-            engine,
-            asset_type=asset_type,
-            timeframe=timeframe,
-            as_of=requested_as_of,
-            strategy_ids=strategy_ids,
-        )
-    except UnknownStrategiesError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    if as_of is None:
-        return {"as_of": None, "results": {}}
-    if not results:
-        return {"as_of": str(as_of), "results": {}}
-
-    if body.get("summary_only"):
-        return {
-            "as_of": str(as_of),
-            "results": {
-                sid: {"total": result["total"], "as_of": result["as_of"]}
-                for sid, result in results.items()
-            },
-        }
-
-    ext_values = _load_ext_value_maps(repo, body.get("ext_columns"))
-    return {"as_of": str(as_of), "results": _results_with_ext(results, ext_values)}
 
 
 def _parse_ext_columns(ext_columns: str) -> list[tuple[str, str]]:

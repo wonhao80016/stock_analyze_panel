@@ -175,7 +175,6 @@ def test_a_polars_backtest_panel_matches_the_full_history_from_its_first_formal_
         store=types.SimpleNamespace(data_dir=tmp_path),
         get_enriched_range=lambda *args, **kwargs: None,
         get_instruments_asset=lambda asset_type: instruments,
-        get_historical_shares=lambda: pl.DataFrame(),
     )
     plan = _plan(_strategy(), entry_signals=["signal_macd_golden"])
     start = DAYS[-60]

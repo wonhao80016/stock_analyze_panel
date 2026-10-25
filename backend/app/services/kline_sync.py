@@ -14,8 +14,7 @@ import polars as pl
 from app.data_providers.base import AssetType
 from app.market_time import CN_TZ, cn_now
 from app.services import preferences
-from app.tickflow.capabilities import CapabilitySet
-from app.tickflow.repository import KlineRepository
+from app.repository import KlineRepository
 
 
 _MINUTE_WINDOW_MARGIN = timedelta(minutes=5)
@@ -200,7 +199,7 @@ def sync_minute_batch(
 _NO_MINUTE_SOURCE_REASON = "台股沒有分鐘資料源, 分時訊號需要設定分鐘資料插件"
 
 
-def intraday_monitor_support(capset: CapabilitySet | None) -> dict[str, object]:
+def intraday_monitor_support() -> dict[str, object]:
     """返回分时信号监控可用的数据能力和单轮标的上限。
 
     Only a resolvable custom minute plugin supplies intraday bars.
@@ -221,12 +220,12 @@ def intraday_monitor_support(capset: CapabilitySet | None) -> dict[str, object]:
 
 
 def fetch_intraday_monitor_batch(
-    symbols: list[str], capset: CapabilitySet | None, *, now: datetime | None = None,
+    symbols: list[str], *, now: datetime | None = None,
 ) -> pl.DataFrame:
-    """按当前能力获取分时信号所需的当日分钟数据，不落盘。"""
+    """获取分时信号所需的当日分钟数据，不落盘。"""
     if not symbols:
         return pl.DataFrame()
-    support = intraday_monitor_support(capset)
+    support = intraday_monitor_support()
     if not support["available"] or len(symbols) > int(support["max_symbols"]):
         return pl.DataFrame()
 
@@ -348,7 +347,6 @@ def _migrate_symbol_to_date_partition(repo: KlineRepository) -> None:
 def sync_and_persist_minute(
     symbols: list[str],
     repo: KlineRepository,
-    capset: CapabilitySet,
     days: int = 5,
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     force_full_days: bool = False,

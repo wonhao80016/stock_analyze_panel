@@ -341,26 +341,13 @@ def test_maybe_inject_live_candle_prefers_snapshot_when_symbol_already_polled():
     assert qs.fetch_live_bar_calls == []
 
 
-def test_maybe_inject_live_candle_etf_path_never_touches_quote_service_fetch_live_bar():
+def test_maybe_inject_live_candle_has_no_live_cache_outside_stocks():
+    """Taiwan ETFs are polled as stocks; another asset type has no live candle to inject."""
     today = date.today()
-    snapshot = pl.DataFrame({
-        "symbol": ["0050.TWSE"], "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
-        "volume": [100.0], "amount": [1000.0], "change_pct": [0.01],
-    })
-
-    class _FakeRepoForInject:
-        def get_enriched_latest_asset(self, asset_type):
-            assert asset_type == "etf"
-            return snapshot, today
-
     qs = _FakeQuoteServiceForInject(pl.DataFrame(), today, {"symbol": "0050.TWSE"})
-    request = _fake_request(quote_service=qs, repo=_FakeRepoForInject())
-    rows: list[dict] = []
+    request = _fake_request(quote_service=qs)
 
-    out = _maybe_inject_live_candle(request, "0050.TWSE", rows, "etf")
-
-    assert len(out) == 1
-    assert out[0]["close"] == 10.5
+    assert _maybe_inject_live_candle(request, "0050.TWSE", [], "etf") == []
     assert qs.fetch_live_bar_calls == []
 
 

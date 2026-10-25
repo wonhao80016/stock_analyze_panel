@@ -36,19 +36,13 @@ from app.indicators.pipeline import (
     rsi_values,
     wilder_values,
 )
-from app.price_limits import (
-    MAIN_BOARD_ST_LIMIT_CHANGE_DATE,
-    TAIWAN_SYMBOL_SUFFIXES,
-    numpy_limit_pct_vectors,
-    numpy_limit_price,
-    write_numpy_price_limit_matrix,
-)
+from app.price_limits import write_numpy_price_limit_matrix
 from app.strategy.listing_age import eligible_from, exclude_new_days
 from app.strategy.scoring import AMOUNT_ESTIMATED, SCORING_DIRECTION_LOW
 from app.strategy.scoring import recursive_warmup_bars as recursive_warmup_bars
 from app.taiwan.share_capital_store import MIN_SESSION_COVERAGE as MIN_SESSION_COVERAGE
 from app.taiwan.share_capital_store import session_coverage as _symbols_session_coverage
-from app.volume_units import volume_unit_for_symbols
+from app.volume_units import TAIWAN_SUFFIXES
 
 try:
     from numba import njit, prange
@@ -468,7 +462,7 @@ class MarketDataMatrix:
     limit_up_locked: np.ndarray
     limit_down_locked: np.ndarray
     fields: Mapping[str, np.ndarray]
-    volume_unit: str = "lots"
+    volume_unit: str = "shares"
     cache_status: str = "memory"
 
     cache_path: str | None = None
@@ -678,7 +672,6 @@ def build_market_data_matrix(
             np.empty(shape, dtype=np.float32),
             trading_dates,
             symbol_values,
-            names,
             valid=np.isfinite(close),
         )
 
@@ -704,7 +697,6 @@ def build_market_data_matrix(
     _make_read_only(*arrays)
 
     sym_tuple = tuple(str(value) for value in symbol_values)
-    vol_unit = volume_unit_for_symbols(sym_tuple)
 
     return MarketDataMatrix(
         timestamps=timestamps,
@@ -721,7 +713,6 @@ def build_market_data_matrix(
         limit_up_locked=limit_up_locked,
         limit_down_locked=limit_down_locked,
         fields=MappingProxyType(fields),
-        volume_unit=vol_unit,
     )
 
 
@@ -965,8 +956,6 @@ def _resolve_matrix_storage_fields(
         matrix_fields.add("raw_close")
     if "turnover_rate" in wanted_fields:
         matrix_fields.add("turnover_rate")
-        if "turnover_rate" not in parquet_fields and "float_shares" in instrument_columns:
-            vector_fields.add("float_shares")
     if "price_limit_pct" in wanted_fields:
         matrix_fields.add("price_limit_pct")
     resolved = matrix_fields | vector_fields
@@ -1034,7 +1023,7 @@ def _build_market_data_matrix_from_dataset(
         published_limit_assets=published_assets,
     )
     _raise_if_matrix_cancelled(cancel_event)
-    names, latest_limits = _populate_matrix_derived_arrays(
+    names = _populate_matrix_derived_arrays(
         actual_symbols,
         arrays,
         fields,
@@ -1049,7 +1038,6 @@ def _build_market_data_matrix_from_dataset(
             fields["price_limit_pct"],
             actual_dates,
             actual_symbols,
-            names,
             valid=seen,
         )
     for name in vector_fields:
@@ -1060,20 +1048,6 @@ def _build_market_data_matrix_from_dataset(
         arrays["low"],
         arrays["close"],
         arrays["volume"],
-    )
-    raw_close = fields.get("raw_close", arrays["close"])
-    limit_up_locked, limit_down_locked = _limit_lock_matrices(
-        arrays["close"],
-        raw_close,
-        seen,
-        actual_dates,
-        actual_symbols,
-        names,
-        latest_limits,
-        published_assets,
-        out_up=arrays["limit_up_locked"],
-        out_down=arrays["limit_down_locked"],
-        apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
     )
     timestamps, session_ids = _matrix_time_axes(
         actual_dates,
@@ -1098,10 +1072,9 @@ def _build_market_data_matrix_from_dataset(
         close=arrays["close"],
         volume=arrays["volume"],
         tradable=tradable,
-        limit_up_locked=limit_up_locked,
-        limit_down_locked=limit_down_locked,
+        limit_up_locked=arrays["limit_up_locked"],
+        limit_down_locked=arrays["limit_down_locked"],
         fields=MappingProxyType(fields),
-        volume_unit=volume_unit_for_symbols(actual_symbols),
         cache_status=cache_status,
     )
 
@@ -1203,7 +1176,7 @@ def _build_market_data_matrix_cache_from_dataset(
         timing_ms["scan"] = round((time.perf_counter() - stage_started) * 1000, 1)
         stage_started = time.perf_counter()
         _mask_unseen_staging_core(arrays, fields, parquet_fields, seen)
-        names, latest_limits = _populate_matrix_derived_arrays(
+        names = _populate_matrix_derived_arrays(
             actual_symbols,
             arrays,
             fields,
@@ -1220,7 +1193,6 @@ def _build_market_data_matrix_cache_from_dataset(
                 fields["price_limit_pct"],
                 actual_dates,
                 actual_symbols,
-                names,
                 valid=seen,
             )
         _write_tradable_matrix(
@@ -1230,19 +1202,6 @@ def _build_market_data_matrix_cache_from_dataset(
             arrays["low"],
             arrays["close"],
             arrays["volume"],
-        )
-        _limit_lock_matrices(
-            arrays["close"],
-            fields.get("raw_close", arrays["close"]),
-            seen,
-            actual_dates,
-            actual_symbols,
-            names,
-            latest_limits,
-            published_assets,
-            out_up=arrays["limit_up_locked"],
-            out_down=arrays["limit_down_locked"],
-            apply_latest_limits=actual_dates[-1] == _latest_partition_date(root),
         )
         timing_ms["derived"] = round((time.perf_counter() - stage_started) * 1000, 1)
         _raise_if_matrix_cancelled(cancel_event)
@@ -1273,7 +1232,7 @@ def _build_market_data_matrix_cache_from_dataset(
             "timestamp_labels": [value.isoformat() for value in actual_dates],
             "symbols": list(actual_symbols),
             "names": list(names),
-            "volume_unit": volume_unit_for_symbols(actual_symbols),
+            "volume_unit": "shares",
             "arrays": array_specs,
             "fields": field_specs,
         }
@@ -1476,7 +1435,7 @@ def _scan_matrix_values(
 
 def _taiwan_asset_mask(symbols: Sequence[str]) -> np.ndarray:
     return np.fromiter(
-        (str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES) for symbol in symbols),
+        (str(symbol).endswith(TAIWAN_SUFFIXES) for symbol in symbols),
         dtype=bool,
         count=len(symbols),
     )
@@ -1524,13 +1483,10 @@ def _populate_matrix_derived_arrays(
     *,
     parquet_fields: list[str],
     vector_fields: list[str],
-) -> tuple[list[str], Mapping[str, np.ndarray]]:
-    instrument_wanted = set(wanted_fields)
-    if "turnover_rate" in wanted_fields and "turnover_rate" not in parquet_fields:
-        instrument_wanted.add("float_shares")
-    names, instrument_fields, latest_limits = _instrument_axis_values(
+) -> list[str]:
+    names, instrument_fields = _instrument_axis_values(
         actual_symbols,
-        instrument_wanted,
+        set(wanted_fields),
         instruments,
         time_count=seen.shape[0],
     )
@@ -1545,59 +1501,11 @@ def _populate_matrix_derived_arrays(
         else:
             np.copyto(fields[name], values, where=seen)
     if "raw_close" in wanted_fields and "raw_close" not in parquet_fields:
-        if _taiwan_asset_mask(actual_symbols).any():
-            raise ValueError("Taiwan matrix requires the published raw_close column")
-        np.copyto(fields["raw_close"], arrays["close"])
+        raise ValueError("the matrix requires the published raw_close column")
+    # Only the publish prices turnover; a current share count must not reach past bars.
     if "turnover_rate" in wanted_fields and "turnover_rate" not in parquet_fields:
-        float_shares = fields.get("float_shares")
-        if float_shares is None:
-            raise ValueError("matrix turnover_rate requires float_shares")
-        volume_unit = volume_unit_for_symbols(actual_symbols)
-        spans_history = fields["turnover_rate"].shape[0] > 1
-        if volume_unit == "shares" and "float_shares" in vector_fields and spans_history:
-            # A vector float_shares is one current count broadcast over the whole
-            # time axis. Taiwan publishes no share history, so across several bars
-            # this prices 2024 with a count announced in 2026 - the look-ahead the
-            # daily pipeline refuses through apply_historical_float_shares, which
-            # this path does not go through. A single bar has nothing to spread the
-            # count across, so it keeps the existing snapshot behaviour.
-            fields["turnover_rate"][:] = np.nan
-        else:
-            _write_turnover_rate_matrix(
-                fields["turnover_rate"],
-                arrays["volume"],
-                float_shares,
-                volume_unit,
-            )
-    return names, latest_limits
-
-
-def _write_turnover_rate_matrix(
-    target: np.ndarray,
-    volume: np.ndarray,
-    float_shares: np.ndarray,
-    volume_unit: str,
-) -> None:
-    shares = (
-        float_shares
-        if float_shares.ndim == 2
-        else np.broadcast_to(float_shares.reshape(1, -1), volume.shape)
-    )
-    rows_per_chunk = max(1, (32 * 1024 * 1024) // max(1, volume.shape[1] * 4))
-    for start in range(0, volume.shape[0], rows_per_chunk):
-        stop = min(volume.shape[0], start + rows_per_chunk)
-        out = target[start:stop]
-        multiplier = 100.0 if volume_unit == "shares" else 10_000.0
-        np.multiply(volume[start:stop], np.float32(multiplier), out=out)
-        shares_chunk = shares[start:stop]
-        valid = np.isfinite(shares_chunk) & (shares_chunk != 0)
-        np.divide(
-            out,
-            shares_chunk,
-            out=out,
-            where=valid,
-        )
-        out[~valid] = np.nan
+        fields["turnover_rate"][:] = np.nan
+    return names
 
 
 def _write_tradable_matrix(
@@ -1725,10 +1633,6 @@ def _partition_date_bounds(root: Path) -> tuple[date | None, date | None]:
         if latest is None or value > latest:
             latest = value
     return earliest, latest
-
-
-def _latest_partition_date(root: Path) -> date | None:
-    return _partition_date_bounds(root)[1]
 
 
 def _instrument_fingerprint(instruments: pl.DataFrame | None) -> bytes:
@@ -2276,15 +2180,11 @@ def _instrument_axis_values(
     instruments: pl.DataFrame | None,
     *,
     time_count: int,
-) -> tuple[list[str], dict[str, np.ndarray], dict[str, np.ndarray]]:
+) -> tuple[list[str], dict[str, np.ndarray]]:
     names = [""] * len(symbols)
     fields: dict[str, np.ndarray] = {}
-    limits = {
-        "limit_up": np.full(len(symbols), np.nan, dtype=np.float32),
-        "limit_down": np.full(len(symbols), np.nan, dtype=np.float32),
-    }
     if instruments is None or instruments.is_empty() or "symbol" not in instruments.columns:
-        return names, fields, limits
+        return names, fields
 
     by_symbol = {
         str(row["symbol"]): row
@@ -2308,110 +2208,13 @@ def _instrument_axis_values(
             value = row.get(name)
             if value is not None:
                 target[asset_id] = np.float32(value)
-        for name, target in limits.items():
-            value = row.get(name)
-            if value is not None:
-                target[asset_id] = np.float32(value)
 
     shape = (1, len(symbols))
     fields.update({
         name: np.broadcast_to(values.reshape(shape), (time_count, len(symbols)))
         for name, values in vectors.items()
     })
-    return names, fields, limits
-
-
-def _limit_lock_matrices(
-    close: np.ndarray,
-    raw_close: np.ndarray,
-    seen: np.ndarray,
-    trading_dates: Sequence[date],
-    symbols: list[str],
-    names: list[str],
-    latest_limits: Mapping[str, np.ndarray],
-    published_assets: np.ndarray,
-    *,
-    out_up: np.ndarray | None = None,
-    out_down: np.ndarray | None = None,
-    apply_latest_limits: bool = True,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Derive locks for assets without published limit signals; published columns are kept."""
-    shape = close.shape
-    up_locked = out_up if out_up is not None else np.zeros(shape, dtype=np.uint8)
-    down_locked = out_down if out_down is not None else np.zeros(shape, dtype=np.uint8)
-    if up_locked.shape != shape or down_locked.shape != shape:
-        raise ValueError("limit lock output shape mismatch")
-    if len(trading_dates) != shape[0]:
-        raise ValueError("price-limit date axis mismatch")
-    if published_assets.shape != (shape[1],):
-        raise ValueError("published limit asset mask mismatch")
-    derived = ~published_assets
-    if not derived.any():
-        return up_locked, down_locked
-    up_locked[:, derived] = 0
-    down_locked[:, derived] = 0
-    derived_ids = np.flatnonzero(derived)
-    legacy_pct = np.full(shape[1], np.nan, dtype=np.float64)
-    current_pct = np.full(shape[1], np.nan, dtype=np.float64)
-    legacy_pct[derived_ids], current_pct[derived_ids] = numpy_limit_pct_vectors(
-        [symbols[index] for index in derived_ids],
-        [names[index] for index in derived_ids],
-    )
-
-    previous_close = np.full(shape[1], np.nan, dtype=np.float64)
-    previous_raw = np.full(shape[1], np.nan, dtype=np.float64)
-    previous_adjustment = np.full(shape[1], np.nan, dtype=np.float64)
-    for time_id in range(shape[0]):
-        limit_pct = (
-            legacy_pct
-            if trading_dates[time_id] < MAIN_BOARD_ST_LIMIT_CHANGE_DATE
-            else current_pct
-        )
-        present = seen[time_id]
-        current_close = close[time_id].astype(np.float64, copy=False)
-        current_raw = raw_close[time_id].astype(np.float64, copy=False)
-        current_adjustment = np.full(shape[1], np.nan, dtype=np.float64)
-        np.divide(
-            current_close,
-            current_raw,
-            out=current_adjustment,
-            where=np.isfinite(current_raw) & (current_raw != 0),
-        )
-        adjustment_changed = (
-            np.isfinite(current_adjustment)
-            & np.isfinite(previous_adjustment)
-            & (np.abs(current_adjustment - previous_adjustment) > 1e-6)
-        )
-        reference = np.where(adjustment_changed, previous_close, previous_raw)
-        valid = (
-            present
-            & derived
-            & np.isfinite(reference)
-            & (reference > 0)
-            & np.isfinite(current_raw)
-            & (current_raw > 0)
-        )
-        if valid.any():
-            up_price = numpy_limit_price(reference, limit_pct, up=True)
-            down_price = numpy_limit_price(reference, limit_pct, up=False)
-            if apply_latest_limits and time_id == shape[0] - 1:
-                latest_up = latest_limits["limit_up"]
-                latest_down = latest_limits["limit_down"]
-                use_up = np.isfinite(latest_up)
-                use_down = np.isfinite(latest_down)
-                up_price = np.where(use_up, latest_up, up_price)
-                down_price = np.where(use_down, latest_down, down_price)
-            up_locked[time_id, valid] = (
-                current_raw[valid] >= up_price[valid] - 0.005
-            ).astype(np.uint8)
-            down_locked[time_id, valid] = (
-                current_raw[valid] <= down_price[valid] + 0.005
-            ).astype(np.uint8)
-
-        previous_close[present] = current_close[present]
-        previous_raw[present] = current_raw[present]
-        previous_adjustment[present] = current_adjustment[present]
-    return up_locked, down_locked
+    return names, fields
 
 
 def make_signal_matrix(
@@ -4597,14 +4400,9 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         return _matrix_rolling_corr(daily, market.volume, close_valid, 20)
     if name == "vwap_bias":
         amount = _traded_amount(market)
-        vol_unit = getattr(market, "volume_unit", "lots")
-        if vol_unit == "shares" or (hasattr(market, "symbols") and any(s.endswith(TAIWAN_SYMBOL_SUFFIXES) for s in market.symbols)):
-            shares = market.volume
-        else:
-            shares = market.volume * np.float32(100.0)
         valid = close_valid & np.isfinite(amount) & (market.volume > 0) & (amount > 0)
         vwap = np.full(market.shape, np.nan, dtype=np.float32)
-        np.divide(amount, shares, out=vwap, where=valid)
+        np.divide(amount, market.volume, out=vwap, where=valid)
         # amount is unadjusted, so the VWAP is compared with the raw close, never the adjusted one.
         # Volume restated by a later share-count event still shifts the VWAP by that event's ratio.
         raw_close = market.fields.get("raw_close")
@@ -4759,7 +4557,7 @@ def taiwan_limit_rule_exclusions(symbols: Sequence[str]) -> list[dict[str, str]]
     taiwan = sorted({
         str(symbol)
         for symbol in symbols
-        if str(symbol).endswith(TAIWAN_SYMBOL_SUFFIXES)
+        if str(symbol).endswith(TAIWAN_SUFFIXES)
     })
     if not taiwan:
         return []

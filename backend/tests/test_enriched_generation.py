@@ -15,7 +15,7 @@ from app.enriched_generation import (
     EnrichedPublication,
     get_enriched_generation,
 )
-from app.tickflow.repository import DataStore, KlineRepository
+from app.repository import DataStore, KlineRepository
 
 
 def _frame(value: float = 10.0) -> pl.DataFrame:
@@ -34,9 +34,9 @@ def test_repository_enriched_noop_does_not_bump_generation(tmp_path) -> None:
     repo = KlineRepository(DataStore(tmp_path))
     frame = _frame()
 
-    repo.append_enriched(frame)
+    repo.merge_live_enriched_asset("stock", frame, force=True)
     first = repo.get_matrix_data_generation("stock")
-    repo.append_enriched(frame)
+    repo.merge_live_enriched_asset("stock", frame, force=True)
 
     assert repo.get_matrix_data_generation("stock") == first
 
@@ -238,7 +238,7 @@ def test_live_flush_write_recovers_stale_marker_from_dead_process(
 ) -> None:
     """实时 enriched 落盘(repository 路径)遇到僵死 publishing 标记应接管自愈,
     而非持续抛错直到下一次盘后管道。"""
-    from app.tickflow.repository import DataStore, KlineRepository
+    from app.repository import DataStore, KlineRepository
 
     (tmp_path / ".matrix_generation_stock.json").write_text(
         json.dumps({
@@ -252,7 +252,7 @@ def test_live_flush_write_recovers_stale_marker_from_dead_process(
     )
 
     repo = KlineRepository(DataStore(tmp_path))
-    repo.append_enriched(_frame(10.0))
+    repo.merge_live_enriched_asset("stock", _frame(10.0), force=True)
 
     marker = json.loads(
         (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")

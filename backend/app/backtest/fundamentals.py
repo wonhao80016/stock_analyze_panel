@@ -4,8 +4,7 @@
 - 输入为 data/financials/metrics/part.parquet, 每行一份报告期指标;
 - ``announce_date`` 是公告日。因子只在 **严格晚于公告日的交易日** 才有值
   (公告多在盘后发布, 保守取 T+1 生效), 此前保持 null;
-- 财报历史按 (symbol, period_end) 累积 (见 services/financial_sync.py),
-  同一期以最新公告为准;
+- 财报历史按 (symbol, period_end) 累积, 同一期以最新公告为准;
 - 无财务数据的标的/日期一律为 null, 绝不填 0 (填 0 会污染截面排名,
   例如资产负债率 0 会被当成最优杠杆)。下游 IC/分层/评分对 null 自动剔除。
 

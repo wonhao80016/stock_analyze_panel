@@ -200,26 +200,6 @@ def test_futures_trust_without_foreign_flag_fails_closed(directory, flag, scope)
         MarketProfileBridge.get_price_limit_pct(inst)
 
 
-def test_twse_product_fetch_carries_foreign_flag(monkeypatch):
-    class _Response:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return [
-                {
-                    "基金代號": "00682U",
-                    "基金類型": "指數股票型期貨信託基金",
-                    "標的指數/追蹤指數名稱": "美元指數",
-                    "是否包含國外成分股": "是",
-                }
-            ]
-
-    monkeypatch.setattr(adapters.httpx, "get", lambda *args, **kwargs: _Response())
-
-    assert adapters.fetch_official_twse_etf_products()["00682U"].underlying_scope == "foreign"
-
-
 @pytest.mark.parametrize(
     ("code", "name", "cfi", "category", "scope"),
     [

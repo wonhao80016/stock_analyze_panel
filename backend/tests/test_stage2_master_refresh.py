@@ -597,9 +597,9 @@ def test_detail_lookups_are_paced(monkeypatch):
         transport=httpx.MockTransport(server), detail_request_interval=0.5
     )
 
-    styles = adapter.fetch_etf_management_styles(
+    styles = dict(adapter.iter_etf_management_styles(
         {"00679B": "bond", "00720B": "bond", "00980D": "bond"}
-    )
+    ))
 
     assert styles == {"00679B": "passive", "00720B": "passive", "00980D": None}
     assert sleeps == [0.5, 0.5]

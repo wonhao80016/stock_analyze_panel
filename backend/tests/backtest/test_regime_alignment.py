@@ -10,33 +10,17 @@ from app.backtest.regime_alignment import (
 )
 
 
-def test_align_first_day_boundary_flag_only_tolerates_first_day():
+def test_align_first_day_without_prior_regime_fails_closed():
     labels = ("2026-01-05", "2026-01-06", "2026-01-07")
     regimes = {
         "2026-01-05": ("weak", 20),
         "2026-01-06": ("strong", 80),
     }
 
-    # 默认 (过滤场景): 正式首日=labels[0] 无前驱 → fail-closed
+    # 正式首日=labels[0] 无前驱 → fail-closed
     with pytest.raises(ValueError, match="正式首日"):
         align_regime_t_minus_one(
             labels, regimes, required_start=date(2026, 1, 5), required_end=None,
-        )
-
-    # 统计场景: 首日容差 → 首日 None, 其余正常 T-1 对齐
-    aligned = align_regime_t_minus_one(
-        labels, regimes,
-        required_start=date(2026, 1, 5), required_end=None,
-        first_day_boundary_ok=True,
-    )
-    assert aligned == [None, ("weak", 20.0), ("strong", 80.0)]
-
-    # 统计场景内部缺口仍 fail-closed (次日 T-1 缺环境)
-    with pytest.raises(ValueError, match="缺少前一交易日环境"):
-        align_regime_t_minus_one(
-            labels, {"2026-01-05": ("weak", 20)},
-            required_start=date(2026, 1, 5), required_end=None,
-            first_day_boundary_ok=True,
         )
 
 

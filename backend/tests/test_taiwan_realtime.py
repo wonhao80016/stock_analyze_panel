@@ -357,20 +357,20 @@ class TestRealtimeCachingAndBatch:
         svc = TaiwanRealtimeService(cache_ttl_seconds=5.0, mis_provider=mis)
 
         # 1. First fetch -> Cache miss
-        q1 = svc.get_quote("2330.TWSE")
+        q1 = svc.get_quotes(["2330.TWSE"])["2330.TWSE"]
         assert q1 is not None
         assert svc.cache_misses == 1
         assert svc.cache_hits == 0
         assert svc.provider_requests == 1
 
         # 2. Second fetch within TTL -> Cache hit
-        q2 = svc.get_quote("2330.TWSE")
+        q2 = svc.get_quotes(["2330.TWSE"])["2330.TWSE"]
         assert q2 is not None
         assert svc.cache_hits == 1
         assert svc.provider_requests == 1
 
         # 3. Force refresh -> Bypasses cache
-        q3 = svc.get_quote("2330.TWSE", force_refresh=True)
+        q3 = svc.get_quotes(["2330.TWSE"], force_refresh=True)["2330.TWSE"]
         assert q3 is not None
         assert svc.cache_misses == 2
         assert svc.provider_requests == 2
@@ -404,18 +404,18 @@ class TestRealtimeCachingAndBatch:
 
         # 1. First fetch in CLOSED session
         with patch.object(svc.trading_calendar, "get_market_status", return_value=MarketStatus.CLOSED):
-            q_closed = svc.get_quote("2330.TWSE")
+            q_closed = svc.get_quotes(["2330.TWSE"])["2330.TWSE"]
             assert q_closed is not None
             assert svc.cache_misses == 1
             assert svc.cache_hits == 0
 
             # Second fetch still in CLOSED -> Cache hit!
-            q_closed_2 = svc.get_quote("2330.TWSE")
+            q_closed_2 = svc.get_quotes(["2330.TWSE"])["2330.TWSE"]
             assert svc.cache_hits == 1
 
         # 2. Market transitions to OPEN -> Cache miss must occur (no leakage of closed snapshot)
         with patch.object(svc.trading_calendar, "get_market_status", return_value=MarketStatus.OPEN):
-            q_open = svc.get_quote("2330.TWSE")
+            q_open = svc.get_quotes(["2330.TWSE"])["2330.TWSE"]
             assert q_open is not None
             # Misses incremented because (2330.TWSE, 'open') was not in cache
             assert svc.cache_misses == 2
@@ -573,14 +573,14 @@ class TestCalendarProductionWiring:
         # 1. Fetch while unverified
         with patch("app.taiwan.realtime.service.taipei_now", return_value=fake_now), \
              patch("app.taiwan.realtime.mis_provider.taipei_now", return_value=fake_now):
-            svc.get_quote("2330.TWSE")
+            svc.get_quotes(["2330.TWSE"])
         assert svc.cache_misses == 1
 
         # 2. Confirm the day
         cal.add_trading_day(date(2026, 8, 26))
         with patch("app.taiwan.realtime.service.taipei_now", return_value=fake_now), \
              patch("app.taiwan.realtime.mis_provider.taipei_now", return_value=fake_now):
-            svc.get_quote("2330.TWSE")
+            svc.get_quotes(["2330.TWSE"])
         # Cache key changed from (2330.TWSE, scheduled_open_unverified) to (2330.TWSE, open) → miss
         assert svc.cache_misses == 2
 

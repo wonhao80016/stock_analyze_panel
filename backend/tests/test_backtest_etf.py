@@ -3,6 +3,7 @@ import types
 from datetime import date
 
 import polars as pl
+import pytest
 
 from app.backtest.engine import BacktestEngine, PanelCache
 from app.backtest.strategy import StrategyBacktestConfig
@@ -21,8 +22,8 @@ def test_panel_cache_key_isolates_asset_type():
     assert k_stock.startswith("stock:")
 
 
-def test_engine_loads_from_etf_dir(monkeypatch, tmp_path):
-    """asset_type='etf' 时, load_panel 应扫 ETF enriched 目录, 不走 stock 缓存。"""
+def test_engine_reads_etfs_from_the_daily_enriched_dir(monkeypatch, tmp_path):
+    """asset_type='etf' reads the shared daily partitions and skips the stock-only cache."""
     captured = {}
 
     def fake_scan(path, *a, **k):
@@ -39,14 +40,13 @@ def test_engine_loads_from_etf_dir(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.backtest.engine.pl.scan_parquet", fake_scan)
 
-    # get_enriched_range 返回 None: 即便被调也不命中缓存; etf 分支本就不该调它
     repo = types.SimpleNamespace(
         store=types.SimpleNamespace(data_dir=tmp_path),
-        get_enriched_range=lambda *a, **k: None,
+        get_enriched_range=lambda *a, **k: pytest.fail("the etf panel must not use the stock cache"),
     )
     eng = BacktestEngine(repo)
-    eng._load_panel_inner(["510300"], date(2026, 1, 1), date(2026, 1, 2), None, "etf")
-    assert "kline_etf_enriched" in captured["path"]
+    eng._load_panel_inner(["0050.TWSE"], date(2026, 1, 1), date(2026, 1, 2), None, "etf")
+    assert "kline_daily_enriched" in captured["path"]
 
 
 def test_engine_stock_uses_daily_enriched_dir(monkeypatch, tmp_path):
@@ -188,17 +188,3 @@ def test_panel_cache_stats_counts_scans_hits_reuses():
     # 其余 4 线程要么 single-flight 复用, 要么(慢调度下 leader 已写缓存)命中 ——
     # 二者之和恒为 4。不锁定 reuse/hit 具体分配, 避免时序 flaky。
     assert s["reuse_count"] + (s["hit_count"] - 1) == 4, "4 个非 leader 线程应复用或命中"
-
-
-def test_job_key_includes_asset_type_and_is_consistent():
-    """stream 与 cancel 必须用同一 job_key: asset_type 进 key 且相同入参产出相同 key。"""
-    from app.api.backtest import _make_job_key
-
-    args = ("s1", None, None, None, "open_t+1", None, None,
-            0.0002, 5.0, 10, 1.0, 1_000_000.0, "equal", None, None,
-            "position", 5, None, None)
-    k_stock = _make_job_key(*args, asset_type="stock")
-    k_etf = _make_job_key(*args, asset_type="etf")
-    assert k_stock != k_etf
-    # 相同参数(含 asset_type)必须产出相同 key —— stream 端与 cancel 端对齐的前提
-    assert _make_job_key(*args, asset_type="etf") == k_etf

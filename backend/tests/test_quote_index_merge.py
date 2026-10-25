@@ -4,8 +4,8 @@ from datetime import date
 import polars as pl
 import pytest
 
+from app.repository import DataStore, KlineRepository
 from app.taiwan.daily_store import TaiwanDailyStore
-from app.tickflow.repository import DataStore, KlineRepository
 
 DAY = date(2026, 7, 28)
 
@@ -59,31 +59,3 @@ def test_merge_live_enriched_preserves_full_index_partition(tmp_path):
 
     otc = result.filter(pl.col("symbol") == "o00.TPEX")
     assert otc["close"][0] == 260.0, "o00.TPEX 不应被 merge 覆盖"
-
-
-def test_merge_live_daily_preserves_full_index_partition(tmp_path):
-    """日K merge 同样不截断全量分区。"""
-    repo = KlineRepository(DataStore(tmp_path))
-    dt = DAY
-
-    # 盘后管道 flush 写入全量 2 只指数日K
-    full_df = pl.DataFrame([
-        {"symbol": "t00.TWSE", "date": dt, "open": 23000.0, "high": 23010.0,
-         "low": 22990.0, "close": 23000.0, "volume": 1000, "amount": 10000.0},
-        {"symbol": "o00.TPEX", "date": dt, "open": 260.0, "high": 261.0,
-         "low": 259.0, "close": 260.0, "volume": 2000, "amount": 20000.0},
-    ])
-    repo.flush_live_daily_asset("index", full_df)
-
-    # 实时 merge 部分指数
-    partial_df = pl.DataFrame([
-        {"symbol": "t00.TWSE", "date": dt, "open": 23000.0, "high": 23010.0,
-         "low": 22990.0, "close": 23001.0, "volume": 1000, "amount": 10000.0},
-    ])
-    repo.merge_live_daily_asset("index", partial_df)
-
-    out = tmp_path / "kline_index_daily" / f"date={dt.isoformat()}" / "part.parquet"
-    result = pl.read_parquet(out)
-    assert len(result) == 2, f"merge 后分区应有 2 只指数, 实际 {len(result)}"
-    assert result.filter(pl.col("symbol") == "t00.TWSE")["close"][0] == 23001.0
-    assert result.filter(pl.col("symbol") == "o00.TPEX")["close"][0] == 260.0

@@ -13,6 +13,12 @@ from app.services import regime_builder
 from app.strategy.engine import StrategyDef
 
 
+def _write_regime_history(data_dir, rows: pl.DataFrame) -> None:
+    path = regime_builder.regime_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows.sort("date").write_parquet(path)
+
+
 def _strategy(**kwargs) -> StrategyDef:
     defaults = dict(
         meta={"id": "test", "name": "test", "scoring": {}, "params": [], "limit": 100},
@@ -218,7 +224,7 @@ def test_non_matrix_strategy_applies_regime_filter_and_reports_config(tmp_path):
         }
         for offset in range(-1, 3)
     ]).sort(["symbol", "date"])
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
+    _write_regime_history(tmp_path, pl.DataFrame({
         "date": [
             start - timedelta(days=1),
             start,
@@ -272,7 +278,7 @@ def test_regime_filter_matches_raw_five_level_states(tmp_path):
         }
         for offset in range(-1, 3)
     ]).sort(["symbol", "date"])
-    regime_builder.upsert_regime_history(tmp_path, pl.DataFrame({
+    _write_regime_history(tmp_path, pl.DataFrame({
         "date": [
             start - timedelta(days=1),
             start,

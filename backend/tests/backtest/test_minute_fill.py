@@ -141,7 +141,7 @@ def test_load_minute_for_fills_returns_compact_arrays():
     df = _sample_minute_df()
     repo = _FakeRepo(df)
     result = BacktestEngine._load_minute_for_fills(
-        repo, ["000001.SZ"], {"2024-01-02"}, "stock",
+        repo, ["000001.SZ"], {"2024-01-02"},
     )
     assert ("000001.SZ", "2024-01-02") in result
     arr = result[("000001.SZ", "2024-01-02")]
@@ -159,6 +159,6 @@ def test_load_minute_for_fills_handles_missing_dates():
     """缺失的日期分区不报错, 直接跳过。"""
     repo = _FakeRepo(pl.DataFrame())  # 空返回
     result = BacktestEngine._load_minute_for_fills(
-        repo, ["000001.SZ"], {"2024-01-02", "2024-01-03"}, "stock",
+        repo, ["000001.SZ"], {"2024-01-02", "2024-01-03"},
     )
     assert result == {}

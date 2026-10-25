@@ -20,7 +20,7 @@ import pytest
 from app.backtest.engine import MatcherConfig
 from app.backtest.strategy import _configure_taiwan_matcher
 from app.data_providers.registry import get_provider
-from app.taiwan.market_rules import PriceLimitClass, TaxClass, TickSizeClass
+from app.taiwan.market_rules import TaxClass, TickSizeClass
 from app.taiwan.universe import (
     MarketProfileBridge,
     TaiwanSecurityMaster,
@@ -219,7 +219,7 @@ class TestTaiwanSecurityMasterOffline:
         assert tsmc is not None
         assert MarketProfileBridge.get_tax_class(tsmc) == TaxClass.ORDINARY_STOCK
         assert MarketProfileBridge.get_tick_size_class(tsmc) == TickSizeClass.ORDINARY_STOCK
-        assert MarketProfileBridge.get_price_limit_class(tsmc) == PriceLimitClass.ORDINARY_TEN_PERCENT
+        assert MarketProfileBridge.get_price_limit_pct(tsmc) == 0.10
 
         etf = offline_master.get_instrument("0050.TWSE")
         assert etf is not None

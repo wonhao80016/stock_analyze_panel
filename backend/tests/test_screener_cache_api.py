@@ -49,7 +49,6 @@ def test_cached_summary_omits_rows_and_counts_realtime_expirations(monkeypatch, 
     assert "rows" not in payload["results"]["strategy_a"]
 
 
-
 def test_cached_summary_reports_the_cache_write_time_apart_from_realtime_overlays(monkeypatch, tmp_path):
     cached = {
         "as_of": "2026-07-20",
@@ -73,47 +72,6 @@ def test_cached_summary_without_a_cache_file_has_no_write_time(monkeypatch, tmp_
     payload = screener_api.get_cached_summary(_request(tmp_path))
 
     assert payload["cache_updated_at"] is None
-
-def test_cached_result_returns_only_requested_rows_with_ext_and_strategy_membership(monkeypatch, tmp_path):
-    cached = {
-        "as_of": "2026-07-20",
-        "results": {
-            "strategy_a": {
-                "as_of": "2026-07-20",
-                "total": 1,
-                "rows": [{"symbol": "000001.SZ"}],
-            },
-            "strategy_b": {
-                "as_of": "2026-07-20",
-                "total": 2,
-                "rows": [{"symbol": "000001.SZ"}, {"symbol": "600000.SH"}],
-            },
-        },
-        "today_ever_rows": {
-            "strategy_a": {
-                "000001.SZ": {"symbol": "000001.SZ"},
-                "000002.SZ": {"symbol": "000002.SZ"},
-            },
-        },
-        "updated_at": 1,
-    }
-    monkeypatch.setattr(screener_api.strategy_cache, "read_cache", lambda *_args: cached)
-    monkeypatch.setattr(
-        screener_api,
-        "_load_ext_value_maps",
-        lambda *_args: {"concept.concept": {"000001.SZ": "银行", "000002.SZ": "科技"}},
-    )
-
-    payload = screener_api.get_cached_result(
-        "strategy_a",
-        _request(tmp_path),
-        ext_columns="concept.concept",
-    )
-
-    assert payload["result"]["strategy"] == "strategy_a"
-    assert payload["result"]["rows"] == [{"symbol": "000001.SZ", "concept.concept": "银行"}]
-    assert payload["today_ever_rows"]["000002.SZ"]["concept.concept"] == "科技"
-    assert payload["strategy_ids_by_symbol"] == {"000001.SZ": ["strategy_a", "strategy_b"]}
 
 
 def _bars(data_dir, last_close: float, count: int = 25):

@@ -17,20 +17,12 @@ import numpy as np
 import polars as pl
 import pytest
 
-from app.price_limits import (
-    board_limit_pct,
-    numpy_limit_price,
-    price_limit_pct,
-    taiwan_price_limit_pct,
-)
 from app.taiwan.market_rules import (
-    EXAMPLE_BROKER_MIN_COMMISSION,
     BacktestMode,
     LotModel,
     PriceLimitClass,
     PriceLimitModel,
     SecuritiesTaxModel,
-    SettlementModel,
     TaiwanMarketProfile,
     TaxClass,
     TickSizeClass,
@@ -52,16 +44,6 @@ class TestCommissionModel:
         # Trade value 1,000 TWD -> 1,000 * 0.001425 = 1.425 TWD
         assert cost.calc_commission(1_000.0) == pytest.approx(1.425)
 
-    def test_explicit_broker_configuration_with_20_twd_floor(self):
-        """Explicit broker profile with 20 TWD minimum charge."""
-        cost = TradingCostModel(
-            commission_rate=0.001425,
-            discount=0.6,
-            minimum_commission=EXAMPLE_BROKER_MIN_COMMISSION,
-        )
-        assert cost.calc_commission(100_000.0) == pytest.approx(85.5)
-        # Small trade floored at 20 TWD
-        assert cost.calc_commission(1_000.0) == 20.0
 
     def test_broker_discount_28pct(self):
         cost = TradingCostModel(
@@ -212,18 +194,6 @@ class TestPriceLimitModelAndDelegation:
     def test_model_get_limit_pct_no_limit(self):
         assert PriceLimitModel.get_limit_pct(PriceLimitClass.NO_LIMIT) is None
 
-    def test_price_limits_py_delegation_ordinary_stock(self):
-        # Ordinary stock 2330.TWSE -> 10%
-        assert taiwan_price_limit_pct("2330.TWSE") == 0.10
-        assert board_limit_pct("2330.TWSE") == 0.10
-        assert price_limit_pct("2330.TWSE", date(2026, 8, 28)) == 0.10
-
-    def test_price_limits_py_delegation_no_limit_etf(self):
-        # Foreign ETF / Bond ETF with NO_LIMIT class must return None, NOT 10%
-        assert taiwan_price_limit_pct("00646.TWSE", limit_class=PriceLimitClass.NO_LIMIT) is None
-        assert board_limit_pct("00646.TWSE", limit_class=PriceLimitClass.NO_LIMIT) is None
-        assert price_limit_pct("00646.TWSE", date(2026, 8, 28), limit_class=PriceLimitClass.NO_LIMIT) is None
-
 
 # ── 6. Settlement and Same-Day Exit Decoupling ─────────────────
 
@@ -231,9 +201,6 @@ class TestPriceLimitModelAndDelegation:
 class TestSettlementAndSameDayExit:
     """Verify settlement cycle is decoupled from position exit rules."""
 
-    def test_settlement_model_is_t_plus_2(self):
-        settlement = SettlementModel()
-        assert settlement.settlement_days == 2
 
     def test_standard_cash_disallows_same_day_exit(self):
         profile = TaiwanMarketProfile(mode=BacktestMode.STANDARD_CASH)
@@ -283,17 +250,6 @@ def _polars_limits(refs, pct, is_etf, trade_date=None):
     return list(zip(out["up"].to_list(), out["down"].to_list(), strict=True))
 
 
-def _numpy_limits(refs, pct, is_etf, trade_date=None):
-    pcts = np.full(len(refs), np.nan if pct is None else pct)
-    up, down = PriceLimitModel.numpy_limit_prices(
-        refs, pcts, np.full(len(refs), is_etf), trade_date=trade_date
-    )
-    return [
-        (None if np.isnan(u) else float(u), None if np.isnan(d) else float(d))
-        for u, d in zip(up, down, strict=True)
-    ]
-
-
 _LIMIT_CASES = [
     pytest.param(5180.0, False, 5695.0, 4665.0, id="2454-5180"),
     pytest.param(971.0, False, 1065.0, 874.0, id="6488-971"),
@@ -335,7 +291,7 @@ _TICK_BOUNDARIES = [
 
 
 class TestSharedTickLadder:
-    """Scalar, Polars and NumPy entry points share one ladder and one rounding rule."""
+    """Scalar and Polars entry points share one ladder and one rounding rule."""
 
     @pytest.mark.parametrize("dtype", [np.float32, np.float64])
     @pytest.mark.parametrize("ref,is_etf,expected_up,expected_down", _LIMIT_CASES)
@@ -344,14 +300,10 @@ class TestSharedTickLadder:
         expected = [(expected_up, expected_down)]
         assert _scalar_limits(refs, 0.10, is_etf) == expected
         assert _polars_limits(refs, 0.10, is_etf) == expected
-        assert _numpy_limits(refs, 0.10, is_etf) == expected
 
-    def test_2454_differs_from_a_share_cent_rounding(self):
+    def test_2454_limits_round_to_the_tick_ladder(self):
         refs = np.array([5180.0])
-        pcts = np.array([0.10])
-        assert numpy_limit_price(refs, pcts, up=True).tolist() == [5698.0]
-        assert numpy_limit_price(refs, pcts, up=False).tolist() == [4662.0]
-        assert _numpy_limits(refs, 0.10, False) == [(5695.0, 4665.0)]
+        assert _polars_limits(refs, 0.10, False) == [(5695.0, 4665.0)]
 
     @pytest.mark.parametrize("dtype", [np.float32, np.float64])
     @pytest.mark.parametrize("price,stock_tick,etf_tick", _TICK_BOUNDARIES)
@@ -368,7 +320,6 @@ class TestSharedTickLadder:
         assert frame["price"].dtype == _POLARS_FLOAT[dtype]
         assert scalar == expected
         assert polars.to_series().to_list() == expected
-        assert TickSizeModel.numpy_tick_size(prices, is_etf).tolist() == expected
 
     def test_trade_date_none_matches_current_session(self):
         refs = np.array([5180.0, 111.85, 9.1, 45.5, 910.0, 1111.0])
@@ -376,12 +327,6 @@ class TestSharedTickLadder:
         for is_etf in (False, True):
             assert _scalar_limits(refs, 0.10, is_etf) == _scalar_limits(refs, 0.10, is_etf, today)
             assert _polars_limits(refs, 0.10, is_etf) == _polars_limits(refs, 0.10, is_etf, today)
-            assert _numpy_limits(refs, 0.10, is_etf) == _numpy_limits(refs, 0.10, is_etf, today)
-            flags = np.full(refs.size, is_etf)
-            assert (
-                TickSizeModel.numpy_tick_size(refs, flags).tolist()
-                == TickSizeModel.numpy_tick_size(refs, flags, trade_date=today).tolist()
-            )
             assert [TickSizeModel.get_tick_size(float(p), _tick_class(is_etf)) for p in refs] == [
                 TickSizeModel.get_tick_size(float(p), _tick_class(is_etf), trade_date=today) for p in refs
             ]
@@ -390,14 +335,11 @@ class TestSharedTickLadder:
         refs = np.array([100.0, 5180.0])
         assert _scalar_limits(refs, None, False) == [(None, None), (None, None)]
         assert _polars_limits(refs, None, False) == [(None, None), (None, None)]
-        assert _numpy_limits(refs, None, False) == [(None, None), (None, None)]
 
     @pytest.mark.parametrize("pct,is_etf", [(0.10, False), (0.10, True), (0.20, True)])
     def test_vector_interfaces_match_scalar_on_dense_price_grid(self, pct, is_etf):
         refs = np.concatenate([np.arange(1, 120_001) * 0.01, 1200.0 + np.arange(0, 96_001) * 0.05])
-        scalar = _scalar_limits(refs, pct, is_etf)
-        assert _numpy_limits(refs, pct, is_etf) == scalar
-        assert _polars_limits(refs, pct, is_etf) == scalar
+        assert _polars_limits(refs, pct, is_etf) == _scalar_limits(refs, pct, is_etf)
 
 
 def test_enriched_limit_signals_use_the_shared_ladder():
@@ -450,7 +392,6 @@ def test_pick_performance_limit_up_uses_the_shared_ladder():
 def test_reference_noise_does_not_move_the_limit_a_tick(refs, is_etf, expected):
     assert _scalar_limits(refs, 0.10, is_etf) == expected
     assert _polars_limits(refs, 0.10, is_etf) == expected
-    assert _numpy_limits(refs, 0.10, is_etf) == expected
 
 
 def test_vector_limits_of_degenerate_references():
@@ -461,19 +402,12 @@ def test_vector_limits_of_degenerate_references():
     assert all(np.isnan(v) for v in rows[2])
     assert rows[3] == (None, None)
 
-    np_up, np_down = PriceLimitModel.numpy_limit_prices(np.array([0.0, -1.0, np.nan]), 0.10, False)
-    assert np_up[:2].tolist() == [0.0, -1.1]
-    assert np_down[:2].tolist() == [0.01, 0.01]
-    assert np.isnan(np_up[2]) and np.isnan(np_down[2])
-
 
 def test_trade_date_accepts_a_datetime_and_rejects_other_types():
     moment = datetime(2026, 10, 6, 13, 30)
     assert TickSizeModel.get_tick_size(1000.0, trade_date=moment) == 5.0
     assert PriceLimitModel.calc_limits_for_pct(5180.0, 0.10, trade_date=moment) == (5695.0, 4665.0)
     assert _polars_limits(np.array([5180.0]), 0.10, False, moment) == [(5695.0, 4665.0)]
-    assert _numpy_limits(np.array([5180.0]), 0.10, False, moment) == [(5695.0, 4665.0)]
-    assert TickSizeModel.numpy_tick_size(np.array([1000.0]), False, trade_date=moment).tolist() == [5.0]
 
     for bad in ("2026-10-06", np.datetime64("2026-10-06"), 20261006):
         with pytest.raises(TypeError, match="trade_date"):
@@ -482,5 +416,3 @@ def test_trade_date_accepts_a_datetime_and_rejects_other_types():
             TickSizeModel.get_tick_size(-1.0, trade_date=bad)
         with pytest.raises(TypeError, match="trade_date"):
             TickSizeModel.polars_tick_size(pl.col("p"), pl.lit(False), trade_date=bad)
-        with pytest.raises(TypeError, match="trade_date"):
-            PriceLimitModel.numpy_limit_prices(np.array([5180.0]), 0.10, False, trade_date=bad)

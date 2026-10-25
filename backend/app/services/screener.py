@@ -23,9 +23,9 @@ from app.enriched_generation import (
     enriched_publication_incomplete,
 )
 from app.parquet import storage_only_rows
-from app.repository import HISTORY_WARMUP_SESSIONS, read_enriched_window
+from app.repository import HISTORY_WARMUP_SESSIONS, KlineRepository, read_enriched_window
 from app.services.strategy_inputs import CURRENT, HISTORY, InputStatus
-from app.tickflow.repository import KlineRepository
+from app.taiwan.enriched_reader import ENRICHED_DIR_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +202,12 @@ def taiwan_symbol_asset_types(
     return _SecurityMasterAssetTypes()
 
 
+def taiwan_etf_symbols() -> frozenset[str]:
+    """Every symbol the security master cache types as an ETF, delisted ones included."""
+    types = _SecurityMasterAssetTypes()
+    return frozenset(symbol for symbol in types if types[symbol] == "etf")
+
+
 @dataclass
 class ScreenerResult:
     as_of: date
@@ -215,8 +221,12 @@ class ScreenerService:
     def __init__(self, repo: KlineRepository, asset_type: str = "stock") -> None:
         self.repo = repo
         self.asset_type = asset_type
-        from app.tickflow.repository import enriched_dirname
-        self._enriched_dirname = enriched_dirname(asset_type)
+
+    def _asset_rows(self, df: pl.DataFrame) -> pl.DataFrame:
+        """*df* narrowed to this service's asset type: ETF rows share the stock partitions."""
+        if self.asset_type != "etf" or df.is_empty():
+            return df
+        return df.filter(pl.col("symbol").is_in(sorted(taiwan_etf_symbols())))
 
     def _raise_if_publishing(self) -> None:
         """Refuse to read partitions while an enriched rewrite is half done; they then mix price scales."""
@@ -244,6 +254,7 @@ class ScreenerService:
         """
         published = self._published_day(target_date)
         if published is not None:
+            published = self._asset_rows(published)
             df_i = self.repo.get_instruments_asset(self.asset_type)
             if not df_i.is_empty() and "name" not in published.columns:
                 inst_cols = [c for c in _INSTRUMENT_COLUMNS if c in df_i.columns]
@@ -283,7 +294,7 @@ class ScreenerService:
         self._raise_if_publishing()
 
         # 历史日期: 从 parquet 读取 14 列, 即时计算指标 (慢路径)
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        enriched_dir = self.repo.store.data_dir / ENRICHED_DIR_NAME
         ds = target_date.isoformat()
         target_parquet = enriched_dir / f"date={ds}" / "part.parquet"
 
@@ -303,7 +314,7 @@ class ScreenerService:
             return df
 
         # 即时计算指标: 需要加载历史窗口作 warmup
-        df_full = self._compute_enriched_full(df, target_date)
+        df_full = self._asset_rows(self._compute_enriched_full(df, target_date))
         _report_input(CURRENT, "ok", df_full, target_date, overwrite=False)
         return df_full
 
@@ -317,7 +328,7 @@ class ScreenerService:
                 data_dir, self.asset_type
             ):
                 return None
-            partition = data_dir / self._enriched_dirname / f"date={target_date.isoformat()}"
+            partition = data_dir / ENRICHED_DIR_NAME / f"date={target_date.isoformat()}"
             path = partition / "part.parquet"
             if not path.exists() or not INDICATOR_COLUMNS.issubset(pl.read_parquet_schema(path)):
                 return None
@@ -331,7 +342,7 @@ class ScreenerService:
 
     def _first_of_last_sessions(self, target_date: date, sessions: int) -> date | None:
         """First of the last ``sessions`` stored sessions through target_date; None if fewer are stored."""
-        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        enriched_dir = self.repo.store.data_dir / ENRICHED_DIR_NAME
         stored: list[date] = []
         for path in enriched_dir.glob("date=*/part.parquet"):
             try:
@@ -348,7 +359,7 @@ class ScreenerService:
     def _published_limit_flags(self, as_of: date) -> dict[str, dict[str, Any]] | None:
         """Limit flags of each symbol in the published partition of as_of; None without one."""
         try:
-            enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+            enriched_dir = self.repo.store.data_dir / ENRICHED_DIR_NAME
             path = enriched_dir / f"date={as_of.isoformat()}" / "part.parquet"
             if not path.exists():
                 return None
@@ -371,9 +382,7 @@ class ScreenerService:
         from app.indicators.pipeline import compute_limit_signals
 
         def compute(frame: pl.DataFrame) -> pl.DataFrame:
-            return compute_limit_signals(
-                frame, instruments, historical_shares=self.repo.get_historical_shares()
-            )
+            return compute_limit_signals(frame, instruments)
 
         return compute
 
@@ -386,7 +395,7 @@ class ScreenerService:
         try:
             df_result = read_enriched_window(
                 self.repo.store.data_dir,
-                self._enriched_dirname,
+                ENRICHED_DIR_NAME,
                 target_date,
                 target_date,
                 limit_signals=limit_signals,
@@ -451,7 +460,7 @@ class ScreenerService:
         try:
             df_full = read_enriched_window(
                 self.repo.store.data_dir,
-                self._enriched_dirname,
+                ENRICHED_DIR_NAME,
                 self._first_of_last_sessions(target_date, lookback_days + 1),
                 target_date,
                 limit_signals=self._limit_signals(instruments),
@@ -461,6 +470,7 @@ class ScreenerService:
             _report_input(HISTORY, "error", None, target_date)
             return pl.DataFrame()
 
+        df_full = self._asset_rows(df_full)
         if df_full.is_empty():
             _report_input(HISTORY, "empty", None, target_date)
             return pl.DataFrame()
@@ -541,7 +551,7 @@ class ScreenerService:
         holding only the handful of watchlist symbols that ticked. Screening off
         that returns nothing at all, which is how this read silently broke.
         """
-        if self.asset_type != "stock":
+        if self.asset_type == "index":
             _, d = self.repo.get_enriched_latest_asset(self.asset_type)
             return d
         d = self.repo.taiwan_official_latest_date()

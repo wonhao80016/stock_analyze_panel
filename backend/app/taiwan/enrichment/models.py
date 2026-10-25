@@ -5,8 +5,6 @@ Covers:
   - StalePolicy: Dataset-specific freshness policies (Quotes vs Chip vs Margin vs Index).
   - InstitutionalFlow: Three Major Institutional Investors (Foreign, Investment Trust, Dealer).
   - MarginTrading: Margin Trading & Short Selling with strict unit normalization (shares).
-  - MarketQuote: Official closing snapshot / quote with explicit fallback metadata.
-  - MarketIndex: TAIEX and TPEx benchmark market index series.
   - EtfCategory: Hardened ETF classification (domestic equity, foreign, bond, leveraged, inverse, futures, unknown).
 """
 from __future__ import annotations
@@ -102,7 +100,6 @@ class SourceMeta:
         return self.fetched_at
 
 
-
 @dataclass(frozen=True)
 class InstitutionalFlow:
     """Standardized Three Major Institutional Investors trading record.
@@ -180,50 +177,4 @@ class MarginTrading:
         res["trade_date"] = self.trade_date.isoformat()
         if self.meta:
             res["meta"] = self.meta.to_dict()
-        return res
-
-
-@dataclass(frozen=True)
-class MarketQuote:
-    """Official Taiwan market snapshot / closing quote with provenance."""
-    symbol: str
-    name: str
-    price: float
-    open: float
-    high: float
-    low: float
-    previous_close: float
-    change: float
-    change_pct: float
-    volume: int                       # shares
-    amount: float                     # TWD
-    trade_time: datetime
-    meta: SourceMeta
-
-    def to_dict(self) -> dict[str, Any]:
-        res = asdict(self)
-        res["trade_time"] = self.trade_time.isoformat()
-        res["meta"] = self.meta.to_dict()
-        return res
-
-
-@dataclass(frozen=True)
-class MarketIndex:
-    """Taiwan market benchmark index series point (TAIEX, TPEx Index)."""
-    symbol: str                       # "TAIEX" | "TPEX_INDEX"
-    name: str                         # "發行量加權股價指數" | "櫃買指數"
-    date: date
-    open: float
-    high: float
-    low: float
-    close: float
-    previous_close: float
-    change: float
-    change_pct: float
-    meta: SourceMeta
-
-    def to_dict(self) -> dict[str, Any]:
-        res = asdict(self)
-        res["date"] = self.date.isoformat()
-        res["meta"] = self.meta.to_dict()
         return res

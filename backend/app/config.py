@@ -6,7 +6,7 @@ import sys
 from datetime import time
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ── 运行环境检测 ──────────────────────────────────────────
@@ -82,9 +82,6 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
-
-    # TickFlow
-    tickflow_api_key: str = Field(default="", description="留空启用 free 模式")
 
     # AI
     ai_provider: str = "openai_compat"

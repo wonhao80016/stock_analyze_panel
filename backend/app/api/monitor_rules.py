@@ -232,9 +232,7 @@ def get_options(request: Request):
             {"key": "exit", "label": "出场"},
             {"key": "both", "label": "出入都报"},
         ],
-        "intraday_signal_support": intraday_monitor_support(
-            getattr(request.app.state, "capabilities", None),
-        ),
+        "intraday_signal_support": intraday_monitor_support(),
         "sector_targets": sector_targets,
     }
 
@@ -257,7 +255,7 @@ def list_rules(request: Request):
     ]
     from app.services.kline_sync import intraday_monitor_support
 
-    support = intraday_monitor_support(getattr(request.app.state, "capabilities", None))
+    support = intraday_monitor_support()
     intraday_rules = [
         rule for rule in rules
         if rule.get("enabled", True) and uses_intraday_signals(rule)
@@ -387,7 +385,7 @@ def save_rule(req: RuleModel, request: Request):
     if rule.get("enabled", True) and uses_intraday_signals(rule):
         from app.services.kline_sync import intraday_monitor_support
 
-        support = intraday_monitor_support(getattr(request.app.state, "capabilities", None))
+        support = intraday_monitor_support()
         if not support["available"]:
             raise HTTPException(status_code=403, detail=str(support["reason"]))
         symbols = set(str(symbol) for symbol in rule.get("symbols", []) if symbol)

@@ -641,27 +641,6 @@ def _tick_snapper(df: pl.DataFrame, tick_class: TickSizeClass | None):
     return snap
 
 
-def summarize_levels(levels: dict[str, list[dict]], close: float | None) -> str:
-    """生成给 AI 提示词的价位摘要文本(紧凑,供上下文)。"""
-    if not close:
-        return "無價位數據"
-    parts: list[str] = []
-    # 当前价
-    parts.append(f"當前價 {close:.2f}")
-    # 每组取前 2 个最相关的(距当前价近的优先)
-    for key, label in LEVEL_TYPES.items():
-        pts = levels.get(key, [])
-        if not pts:
-            continue
-        # 按距当前价排序,取前 2
-        ranked = sorted(pts, key=lambda p: abs(p["value"] - close))[:2]
-        desc = "、".join(
-            f"{p['label']}={p['value']}" for p in ranked
-        )
-        parts.append(f"{label}: {desc}")
-    return " · ".join(parts)
-
-
 # ================================================================
 # 内部工具
 # ================================================================

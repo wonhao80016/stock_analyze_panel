@@ -12,12 +12,11 @@ from fastapi import HTTPException
 from app.api import kline as kline_api
 
 
-def _request(repo=None, capset=None):
+def _request(repo=None):
     return SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
                 repo=repo or MagicMock(),
-                capabilities=capset or MagicMock(),
             )
         )
     )
@@ -88,20 +87,17 @@ def test_minute_range_does_not_read_stock_store_for_index():
 def test_sync_minute_single_uses_requested_days(monkeypatch):
     repo = MagicMock()
     repo.resolve_asset_type.return_value = "stock"
-    capset = MagicMock()
     sync = MagicMock(return_value=2400)
-    refresh = MagicMock()
     monkeypatch.setattr(kline_api.kline_sync, "sync_and_persist_minute", sync)
-    monkeypatch.setattr("app.jobs.daily_pipeline._refresh_single_view", refresh)
 
     result = asyncio.run(kline_api.sync_minute_single(
-        _request(repo, capset),
+        _request(repo),
         {"symbol": "600000.SH", "days": 10},
     ))
 
     assert result["rows"] == 2400
-    sync.assert_called_once_with(["600000.SH"], repo, capset, days=10, force_full_days=True)
-    refresh.assert_called_once_with(repo, "kline_minute")
+    sync.assert_called_once_with(["600000.SH"], repo, days=10, force_full_days=True)
+    repo.refresh_view.assert_called_once_with("kline_minute")
 
 
 def test_sync_minute_single_rejects_invalid_days():

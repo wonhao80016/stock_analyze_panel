@@ -241,7 +241,7 @@ def test_amount_ratio_fields_are_computed_from_a_quoted_amount(live_root, quote_
 
 
 def test_a_forced_live_write_keeps_the_estimate_flag_out_of_the_partition(live_root, monkeypatch):
-    from app.tickflow.repository import DataStore, KlineRepository
+    from app.repository import DataStore, KlineRepository
 
     rows = _live_rows(live_root)
     repo = KlineRepository(DataStore(live_root))

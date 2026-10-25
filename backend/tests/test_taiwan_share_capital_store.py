@@ -155,11 +155,11 @@ def test_the_current_count_never_reaches_a_historical_date():
     from app.share_capital import apply_historical_float_shares
 
     rows = pl.DataFrame({
-        "symbol": ["2330.TWSE", "2330.TWSE", "600000.SH"],
-        "date": [date(2026, 9, 22), date(2026, 9, 18), date(2026, 9, 18)],
-        "float_shares": [25930380458.0, 25930380458.0, 1.0],
+        "symbol": ["2330.TWSE", "2330.TWSE"],
+        "date": [date(2026, 9, 22), date(2026, 9, 18)],
+        "float_shares": [25930380458.0, 25930380458.0],
     })
-    out = apply_historical_float_shares(rows, None, today=date(2026, 9, 22))
+    out = apply_historical_float_shares(rows, today=date(2026, 9, 22))
     got = {
         (s, d): v
         for s, d, v in zip(out["symbol"], out["date"], out["float_shares"])
@@ -168,8 +168,6 @@ def test_the_current_count_never_reaches_a_historical_date():
     assert got[("2330.TWSE", date(2026, 9, 22))] == 25930380458.0
     # Same Taiwan symbol, previous session: the denominator is withdrawn.
     assert got[("2330.TWSE", date(2026, 9, 18))] is None
-    # Non-Taiwan markets have a point-in-time source, so they keep theirs.
-    assert got[("600000.SH", date(2026, 9, 18))] == 1.0
 
 
 def test_the_enriched_publish_asks_the_store_for_its_denominator(tmp_path):
@@ -246,10 +244,10 @@ def test_the_daily_update_refreshes_share_capital_before_publishing():
 
 
 def test_a_broadcast_share_count_never_prices_Taiwan_history():
-    """The backtest matrix does not go through apply_historical_float_shares.
+    """The backtest matrix never derives turnover from the instruments' float_shares.
 
     A vector float_shares is one current count stretched over the whole time axis,
-    so letting it through would price every past bar with a count announced later.
+    so deriving from it would price every past bar with a count announced later.
     """
     import numpy as np
 

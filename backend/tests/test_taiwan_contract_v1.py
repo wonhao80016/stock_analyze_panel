@@ -30,7 +30,7 @@ def test_taiwan_market_contract_v1_tax_windows():
         "ordinary_stock": (TaxClass.ORDINARY_STOCK, False),
         "day_trade_stock": (TaxClass.ORDINARY_STOCK, True),
         "domestic_etf": (TaxClass.DOMESTIC_ETF, False),
-        "foreign_component_etf": (TaxClass.FOREIGN_ETF, False),
+        "foreign_component_etf": (TaxClass.DOMESTIC_ETF, False),
         "passive_bond_etf": (TaxClass.BOND_ETF, False),
         "tdr": (TaxClass.TDR, False),
         "tdr_day_trade": (TaxClass.TDR, True),

@@ -27,12 +27,17 @@ _REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8, 1.0)
 _WINDOWS_FILE_IN_USE = frozenset({5, 32})
 
 
+def _dataset(asset_type: str) -> str:
+    # Taiwan ETF rows are published inside the stock enriched partitions, under its generation.
+    return "stock" if asset_type == "etf" else asset_type
+
+
 def _marker_path(data_dir: Path, asset_type: str) -> Path:
-    return Path(data_dir) / f".matrix_generation_{asset_type}.json"
+    return Path(data_dir) / f".matrix_generation_{_dataset(asset_type)}.json"
 
 
 def _writer_lock(data_dir: Path, asset_type: str) -> threading.RLock:
-    key = (str(Path(data_dir).resolve()), asset_type)
+    key = (str(Path(data_dir).resolve()), _dataset(asset_type))
     with _WRITER_LOCKS_GUARD:
         return _WRITER_LOCKS.setdefault(key, threading.RLock())
 
@@ -126,7 +131,7 @@ def _try_lock_file(stream: BinaryIO) -> None:
 
 @contextmanager
 def _exclusive_generation_lock(data_dir: Path, asset_type: str) -> Iterator[None]:
-    lock_path = Path(data_dir) / f".matrix_generation_{asset_type}.lock"
+    lock_path = Path(data_dir) / f".matrix_generation_{_dataset(asset_type)}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with (
         _writer_lock(data_dir, asset_type),

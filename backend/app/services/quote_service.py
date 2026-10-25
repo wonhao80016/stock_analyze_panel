@@ -4,17 +4,15 @@
 
 架构:
   - A background thread polls Taiwan official quotes (watchlist, monitor-rule symbols, indices) or a custom realtime source
-  - 拉取行情 → 写 kline_daily (不复权) + 增量计算 enriched → 写盘 + 更新缓存
+  - 拉取行情 → 增量计算 enriched → 更新缓存 (Taiwan daily bars are owned by TaiwanDailyStore)
   - _enriched_cache 是唯一的盘中数据源 (OHLCV + 全套技术指标)
-  - _live_agg_cache 是递推状态 (只加载一次, 盘中不变)
 
 数据流 (每轮 ~15s):
   1. API 拉取 → raw_records (临时变量)
-  2. raw_records → 写 kline_daily (不复权原始价格)
-  3. raw_records → 更新 _enriched_cache 的 OHLCV
-  4. 增量计算 enriched 指标 (~50ms)
-  5. 写 kline_daily_enriched + 替换 _enriched_cache
-  6. 通知 SSE
+  2. raw_records → 更新 _enriched_cache 的 OHLCV
+  3. Taiwan rows get today's enriched indicators from the publish pipeline (TaiwanLiveEnriched)
+  4. 替换 _enriched_cache
+  5. 通知 SSE
 
 生命周期:
   - 服务启动时读取 preferences，若 enabled 则自动启动线程
@@ -33,7 +31,6 @@ from datetime import time as dt_time
 import polars as pl
 
 from app.market_time import cn_now, cn_today
-from app.parquet import scan_daily_parquet
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 from app.volume_units import TAIWAN_SUFFIXES
 
@@ -145,12 +142,28 @@ def _positive(value: object) -> bool:
 
 
 def _monitor_name_map(repo) -> dict[str, str]:
-    """监控回填用的 symbol → name 映射 (股票 + ETF + 指数, 股票优先)。
+    """监控回填用的 symbol → name 映射 (股票 + 指数, 股票优先)。
 
-    走 repo.get_name_map() 的进程内 memo (三份 instruments 维表刷新时失效),
+    走 repo.get_name_map() 的进程内 memo (两份 instruments 维表刷新时失效),
     避免每轮监控对 ~7000 行维表 iter_rows 重建。过滤空名称与旧行为一致。
     """
     return {s: n for s, n in repo.get_name_map().items() if n}
+
+
+def _taiwan_etf_rows(enriched: pl.DataFrame) -> pl.DataFrame:
+    """The rows of *enriched* whose symbol the security master lists as an ETF."""
+    if enriched.is_empty() or "symbol" not in enriched.columns:
+        return pl.DataFrame()
+    from app.taiwan.universe import get_security_master
+
+    master = get_security_master()
+    etfs = [
+        symbol
+        for symbol in enriched["symbol"].unique().to_list()
+        if (instrument := master.get_instrument(symbol)) is not None
+        and instrument.instrument_type == "etf"
+    ]
+    return enriched.filter(pl.col("symbol").is_in(etfs))
 
 
 def _taiwan_live_rows(
@@ -223,7 +236,6 @@ class QuoteService:
             self._fetched_at = 0.0      # 拉取完成的 Unix 时间戳 (毫秒)
         self._symbol_count: int = 0
         self._index_symbol_count: int = 0
-        self._etf_symbol_count: int = 0
         self._index_quotes_cache: pl.DataFrame | None = None
         # Today's Taiwan index rows for the monitor's index round; held in memory only, never stored.
         self._taiwan_index_live: pl.DataFrame | None = None
@@ -459,7 +471,6 @@ class QuoteService:
 
     def status(self) -> dict:
         """返回行情服务状态。"""
-        from app.services import preferences
         age = (time.perf_counter() - self._fetch_time) * 1000 if self._fetch_time else -1
         mode = self.realtime_mode()
         phase = self._market_phase()
@@ -472,11 +483,9 @@ class QuoteService:
             "paused": self._paused,
             "mode": mode,
             "realtime_allowed": mode != "none",
-            "watchlist_symbol_count": len(preferences.get_realtime_watchlist_symbols()),
             "interval_s": self._interval,
             "symbol_count": self._symbol_count,
             "index_symbol_count": self._index_symbol_count,
-            "etf_symbol_count": self._etf_symbol_count,
             "quote_age_ms": round(age, 0) if age >= 0 else None,
             # Regular session only; polling_window is reported separately so the
             # pre-open warm-up and the post-close capture do not read as "trading".
@@ -778,7 +787,7 @@ class QuoteService:
 
         Same provider, realtime gate, change_pct scale and indicator pipeline as the
         poll, so the row matches what the symbol would show once it joins the pool.
-        Without the prepared history (Taiwan) or recursive state it is the bare OHLCV bar.
+        Without the prepared Taiwan history, or for a non-Taiwan symbol, it is the bare OHLCV bar.
         """
         from app.services import preferences
 
@@ -794,21 +803,16 @@ class QuoteService:
             return None
         live_bar = {**bar.row(0, named=True), "change_pct": records[0].get("change_pct")}
         try:
-            if bar.filter(_is_taiwan_symbol()).is_empty():
-                prev_enriched, _ = self._repo.get_enriched_latest()
-                enriched = self._enrich_today_incremental(
-                    bar, self._build_quote_extra(records), self._repo.get_live_agg(), prev_enriched,
-                )
-            else:
-                enriched = _taiwan_live_rows(self._repo, bar, self._build_quote_extra(records))
+            enriched = _taiwan_live_rows(
+                self._repo, bar.filter(_is_taiwan_symbol()), self._build_quote_extra(records)
+            )
         except Exception as e:
             logger.debug("On-demand indicators failed for %s: %s", symbol, e)
             return live_bar
         return enriched.row(0, named=True) if not enriched.is_empty() else live_bar
 
     def _process_full_market_records(self, records: list[dict], *, t0: float, now_ts: float) -> None:
-        """把全市场 records 写盘并增量计算 enriched。"""
-        from app.services import preferences
+        """把全市场 records 增量计算为 enriched 并评估监控。"""
         # TaiwanHybridProvider.get_realtime() falls back to official.fetch_quote /
         # get_daily (status != "realtime") when no live quote exists; that batch
         # must not be evaluated by monitor rules (see _evaluate_monitors), so the
@@ -816,22 +820,13 @@ class QuoteService:
         self._quote_source_realtime = self._records_realtime_status(records)
         self._track_closing_quotes(records)
         all_index_symbols = self._index_symbol_set()
-        all_etf_symbols = set()
-        if self._repo:
-            etf_inst = self._repo.get_etf_instruments()
-            if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
-                all_etf_symbols = set(etf_inst["symbol"].cast(pl.Utf8).to_list())
 
         if not records:
             logger.warning("行情数据为空")
             return
 
         index_records = [r for r in records if r.get("symbol") in all_index_symbols]
-        etf_records = [r for r in records if r.get("symbol") in all_etf_symbols]
-        stock_records = [
-            r for r in records
-            if r.get("symbol") not in all_index_symbols and r.get("symbol") not in all_etf_symbols
-        ]
+        stock_records = [r for r in records if r.get("symbol") not in all_index_symbols]
 
         fetch_ms = (time.perf_counter() - t0) * 1000
         fetched_at = time.time() * 1000
@@ -842,56 +837,25 @@ class QuoteService:
             self._fetched_at = fetched_at
             self._symbol_count = len(stock_records)
             self._index_symbol_count = len(index_records)
-            self._etf_symbol_count = len(etf_records)
             # A round without index quotes keeps the last ones instead of blanking the index cache.
             if index_records:
                 self._index_quotes_cache = self._build_index_quotes(index_records)
         self._taiwan_index_live = self._taiwan_index_rows(index_records)
 
         _persist_last_fetch(fetched_at)
-        logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
+        logger.info("行情刷新: %d 只股票, %d 只指数, 耗时 %.0fms", len(stock_records), len(index_records), fetch_ms)
 
         # Only realtime quotes become today's bar (see _records_datable_today); the
-        # quote cache above still keeps the others for display.
+        # quote cache above still keeps the others for display. Taiwan bars are
+        # owned by TaiwanDailyStore, so nothing here is written to a daily table.
         daily_df = self._build_daily(self._records_datable_today(stock_records))
-        etf_daily_df = self._build_daily(self._records_datable_today(etf_records))
-        # Taiwan bars are owned by TaiwanDailyStore; kline_daily/kline_etf_daily take non-Taiwan rows only.
-        for asset_type, bars in (("stock", daily_df), ("etf", etf_daily_df)):
-            legacy_bars = bars.filter(~_is_taiwan_symbol()) if not bars.is_empty() else bars
-            if legacy_bars.is_empty() or not self._repo:
-                continue
-            try:
-                self._repo.flush_live_daily_asset(asset_type, legacy_bars)
-            except Exception as e:
-                logger.warning("live %s daily write failed: %s", asset_type, e)
 
         # ---- 构建 API 直接值的补充表 (不写 daily, 只用于 enriched 计算) ----
         quote_extra = self._build_quote_extra(stock_records)
-        etf_quote_extra = self._build_quote_extra(etf_records)
 
-        # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
+        # ---- Taiwan enriched rows + 更新缓存 ----
         if not daily_df.is_empty() and self._repo:
-            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock")
-        if not etf_daily_df.is_empty() and self._repo:
-            self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
-        # ---- 指数: 仅有指数监控规则时才写盘 (无规则零成本) ----
-        # mode=all (完整 CN_Index universe) → flush 覆盖; mode=core (部分标的) → merge 不截断分区
-        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-        if engine and engine.has_asset_rules("index") and self._repo:
-            index_daily_df = self._build_daily(self._records_datable_today(index_records))
-            if not index_daily_df.is_empty():
-                # Taiwan index rows feed the index round from memory (_taiwan_index_live) instead.
-                index_daily_df = index_daily_df.filter(~_is_taiwan_symbol())
-            if not index_daily_df.is_empty():
-                use_flush = preferences.get_realtime_index_mode() == "all"
-                try:
-                    if use_flush:
-                        self._repo.flush_live_daily_asset("index", index_daily_df)
-                    else:
-                        self._repo.merge_live_daily_asset("index", index_daily_df)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("指数日K写盘失败: %s", e)
-                self._flush_live_enriched(index_daily_df, self._build_quote_extra(index_records), asset_type="index", merge=not use_flush)
+            self._flush_live_enriched(daily_df, quote_extra)
 
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
@@ -902,24 +866,6 @@ class QuoteService:
     # ================================================================
     # 工具
     # ================================================================
-
-    @staticmethod
-    def _split_records_by_asset(
-        records: list[dict], index_set: set[str], etf_set: set[str],
-    ) -> tuple[list[dict], list[dict], list[dict]]:
-        """把行情 records 按资产拆成 (index, etf, stock)。判定顺序与 resolve_asset_type 一致: 先 ETF 后指数。"""
-        index_records: list[dict] = []
-        etf_records: list[dict] = []
-        stock_records: list[dict] = []
-        for r in records:
-            sym = r.get("symbol")
-            if sym in etf_set:
-                etf_records.append(r)
-            elif sym in index_set:
-                index_records.append(r)
-            else:
-                stock_records.append(r)
-        return index_records, etf_records, stock_records
 
     @staticmethod
     def _records_datable_today(records: list[dict]) -> list[dict]:
@@ -1226,7 +1172,7 @@ class QuoteService:
                 engine = getattr(self._app_state, "monitor_engine", None)
                 if engine and engine.rule_count > 0:
                     # 预构建 symbol → name 映射 (enriched 已 drop name 列, 引擎触发时回填用)。
-                    # 股票 + ETF + 指数三表合并走 _monitor_name_map -> repo.get_name_map()
+                    # 股票 + 指数两表合并走 _monitor_name_map -> repo.get_name_map()
                     # 的进程内 memo, 避免每轮监控对 ~7000 行维表 iter_rows 重建。
                     try:
                         name_map = _monitor_name_map(self._app_state.repo)
@@ -1245,15 +1191,11 @@ class QuoteService:
                             enriched_today if stock_ready else pl.DataFrame(),
                             self.get_index_quotes(),
                         )
-                    # ETF 规则轮: 股票快照不含 ETF, 用 ETF enriched 快照单独评估。
+                    # Taiwan ETFs are polled as stocks, so ETF rules read the ETF rows of the stock snapshot.
                     # 独立 try —— ETF 轮任何异常都不得丢弃本轮已算出的股票告警。
-                    # refresh=False —— 不在轮询线程上触发 ETF 冷缓存的同步重算 (缓存由 ETF 实时
-                    # flush 焐热; 未焐热说明无 ETF 实时数据, 跳过本轮 ETF 评估)。
-                    if engine.has_asset_rules("etf") and self._repo is not None:
+                    if engine.has_asset_rules("etf") and stock_ready:
                         try:
-                            etf_enriched, _ = self._repo.get_enriched_latest_asset("etf", refresh=False)
-                            if closing_pass:
-                                etf_enriched = self._closing_scope(etf_enriched)
+                            etf_enriched = _taiwan_etf_rows(enriched_today)
                             if not etf_enriched.is_empty():
                                 etf_enriched = self._inject_intraday_signals(etf_enriched, engine, "etf")
                                 rule_events = rule_events + engine.evaluate(
@@ -1474,12 +1416,11 @@ class QuoteService:
             intraday_monitor_support,
         )
 
-        capset = getattr(self._app_state, "capabilities", None)
-        support = intraday_monitor_support(capset)
+        support = intraday_monitor_support()
         if not support["available"] or len(symbols) > int(support["max_symbols"]):
             return self._intraday_signal_evaluator.inject(enriched, [])
 
-        minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
+        minute_df = fetch_intraday_monitor_batch(sorted(symbols), now=now)
         prev_close: dict[str, float] = {}
         available_cols = set(enriched.columns)
         for row in enriched.filter(pl.col("symbol").is_in(sorted(symbols))).iter_rows(named=True):
@@ -1625,160 +1566,23 @@ class QuoteService:
             logger.debug("系统通知发送异常 (不影响告警主流程): %s", e)
 
     # ================================================================
-    # enriched 增量计算
+    # Taiwan live enriched rows
     # ================================================================
 
-    def _enrich_today_incremental(
-        self,
-        daily_df: pl.DataFrame,
-        quote_extra: pl.DataFrame | None,
-        live_agg: pl.DataFrame,
-        prev_enriched: pl.DataFrame,
-    ) -> pl.DataFrame:
-        """Today's enriched rows: Taiwan ones from the publish pipeline, others from yesterday's recursive state."""
-        from app.indicators.pipeline import compute_enriched_today
-        if daily_df.is_empty():
-            return pl.DataFrame()
-        taiwan_today = _taiwan_live_rows(
-            self._repo, daily_df.filter(_is_taiwan_symbol()), quote_extra
-        )
-        daily_df = daily_df.filter(~_is_taiwan_symbol())
-        if daily_df.is_empty():
-            return taiwan_today
-        instruments = self._repo.get_instruments()
-        today_ohlcv = daily_df
-        if quote_extra is not None and not quote_extra.is_empty():
-            today_ohlcv = daily_df.join(quote_extra, on="symbol", how="left")
-        # The only session clock here is Taiwan's, which does not fit other markets' volume.
-        enriched = compute_enriched_today(
-            live_agg=live_agg,
-            prev_enriched=prev_enriched,
-            today_ohlcv=today_ohlcv,
-            instruments=instruments,
-            session_progress=None,
-        )
-        frames = [frame for frame in (taiwan_today, enriched) if not frame.is_empty()]
-        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+    def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None = None) -> None:
+        """Put today's enriched rows of the Taiwan bars in *daily_df* into the live stock cache.
 
-    def _flush_live_enriched(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame = None, asset_type: str = "stock", merge: bool = False) -> None:
-        """增量计算今天的 enriched: 用昨天的递推状态 + 今天 OHLCV → 只算今天 5500 行。
-
-        quote_extra: API 直接提供的补充字段 (prev_close, change_pct 等),
-                     不写 daily, 直接传给 compute_enriched_today 避免重复计算。
-        Taiwan stock rows come from the publish pipeline instead and ignore quote_extra.
+        The rows come from the publish pipeline (TaiwanLiveEnriched); other symbols get none.
         """
         try:
-            today = cn_today()
             t0 = time.perf_counter()
-
-            taiwan_today = pl.DataFrame()
-            if asset_type == "stock" and not daily_df.is_empty():
-                taiwan_today = _taiwan_live_rows(
-                    self._repo, daily_df.filter(_is_taiwan_symbol()), quote_extra
-                )
-                daily_df = daily_df.filter(~_is_taiwan_symbol())
-            enriched_today, use_incremental = pl.DataFrame(), False
-            if not daily_df.is_empty():
-                enriched_today, use_incremental = self._enrich_live_rows(daily_df, quote_extra, asset_type, today)
-            mode_label = "增量" if use_incremental else "全量"
+            enriched_today = _taiwan_live_rows(
+                self._repo, daily_df.filter(_is_taiwan_symbol()), quote_extra
+            )
             if enriched_today.is_empty():
-                mode_label = "taiwan"
-            elif not taiwan_today.is_empty():
-                mode_label += "+taiwan"
-            frames = [frame for frame in (taiwan_today, enriched_today) if not frame.is_empty()]
-            if not frames:
                 return
-            enriched_today = pl.concat(frames, how="diagonal_relaxed")
-
-            # ---- 写盘 + 更新缓存 ----
-            if merge:
-                self._repo.merge_live_enriched_asset(asset_type, enriched_today)
-            else:
-                self._repo.flush_live_enriched_asset(asset_type, enriched_today)
-
-            elapsed = time.perf_counter() - t0
-            logger.info("enriched %s: %d 只, %s, 耗时 %.0fms",
-                        mode_label, len(enriched_today), today, elapsed * 1000)
+            self._repo.flush_live_enriched_asset("stock", enriched_today)
+            logger.info("enriched taiwan: %d 只, %s, 耗时 %.0fms",
+                        len(enriched_today), cn_today(), (time.perf_counter() - t0) * 1000)
         except Exception as e:  # noqa: BLE001
             logger.warning("enriched 计算失败: %s", e)
-
-    def _enrich_live_rows(
-        self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None, asset_type: str, today: date
-    ) -> tuple[pl.DataFrame, bool]:
-        """Today's rows of *daily_df*, Taiwan stocks excluded, and whether the incremental path made them."""
-        # ---- 尝试增量路径 ----
-        live_agg = self._repo.get_live_agg() if asset_type == "stock" else pl.DataFrame()
-        prev_enriched, prev_date = (
-            self._repo.get_enriched_latest()
-            if asset_type == "stock"
-            else self._repo.get_enriched_latest_asset(asset_type)
-        )
-
-        use_incremental = (
-            asset_type == "stock"
-            and not live_agg.is_empty()
-            and not prev_enriched.is_empty()
-            and prev_date is not None
-        )
-
-        if use_incremental:
-            enriched_today = self._enrich_today_incremental(daily_df, quote_extra, live_agg, prev_enriched)
-            if enriched_today.is_empty():
-                logger.warning("增量计算结果为空, 回退到全量计算")
-                use_incremental = False
-
-        # ---- 全量回退路径 ----
-        if not use_incremental:
-            from datetime import timedelta
-            from app.indicators.pipeline import compute_enriched
-
-            # kline_daily holds no Taiwan history: Taiwan etf/index rows have no rebuild path here.
-            non_taiwan = daily_df.filter(~_is_taiwan_symbol())
-            if non_taiwan.is_empty():
-                return pl.DataFrame(), False
-            daily_df = non_taiwan
-
-            logger.info("enriched 全量计算 (live_agg=%s, 上次日期=%s)",
-                        "ok" if not live_agg.is_empty() else "空", prev_date)
-
-            cutoff = today - timedelta(days=90)
-            table = {"etf": "kline_etf_daily", "index": "kline_index_daily"}.get(asset_type, "kline_daily")
-            daily_glob = str(self._repo.store.data_dir / table / "**" / "*.parquet")
-            ohlcv_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "quote_ts"]
-            hist_df = (
-                scan_daily_parquet(daily_glob)
-                .filter(pl.col("date") >= cutoff)
-                .sort(["symbol", "date"])
-                .collect()
-            )
-            if hist_df.is_empty():
-                return pl.DataFrame(), False
-
-            hist_cols = [c for c in ohlcv_cols if c in hist_df.columns]
-            hist_df = hist_df.select(hist_cols).filter(pl.col("date") != today)
-            daily_ohlcv = daily_df.select([c for c in ohlcv_cols if c in daily_df.columns])
-            full_df = pl.concat([hist_df, daily_ohlcv], how="diagonal_relaxed")
-            full_df = full_df.sort(["symbol", "date"])
-
-            factor_dir = {"stock": "adj_factor", "etf": "adj_factor_etf"}.get(asset_type)
-            factor_path = self._repo.store.data_dir / factor_dir / "all.parquet" if factor_dir else None
-            factors = pl.DataFrame()
-            if factor_path and factor_path.exists():
-                try:
-                    factors = pl.read_parquet(factor_path)
-                except Exception:
-                    pass
-            instruments = self._repo.get_instruments() if asset_type == "stock" else None
-
-            enriched_full = compute_enriched(
-                full_df,
-                factors=factors,
-                instruments=instruments,
-                historical_shares=(
-                    self._repo.get_historical_shares()
-                    if asset_type == "stock"
-                    else None
-                ),
-            )
-            enriched_today = enriched_full.filter(pl.col("date") == today)
-        return enriched_today, use_incremental

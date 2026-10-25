@@ -29,6 +29,7 @@ from app.indicators.pipeline import (
     invalidate_custom_signals,
     invalidate_taiwan_limit_profile_cache,
 )
+from app.repository import DataStore, KlineRepository
 from app.services import quote_service
 from app.services.quote_service import QuoteService
 from app.taiwan import universe
@@ -46,7 +47,6 @@ from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.universe import TaiwanSecurityMaster
 from app.taiwan.universe.models import TaiwanInstrument
 from app.taiwan.volume_patterns import VOLUME_PATTERN_COLUMNS, add_volume_patterns
-from app.tickflow.repository import DataStore, KlineRepository
 
 pytestmark = pytest.mark.usefixtures("deny_network")
 
