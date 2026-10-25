@@ -1,5 +1,8 @@
 # Code Review 2026-09-22 — feat/wire-unreachable-settings
 
+> 本文件已封存，後續追蹤改到 [docs/audit-2026-10-22/](audit-2026-10-22/README.md)。
+> 2026-10-25 註記：第八節說稽核報告沒有納入版本庫已過時（`1b6daf5` 已加入 `docs/audit-2026-09-24/`）；第六、七節列為未修的 B12、N5、N3 已在 `ac16ee5` 修正。仍未結的項目見 docs/audit-2026-10-22/findings.md 的「既有文件」欄。
+
 審查範圍：`feat/wire-unreachable-settings` 分支相對 `main` 的變更，加上使用者回報的
 「清單價格與個股彈窗 card 不同步」症狀追查。由四個獨立 agent 分頭審查（前端、後端
 core、`backend/app/taiwan/*`、價格資料流追查），本文彙整其結果。
