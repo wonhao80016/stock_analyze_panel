@@ -706,15 +706,11 @@ export function TaiwanScreener() {
               <span className="text-zinc-500 font-mono text-[11px]">交易日: {intelData.trade_date}</span>
               {/* trade_date is the expected latest session, not the stored data date. Badge follows overall_status:
                   provisional is the after-close value, finalized by the evening run; other non-complete states mean stats may not reflect that session. */}
-              {intelData.data_quality?.overall_status === 'provisional' ? (
-                <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 font-medium text-[10px]">
-                  盤後初值，晚間定稿
-                </span>
-              ) : intelData.data_quality?.overall_status !== 'complete' && (
-                <span className="px-1.5 py-0.5 rounded bg-amber-900/50 text-amber-400 font-medium text-[10px]">
-                  尚無完整市場資料，以下統計非今日實際行情
-                </span>
-              )}
+              <DataQualityBadge
+                status={intelData.data_quality?.overall_status ?? 'unavailable'}
+                provisionalText="盤後初值，晚間定稿"
+                incompleteText="尚無完整市場資料，以下統計非今日實際行情"
+              />
             </div>
             <div className="text-[11px] text-zinc-400">
               全市場成交額: <strong className="text-zinc-200 font-mono">{(intelData.market_totals.turnover / 100_000_000).toFixed(1)}</strong> 億元

@@ -84,18 +84,6 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   return res.json() as Promise<T>
 }
 
-// ===== Capabilities =====
-export interface CapabilityLimits {
-  rpm: number | null
-  batch: number | null
-  subscribe: number | null
-}
-
-export interface CapabilitiesResponse {
-  label: string
-  capabilities: Record<string, CapabilityLimits>
-}
-
 // ===== 個股分析 =====
 export type LevelType = 'sr' | 'pivot' | 'extreme' | 'boll' | 'keltner_s' | 'keltner_m' | 'keltner_l' | 'atr_stop' | 'gap' | 'fib' | 'round'
 
@@ -241,13 +229,11 @@ export interface QuoteStatus {
   enabled: boolean
   running: boolean
   paused?: boolean
-  mode?: 'none' | 'watchlist' | 'full_market'
+  mode?: 'none' | 'full_market'
   realtime_allowed?: boolean
   interval_s: number
   symbol_count: number
-  watchlist_symbol_count?: number
   index_symbol_count?: number
-  etf_symbol_count?: number
   quote_age_ms: number | null
   is_trading_hours: boolean
   is_polling_window?: boolean
@@ -1828,36 +1814,15 @@ export interface Preferences {
   realtime_quotes_enabled: boolean
   taiwan_market_closed_today?: boolean
   watchlist_groups_in_nav: boolean
-  minute_sync_enabled: boolean
-  minute_sync_days: number
-  minute_sync_segment_days: number
   daily_data_provider?: string
   adj_factor_provider?: string
   minute_data_provider?: string
   realtime_data_provider?: string
   financial_data_provider?: string
-  realtime_watchlist_symbols?: string[]
-  realtime_pull_stock?: boolean
-  realtime_pull_etf?: boolean
-  realtime_pull_index?: boolean
-  realtime_index_mode?: 'core' | 'all'
-  realtime_index_symbols?: string[]
-  pipeline_pull_a_share: boolean
-  pipeline_pull_etf: boolean
-  pipeline_pull_index: boolean
-  pipeline_regime_enabled: boolean
-  regime_batch_days: number
-  regime_warmup_days: number
-  pipeline_index_symbols: string
-  pipeline_schedule: { hour: number; minute: number }
-  instruments_schedule: { hour: number; minute: number }
-  enriched_batch_size: number
-  index_daily_batch_size: number
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
   system_notify_enabled: boolean
-  webhook_enabled_default?: boolean
   webhook_default_channels?: string[]
   line_target_id?: string
   line_channel_access_token_masked?: string
@@ -2007,7 +1972,7 @@ export const api = {
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),
   updateRealtimeQuotes: (enabled: boolean) =>
-    request<{ realtime_quotes_enabled: boolean; realtime_allowed?: boolean; mode?: string; error?: string }>('/api/settings/preferences/realtime-quotes', {
+    request<{ realtime_quotes_enabled: boolean; realtime_allowed?: boolean }>('/api/settings/preferences/realtime-quotes', {
       method: 'PUT',
       body: JSON.stringify({ realtime_quotes_enabled: enabled }),
     }),
@@ -2100,7 +2065,6 @@ export const api = {
       body: JSON.stringify({ columns }),
     }),
 
-  capabilities: () => request<CapabilitiesResponse>('/api/capabilities'),
   version: () => request<{ version: string }>('/api/data/version'),
 
   klineDaily: (symbol: string, days = 120, dateRange?: { start: string; end: string }, extColumns?: string) =>

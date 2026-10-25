@@ -3,9 +3,9 @@ import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, Bell, Check, ExternalLink, Loader2, Trash2, X } from 'lucide-react'
 import { toast } from '@/components/Toast'
-import { LEVEL_GROUPS } from './AnalysisKChart'
 import { api, genRuleId, type MonitorRule, type PriceLevel } from '@/lib/api'
 import {
+  LEVEL_GROUPS,
   buildPriceAlertMessage,
   inferPriceAlertDirection,
   parsePointPriceAlert,

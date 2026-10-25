@@ -44,7 +44,6 @@ const CORE_ROUTE_PATHS = new Set([
   '/dev',
   '/settings/keys',
   '/settings/ai',
-  '/settings/queries',
 ])
 
 finalizeFrontendExtensions(CORE_ROUTE_PATHS)

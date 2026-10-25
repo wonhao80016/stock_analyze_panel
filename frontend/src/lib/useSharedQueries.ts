@@ -10,14 +10,6 @@ import { QK } from './queryKeys'
 
 // ===== 全局共享 =====
 
-/** 能力檢測 — Layout / Data / Keys 共用 */
-export function useCapabilities() {
-  return useQuery({
-    queryKey: QK.capabilities,
-    queryFn: api.capabilities,
-  })
-}
-
 /** 設置狀態 — Layout / Data / Keys 共用 */
 export function useSettings() {
   return useQuery({

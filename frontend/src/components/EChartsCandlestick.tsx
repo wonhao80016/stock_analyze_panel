@@ -517,6 +517,62 @@ function buildSubInfoGraphics(
   return graphics
 }
 
+function buildMarkPointData(
+  markers: ChartMarker[] | undefined,
+  data: OHLC[],
+  dateIndexMap: Map<string, number>,
+  compact: boolean,
+): any[] {
+  const markPointData: any[] = []
+  for (const m of markers ?? []) {
+    const idx = dateIndexMap.get(m.date)
+    if (idx == null) continue
+    const d = data[idx]
+    const isBuy = m.kind === 'buy'
+    const isSell = m.kind === 'sell'
+
+    if (m.above) {
+      const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
+      if (compact) {
+        markPointData.push({
+          name: m.date, coord: [m.date, d.high],
+          symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
+          itemStyle: { color: dotColor, cursor: 'pointer' },
+          label: { show: false }, z: 100, zlevel: 10,
+        })
+      } else {
+        markPointData.push({
+          name: m.date, coord: [m.date, d.high],
+          symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
+          itemStyle: { color: 'transparent' },
+          label: {
+            show: true, formatter: m.label ?? '', position: 'top', distance: 0,
+            color: dotColor, fontSize: 10, fontWeight: 'normal',
+            fontFamily: 'JetBrains Mono, monospace',
+          },
+          z: 100, zlevel: 10,
+        })
+      }
+    } else {
+      markPointData.push({
+        name: m.label ?? '',
+        coord: [m.date, isBuy ? d.low : d.high],
+        symbol: 'arrow', symbolSize: 12,
+        symbolRotate: isBuy ? 0 : 180,
+        symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
+        itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
+        label: {
+          show: !!m.label, formatter: m.label ?? '',
+          position: isBuy ? 'bottom' : 'top', distance: 8,
+          color: CT().text, fontSize: 10,
+          fontFamily: 'JetBrains Mono, monospace',
+        },
+      })
+    }
+  }
+  return markPointData
+}
+
 function buildOption(
   data: OHLC[],
   dates: string[],
@@ -536,55 +592,7 @@ function buildOption(
 
   const hasMA = showMA && data.some(d => d.ma5 != null || d.ma10 != null || d.ma20 != null || d.ma60 != null)
 
-  const markPointData: any[] = []
-  if (markers && markers.length > 0) {
-    for (const m of markers) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
-  }
+  const markPointData = buildMarkPointData(markers, data, dateIndexMap, compact)
 
   // ====== 佈局計算 ======
   const left = 60
@@ -1093,52 +1101,7 @@ export function EChartsCandlestick({
     const mkrs = showMarkersProp ? markers : undefined
     const compact = compactRef.current
     const seriesUpdates: any[] = []
-    const markPointData: any[] = []
-    for (const m of mkrs ?? []) {
-      const idx = dateIndexMap.get(m.date)
-      if (idx == null) continue
-      const d = data[idx]
-      const isBuy = m.kind === 'buy'
-      const isSell = m.kind === 'sell'
-      if (m.above) {
-        const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
-        if (compact) {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
-            itemStyle: { color: dotColor, cursor: 'pointer' },
-            label: { show: false }, z: 100, zlevel: 10,
-          })
-        } else {
-          markPointData.push({
-            name: m.date, coord: [m.date, d.high],
-            symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
-            itemStyle: { color: 'transparent' },
-            label: {
-              show: true, formatter: m.label ?? '', position: 'top', distance: 0,
-              color: dotColor, fontSize: 10, fontWeight: 'normal',
-              fontFamily: 'JetBrains Mono, monospace',
-            },
-            z: 100, zlevel: 10,
-          })
-        }
-      } else {
-        markPointData.push({
-          name: m.label ?? '',
-          coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
-          symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
-          label: {
-            show: !!m.label, formatter: m.label ?? '',
-            position: isBuy ? 'bottom' : 'top', distance: 8,
-            color: CT().text, fontSize: 10,
-            fontFamily: 'JetBrains Mono, monospace',
-          },
-        })
-      }
-    }
+    const markPointData = buildMarkPointData(mkrs, data, dateIndexMap, compact)
     if (mkrs?.length) {
       seriesUpdates.push({
         name: 'K',
@@ -1190,46 +1153,9 @@ export function EChartsCandlestick({
     }
   }, [data, markers, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, volumeUnit, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
-  // 渲染信息欄容器 (內容由 JS 直接寫入)
-  const initialHTML = useMemo(() => {
-    const idx = data.length - 1
-    const d = idx >= 0 && idx < data.length ? data[idx] : null
-    if (!d) return ''
-    let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
-    html += `<span style="color:${CT().text}">${d.date}</span>`
-    html += `<span style="color:${CT().text}">開</span>`
-    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(2)}</span>`
-    html += `<span style="color:${CT().text}">高</span>`
-    html += `<span style="color:${THEME.bull}">${d.high.toFixed(2)}</span>`
-    html += `<span style="color:${CT().text}">低</span>`
-    html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
-    html += `<span style="color:${CT().text}">收</span>`
-    const base0 = changeBase(data, idx)
-    const prevClose0 = base0 ?? d.close
-    const clr0 = d.close >= prevClose0 ? THEME.bull : THEME.bear
-    html += `<span style="color:${clr0};font-weight:600">${d.close.toFixed(2)}</span>`
-    // 漲跌幅 (收盤後, 換手前; 和收間隔一些距離)
-    if (base0 != null) {
-      const chgPct0 = ((d.close - prevClose0) / prevClose0 * 100)
-      html += `<span style="color:${clr0};margin-left:8px">${chgPct0 >= 0 ? '+' : ''}${chgPct0.toFixed(2)}%</span>`
-    }
-    html += unadjustedCloseHTML(d, CT().text)
-    html += turnoverRateHTML(d, CT().text)
-    html += `</div>`
-    if (showMA) {
-      html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
-      }
-      html += `</div>`
-    }
-    return html
+  // Computed once: later updates write innerHTML directly, and a changed __html would overwrite them.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const initialHTML = useMemo(() => getInfoBarHTML(), [])
 
   return (
     <div className="w-full">

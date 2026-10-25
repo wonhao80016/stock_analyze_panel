@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import type { CustomSourceConfig } from '@/lib/api'
+import { api, type CustomSourceConfig } from '@/lib/api'
 import { DataSourceEditor } from './DataSourceEditor'
 
 vi.mock('@/lib/api', () => ({
@@ -13,24 +13,29 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 
-function renderEditor(config: CustomSourceConfig) {
+async function renderEditor(config: CustomSourceConfig, onActivate: (name: string) => void = () => {}) {
+  vi.mocked(api.dataSource).mockResolvedValue(config)
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <DataSourceEditor
-        initial={config}
+        existingName={config.name}
         onCancel={() => {}}
         onSaved={() => {}}
         activeName=""
-        onActivate={() => {}}
+        onActivate={onActivate}
       />
     </QueryClientProvider>,
   )
+  await waitFor(() => expect(screen.getByPlaceholderText('my_tushare')).toHaveValue(config.name))
+  // The daily tab is open by default; its detail fades in after the empty placeholder exits.
+  if (config.datasets.daily) await screen.findByDisplayValue(config.datasets.daily.url)
+  return view
 }
 
 describe('DataSourceEditor volume field', () => {
-  it('asks for volume in shares, which the custom source stores without conversion', () => {
-    renderEditor({
+  it('asks for volume in shares, which the custom source stores without conversion', async () => {
+    await renderEditor({
       name: 'demo',
       display_name: 'demo',
       auth: { type: 'none' },
@@ -61,8 +66,8 @@ describe('DataSourceEditor ratio units', () => {
 
   const openRealtime = () => fireEvent.click(screen.getByText('即時行情').closest('button')!)
 
-  it('asks for the unit of each mapped ratio field and starts undeclared', () => {
-    renderEditor(realtime())
+  it('asks for the unit of each mapped ratio field and starts undeclared', async () => {
+    await renderEditor(realtime())
     openRealtime()
 
     const select = screen.getByLabelText('turnover_rate 單位') as HTMLSelectElement
@@ -71,8 +76,8 @@ describe('DataSourceEditor ratio units', () => {
     expect(screen.getByText(/尚未宣告單位/)).toBeInTheDocument()
   })
 
-  it('keeps a declared unit', () => {
-    renderEditor(realtime({ turnover_rate: 'percent' }))
+  it('keeps a declared unit', async () => {
+    await renderEditor(realtime({ turnover_rate: 'percent' }))
     openRealtime()
 
     expect((screen.getByLabelText('turnover_rate 單位') as HTMLSelectElement).value).toBe('percent')
@@ -85,7 +90,7 @@ describe('DataSourceEditor ratio units', () => {
       columns: ['symbol', 'turnover_rate'],
       preview: [{ symbol: '2330.TWSE', turnover_rate: 0.0015 }],
     })
-    renderEditor(realtime({ turnover_rate: 'percent' }))
+    await renderEditor(realtime({ turnover_rate: 'percent' }))
     openRealtime()
 
     fireEvent.click(screen.getByText('測試'))
@@ -100,7 +105,6 @@ describe('DataSourceEditor new source name', () => {
     return render(
       <QueryClientProvider client={queryClient}>
         <DataSourceEditor
-          initial={null}
           takenNames={takenNames}
           onCancel={() => {}}
           onSaved={() => {}}
@@ -125,15 +129,15 @@ describe('DataSourceEditor new source name', () => {
 })
 
 describe('DataSourceEditor dataset list', () => {
-  it('keeps the enable toggles outside the row buttons and labels them', () => {
-    const { container } = renderEditor({ name: 'demo', display_name: 'demo', auth: { type: 'none' }, datasets: {} })
+  it('keeps the enable toggles outside the row buttons and labels them', async () => {
+    const { container } = await renderEditor({ name: 'demo', display_name: 'demo', auth: { type: 'none' }, datasets: {} })
 
     expect(container.querySelectorAll('button button')).toHaveLength(0)
     expect(screen.getByRole('button', { name: '日K 啟用' })).toBeInTheDocument()
   })
 
-  it('describes Taiwan symbols and the built-in fallback', () => {
-    renderEditor({
+  it('describes Taiwan symbols and the built-in fallback', async () => {
+    await renderEditor({
       name: 'demo',
       display_name: 'demo',
       auth: { type: 'none' },
@@ -150,11 +154,11 @@ describe('DataSourceEditor dataset list', () => {
 })
 
 describe('DataSourceEditor field map rows', () => {
-  it('gives an added row its own identity when there are more mappings than target fields', () => {
+  it('gives an added row its own identity when there are more mappings than target fields', async () => {
     const fieldMap = Object.fromEntries(
       Array.from({ length: 9 }, (_, i) => [`src${i + 1}`, i === 8 ? 'amount' : 'close']),
     )
-    renderEditor({
+    await renderEditor({
       name: 'demo',
       display_name: 'demo',
       auth: { type: 'none' },
@@ -173,20 +177,8 @@ describe('DataSourceEditor field map rows', () => {
 })
 
 describe('DataSourceEditor existing source', () => {
-  const renderExisting = (config: CustomSourceConfig, onActivate = vi.fn()) => {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    render(
-      <QueryClientProvider client={queryClient}>
-        <DataSourceEditor
-          existingName={config.name}
-          initial={config}
-          onCancel={() => {}}
-          onSaved={() => {}}
-          activeName=""
-          onActivate={onActivate}
-        />
-      </QueryClientProvider>,
-    )
+  const renderExisting = async (config: CustomSourceConfig, onActivate = vi.fn()) => {
+    await renderEditor(config, onActivate)
     return onActivate
   }
   const daily = { url: 'http://example.test/daily', method: 'GET', response_path: '', field_map: { c: 'close' } }
@@ -195,7 +187,7 @@ describe('DataSourceEditor existing source', () => {
     const { api } = await import('@/lib/api')
     vi.mocked(api.saveDataSource).mockClear()
     vi.mocked(api.updateDataSource).mockResolvedValue({} as never)
-    renderExisting({ name: 'mysrc', display_name: 'My Source', auth: { type: 'none' }, datasets: { daily } })
+    await renderExisting({ name: 'mysrc', display_name: 'My Source', auth: { type: 'none' }, datasets: { daily } })
 
     fireEvent.click(screen.getByRole('button', { name: /儲存/ }))
 
@@ -204,8 +196,8 @@ describe('DataSourceEditor existing source', () => {
     expect(api.saveDataSource).not.toHaveBeenCalled()
   })
 
-  it('cannot be switched to when it only offers daily K or adjustment factors', () => {
-    const onActivate = renderExisting({
+  it('cannot be switched to when it only offers daily K or adjustment factors', async () => {
+    const onActivate = await renderExisting({
       name: 'dailyonly', display_name: 'Daily Only', auth: { type: 'none' },
       datasets: { daily, adj_factor: { ...daily, field_map: { f: 'ex_factor' } } },
     })
@@ -217,8 +209,8 @@ describe('DataSourceEditor existing source', () => {
     expect(onActivate).not.toHaveBeenCalled()
   })
 
-  it('can be switched to when it offers realtime quotes', () => {
-    renderExisting({
+  it('can be switched to when it offers realtime quotes', async () => {
+    await renderExisting({
       name: 'rt', display_name: 'RT', auth: { type: 'none' },
       datasets: { realtime: { ...daily, field_map: { p: 'last_price' } } },
     })
@@ -228,24 +220,12 @@ describe('DataSourceEditor existing source', () => {
 })
 
 describe('DataSourceEditor switch with unsaved edits', () => {
-  it('asks to save before switching while the form has unsaved edits', () => {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  it('asks to save before switching while the form has unsaved edits', async () => {
     const onActivate = vi.fn()
-    render(
-      <QueryClientProvider client={queryClient}>
-        <DataSourceEditor
-          existingName="rt"
-          initial={{
-            name: 'rt', display_name: 'RT', auth: { type: 'none' },
-            datasets: { realtime: { url: 'http://example.test/rt', method: 'GET', response_path: '', field_map: { p: 'last_price' } } },
-          }}
-          onCancel={() => {}}
-          onSaved={() => {}}
-          activeName=""
-          onActivate={onActivate}
-        />
-      </QueryClientProvider>,
-    )
+    await renderEditor({
+      name: 'rt', display_name: 'RT', auth: { type: 'none' },
+      datasets: { realtime: { url: 'http://example.test/rt', method: 'GET', response_path: '', field_map: { p: 'last_price' } } },
+    }, onActivate)
 
     fireEvent.change(screen.getByPlaceholderText('我的 Tushare'), { target: { value: 'RT edited' } })
 

@@ -187,7 +187,6 @@ function StockSections({ sections, isTdr }: { sections: Record<string, TaiwanDat
           <DataRow label={isTdr ? 'TDR原股發行股數' : '已發行普通股數'} value={number(capitalValues.issued_shares, 0)} />
           <DataRow label="實收資本額" value={money(capitalValues.capital_twd)} />
           <DataRow label="每股面額" value={parValue(capitalValues)} />
-          <DataRow label="流通股數" value={number(capitalValues.float_shares, 0)} />
         </div>
       </SectionCard>
     </div>

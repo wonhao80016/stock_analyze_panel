@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 import * as columnsModule from './watchlist-columns'
 import { BUILTIN_COLUMNS, COLUMN_GROUPS, loadColumnConfig, saveColumnConfig } from './watchlist-columns'
+import { BUILTIN_INFO_FIELDS, loadInfoFields } from './stock-info-fields'
+import { storage } from './storage'
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
@@ -41,6 +43,23 @@ describe('B289 the watchlist offers no financial columns', () => {
   })
 })
 
+describe('D407 the 流通值 columns are gone', () => {
+  const stale = (key: string) => ({ id: `builtin:${key}`, source: { type: 'builtin', key }, label: '流通值', visible: true, align: 'center' })
+
+  it('drops a watchlist 流通值 column a user saved earlier', async () => {
+    expect(BUILTIN_COLUMNS.some(c => c.id === 'builtin:float_val')).toBe(false)
+    vi.mocked(api.watchlistColumns).mockResolvedValue({ columns: [...BUILTIN_COLUMNS, stale('float_val')] } as any)
+    const loaded = await loadColumnConfig()
+    expect(loaded.map(c => c.id)).toEqual(BUILTIN_COLUMNS.map(c => c.id))
+  })
+
+  it('drops a stock info bar 流通值 field a user saved earlier', () => {
+    expect(BUILTIN_INFO_FIELDS.some(f => f.id === 'builtin:float_market_cap')).toBe(false)
+    storage.stockInfoBarFields.set([stale('float_market_cap'), ...BUILTIN_INFO_FIELDS])
+    expect(loadInfoFields().map(f => f.id)).toEqual(BUILTIN_INFO_FIELDS.map(f => f.id))
+  })
+})
+
 describe('B290 / F4 a column change the backend rejected is reconciled against the last sync', () => {
   async function failedSaveAfterSync(backendAtSync: ReturnType<typeof withVisibility>) {
     vi.mocked(api.watchlistColumns).mockResolvedValueOnce({ columns: backendAtSync } as any)
@@ -67,14 +86,14 @@ describe('B290 / F4 a column change the backend rejected is reconciled against t
 
   it('takes the backend copy and reports the conflict when it changed elsewhere', async () => {
     await failedSaveAfterSync(withVisibility('builtin:amount', false))
-    vi.mocked(api.watchlistColumns).mockResolvedValue({ columns: withVisibility('builtin:float_val', true) } as any)
+    vi.mocked(api.watchlistColumns).mockResolvedValue({ columns: withVisibility('builtin:annual_vol', true) } as any)
     const pushesBefore = vi.mocked(api.updateWatchlistColumns).mock.calls.length
     const onUnsyncedDiscarded = vi.fn()
 
     const loaded = await loadColumnConfig({ onUnsyncedDiscarded })
 
     expect(loaded.find(c => c.id === 'builtin:amount')?.visible).toBe(false)
-    expect(loaded.find(c => c.id === 'builtin:float_val')?.visible).toBe(true)
+    expect(loaded.find(c => c.id === 'builtin:annual_vol')?.visible).toBe(true)
     expect(onUnsyncedDiscarded).toHaveBeenCalledTimes(1)
     expect(vi.mocked(api.updateWatchlistColumns).mock.calls.length).toBe(pushesBefore)
     expect(localStorage.getItem('watchlist_columns_unsynced')).toBeNull()

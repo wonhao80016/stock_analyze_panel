@@ -14,7 +14,7 @@ vi.mock('@/lib/api', () => ({
     preferences: vi.fn(),
     saveNavOrder: vi.fn(),
     saveNavHidden: vi.fn(),
-    quoteStatus: vi.fn().mockResolvedValue({ mode: 'watchlist', running: false, is_trading_hours: false, paused: false }),
+    quoteStatus: vi.fn().mockResolvedValue({ mode: 'full_market', running: false, is_trading_hours: false, paused: false }),
     quoteInterval: vi.fn().mockResolvedValue({ interval: 6, min_interval: 6, max_interval: 60 }),
     watchlistList: vi.fn().mockResolvedValue([]),
     updateWebhookDefaultChannels: vi.fn(),

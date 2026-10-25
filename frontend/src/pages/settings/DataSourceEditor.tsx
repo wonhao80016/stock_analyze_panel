@@ -89,7 +89,6 @@ function emptyConfig(): CustomSourceConfig {
 
 export function DataSourceEditor({
   existingName,
-  initial,
   onCancel,
   onSaved,
   activeName,
@@ -98,7 +97,6 @@ export function DataSourceEditor({
   takenNames = [],
 }: {
   existingName?: string
-  initial?: CustomSourceConfig | null
   onCancel: () => void
   onSaved: () => void
   activeName: string
@@ -108,14 +106,15 @@ export function DataSourceEditor({
   takenNames?: string[]
 }) {
   const isNew = !existingName
-  const [config, setConfig] = useState<CustomSourceConfig>(() => initial ? structuredClone(initial) : emptyConfig())
+  const [config, setConfig] = useState<CustomSourceConfig>(emptyConfig)
   const [activeTab, setActiveTab] = useState<DatasetKey>('daily')
 
   // 編輯現有源: 從後端拉完整配置 (每次掛載都重新拉, 不用緩存, 確保拿到最新保存的配置)
   const fetchCfg = useQuery({
     queryKey: ['data-source-detail', existingName],
-    queryFn: () => api.dataSource(existingName!),
-    enabled: !!existingName && !initial,
+    // Undeduped so every open reports a failed read, not only the first one.
+    queryFn: () => api.dataSource(existingName!, { dedupe: false }),
+    enabled: !!existingName,
     staleTime: 0,
   })
 
@@ -182,9 +181,9 @@ export function DataSourceEditor({
   }
 
   const canSave = !!config.name.trim() && !save.isPending
-  const loading = !!existingName && !initial && fetchCfg.isLoading
+  const loading = !!existingName && fetchCfg.isLoading
   const isActive = !isNew && activeName === existingName
-  const savedConfig = fetchCfg.data ?? initial ?? null
+  const savedConfig = fetchCfg.data ?? null
   const routable = hasRoutableDataset(Object.keys(savedConfig?.datasets ?? config.datasets))
   const hasUnsavedEdits = !!savedConfig
     && JSON.stringify(normalizeConfig(config)) !== JSON.stringify(normalizeConfig(savedConfig))

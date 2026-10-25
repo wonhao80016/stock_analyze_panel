@@ -33,7 +33,6 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
   // 成交
   { id: 'builtin:turnover', source: { type: 'builtin', key: 'turnover' }, label: '換手率', visible: true, align: 'center' },
   { id: 'builtin:amount', source: { type: 'builtin', key: 'amount' }, label: '成交額', visible: false, align: 'center' },
-  { id: 'builtin:float_val', source: { type: 'builtin', key: 'float_val' }, label: '流通值', visible: false, align: 'center' },
   { id: 'builtin:vol_ratio', source: { type: 'builtin', key: 'vol_ratio' }, label: '量比', visible: true, align: 'center' },
   { id: 'builtin:annual_vol', source: { type: 'builtin', key: 'annual_vol' }, label: '年化波動', visible: false, align: 'center' },
   // 均線
@@ -77,7 +76,7 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
 
 export const COLUMN_GROUPS: ColumnGroup[] = [
   { id: 'price', label: '價格', icon: '💰', keys: ['price', 'pct', 'change_amount', 'amplitude'] },
-  { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'amount', 'float_val', 'vol_ratio', 'annual_vol'] },
+  { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'amount', 'vol_ratio', 'annual_vol'] },
   { id: 'ma', label: '均線', icon: '📈', keys: ['ma5', 'ma10', 'ma20', 'ma60'] },
   { id: 'range', label: '區間', icon: '📏', keys: ['high_60d', 'low_60d'] },
   { id: 'tech', label: '技術指標', icon: '🔬', keys: ['rsi6', 'rsi14', 'rsi24', 'macd_dif', 'macd_dea', 'macd_hist', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_upper', 'boll_lower', 'atr14', 'vol_ma5', 'vol_ma10'] },
@@ -108,7 +107,7 @@ const FILTER_UNITS: Record<string, FilterUnit> = {
   momentum_30d: PERCENT_OF_DECIMAL, momentum_60d: PERCENT_OF_DECIMAL,
   // turnover_rate is already a percent value (5 = 5%), CONTRIBUTING.md 3.1.
   turnover: PERCENT_VALUE,
-  amount: HUNDRED_MILLION, float_val: HUNDRED_MILLION,
+  amount: HUNDRED_MILLION,
   ma5: PRICE, ma10: PRICE, ma20: PRICE, ma60: PRICE, high_60d: PRICE, low_60d: PRICE,
   boll_upper: PRICE, boll_lower: PRICE, atr14: PRICE,
 }

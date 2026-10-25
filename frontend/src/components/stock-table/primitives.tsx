@@ -98,8 +98,6 @@ function renderBuiltinCell(r: any, col: ColumnConfig): ReactNode | null {
       return <td key={col.id} className={numCls}>{r.turnover_rate != null ? `${Number(r.turnover_rate).toFixed(2)}%` : '—'}</td>
     case 'amount':
       return <td key={col.id} className={`${numCls} text-secondary`}>{fmtBigNum(r.amount)}</td>
-    case 'float_val':
-      return <td key={col.id} className={`${numCls} text-secondary`}>{r.float_shares && r.close ? fmtBigNum(r.float_shares * r.close) : '—'}</td>
     case 'vol_ratio':
       return (
         <td key={col.id} className={numCls}>

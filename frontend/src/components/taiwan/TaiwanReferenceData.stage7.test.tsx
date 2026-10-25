@@ -47,3 +47,26 @@ describe('TaiwanReferenceData financial statement', () => {
     expect(screen.getByText('截至 2026-06-30')).toBeInTheDocument()
   })
 })
+
+describe('TaiwanReferenceData share capital', () => {
+  it('has no public float row, since Taiwan publishes no public-float source', () => {
+    const response = {
+      ...statementResponse(),
+      sections: {
+        share_capital_record: {
+          dataset: 'share_capital_record',
+          status: 'ok',
+          usage_scope: 'current_reference',
+          historically_eligible: false,
+          data: { period_end: '2026-09-30', values: { issued_shares: 25_930_380_458, capital_twd: 259_303_804_580 } },
+        },
+      },
+    }
+    render(
+      <TaiwanReferenceData response={response as any} isLoading={false} isError={false} isFetching={false} onRetry={() => {}} />,
+    )
+
+    expect(screen.getByText('已發行普通股數')).toBeInTheDocument()
+    expect(screen.queryByText('流通股數')).not.toBeInTheDocument()
+  })
+})

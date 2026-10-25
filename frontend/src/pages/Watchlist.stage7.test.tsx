@@ -73,7 +73,6 @@ beforeEach(() => {
   vi.mocked(api.watchlistGroups).mockResolvedValue({ groups: GROUPS } as any)
   vi.mocked(api.watchlistColumns).mockResolvedValue({ columns: null } as any)
   vi.mocked(api.watchlistOcrStatus).mockResolvedValue({ available: false } as any)
-  vi.mocked(api.capabilities).mockResolvedValue({ label: 'x', capabilities: {} } as any)
   vi.mocked(api.quoteStatus).mockResolvedValue({ running: false } as any)
   vi.mocked(api.preferences).mockResolvedValue({} as any)
 })

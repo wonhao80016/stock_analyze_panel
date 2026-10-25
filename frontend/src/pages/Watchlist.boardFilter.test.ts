@@ -6,20 +6,7 @@
 //
 // 這裡鎖的是清洗邏輯本身: 元件的初始化直接用它, 給錯的輸入就會重現那個畫面。
 import { describe, expect, it } from 'vitest'
-
-const BOARDS = ['上市', '上櫃'] as const
-type BoardType = typeof BOARDS[number]
-
-/** 與 Watchlist.tsx 的 boardFilter 初始化同一段邏輯。 */
-function initialBoardFilter(saved: string[]): Set<string> {
-  const kept = saved.filter((b): b is BoardType => (BOARDS as readonly string[]).includes(b))
-  return kept.length > 0 ? new Set<string>(kept) : new Set<string>(BOARDS)
-}
-
-/** Watchlist.tsx 的「全選時跳過篩選」判斷。 */
-function filterIsActive(f: Set<string>): boolean {
-  return f.size > 0 && f.size < BOARDS.length
-}
+import { boardFilterIsActive as filterIsActive, initialBoardFilter } from './Watchlist'
 
 describe('自選頁板塊篩選 — 舊 A 股值的清洗', () => {
   it('完全是舊板塊時回退全選, 而不是篩成空集合', () => {
@@ -53,6 +40,6 @@ describe('自選頁板塊篩選 — 舊 A 股值的清洗', () => {
     // 未清洗的舊行為: 直接 new Set(saved)
     const unsanitised = new Set<string>(['創業板'])
     expect(filterIsActive(unsanitised)).toBe(true)
-    expect(BOARDS.some(b => unsanitised.has(b))).toBe(false)
+    expect(['上市', '上櫃'].some(b => unsanitised.has(b))).toBe(false)
   })
 })

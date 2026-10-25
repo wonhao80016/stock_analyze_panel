@@ -1,4 +1,18 @@
-import type { MonitorRule } from '@/lib/api'
+import type { LevelType, MonitorRule } from '@/lib/api'
+
+export const LEVEL_GROUPS: { key: LevelType; label: string }[] = [
+  { key: 'sr', label: '壓力支撐' },
+  { key: 'pivot', label: '樞軸點' },
+  { key: 'extreme', label: '前高前低' },
+  { key: 'boll', label: '布林帶' },
+  { key: 'keltner_s', label: 'Keltner短期' },
+  { key: 'keltner_m', label: 'Keltner中期' },
+  { key: 'keltner_l', label: 'Keltner長期' },
+  { key: 'atr_stop', label: 'ATR波動通道' },
+  { key: 'gap', label: '缺口位' },
+  { key: 'fib', label: '斐波那契' },
+  { key: 'round', label: '整數關口' },
+]
 
 export type PriceAlertDirection = 'up' | 'down'
 

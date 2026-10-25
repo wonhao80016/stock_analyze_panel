@@ -22,7 +22,6 @@ export type { ColumnConfig, ColumnGroup }
 export const BUILTIN_INFO_FIELDS: ColumnConfig[] = [
   // 規模
   { id: 'builtin:market_cap', source: { type: 'builtin', key: 'market_cap' }, label: '市值', visible: true, align: 'left' },
-  { id: 'builtin:float_market_cap', source: { type: 'builtin', key: 'float_market_cap' }, label: '流通值', visible: true, align: 'left' },
   // 成交
   { id: 'builtin:turnover', source: { type: 'builtin', key: 'turnover' }, label: '換手', visible: true, align: 'left' },
   { id: 'builtin:volume', source: { type: 'builtin', key: 'volume' }, label: '成交量', visible: false, align: 'left' },
@@ -34,7 +33,7 @@ export const BUILTIN_INFO_FIELDS: ColumnConfig[] = [
 ]
 
 export const INFO_GROUPS: ColumnGroup[] = [
-  { id: 'scale', label: '規模', icon: '🏦', keys: ['market_cap', 'float_market_cap'] },
+  { id: 'scale', label: '規模', icon: '🏦', keys: ['market_cap'] },
   { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'volume', 'amplitude'] },
   { id: 'quote', label: '行情', icon: '📈', keys: ['open', 'high', 'low'] },
 ]

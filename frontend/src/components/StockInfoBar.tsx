@@ -128,9 +128,7 @@ export function StockInfoBar({
   const clr = isUp ? BULL : BEAR
 
   const totalShares = stockInfo?.total_shares
-  const floatShares = stockInfo?.float_shares
   const marketCap = totalShares ? close * totalShares : null
-  const floatMarketCap = floatShares ? close * floatShares : null
   const turnoverRate = resolveTurnoverRate(latest)
 
   const displayName = stockInfo?.name ?? name ?? ''
@@ -141,7 +139,6 @@ export function StockInfoBar({
   const computeBuiltinValue = (key: string): string | null => {
     switch (key) {
       case 'market_cap':       return marketCap != null ? fmtBigNum(marketCap) : null
-      case 'float_market_cap': return floatMarketCap != null ? fmtBigNum(floatMarketCap) : null
       case 'turnover':         return turnoverRate != null ? `${turnoverRate.toFixed(2)}%` : null
       case 'volume': {
         if (latest.volume == null) return null

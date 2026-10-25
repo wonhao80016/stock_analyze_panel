@@ -19,7 +19,6 @@ const DATASET_LABEL: Record<string, string> = {
   financial: '財務',
 }
 
-/** 數據集 → 路由偏好字段 + 默認值 + 展示標籤 (financial 無後端路由消費方, 僅展示不參與切換) */
 /** 能力卡片定義: 數據集 + 說明 (路由選擇嵌入每張卡片) */
 const CAPABILITY_CARDS = [
   { dataset: 'daily', label: '日K', desc: '歷史 + 即時覆寫' },
@@ -28,7 +27,7 @@ const CAPABILITY_CARDS = [
   { dataset: 'minute', label: '分鐘K', desc: '分時圖 · 回測' },
 ] as const
 
-/** 數據集 → 路由偏好字段 + 默認值 (financial 無後端路由消費方, 僅展示) */
+/** 數據集 → 路由偏好字段 + 默認值 */
 const DATASET_ROUTE: Record<string, {
   field: 'minute_data_provider' | 'realtime_data_provider'
   def: string
@@ -68,8 +67,7 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
   onReset?: () => void
 }) {
   const isDefault = sourceName === 'taiwan'
-  const dsList = isDefault ? [...datasets, 'financial'] : datasets
-  if (dsList.length === 0) return null
+  if (datasets.length === 0) return null
 
   return (
     <div>
@@ -91,7 +89,7 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5 mb-2">
-        {dsList.map(ds => {
+        {datasets.map(ds => {
           const route = DATASET_ROUTE[ds]
           const meta = CAPABILITY_CARDS.find(c => c.dataset === ds)
           const label = meta?.label || DATASET_LABEL[ds] || ds
@@ -142,7 +140,7 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
           )
         })}
       </div>
-      {dsList.some(ds => FIXED_TAIWAN_DATASETS.has(ds)) && (
+      {datasets.some(ds => FIXED_TAIWAN_DATASETS.has(ds)) && (
         <p className="text-[10px] text-muted/70 leading-relaxed">{FIXED_TAIWAN_NOTE}</p>
       )}
     </div>
@@ -181,7 +179,6 @@ function PluginKeyConfig({ plugin }: { plugin: PluginDataSourceItem }) {
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: QK.dataSources })
-    qc.invalidateQueries({ queryKey: QK.capabilities })
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
   }
 
@@ -349,8 +346,7 @@ export function SettingsDataSourcesPanel() {
     mutationFn: api.reloadDataSources,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
-      // 重載可能改變數據集聲明 → 能力與實時模式隨之變化
-      qc.invalidateQueries({ queryKey: QK.capabilities })
+      // Reloaded configs can change dataset declarations and with them the realtime mode.
       qc.invalidateQueries({ queryKey: QK.quoteStatus })
       toast('設定已重新載入', 'success')
     },
@@ -361,7 +357,6 @@ export function SettingsDataSourcesPanel() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.preferences })
-      qc.invalidateQueries({ queryKey: QK.capabilities })
       qc.invalidateQueries({ queryKey: QK.quoteStatus })
       setSelected('taiwan')
       setConfirmDelete(null)
@@ -396,23 +391,16 @@ export function SettingsDataSourcesPanel() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.preferences })
-      qc.invalidateQueries({ queryKey: QK.capabilities })
-      // 切換會改變實時行情 provider → 模式(none/watchlist/full_market)立即刷新
+      // 切換會改變實時行情 provider → 模式(none/full_market)立即刷新
       qc.invalidateQueries({ queryKey: QK.quoteStatus })
       toast('資料來源已切換', 'success')
     },
-  })
-
-  const editExisting = useMutation({
-    mutationFn: (name: string) => api.dataSource(name, { dedupe: false }),
-    onSuccess: (_data, name) => setSelected(name),
   })
 
   const installMut = useMutation({
     mutationFn: (name: string) => api.installPlugin(name),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
-      qc.invalidateQueries({ queryKey: QK.capabilities })
       qc.invalidateQueries({ queryKey: QK.quoteStatus })
       if (data.install_ok) {
         toast('插件相依套件安裝成功', 'success')
@@ -428,7 +416,6 @@ export function SettingsDataSourcesPanel() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: QK.dataSources })
       qc.invalidateQueries({ queryKey: QK.preferences })
-      qc.invalidateQueries({ queryKey: QK.capabilities })
       qc.invalidateQueries({ queryKey: QK.quoteStatus })
       if (data.uninstall_ok) {
         toast(data.uninstall_message || '已解除安裝', 'success')
@@ -481,7 +468,6 @@ export function SettingsDataSourcesPanel() {
 
   const invalidateRouting = () => {
     qc.invalidateQueries({ queryKey: QK.preferences })
-    qc.invalidateQueries({ queryKey: QK.capabilities })
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
   }
 
@@ -601,10 +587,6 @@ export function SettingsDataSourcesPanel() {
                   // 未就緒插件僅當支持界面配 Key 時可點開(進詳情配置); 其餘不可選
                   if (pluginUnavailable && !plugin?.api_key_env) return
                   setSelected(item.name)
-                  // Only user-defined YAML sources open the editor; built-in sources and plugins are read-only.
-                  if (customList.some(c => c.name === item.name)) {
-                    editExisting.mutate(item.name)
-                  }
                 }}
                 className={`relative text-left rounded-lg border px-3.5 py-3 transition-all ${
                   pluginUnavailable && !plugin?.api_key_env
@@ -695,7 +677,7 @@ export function SettingsDataSourcesPanel() {
                   )}
                 </div>
                 {/* 數據集標籤(靜態): 該源適配的數據集, 路由選擇在下方能力卡片 */}
-                <DatasetChipRow datasets={item.name === 'taiwan' ? [...new Set([...item.datasets, 'financial'])] : item.datasets} />
+                <DatasetChipRow datasets={item.name === 'taiwan' ? item.datasets.filter(ds => ds !== 'financial') : item.datasets} />
                 {/* 未安裝插件顯示安裝命令提示 */}
                 {pluginUnavailable && plugin?.install_hint && (
                   <div className="ml-3.5 mt-1 text-[10px] text-muted/40 font-mono truncate">{plugin.install_hint}</div>
@@ -752,15 +734,13 @@ export function SettingsDataSourcesPanel() {
             selected === '__new__' ? (
               <DataSourceEditor
                 key={selected}
-                initial={null}
                 existingName={undefined}
                 takenNames={[...allItems.map(s => s.name), ...errors.flatMap(e => (e.name ? [e.name] : []))]}
                 onCancel={() => setSelected('taiwan')}
                 onSaved={() => {
                   qc.invalidateQueries({ queryKey: QK.dataSources })
-                  // 數據集聲明變化 → 能力增廣與實時模式立即刷新
+                  // Dataset declarations changed, so the realtime mode must refresh now.
                   qc.invalidateQueries({ queryKey: QK.preferences })
-                  qc.invalidateQueries({ queryKey: QK.capabilities })
                   qc.invalidateQueries({ queryKey: QK.quoteStatus })
                   setSelected('taiwan')
                 }}
@@ -789,14 +769,12 @@ export function SettingsDataSourcesPanel() {
                 </section>
                 <DataSourceEditor
                   key={selected}
-                  initial={null}
                   existingName={selected}
                   onCancel={() => setSelected('taiwan')}
                   onSaved={() => {
                     qc.invalidateQueries({ queryKey: QK.dataSources })
-                    // 數據集聲明變化 → 能力增廣與實時模式立即刷新
+                    // Dataset declarations changed, so the realtime mode must refresh now.
                     qc.invalidateQueries({ queryKey: QK.preferences })
-                    qc.invalidateQueries({ queryKey: QK.capabilities })
                     qc.invalidateQueries({ queryKey: QK.quoteStatus })
                     // 強制清除該源的詳情緩存, 下次編輯重新拉取最新配置
                     qc.removeQueries({ queryKey: ['data-source-detail', selected] })

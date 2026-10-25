@@ -5,7 +5,7 @@ import { motion } from 'framer-motion'
 import { Activity, ArrowUpRight, BellRing, Database, Eye, HelpCircle, Layers, Loader2, Target, TrendingUp } from 'lucide-react'
 import { api, industryLabel, type AlertEvent, type IndustryMetrics, type StrategyDetail } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { fmtBigNum, fmtPct } from '@/lib/format'
+import { fmtBigNum, fmtPct, fmtPrice } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { StrategyRule } from '@/components/StrategyRule'
 import { MarketFilterNote, PickGradeBadge } from '@/components/PickGrade'
@@ -20,17 +20,6 @@ const StockPreviewDialog = lazy(() =>
 
 function n(v: number | null | undefined) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-
-function fmtPrice(v: number | null | undefined, digits = 2) {
-  const x = n(v)
-  return x == null ? '—' : x.toFixed(digits)
-}
-
-function fmtStockPct(v: number | null | undefined) {
-  const x = n(v)
-  if (x == null) return '—'
-  return `${x >= 0 ? '+' : ''}${(x * 100).toFixed(2)}%`
 }
 
 function pctClass(v: number | null | undefined) {
@@ -318,7 +307,7 @@ function IndustryStrengthList({ title, rows, tone }: { title: string; rows: Indu
       {rows.map(ind => (
         <div key={ind.industry} className="flex items-center justify-between gap-2 rounded-md bg-elevated/40 px-2 py-1 text-[11px]">
           <span className="truncate text-foreground" title={industryLabel(ind.industry)}>{industryLabel(ind.industry)}</span>
-          <span className={`shrink-0 font-mono font-semibold ${pctClass(ind.average_change_pct)}`}>{fmtStockPct(ind.average_change_pct)}</span>
+          <span className={`shrink-0 font-mono font-semibold ${pctClass(ind.average_change_pct)}`}>{fmtPct(ind.average_change_pct)}</span>
         </div>
       ))}
       {rows.length === 0 && <div className="rounded border border-dashed border-border py-3 text-center text-[11px] text-muted">暫無資料</div>}
@@ -418,7 +407,7 @@ function WatchlistQuickGlance({ onStockClick }: { onStockClick: (symbol: string,
               </div>
               <div className="text-right shrink-0">
                 <div className="font-mono text-[11px] text-foreground">{fmtPrice(r.close)}</div>
-                <div className={`font-mono text-[10px] font-semibold ${pctClass(r.change_pct)}`}>{fmtStockPct(r.change_pct)}</div>
+                <div className={`font-mono text-[10px] font-semibold ${pctClass(r.change_pct)}`}>{fmtPct(r.change_pct)}</div>
               </div>
             </button>
           ))}
@@ -558,7 +547,7 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
                     </div>
                     <div className="text-right shrink-0">
                       <div className="font-mono text-[11px] text-foreground">{fmtPrice(r.close)}</div>
-                      <div className={`font-mono text-[10px] font-semibold ${pctClass(r.change_pct)}`}>{fmtStockPct(r.change_pct)}</div>
+                      <div className={`font-mono text-[10px] font-semibold ${pctClass(r.change_pct)}`}>{fmtPct(r.change_pct)}</div>
                     </div>
                   </button>
                 ))}

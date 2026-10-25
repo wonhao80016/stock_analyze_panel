@@ -44,8 +44,9 @@ describe('repairing a data source that failed to load', () => {
 
   it('keeps the save error from the backend on screen', async () => {
     vi.mocked(api.saveDataSource).mockRejectedValue(new Error('資料來源設定無法載入, 未儲存: realtime: amplitude 未宣告'))
-    wrap(<DataSourceEditor initial={{ ...BROKEN, load_error: undefined }} onCancel={() => {}} onSaved={() => {}} activeName="" onActivate={() => {}} />)
+    wrap(<DataSourceEditor onCancel={() => {}} onSaved={() => {}} activeName="" onActivate={() => {}} />)
 
+    fireEvent.change(screen.getByPlaceholderText('my_tushare'), { target: { value: 'broken' } })
     fireEvent.click(screen.getByText(/儲存/))
 
     expect(await screen.findByText(/amplitude 未宣告/)).toBeInTheDocument()

@@ -46,7 +46,7 @@ import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primitives'
 import { getSignals, signalCls, getSortValue, getIntradaySortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
-import { useQuoteStatus, useCapabilities, usePreferences } from '@/lib/useSharedQueries'
+import { useQuoteStatus, usePreferences } from '@/lib/useSharedQueries'
 import {
   type ColumnConfig,
   BUILTIN_COLUMNS,
@@ -63,10 +63,16 @@ import {
 const BOARDS = ['上市', '上櫃'] as const
 type BoardType = typeof BOARDS[number]
 
-function getBoardType(symbol: string): BoardType | null {
-  if (symbol.endsWith('.TWSE')) return '上市'
-  if (symbol.endsWith('.TPEX')) return '上櫃'
-  return null
+// Persisted values from older board sets must be dropped; an unknown board would
+// filter out every stock row while both board buttons show as unselected.
+export function initialBoardFilter(saved: string[]): Set<string> {
+  const kept = saved.filter((b): b is BoardType => (BOARDS as readonly string[]).includes(b))
+  return kept.length > 0 ? new Set<string>(kept) : new Set<string>(BOARDS)
+}
+
+/** Selecting every board, or none, skips board filtering. */
+export function boardFilterIsActive(filter: Set<string>): boolean {
+  return filter.size > 0 && filter.size < BOARDS.length
 }
 
 // ===== 盤後訊號的資料日期 =====
@@ -759,10 +765,7 @@ export function Watchlist() {
   )
   // 分時列渲染配置（寬高, 來自列定製, 已鉗制邊界）
   const intradayResolved = useMemo(() => resolveIntradayConfig(intradayColumn?.intradayConfig), [intradayColumn])
-  // 分時圖依賴分鐘K批量數據 (kline.minute.batch), 無數據時開了列也不拉
-  const caps = useCapabilities()
-  const hasMinuteBatch = !!caps.data?.capabilities?.['kline.minute.batch']
-  const intradayVisible = !!intradayColumn && hasMinuteBatch && intradayChartVisible
+  const intradayVisible = !!intradayColumn && intradayChartVisible
 
   // 計算可見列（列是否出現只由自定義列配置決定）
   const visibleColumns = useMemo(() => {
@@ -1070,14 +1073,7 @@ export function Watchlist() {
   const [volumeUnit] = useVolumeUnit()
 
   // 板塊篩選（持久化）
-  const [boardFilter, setBoardFilter] = useState<Set<string>>(() => {
-    // Persisted values from older board sets must be dropped; an unknown board would
-    // filter out every stock row while both board buttons show as unselected.
-    const saved = storage.watchlistBoardFilter.get([]).filter(
-      (b): b is BoardType => (BOARDS as readonly string[]).includes(b),
-    )
-    return saved.length > 0 ? new Set<string>(saved) : new Set<string>(BOARDS) // 預設全選
-  })
+  const [boardFilter, setBoardFilter] = useState<Set<string>>(() => initialBoardFilter(storage.watchlistBoardFilter.get([])))
   const persistBoardFilter = useCallback((next: Set<string>) => {
     setBoardFilter(next)
     storage.watchlistBoardFilter.set([...next])
@@ -1135,11 +1131,11 @@ export function Watchlist() {
   const filteredRows = useMemo(() => {
     // 板塊篩選（全選時跳過）
     let result = rowsInSelectedGroup
-    if (boardFilter.size > 0 && boardFilter.size < BOARDS.length) {
+    if (boardFilterIsActive(boardFilter)) {
       result = result.filter(r => {
         // 非股票 (指數/ETF) 無板塊語義, 不受板塊篩選影響 (順帶修復 ETF 行被誤過濾)
         if (r.asset_type && r.asset_type !== 'stock') return true
-        const board = getBoardType(r.symbol)
+        const board = boardTag(r.symbol)?.label
         return board != null && boardFilter.has(board)
       })
     }
@@ -1166,7 +1162,7 @@ export function Watchlist() {
   }, [rowsInSelectedGroup, filters, columns, boardFilter, volumeUnit])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
-  const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
+  const hasBoardFilter = boardFilterIsActive(boardFilter)
   const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter
 
   // 排序（複用共享三態排序 hook）。分時列按「最新分鐘收盤 vs 昨收」排序（分時圖最後一點同口徑），

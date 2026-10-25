@@ -35,6 +35,35 @@ const BUILTIN_PAGES: NavEntry[] = CORE_NAV.map(n => ({
   id: n.to, label: n.label, visible: true,
 }))
 
+function orderNavEntries(order: string[]): NavEntry[] {
+  if (order.length === 0) return [...BUILTIN_PAGES]
+  const entryMap = new Map(BUILTIN_PAGES.map(e => [e.id, e]))
+  const ordered: NavEntry[] = []
+  const seen = new Set<string>()
+  for (const id of order) {
+    const entry = entryMap.get(id)
+    if (entry) {
+      ordered.push(entry)
+      seen.add(id)
+    }
+  }
+  for (const e of BUILTIN_PAGES) {
+    if (seen.has(e.id)) continue
+    // 未保存過排序的新條目: 內置頁插回默認位置
+    const defaultIndex = BUILTIN_PAGES.findIndex(p => p.id === e.id)
+    let anchor = -1
+    if (defaultIndex > 0) {
+      for (let i = defaultIndex - 1; i >= 0 && anchor < 0; i -= 1) {
+        anchor = ordered.findIndex(o => o.id === BUILTIN_PAGES[i].id)
+      }
+    }
+    if (anchor >= 0) ordered.splice(anchor + 1, 0, e)
+    else if (defaultIndex >= 0) ordered.unshift(e)
+    else ordered.push(e)
+  }
+  return ordered
+}
+
 const NAV_HIDDEN_MUTATION_KEY = ['nav-hidden'] as const
 
 // ── Sortable row ──
@@ -66,7 +95,7 @@ function SortableItem({ entry, hidden, onToggleHidden, badgeEnabled, onToggleBad
     <div
       ref={setNodeRef}
       style={style}
-      className={`grid grid-cols-[2.5rem_1fr_4.5rem_3rem_3rem_3rem] items-center border-b border-border/70 px-4 py-3 last:border-b-0 ${
+      className={`grid grid-cols-[2.5rem_1fr_3rem_3rem_3rem] items-center border-b border-border/70 px-4 py-3 last:border-b-0 ${
         isDragging ? 'bg-elevated rounded-lg shadow-lg' : ''
       } ${hidden ? 'opacity-50' : ''}`}
     >
@@ -85,11 +114,6 @@ function SortableItem({ entry, hidden, onToggleHidden, badgeEnabled, onToggleBad
           <span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted shrink-0">已隱藏</span>
         )}
         <span className="truncate text-[11px] text-muted font-mono">{entry.id}</span>
-      </div>
-      <div>
-        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] bg-elevated text-muted">
-          內建
-        </span>
       </div>
       <div className="flex justify-center">
         <button
@@ -139,69 +163,14 @@ export function SettingsMenuSettingsPanel() {
   const qc = useQueryClient()
   const { data: prefs } = usePreferences()
 
-  const allEntries = useMemo(() => {
-    const saved = prefs?.nav_order ?? []
-    const entryMap = new Map<string, NavEntry>()
-    for (const e of BUILTIN_PAGES) entryMap.set(e.id, e)
-
-    if (saved.length === 0) return [...BUILTIN_PAGES]
-
-    const ordered: NavEntry[] = []
-    const seen = new Set<string>()
-    for (const id of saved) {
-      const entry = entryMap.get(id)
-      if (entry) {
-        ordered.push(entry)
-        seen.add(id)
-      }
-    }
-    for (const e of BUILTIN_PAGES) {
-      if (seen.has(e.id)) continue
-      // 未保存過排序的新條目: 內置頁插回默認位置
-      const defaultIndex = BUILTIN_PAGES.findIndex(p => p.id === e.id)
-      let anchor = -1
-      if (defaultIndex > 0) {
-        for (let i = defaultIndex - 1; i >= 0 && anchor < 0; i -= 1) {
-          anchor = ordered.findIndex(o => o.id === BUILTIN_PAGES[i].id)
-        }
-      }
-      if (anchor >= 0) ordered.splice(anchor + 1, 0, e)
-      else if (defaultIndex >= 0) ordered.unshift(e)
-      else ordered.push(e)
-    }
-    return ordered
-  }, [prefs?.nav_order])
-
   const hiddenSet = useMemo(() => new Set(prefs?.nav_hidden ?? []), [prefs?.nav_hidden])
 
   // Local order state for optimistic drag updates
   const [localOrder, setLocalOrder] = useState<string[] | null>(null)
-  const orderedEntries = useMemo(() => {
-    const order = localOrder ?? prefs?.nav_order ?? []
-    if (!order.length) return allEntries
-    const byId = new Map(allEntries.map(e => [e.id, e]))
-    const result: NavEntry[] = []
-    const seen = new Set<string>()
-    for (const id of order) {
-      const e = byId.get(id)
-      if (e) { result.push(e); seen.add(id) }
-    }
-    for (const e of allEntries) {
-      if (seen.has(e.id)) continue
-      // 與 allEntries 同一語義: 未保存的新內置頁插回默認位置而非追加到末尾
-      const defaultIndex = BUILTIN_PAGES.findIndex(p => p.id === e.id)
-      let anchor = -1
-      if (defaultIndex > 0) {
-        for (let i = defaultIndex - 1; i >= 0 && anchor < 0; i -= 1) {
-          anchor = result.findIndex(o => o.id === BUILTIN_PAGES[i].id)
-        }
-      }
-      if (anchor >= 0) result.splice(anchor + 1, 0, e)
-      else if (defaultIndex >= 0) result.unshift(e)
-      else result.push(e)
-    }
-    return result
-  }, [localOrder, prefs?.nav_order, allEntries])
+  const orderedEntries = useMemo(
+    () => orderNavEntries(localOrder ?? prefs?.nav_order ?? []),
+    [localOrder, prefs?.nav_order],
+  )
 
   const saveNavOrder = useMutation({
     mutationFn: (order: string[]) => api.saveNavOrder(order),
@@ -271,10 +240,9 @@ export function SettingsMenuSettingsPanel() {
       </section>
 
       <section className="rounded-card border border-border bg-surface overflow-hidden">
-        <div className="grid grid-cols-[2.5rem_1fr_4.5rem_3rem_3rem_3rem] items-center border-b border-border px-4 py-2 text-[11px] text-muted">
+        <div className="grid grid-cols-[2.5rem_1fr_3rem_3rem_3rem] items-center border-b border-border px-4 py-2 text-[11px] text-muted">
           <div />
           <div>選單</div>
-          <div>類型</div>
           <div className="text-center">顯示</div>
           <div className="text-center">設定</div>
           <div className="text-center">數字</div>

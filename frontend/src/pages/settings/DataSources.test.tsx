@@ -57,12 +57,13 @@ afterEach(() => {
 })
 
 describe('built-in Taiwan source card', () => {
-  it('lists the financial dataset once', async () => {
+  it('does not list the financial dataset the backend still declares', async () => {
     renderPanel()
 
     const name = await screen.findByText('台灣官方資料源 (TWSE/TPEx)', { selector: 'span' })
     const card = name.closest('div.relative') as HTMLElement
-    expect(within(card).getAllByText('財務')).toHaveLength(1)
+    expect(within(card).getByText('日K')).toBeInTheDocument()
+    expect(within(card).queryByText('財務')).toBeNull()
   })
 })
 
