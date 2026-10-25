@@ -61,6 +61,9 @@
 - D5（2026-10-24）：B006–B009 修正後，以修正後的程式重新評估既有挖掘發佈的策略，未通過門檻的下架。
 - D8（2026-10-24）：指標改為台股常見口徑，一次提高 `INDICATOR_DEFINITION_VERSION` 並全量重新發佈。MACD 柱為 DIF − 訊號線（不乘 2）；布林通道為 20 日中線 ±2 倍母體標準差；`annual_vol_20d` 用對數報酬、20 日樣本標準差 ×√252；KD 在 H9 = L9 時沿用前一日 K；RSI 在漲跌皆為 0 時為 50；交叉判定加浮點容差，等於 0 的那根不算穿越（Polars 路徑容差為 max(1e-9, 1e-9×|收盤|)；矩陣路徑任一輸入為 float32 時，容差下限為 2⁻²²×max(|左|,|右|)）；跌停翻紅為「原始最低價觸及跌停價（容差 0.005）且原始收盤高於昨收」。
 - D6（2026-10-24）：台股模式的分時訊號只在設定了自訂分鐘資料插件時回報可用；預設台股設定回報「不可用」並附原因，存檔時拒絕，已存的規則在列表標示警告。四個分時訊號、評估器與自訂插件路徑保留；TickFlow 能力分支留待 D7 於階段 9 一併處理。
+- D7（2026-10-25）：全面移除 A 股／TickFlow 遺留，包括 TickFlow SDK 整合、A 股資料路徑與台股模式不可達的分支。
+- Mining（2026-10-25）：策略挖掘已沒有任何正式入口，使用者決定整組刪除；D5 的重新評估與恢復端點、B148 隨之結案。原本附帶的資料目錄行程鎖保留為 `DataDirProcessLock`。
+- D9（2026-10-25）：採建議方案：刪除 `screenshots/`、`gui-test-screenshots/`、`community-qr-code.jpg`；`frontend/vite.config.d.ts` 移出版控；`docs/deploy-password.md` 併入 `docs/deployment.md`；README、`操作說明書.md`、`docs/features.md` 收斂為「README 簡介、操作說明書為功能正本」。
 - B180（2026-10-24）：融資未公布的 16:30–21:40 期間，AI 研究仍帶入大盤與產業脈絡，並附資料狀態，要求引用時註明。
 
 ## 各階段做法與完成條件
@@ -159,13 +162,13 @@
 | 0 安全止血 | 已完成（2026-10-23） | B001、B005、B023：`bedae43`；B002：`6451def`；B003：`d754f6e`；B018：`b6f75a1`；B030：`f90cf95`；B035：`a41233e`；B026：`b625690`。合併後階段 0 相關測試 324 passed。後續事項見下方 |
 | 1 測試基線與隔離 | 已完成（2026-10-23） | B057：`c0587fc`；B223–B228、B231–B235、B238–B241：`99931b1`；B236、B237：`3ae2f62`；B229、B230：`e6fab1c`。不設環境變數的全套基線（在不含 data/ 的副本上）：4485 passed、7 xfailed、12 deselected，約 9.5 分鐘，峰值記憶體約 0.8 GB，無外連，正式 data/ 未被寫入。後續事項見下方 |
 | 2 部署與打包 | 程式已完成（2026-10-24），待實機驗證 | B004：`bfaf74e`；B069、B334：`de8086d`；B010：`7e5eff8`；B222：`cdab715`；B242、B243：`62d8e9b`；B332、B333：`e45ca41`；B335、B336：`76fd791`。本機沒有 Docker、PyInstaller 與 Inno Setup，打包與容器只做了靜態驗證，實機步驟見下方 |
-| 3 回測與挖掘可信度 | 已完成（2026-10-25）；第二輪 B097–B108、B111–B114 的提交見下方紀錄，B148 待使用者決定 | B006、B007、B008、B015、B016、B017、B036、B037、B109：`70725a3`；B009、B110、B145、B146、B147 與 D5：`7aab380`。合併驗證 1747 passed。正式 data 的 679 個日 K 分區都有 raw_close |
+| 3 回測與挖掘可信度 | 已完成（2026-10-25）；第二輪 B097–B108、B111–B114 的提交見下方紀錄；B148 隨階段 9 移除 mining 結案 | B006、B007、B008、B015、B016、B017、B036、B037、B109：`70725a3`；B009、B110、B145、B146、B147 與 D5：`7aab380`。合併驗證 1747 passed。正式 data 的 679 個日 K 分區都有 raw_close |
 | 4 資料寫入與一致性 | 已完成（2026-10-24） | B012：`8448d4c`；B024：`63ac041`；B031、B032：`efd63da`；B025、B060：`162a670`；B047、B048、B044：`19999ef`；B051、B052：`4f0ef75`。合併後的後端全套：4727 passed、7 xfailed、12 deselected，0 failed。上線步驟與後續事項見下方 |
 | 5 台股資料與分析 | 已完成（2026-10-24） | 5A 指標口徑（D8）：`5c25f3c`；5B 關鍵價位：`05073b1`；5C 詳細頁與籌碼：`3d43f37`；5E 資料同步與 store：`9a45b33`；5F 選股、市場統計、自選頁：`59a8fde`；5D 異常診斷與 AI 研究：`26abe38`。合併後的後端全套：5058 passed、1 xfailed、12 deselected，0 failed；前端 tsc 通過，vitest 525 passed。上線步驟與後續事項見下方 |
 | 6 即時行情、監控與自訂訊號 | 已完成（2026-10-24） | 6A 即時行情：`6774d2f`；6D 截圖匯入與標的搜尋：`30c7787`；6B 監控規則與 D6：`63cc3e2`；6C 自訂訊號、AI 策略與自訂資料源：`2bd7544`。合併後的後端全套：5287 passed、1 xfailed、12 deselected，0 failed；前端 tsc 通過，vitest 547 passed。上線步驟與後續事項見下方 |
 | 7 前端顯示與狀態 | 程式已完成（2026-10-24），待瀏覽器檢查 | 7A 版面與共用函式庫：`4551cf8`；7B 圖表與個股頁：`5c6193a`；7C 選股與自選：`dd4534d`；7D 看板、監控中心、策略頁：`d48dc76`；7E 設定頁：`78d7e89`。合併後的後端全套：5330 passed、1 xfailed、12 deselected，1 failed（`test_stage2_master_refresh` 偶發，單獨重跑通過）；前端 tsc 通過，vitest 757 passed，`pnpm build` 通過（2026-10-24，echarts chunk 1.03 MB 有大小警告）。手動檢查清單見下方 |
 | 8 效能 | 已完成（2026-10-25） | B049、B064：`ba5a9be`；B056、B053：`08f997f`。合併後的後端全套：5374 passed、1 skipped、1 xfailed、12 deselected，0 failed；前端 tsc 通過，vitest 770 passed，`pnpm build` 通過。量測與後續事項見下方 |
-| 9 Dead code 與遺留移除 | 未開始 | 待 D7 |
+| 9 Dead code 與遺留移除 | 已完成（2026-10-25） | 第一輪：`1b7d67c`（前端）、`4505586`（後端）；第二、三輪：`b073f5f`（ext 設定快取修正）、`da2efe8`（前端）、`2e87ed3`（後端，含台股 ETF asset_type 修正）；mining 移除：`a99262d`。最後的後端全套 4700 passed、1 xfailed，0 failed；前端 tsc 通過，vitest 771 passed，`pnpm build` 通過。後續事項見下方 |
 | 10 文件與冗餘檔案 | 未開始 | 待 D9 |
 
 ### 階段 0 留下的後續事項
@@ -337,6 +340,25 @@
 3. `listing_sessions` 的 `first_sessions` 每 60 秒仍掃描全部日K分區；分區檔損毀時會讓選股直接丟例外。
 4. 共用 provider 若在測試中建立於被 patch 的 `httpx.Client` 之下，會沿用到整個測試行程。
 5. echarts chunk 約 1.03 MB，建置時有大小警告。
+
+### 階段 9 處置與後續事項
+
+處置摘要：
+
+1. 每個 D 編號刪除前都重新搜尋整個 repo（含動態載入、打包設定、插件文件與使用者策略可 import 的模組）；刪除後跑後端全套、前端 tsc、vitest 與 `pnpm build`。
+2. A 股漲跌停、成交量單位與換手率改動前後，以台股合成樣本做 golden 對照（上市、上櫃、ETF、TDR、除權息、漲跌停），輸出逐位元組相同。
+3. 移除的大項：TickFlow SDK 整合與能力框架（`app/tickflow/`、`app/capabilities.py`）、A 股資料與盤中增量路徑、A 股 ETF enriched 快取、optimizer、walkforward、prompt_builder、mining；依賴 fastexcel、platformdirs、plyer、mypy、class-variance-authority、echarts-for-react、lightweight-charts。
+4. 一併修正：台股 ETF 以 `asset_type=etf` 回測、選股與 ETF 策略型規則原本讀到空目錄，改讀 `kline_daily_enriched` 並以 Security Master 篩選；監控的 ETF 輪原本永遠不會觸發；擴展表設定編輯後可能讀到舊快取。
+5. 已發佈的挖掘策略仍可載入與回測（只依賴 `factor_rank_research`）。下架改為手動：把 `data/strategies/custom/<id>.py` 移走、停用引用它的監控規則並重啟後端；以前下架的檔案在 `data/research/mining/reevaluation/delisted/`。
+
+後續事項：
+
+1. 使用者 data 目錄會留下 `research/mining/`、`.mining_process.lock` 與偏好中的 mining 鍵，程式不再讀取，可手動清理。
+2. 後端 builtin 資料源仍宣告 `financial`，目前由前端過濾不顯示。
+3. 保留但無正式入口或待決的項目：matrix 運算子（使用者策略可 import）、基本面相關 D301、D365、D442、D495、D538；`ScreenerResult` 只剩測試使用。
+4. 台股 ETF 價位用的是股票的升降單位（`_TICK_CLASSES["etf"]` 不可達），屬既有問題。
+5. 階段 10 要同步的文件：`CONTRIBUTING.md`（`app/tickflow/`、優化與步進優化、lightweight-charts）、`docs/configuration.md`（已刪端點、mining 發佈、TICKFLOW_API_KEY）、`docs/deployment.md`、`docs/plugin-development.md`（回退 TickFlow、`plugins/` 目錄）、`docs/taiwan-data-sources.md`（`/api/data/status`）、`docs/radar-strategies-validation.md`（optimizer）、`.env.example`；audit README 階段 2 的實機步驟仍提到已不再打包的 prompts。
+6. 本階段有三次 subagent 讀到正式 data/（遞迴 grep、未隔離的驗證腳本），都沒有寫入；派工限制已改為明列「不得從 repo 根目錄遞迴、驗證腳本必須設 DATA_DIR」。
 
 ## 維護方式
 
