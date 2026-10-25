@@ -36,8 +36,6 @@ vi.mock('@/components/StockIntradayChart', () => ({
 }))
 
 vi.mock('@/components/StockInfoBar', () => ({ StockInfoBar: () => null }))
-vi.mock('@/lib/useFinancials', () => ({ useFinancialMetrics: () => ({ data: undefined }) }))
-vi.mock('@/lib/useSharedQueries', () => ({ useCapabilities: () => ({ data: undefined }) }))
 
 function row(date: string, close: number, prev_close?: number): KlineRow {
   return { date, open: close, high: close, low: close, close, volume: 1000, ...(prev_close != null ? { prev_close } : {}) }

@@ -9,7 +9,6 @@ import { storage } from '@/lib/storage'
 import type { VolumeUnit } from '@/lib/volumeUnit'
 import {
   buildExtColumnsParam as buildExtColumnsParamBase,
-  createExtColumn as createExtColumnBase,
   mergeColumns as mergeColumnsBase,
   serializeColumns as serializeColumnsBase,
   type ColumnConfig,
@@ -252,14 +251,4 @@ function mergeColumns(saved: ColumnConfig[], defaults: ColumnConfig[]): ColumnCo
 /** 從列配置中提取 ext 列參數，用於後端 enriched 接口 */
 export function buildExtColumnsParam(columns: ColumnConfig[]): string {
   return buildExtColumnsParamBase(columns)
-}
-
-/** 根據 ext schema 數據創建 ext 列配置 */
-export function createExtColumn(
-  configId: string,
-  configLabel: string,
-  fieldName: string,
-  fieldLabel?: string,
-): ColumnConfig {
-  return createExtColumnBase(configId, configLabel, fieldName, fieldLabel)
 }

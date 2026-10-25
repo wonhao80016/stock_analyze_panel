@@ -52,8 +52,6 @@ vi.mock('@/components/StockIntradayChart', () => ({
 vi.mock('@/components/StockInfoBar', () => ({
   StockInfoBar: ({ rows }: { rows: KlineRow[] }) => <div data-testid="info" data-rows={rows.length} />,
 }))
-vi.mock('@/lib/useFinancials', () => ({ useFinancialMetrics: () => ({ data: undefined }) }))
-vi.mock('@/lib/useSharedQueries', () => ({ useCapabilities: () => ({ data: undefined }) }))
 
 function row(date: string, close: number, extra: Partial<KlineRow> = {}): KlineRow {
   return { date, open: close, high: close, low: close, close, volume: 1000, ...extra }

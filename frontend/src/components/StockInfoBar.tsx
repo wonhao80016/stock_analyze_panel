@@ -1,10 +1,9 @@
 import { useState, type ReactNode } from 'react'
-import { Settings2, RadioTower, Star } from 'lucide-react'
-import { BOARD_LOT_VOLUME_NOTE, type KlineRow, type FinancialMetricRecord } from '@/lib/api'
+import { Settings2 } from 'lucide-react'
+import { BOARD_LOT_VOLUME_NOTE, type KlineRow } from '@/lib/api'
 import { fmtPrice, fmtBigNum } from '@/lib/format'
 import { formatVolume, useVolumeUnit } from '@/lib/volumeUnit'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
-import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { INFO_GROUPS, type ColumnConfig } from '@/lib/stock-info-fields'
 import { resolveTurnoverRate } from '@/lib/turnoverRate'
 
@@ -19,15 +18,6 @@ interface Props {
   /** 信息條字段配置（由 StockPanel 提升，受控） */
   fields: ColumnConfig[]
   onFieldsChange: (fields: ColumnConfig[]) => void
-  /** 財務指標最新一期（來自 useFinancialMetrics，受 Cap.FINANCIAL 門控） */
-  financialMetrics?: FinancialMetricRecord
-  /** 加監控回調 (個股彈窗傳入, 有值時渲染 RadioTower 圖標) */
-  onMonitor?: () => void
-  /** 自選狀態與操作（傳入對應回調時渲染 Star 圖標） */
-  inWatchlist?: boolean
-  onAddToWatchlist?: (groupId: string | null) => void
-  onRemoveFromWatchlist?: () => void
-  watchlistPending?: boolean
 }
 
 /**
@@ -103,12 +93,6 @@ export function StockInfoBar({
   rows,
   fields,
   onFieldsChange,
-  financialMetrics,
-  onMonitor,
-  inWatchlist,
-  onAddToWatchlist,
-  onRemoveFromWatchlist,
-  watchlistPending,
 }: Props) {
   // 彈窗開關：純本地狀態，與數據/配置無關，放早期 return 之前
   const [customizerOpen, setCustomizerOpen] = useState(false)
@@ -173,24 +157,6 @@ export function StockInfoBar({
       case 'open': return fmtPrice(Number(latest.open))
       case 'high': return fmtPrice(Number(latest.high))
       case 'low':  return fmtPrice(Number(latest.low))
-      // 財務指標：百分比字段存儲為百分點(12.3 表示 12.3%)，直接 toFixed(2) + %
-      case 'eps':         return financialMetrics?.eps_basic != null ? fmtPrice(financialMetrics.eps_basic) : null
-      case 'bps':         return financialMetrics?.bps != null ? fmtPrice(financialMetrics.bps) : null
-      case 'roe':         return financialMetrics?.roe != null ? `${financialMetrics.roe.toFixed(2)}%` : null
-      case 'gross_margin':return financialMetrics?.gross_margin != null ? `${financialMetrics.gross_margin.toFixed(2)}%` : null
-      case 'net_margin':  return financialMetrics?.net_margin != null ? `${financialMetrics.net_margin.toFixed(2)}%` : null
-      case 'debt_ratio':  return financialMetrics?.debt_to_asset_ratio != null ? `${financialMetrics.debt_to_asset_ratio.toFixed(2)}%` : null
-      case 'revenue_yoy': return financialMetrics?.revenue_yoy != null ? `${financialMetrics.revenue_yoy.toFixed(2)}%` : null
-      case 'net_income_yoy': return financialMetrics?.net_income_yoy != null ? `${financialMetrics.net_income_yoy.toFixed(2)}%` : null
-      // PE/PB 後端無此字段，用現價現算（PE 基於最新一期 EPS，非嚴格 TTM）
-      case 'pe_ttm': {
-        const eps = financialMetrics?.eps_basic
-        return eps && eps !== 0 ? fmtPrice(close / eps) : null
-      }
-      case 'pb': {
-        const bps = financialMetrics?.bps
-        return bps && bps !== 0 ? fmtPrice(close / bps) : null
-      }
       default: return null
     }
   }
@@ -242,38 +208,7 @@ export function StockInfoBar({
         <span style={{ color: clr }} className="tabular-nums">
           {isUp ? '+' : ''}{fmtPrice(chgPct)}%
         </span>
-        {/* 右側操作按鈕：加自選 + 加監控 + 信息條配置 */}
         <div className="ml-auto self-center flex items-center gap-1">
-          {inWatchlist && onRemoveFromWatchlist ? (
-            <button
-              type="button"
-              onClick={onRemoveFromWatchlist}
-              disabled={watchlistPending}
-              className="rounded-btn p-1 text-[#FACC15] transition-colors cursor-pointer hover:bg-elevated disabled:opacity-50"
-              title="移出自選"
-              aria-label={`將 ${symbol} 移出自選`}
-            >
-              <Star className="h-3.5 w-3.5" />
-            </button>
-          ) : !inWatchlist && onAddToWatchlist ? (
-            <WatchlistAddMenu
-              onSelect={onAddToWatchlist}
-              disabled={watchlistPending}
-              triggerClassName="rounded-btn p-1 text-muted transition-colors cursor-pointer hover:bg-elevated hover:text-foreground disabled:opacity-50"
-              ariaLabel={`將 ${symbol} 加入自選`}
-            >
-              <Star className="h-3.5 w-3.5" />
-            </WatchlistAddMenu>
-          ) : null}
-          {onMonitor && (
-            <button
-              onClick={onMonitor}
-              className="p-1 rounded-btn text-amber-400 hover:bg-amber-400/10 transition-colors cursor-pointer"
-              title="加監控"
-            >
-              <RadioTower className="h-3.5 w-3.5" />
-            </button>
-          )}
           <button
             onClick={() => setCustomizerOpen(true)}
             className="p-1 rounded-btn text-muted hover:text-foreground hover:bg-elevated transition-colors"

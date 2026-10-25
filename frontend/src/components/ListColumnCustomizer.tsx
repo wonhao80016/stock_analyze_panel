@@ -34,9 +34,6 @@ interface ListColumnCustomizerProps {
   title?: string
   builtinSectionLabel?: string
   extColumnAlign?: 'left' | 'center' | 'right'
-  extFieldFilter?: (field: { name: string; label: string; type: string }) => boolean
-  /** 是否顯示擴展數據列區塊（默認 true；信息條等無法渲染 ext 數據的場景設為 false）。 */
-  showExtColumns?: boolean
   /** 是否顯示「單獨顯示」勾選項（默認 false；僅信息條場景啟用，讓某列獨佔一行）。 */
   showStandaloneToggle?: boolean
 }
@@ -54,7 +51,7 @@ function isNumericFieldType(ft?: string): boolean {
   return true
 }
 
-function SortableActiveCol({ col, onRemove, onConfig, configOpen, extTableLabel, extConfig, candleConfig: candlePanel, intradayConfig: intradayPanel, strategiesConfig, showStandaloneToggle, onToggleStandalone }: {
+function SortableActiveCol({ col, onRemove, onConfig, configOpen, extTableLabel, extConfig, candleConfig: candlePanel, intradayConfig: intradayPanel, showStandaloneToggle, onToggleStandalone }: {
   col: ColumnConfig
   onRemove: (id: string) => void
   onConfig: (id: string | null) => void
@@ -63,7 +60,6 @@ function SortableActiveCol({ col, onRemove, onConfig, configOpen, extTableLabel,
   extConfig: React.ReactNode
   candleConfig: React.ReactNode
   intradayConfig: React.ReactNode
-  strategiesConfig: React.ReactNode
   showStandaloneToggle?: boolean
   onToggleStandalone?: (id: string) => void
 }) {
@@ -73,8 +69,7 @@ function SortableActiveCol({ col, onRemove, onConfig, configOpen, extTableLabel,
   const isExt = col.source.type === 'ext'
   const isCandle = col.source.type === 'builtin' && col.source.key === 'candle'
   const isIntraday = col.source.type === 'builtin' && col.source.key === 'intraday'
-  const isStrategies = col.source.type === 'builtin' && col.source.key === 'strategies'
-  const hasConfig = isExt || isCandle || isIntraday || isStrategies
+  const hasConfig = isExt || isCandle || isIntraday
 
   return (
     <>
@@ -132,7 +127,7 @@ function SortableActiveCol({ col, onRemove, onConfig, configOpen, extTableLabel,
           <EyeOff className="h-3 w-3" />
         </button>
       </div>
-      {hasConfig && configOpen && (isExt ? extConfig : isCandle ? candlePanel : isIntraday ? intradayPanel : strategiesConfig)}
+      {hasConfig && configOpen && (isExt ? extConfig : isCandle ? candlePanel : intradayPanel)}
     </>
   )
 }
@@ -146,14 +141,12 @@ export function ListColumnCustomizer({
   title = '自訂列',
   builtinSectionLabel = '內建列',
   extColumnAlign = 'center',
-  extFieldFilter,
-  showExtColumns = true,
   showStandaloneToggle = false,
 }: ListColumnCustomizerProps) {
   const extSchema = useQuery({
     queryKey: QK.extDataSchemaAll,
     queryFn: api.extDataSchemaAll,
-    enabled: open && showExtColumns,
+    enabled: open,
     staleTime: 60_000,
   })
   const backdrop = useDialogBackdrop(onClose)
@@ -167,7 +160,7 @@ export function ListColumnCustomizer({
   const keyToId = useMemo(() => {
     const m = new Map<string, string>()
     for (const c of columns) {
-      if (c.source.type === 'builtin' || c.source.type === 'computed') m.set(c.source.key, c.id)
+      if (c.source.type === 'builtin') m.set(c.source.key, c.id)
     }
     return m
   }, [columns])
@@ -217,14 +210,7 @@ export function ListColumnCustomizer({
       visible: true,
       align: extColumnAlign,
     }
-    const actionIdx = columns.findIndex(c => c.id === 'builtin:action')
-    if (actionIdx >= 0) {
-      const next = [...columns]
-      next.splice(actionIdx, 0, newCol)
-      onChange(next)
-    } else {
-      onChange([...columns, newCol])
-    }
+    onChange([...columns, newCol])
   }, [columns, extColumnAlign, onChange, toggleVisible])
 
   const hideColumn = useCallback((colId: string) => {
@@ -479,84 +465,6 @@ export function ListColumnCustomizer({
     </motion.div>
   )
 
-  // 策略列配置（精簡版：僅顯示數量/位置/排列方向，複用 extDisplay 存儲）
-  const renderStrategiesConfig = (col: ColumnConfig) => (
-    <motion.div
-      initial={{ height: 0, opacity: 0 }}
-      animate={{ height: 'auto', opacity: 1 }}
-      exit={{ height: 0, opacity: 0 }}
-      transition={{ duration: 0.15 }}
-      className="overflow-hidden"
-    >
-      <div className="pl-10 pr-3 py-2 space-y-2 border-l-2 border-accent/20 ml-[18px]">
-        <label className="flex items-center gap-2 text-xs">
-          <span className="text-secondary w-16 shrink-0">顯示前N個</span>
-          <input
-            type="number" min={0}
-            value={col.extDisplay?.maxTags ?? ''}
-            onChange={e => {
-              const v = e.target.value ? Number(e.target.value) : undefined
-              updateExtDisplay(col.id, { maxTags: v, ...(v ? {} : { hiddenIndices: undefined }) })
-            }}
-            placeholder="0=全部"
-            className="flex-1 h-7 rounded bg-elevated border border-border text-foreground text-xs placeholder:text-muted focus:outline-none focus:border-accent/50"
-          />
-        </label>
-        {(col.extDisplay?.maxTags ?? 0) > 0 && (
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-secondary w-16 shrink-0">顯示位置</span>
-            <div className="flex flex-wrap gap-1">
-              {Array.from({ length: col.extDisplay!.maxTags! }, (_, i) => {
-                const hidden = col.extDisplay?.hiddenIndices?.includes(i)
-                return (
-                  <button
-                    key={i}
-                    onClick={() => {
-                      const cur = col.extDisplay?.hiddenIndices ?? []
-                      const next = hidden ? cur.filter(x => x !== i) : [...cur, i]
-                      updateExtDisplay(col.id, { hiddenIndices: next.length ? next : undefined })
-                    }}
-                    className={`w-6 h-6 rounded text-[10px] font-medium transition-colors ${
-                      hidden ? 'bg-elevated text-muted line-through' : 'bg-accent/15 text-accent'
-                    }`}
-                  >
-                    {i + 1}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
-        <label className="flex items-center gap-2 text-xs">
-          <span className="text-secondary w-16 shrink-0">排列方向</span>
-          <div className="flex rounded overflow-hidden border border-border">
-            <button
-              onClick={() => updateExtDisplay(col.id, { tagLayout: 'horizontal' })}
-              className={`px-3 py-1 text-xs transition-colors ${
-                (col.extDisplay?.tagLayout ?? 'horizontal') === 'horizontal'
-                  ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary hover:text-foreground'
-              }`}
-            >橫向</button>
-            <button
-              onClick={() => updateExtDisplay(col.id, { tagLayout: 'vertical' })}
-              className={`px-3 py-1 text-xs transition-colors border-l border-border ${
-                col.extDisplay?.tagLayout === 'vertical'
-                  ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary hover:text-foreground'
-              }`}
-            >縱向</button>
-          </div>
-        </label>
-        {col.extDisplay && (
-          <div className="flex justify-end pt-1">
-            <button onClick={() => resetExtDisplay(col.id)} className="text-[10px] text-muted hover:text-foreground transition-colors">
-              恢復預設
-            </button>
-          </div>
-        )}
-      </div>
-    </motion.div>
-  )
-
   const renderCandleConfig = (col: ColumnConfig) => {
     const cfg = resolveCandleConfig(col.candleConfig)
     // 數值輸入: onChange 存原始值(不鉗制, 允許自由輸入), onBlur 鉗制邊界
@@ -771,7 +679,6 @@ export function ListColumnCustomizer({
                           extConfig={renderExtConfig(col)}
                           candleConfig={renderCandleConfig(col)}
                           intradayConfig={renderIntradayConfig(col)}
-                          strategiesConfig={renderStrategiesConfig(col)}
                           showStandaloneToggle={showStandaloneToggle}
                           onToggleStandalone={toggleStandalone}
                         />
@@ -828,7 +735,7 @@ export function ListColumnCustomizer({
                 })}
               </div>
 
-              {showExtColumns && extTables.length > 0 && (
+              {extTables.length > 0 && (
                 <div className="pt-1 border-t border-border mt-1">
                   <div className="flex items-center gap-1.5 px-1 py-1.5">
                     <Database className="h-3 w-3 text-accent/70" />
@@ -839,7 +746,6 @@ export function ListColumnCustomizer({
                       const isExpanded = expandedTables.has(table.id)
                       const dataFields = table.columns
                         .filter(c => !['symbol', 'code', 'date'].includes(c.name))
-                        .filter(c => extFieldFilter ? extFieldFilter(c) : true)
                       const activeCount = dataFields.filter(f => {
                         const colId = `ext:${table.id}:${f.name}`
                         return columns.some(c => c.id === colId && c.visible)
@@ -878,7 +784,7 @@ export function ListColumnCustomizer({
                 </div>
               )}
 
-              {showExtColumns && extTables.length === 0 && extSchema.isSuccess && (
+              {extTables.length === 0 && extSchema.isSuccess && (
                 <div className="text-xs text-muted text-center py-4">
                   暫無擴展資料表，可在「資料」頁面建立
                 </div>

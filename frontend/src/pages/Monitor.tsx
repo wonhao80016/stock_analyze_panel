@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, ListChecks, BellRing, Globe, Loader2, Trash2 } from 'lucide-react'
 import { api, type MonitorRule, type TaiwanRealtimeQuote } from '@/lib/api'
@@ -13,17 +13,6 @@ import { Modal } from '@/components/Modal'
 
 const MONITOR_ALERTS_PARAMS = { days: 7, limit: 500 }
 
-// Phase 8C-D — Legacy Product Removal: 「A 股策略監控」分頁與其專屬觸發記錄/
-// 規則管理 UI (含行業/概念標籤設定) 已隨產品介面正式移除。strategy_alert SSE、
-// 通用告警串流 (alertsQuery/api.alertsList)、通用監控規則 API
-// (monitorRuleSave/monitorRuleDelete/monitorRulesList, 由 components/monitor/
-// RuleEditor.tsx 經 StockPreviewDialog 等處繼續重用)、Taiwan quote/monitor
-// merge 完全未動。Monitor 最終只剩台股即時監控一種畫面, 不再需要市場切換分頁。
-//
-// 監控規則合併(2026-09): 原本並排的「台股即時規則」「訊號規則」兩組列表/編輯器
-// 已合併為單一 GenericRulesList + RuleEditor —— 兩者過去欄位/後端儲存不同,
-// 使用者無從判斷該用哪個; 通用引擎(monitor.py)現已能表達台股引擎原本的全部
-// 規則型態(價格/漲跌幅/量能/漲跌停距離/訊號), 不再需要兩套。
 export function Monitor() {
   const qc = useQueryClient()
   const [editorOpen, setEditorOpen] = useState(false)
@@ -68,11 +57,8 @@ export function Monitor() {
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.alertsAll }),
   })
 
-  // 進入監控頁: 清零未讀徽標 + 記錄"進入時刻", 之後新增的記錄會閃爍
-  // 離開監控頁: 停止同步, 之後新增才計入未讀
-  const enterTsRef = useRef<number>(Date.now())
+  // Entering clears the unread badge; after leaving, new alerts count as unread again.
   useEffect(() => {
-    enterTsRef.current = Date.now()
     markSeen()
     return () => leaveMonitorPage()
   }, [])

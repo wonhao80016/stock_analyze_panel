@@ -4,17 +4,8 @@
 
 export const BENCHMARK_SYMBOLS = ['t00.TWSE', 'o00.TPEX'] as const
 
-export const BENCHMARK_NAMES: Record<string, string> = {
-  'T00.TWSE': '發行量加權股價指數',
-  'O00.TPEX': '櫃買指數',
-}
-
 export function isBenchmarkSymbol(symbol: string | undefined | null): boolean {
   if (!symbol) return false
   const upper = symbol.toUpperCase()
   return BENCHMARK_SYMBOLS.some(s => s.toUpperCase() === upper)
-}
-
-export function benchmarkName(symbol: string): string | undefined {
-  return BENCHMARK_NAMES[symbol.toUpperCase()]
 }

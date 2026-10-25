@@ -9,8 +9,6 @@ import {
   ScanSearch,
   History,
   Signal as SignalIcon,
-  Eye,
-  FileText,
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 
@@ -76,8 +74,6 @@ const MOCK_NAV = [
   { icon: ScanSearch, label: '策略' },
   { icon: History, label: '回測' },
   { icon: SignalIcon, label: '訊號' },
-  { icon: Eye, label: '監控' },
-  { icon: FileText, label: '財務分析' },
 ]
 
 export function Branding() {
@@ -150,7 +146,7 @@ function Sample({ v }: { v: Variant }) {
 
         {/* 模擬導航 */}
         <nav className="px-2 py-3 space-y-0.5">
-          {MOCK_NAV.slice(0, 5).map(({ icon: I, label }, i) => (
+          {MOCK_NAV.map(({ icon: I, label }, i) => (
             <div
               key={label}
               className={`flex items-center gap-3 px-3 py-2 rounded-btn text-sm ${

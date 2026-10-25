@@ -90,9 +90,7 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const navigate = useNavigate()
   const backdrop = useDialogBackdrop(onClose)
 
-  // Phase 8C-A: 加入比較 — 本 dialog 為 A 股 Screener.tsx 與台股頁面共用元件,
-  // 「多股比較」(/stocks/compare) 僅支援台股標的, 故只在台股代碼時顯示此動作,
-  // 避免把 A 股標的送進台股專用比較頁 (FLOW_GAP 修正需限定範圍, 不做 A 股相容)。
+  // The compare page and the research workbench only accept Taiwan symbols.
   const isTaiwanSymbol = !!symbol && (symbol.endsWith('.TWSE') || symbol.endsWith('.TPEX'))
 
   const watchlist = useQuery({
@@ -145,9 +143,8 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     setPriceAlertDraft(null)
   }, [symbol])
 
-  // 焦點股票註冊: SSE quotes_updated 推送時精準 invalidate 當前股票日K,
-  // 讓對話框日K最後一根蠟燭隨實時價變化 (後端只讀內存, 不調 TickFlow)。
-  // 關閉/切股時清除, 避免無謂刷新。
+  // SSE quotes_updated refreshes only the focus symbol's daily K so its last candle follows the
+  // live price; the registration is cleared on close or symbol change.
   useEffect(() => {
     if (!symbol) return
     setFocusSymbol(symbol)

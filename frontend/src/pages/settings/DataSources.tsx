@@ -52,14 +52,13 @@ function DatasetChipRow({ datasets }: { datasets: string[] }) {
   )
 }
 
-/** 按能力路由網格: 每個數據源詳情下展示一張能力卡; 可路由的能力以可點標籤列出
- *  所有具備該能力的數據源, 日K與除權因子在台股模式固定為台灣官方資料源。
- *  TickFlow 詳情含全部能力; 其他源只列自己參與的能力。 */
+/** Per-dataset routing cards; daily K and adjustment factors stay on the official source.
+ *  The official source lists every dataset; other sources list only their own. */
 function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesOf, providerOf, pending, onSelect, anyCustom, onReset }: {
   sourceName: string
   sourceDisplay: string
   datasets: string[]
-  /** 該數據集的所有候選提供方 (含 TickFlow), 按推薦順序 */
+  /** Candidate providers of the dataset, in recommended order. */
   candidatesOf: (dataset: string) => { name: string; display: string }[]
   /** 該數據集當前的原始路由偏好值 */
   providerOf: (dataset: string) => string
@@ -68,7 +67,7 @@ function SourceCapabilityGrid({ sourceName, sourceDisplay, datasets, candidatesO
   anyCustom?: boolean
   onReset?: () => void
 }) {
-  const isDefault = sourceName === 'taiwan' || sourceName === 'tickflow'
+  const isDefault = sourceName === 'taiwan'
   const dsList = isDefault ? [...datasets, 'financial'] : datasets
   if (dsList.length === 0) return null
 
@@ -162,11 +161,10 @@ function tagCls(active: boolean) {
 
 /** 詳情組件所需的路由上下文(由面板構造) */
 interface RouteCtx {
-  /** 數據集 → 候選提供方列表 (含 TickFlow) */
+  /** Dataset to its candidate providers. */
   candidatesOf: (dataset: string) => { name: string; display: string }[]
   /** 數據集 → 當前原始路由偏好值 */
   providerOf: (dataset: string) => string
-  displayOf: (name?: string) => string
   pending: boolean
   onSelect: (dataset: string, provider: string) => void
   anyCustom: boolean
@@ -373,8 +371,8 @@ export function SettingsDataSourcesPanel() {
 
   const switchProvider = useMutation({
     mutationFn: async (name: string) => {
-      // taiwan/tickflow: 全量重置為台灣官方默認路由
-      if (name === 'taiwan' || name === 'tickflow') {
+      // Choosing taiwan resets every route to the official default.
+      if (name === 'taiwan') {
         return api.updateDataProviders({
           daily_data_provider: 'taiwan',
           adj_factor_provider: 'same_as_daily',
@@ -471,13 +469,13 @@ export function SettingsDataSourcesPanel() {
     realtime: prefs.data?.realtime_data_provider || 'taiwan',
   }
   const servingDatasets = (name: string) =>
-    Object.entries(effProvider).filter(([, v]) => (name === 'taiwan' || name === 'tickflow') ? (v === 'taiwan' || v === 'tickflow') : v === name).map(([k]) => k)
+    Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
   const activeName = servingDatasets(selected).length > 0 ? selected : ''
   const servingLabels = (name: string) =>
     servingDatasets(name).map(k => DATASET_LABEL[k] || k)
 
   const displayOf = (name?: string) =>
-    (name === 'taiwan' || name === 'tickflow') ? '台灣官方資料源'
+    name === 'taiwan' ? '台灣官方資料源'
       : name === 'same_as_daily' ? '跟隨日K'
         : allItems.find(s => s.name === name)?.display_name || name || ''
 
@@ -517,13 +515,13 @@ export function SettingsDataSourcesPanel() {
     onError: (e: Error) => toast(`恢復失敗: ${e.message}`, 'error'),
   })
 
-  const anyCustomRouting = Object.values(effProvider).some(v => v !== 'taiwan' && v !== 'tickflow')
+  const anyCustomRouting = Object.values(effProvider).some(v => v !== 'taiwan')
 
   // 某數據集的全部候選提供方 (台灣官方恆在首位, 其餘按聲明該數據集的數據源列出)
   const candidatesOf = (dataset: string) => {
     const list = [{ name: 'taiwan', display: '台灣官方資料源' }]
     for (const item of allItems) {
-      if (item.name !== 'tickflow' && item.name !== 'taiwan' && item.datasets.includes(dataset)) {
+      if (item.name !== 'taiwan' && item.datasets.includes(dataset)) {
         list.push({ name: item.name, display: item.display_name || item.name })
       }
     }
@@ -543,7 +541,6 @@ export function SettingsDataSourcesPanel() {
   const routeCtx: RouteCtx = {
     candidatesOf,
     providerOf,
-    displayOf,
     pending: routeMut.isPending,
     onSelect: (dataset, provider) => routeMut.mutate({ dataset, provider }),
     anyCustom: anyCustomRouting,
@@ -604,7 +601,7 @@ export function SettingsDataSourcesPanel() {
                   // 未就緒插件僅當支持界面配 Key 時可點開(進詳情配置); 其餘不可選
                   if (pluginUnavailable && !plugin?.api_key_env) return
                   setSelected(item.name)
-                  // 只有用戶自定義源 (YAML) 才進編輯器; tickflow 和插件不可編輯
+                  // Only user-defined YAML sources open the editor; built-in sources and plugins are read-only.
                   if (customList.some(c => c.name === item.name)) {
                     editExisting.mutate(item.name)
                   }
@@ -634,7 +631,7 @@ export function SettingsDataSourcesPanel() {
                       <Check className="h-2.5 w-2.5" /> 服務中
                     </span>
                   )}
-                  {(item.name === 'taiwan' || item.name === 'tickflow') && (
+                  {item.name === 'taiwan' && (
                     <span className="shrink-0 rounded bg-accent/15 px-1 py-0.5 text-[9px] font-medium leading-none text-accent">官方預設</span>
                   )}
                   {pluginNames.has(item.name) && (
@@ -698,7 +695,7 @@ export function SettingsDataSourcesPanel() {
                   )}
                 </div>
                 {/* 數據集標籤(靜態): 該源適配的數據集, 路由選擇在下方能力卡片 */}
-                <DatasetChipRow datasets={(item.name === 'taiwan' || item.name === 'tickflow') ? [...new Set([...item.datasets, 'financial'])] : item.datasets} />
+                <DatasetChipRow datasets={item.name === 'taiwan' ? [...new Set([...item.datasets, 'financial'])] : item.datasets} />
                 {/* 未安裝插件顯示安裝命令提示 */}
                 {pluginUnavailable && plugin?.install_hint && (
                   <div className="ml-3.5 mt-1 text-[10px] text-muted/40 font-mono truncate">{plugin.install_hint}</div>
@@ -744,9 +741,9 @@ export function SettingsDataSourcesPanel() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.15 }}
         >
-          {(selected === 'taiwan' || selected === 'tickflow') ? (
+          {selected === 'taiwan' ? (
             <TaiwanOfficialDetail
-              active={servingDatasets('taiwan').length > 0 || servingDatasets('tickflow').length > 0}
+              active={servingDatasets('taiwan').length > 0}
               onSwitch={() => switchProvider.mutate('taiwan')}
               switching={switchProvider.isPending}
               route={routeCtx}

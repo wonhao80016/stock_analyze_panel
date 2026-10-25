@@ -11,7 +11,7 @@ export function fmtPct(v: number | null | undefined, digits = 2): string {
   return `${sign}${(v * 100).toFixed(digits)}%`
 }
 
-// A 股語義色:紅漲綠跌 → 僅用於價格相關元素
+// Red-up / green-down convention; only for price-related elements.
 export function priceColorClass(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v) || v === 0) return 'text-muted'
   return v > 0 ? 'text-bull' : 'text-bear'
@@ -30,47 +30,6 @@ export function fmtDate(s: string | Date | null | undefined): string {
   const d = typeof s === 'string' ? new Date(s) : s
   if (isNaN(d.getTime())) return String(s)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-// ===== Data 頁面工具函數 =====
-
-export function formatNumber(n: number): string {
-  if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(1)}億`
-  if (n >= 10_000) return `${(n / 10_000).toFixed(1)}萬`
-  return n.toLocaleString()
-}
-
-export function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
-  const h = Math.floor(m / 60)
-  const rm = m % 60
-  return rm > 0 ? `${h}h ${rm}m` : `${h}h`
-}
-
-export function formatScheduleDatePart(iso: string): string {
-  const d = new Date(iso)
-  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-export function formatScheduleTimePart(iso: string): string {
-  const d = new Date(iso)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
-export function isToday(iso: string): boolean {
-  const d = new Date(iso)
-  const now = new Date()
-  return d.getFullYear() === now.getFullYear()
-    && d.getMonth() === now.getMonth()
-    && d.getDate() === now.getDate()
-}
-
-export function formatLogTime(iso: string): string {
-  const d = new Date(iso)
-  return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 }
 
 /**

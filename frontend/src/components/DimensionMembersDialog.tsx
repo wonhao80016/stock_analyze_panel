@@ -59,11 +59,11 @@ function finite(value: unknown): number | null {
 }
 
 function stockName(row: Record<string, any>): string {
-  return String(row.name ?? row['股票简称'] ?? row['名称'] ?? '')
+  return String(row.name ?? '')
 }
 
 function stockSymbol(row: Record<string, any>): string {
-  return String(row.symbol ?? row.code ?? row['股票代码'] ?? row['代码'] ?? '')
+  return String(row.symbol ?? row.code ?? '')
 }
 
 export function DimensionMembersDialog({ target, onClose, onStockClick }: Props) {

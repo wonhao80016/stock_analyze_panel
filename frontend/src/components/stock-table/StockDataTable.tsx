@@ -12,8 +12,6 @@ import { UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
 import type { SortState } from './useTableSort'
 
-export type { SortState }
-
 export interface StockDataTableProps {
   columns: ColumnConfig[]
   rows: any[]

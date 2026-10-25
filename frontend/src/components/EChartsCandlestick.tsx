@@ -96,13 +96,6 @@ export interface ChartMarker {
   color?: string
 }
 
-export interface ChartRange {
-  start: string
-  end: string
-  label?: string
-  color?: string
-}
-
 export interface ChartPriceLine {
   value: number
   label?: string
@@ -382,9 +375,6 @@ export const SUB_CHARTS: SubChartDef[] = [
   },
 ]
 
-/** 向後兼容的 INDICATORS 導出 (不含 vol) */
-export const INDICATORS = SUB_CHARTS.filter(s => s.key !== 'vol')
-
 /** 主圖疊加指標 (畫在 K 線上方, 不佔副圖空間) */
 export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
   { key: 'boll', label: 'BOLL' },
@@ -393,14 +383,11 @@ export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
 interface Props {
   data: OHLC[]
   markers?: ChartMarker[]
-  ranges?: ChartRange[]
   priceLines?: ChartPriceLine[]
   height?: number
   showMA?: boolean
   showInfoBar?: boolean
   showMarkers?: boolean
-  onToggleMarkers?: () => void
-  symbol?: string
   linkedPrice?: LinkedPrice | null
   onDateClick?: (date: string) => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -535,7 +522,6 @@ function buildOption(
   dates: string[],
   dateIndexMap: Map<string, number>,
   markers: ChartMarker[] | undefined,
-  ranges: ChartRange[] | undefined,
   priceLines: ChartPriceLine[] | undefined,
   showMA: boolean,
   compact: boolean,
@@ -664,30 +650,6 @@ function buildOption(
   })
   xAxisIndices.push(0)
 
-  const markAreaData = (ranges ?? [])
-    .filter(r => dateIndexMap.has(r.start) && dateIndexMap.has(r.end))
-    .map(r => ([
-      {
-        name: r.label ?? '',
-        xAxis: r.start,
-        itemStyle: { color: r.color ?? 'rgba(59,130,246,0.08)' },
-        label: {
-          show: !!r.label,
-          position: 'insideTop',
-          distance: 8,
-          color: CT().tooltipText,
-          backgroundColor: CT().tooltipBg,
-          borderColor: 'rgba(59,130,246,0.35)',
-          borderWidth: 1,
-          borderRadius: 4,
-          padding: [2, 6],
-          fontSize: 10,
-          fontFamily: 'JetBrains Mono, monospace',
-        },
-      },
-      { xAxis: r.end },
-    ]))
-
   const markLineData: any[] = (priceLines ?? [])
     .filter(line => Number.isFinite(line.value))
     .map(line => {
@@ -749,7 +711,6 @@ function buildOption(
       cursor: 'pointer',
     },
     markPoint: markPointData.length > 0 ? { data: markPointData, animation: false } : undefined,
-    markArea: markAreaData.length > 0 ? { silent: true, data: markAreaData } : undefined,
     markLine: markLineData.length > 0 ? { silent: true, symbol: 'none', data: markLineData, animation: false } : undefined,
   })
 
@@ -879,14 +840,11 @@ function buildOption(
 export function EChartsCandlestick({
   data,
   markers,
-  ranges,
   priceLines,
   height = 480,
   showMA = true,
   showInfoBar = true,
   showMarkers: showMarkersProp = true,
-  onToggleMarkers: _onToggleMarkers,
-  symbol: _symbol,
   linkedPrice,
   onDateClick,
   onPriceDoubleClick,
@@ -1206,7 +1164,6 @@ export function EChartsCandlestick({
     const option = buildOption(
       data, dates, dateIndexMap,
       showMarkersProp ? markers : undefined,
-      ranges,
       priceLines,
       showMA, compactRef.current,
       activeIndicators, chartHeight,
@@ -1231,7 +1188,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, volumeUnit, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, volumeUnit, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息欄容器 (內容由 JS 直接寫入)
   const initialHTML = useMemo(() => {

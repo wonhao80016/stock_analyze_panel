@@ -34,8 +34,6 @@ export const QK = {
   taiwanScreener: (payload: unknown) => ['taiwanScreener', payload] as const,
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
-  overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
-  indexQuotes:    ['index-quotes'] as const,
 
   // Watchlist
   watchlist:            ['watchlist'] as const,
@@ -46,19 +44,16 @@ export const QK = {
   // 刷新點: staleTime 過期 + Watchlist 增刪自選/改蠟燭天數時的手動失效;
   // 當日最後一根蠟燭由 Watchlist 用 enriched 實時 OHLC 前端修補 (零額外請求)。
   watchlistKlineBatch:  (symbols: string) => ['kline-batch', symbols] as const,
-  // 不用 watchlist- 前綴: 避免被 SSE quotes_updated 高頻失效(expert 1s/pro 2s)
-  // 導致每次都拉 TickFlow 觸限流。分時圖用固定 refetchInterval 刷新即可。
+  // Not prefixed with watchlist-: SSE quotes_updated would refetch it on every tick.
+  // The intraday column refreshes with its own refetchInterval instead.
   minuteBatch:          (symbols: string) => ['minute-batch', symbols] as const,
   instrumentSearch:     (q: string, assetTypes?: string) =>
     ['instrument-search', q, assetTypes ?? 'stock'] as const,
 
   // Screener
-  screener:             ['screener'] as const,
   screenerStrategies:   (assetType: string = 'stock') => ['screener-strategies', assetType] as const,
   screenerCachedSummary: ['screener-cached', 'summary'] as const,
-  screenerCachedResult: (strategyId: string, asOf?: string, ext?: string) => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? ''] as const,
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
-  screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   screenerPickPerformance: ['screener-pick-performance', 'summary'] as const,
   screenerPickPerformanceAll: ['screener-pick-performance'] as const,
   screenerPickBackfill: (jobId: string) => ['screener-pick-backfill', jobId] as const,
@@ -66,24 +61,6 @@ export const QK = {
     ['screener-pick-performance', 'detail', strategyId, limit] as const,
   marketSnapshot:       ['market-snapshot'] as const,
 
-  // Backtest
-  backtestStatus:       ['backtest-status'] as const,
-  miningRuns:           ['backtest-mining-runs'] as const,
-  miningAvailability:   (assetType: string, profile: string, start: string, end: string) =>
-                          ['backtest-mining-availability', assetType, profile, start, end] as const,
-  miningRun:            (id: string) => ['backtest-mining-run', id] as const,
-  miningResult:         (id: string) => ['backtest-mining-result', id] as const,
-  miningConfig:         ['backtest-mining-config'] as const,
-  researchCandidates:  ['research-candidates'] as const,
-  strategyLinkOptions: (assetType?: 'stock' | 'etf') => assetType
-    ? ['strategy-link-options', assetType] as const
-    : ['strategy-link-options'] as const,
-  strategyDetail:       (id: string) => ['strategy-detail', id] as const,
-
-  // Data / Pipeline
-  dataStatus:           ['data-status'] as const,
-  pipelineJobs:         ['pipeline-jobs'] as const,
-  pipelineJob:          (id: string) => ['pipeline-job', id] as const,
   dimensionMembers:     (id: string, field: string, value: string, date?: string) => ['dimension-members', id, field, value, date] as const,
 
   // Kline
@@ -119,14 +96,6 @@ export const QK = {
   taiwanCurrentData:    (symbol: string) => ['taiwan-current-data', symbol] as const,
   taiwanInstitutionalHistory: (symbol: string, days: number) => ['taiwan-institutional-history', symbol, days] as const,
   taiwanMarginHistory:  (symbol: string, days: number) => ['taiwan-margin-history', symbol, days] as const,
-  taiwanCapabilities:   ['taiwan-capabilities'] as const,
-
-  // 市場環境(Regime) — 日級離線計算, 不進 SSE 刷新
-  // Phase 8B-5.7: 僅保留仍有真實 consumer 的 regimeLatest(Mining)/
-  // regimeCoverage(Data) —— history/states/phases/mainline 隨已刪除的
-  // Regime.tsx 一併移除。
-  regimeLatest:         ['regime-latest'] as const,
-  regimeCoverage:       ['regime-coverage'] as const,
 } as const
 
 // ===== SSE 應該 invalidate 的 key 前綴列表 =====
@@ -141,11 +110,8 @@ export const SSE_INVALIDATE_PREFIXES = [
   // 精確前綴: 只命中自選頁的實時數據 (quotes/enriched)。不能用寬泛的 'watchlist' ——
   // 會誤傷 ['watchlist'] (自選列表) 和 ['watchlist-groups'] (分組配置, 只隨手動操作變化)。
   // 舊設置裡的 'watchlist' 單開關由 useQuoteStream 兼容讀取。
-  'watchlist-quotes',
   'watchlist-enriched',
   'quote-status',
-  'index-quotes',
-  'overview-market',
   'taiwan-quotes',
   'taiwan-stock-detail',
 ] as const

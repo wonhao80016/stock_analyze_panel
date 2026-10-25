@@ -165,9 +165,6 @@ export function SettingsAIPanel() {
         ai_model: '',
         ai_openai_model: '',
         ai_reasoning_effort: DEFAULT_REASONING_EFFORT,
-        ai_codex_model: '',
-        ai_codex_command: '',
-        ai_codex_reasoning_effort: '',
         ai_max_output_tokens: 8192,
         ai_context_window: 64000,
         has_ai_key: false,
@@ -197,15 +194,9 @@ export function SettingsAIPanel() {
       setModel(directDrafts.current.custom.model)
       return
     }
-    const nextProvider = p.provider ?? OPENAI_COMPAT_PROVIDER
-    setProvider(nextProvider)
-    if (nextProvider === OPENAI_PROVIDER) {
-      setBaseUrl(directDrafts.current.openai.baseUrl)
-      setModel(directDrafts.current.openai.model)
-    } else {
-      setBaseUrl(p.url)
-      setModel(p.model)
-    }
+    setProvider(OPENAI_PROVIDER)
+    setBaseUrl(directDrafts.current.openai.baseUrl)
+    setModel(directDrafts.current.openai.model)
   }
 
   const handleBaseUrlChange = (value: string) => {

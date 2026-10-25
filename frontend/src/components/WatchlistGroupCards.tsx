@@ -118,16 +118,16 @@ const GroupCard = React.memo(function GroupCard({
         <div className="flex flex-col">
           {visible.map((r: any, i: number) => {
             const pct = rowPct(r)
-            const price = r.rt_price ?? r.close
+            const price = r.close
             const cls = priceColorClass(pct)
             const board = boardTag(r.symbol)
             return (
               <button
                 key={r.symbol}
                 type="button"
-                onClick={() => onPreview(r.symbol, r.rt_name ?? r.name ?? '')}
+                onClick={() => onPreview(r.symbol, r.name ?? '')}
                 className="flex w-full items-center gap-2 px-3 py-[5px] text-left transition-colors hover:bg-elevated/50"
-                title={`${r.symbol} ${r.rt_name ?? r.name ?? ''}`}
+                title={`${r.symbol} ${r.name ?? ''}`}
               >
                 {showRank && (
                   <span className="w-4 shrink-0 text-right font-mono text-[10px] leading-none tabular-nums text-muted/70">
@@ -136,7 +136,7 @@ const GroupCard = React.memo(function GroupCard({
                 )}
                 <span className="shrink-0 font-mono text-xs text-foreground">{r.symbol}</span>
                 <span className="flex min-w-0 flex-1 items-center gap-1">
-                  <span className="min-w-0 truncate text-xs text-secondary">{r.rt_name ?? r.name}</span>
+                  <span className="min-w-0 truncate text-xs text-secondary">{r.name}</span>
                   {board && (
                     <span className={`shrink-0 inline-flex items-center justify-center px-1 h-[16px] rounded text-[9px] font-bold leading-none ${board.color}`}>
                       {board.label}

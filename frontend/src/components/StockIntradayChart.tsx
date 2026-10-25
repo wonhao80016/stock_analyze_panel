@@ -56,7 +56,7 @@ export function StockIntradayChart({
   const basePrevClose = minutePrevClose != null && Number.isFinite(minutePrevClose) && minutePrevClose > 0
     ? minutePrevClose
     : prevClose
-  // source=none 表示本地無數據且 TickFlow 也拉不到 (停牌/復牌延遲/非交易日)
+  // source=none: no local data and the provider has none either (suspension, non-trading day).
   // 此時不彈"是否獲取"詢問窗, 只做靜態提示, 避免誤導用戶去拉明知拉不到的數據
   const sourceIsNone = minute.data?.source === 'none'
   // 指數分鐘K無本地存儲且不支持落庫獲取 (後端 sync_minute_single 顯式拒絕), 不顯示獲取按鈕

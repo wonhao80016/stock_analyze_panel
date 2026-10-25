@@ -687,7 +687,6 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
                     data={ohlcRows}
                     height={isIndex ? INDEX_CHART_HEIGHT : DAILY_CHART_HEIGHT}
                     showMA={true}
-                    symbol={data.symbol}
                     activeIndicators={isIndex ? INDEX_DAILY_INDICATORS : STOCK_DAILY_INDICATORS}
                   />
                 </div>

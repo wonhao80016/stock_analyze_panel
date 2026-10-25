@@ -11,7 +11,7 @@ const BUTTON_CLASS =
 // Mirrors the max_length of the backend password models.
 const PASSWORD_MAX_LENGTH = 128
 
-export function SettingsAccountPanel(_props: { highlight?: string } = {}) {
+export function SettingsAccountPanel() {
   const qc = useQueryClient()
   const authStatus = useQuery({ queryKey: QK.authStatus, queryFn: () => api.authStatus() })
 

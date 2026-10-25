@@ -46,11 +46,6 @@ export function refreshAlertToastConfig() {
 
 function _emit() { _listeners.forEach(fn => fn([..._queue])) }
 
-/** 推入單條監控告警通知 (兼容入口, 不發聲 — 發聲由批量入口統一處理) */
-export function pushAlertToast(alert: AlertEvent) {
-  pushAlertToasts([alert])
-}
-
 /**
  * 批量推入監控告警通知 (一輪 SSE 多隻新命中時調用)。
  * - 每條都彈 Toast (受 maxVisible 上限, 超出丟最舊)
@@ -93,8 +88,6 @@ const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
   pool_exit:   { label: '移出', cls: 'bg-bear/15 text-bear' },
   buy_signal: { label: '買進', cls: 'bg-danger/15 text-danger' },
   sell_signal: { label: '賣出', cls: 'bg-bear/15 text-bear' },
-  new_entry: { label: '進入', cls: 'bg-danger/15 text-danger' },
-  dropped:   { label: '移出', cls: 'bg-bear/15 text-bear' },
 }
 
 // ===== 容器 — 掛在 Layout =====

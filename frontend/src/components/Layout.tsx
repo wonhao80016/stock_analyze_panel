@@ -25,7 +25,6 @@ import {
   ChevronDown,
   Sun,
   Moon,
-  X,
   WifiOff,
   PanelLeftClose,
   PanelLeftOpen,
@@ -203,8 +202,6 @@ export function Layout() {
     window.location.href = '/login'
   }
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
-  // 自選實時模式限制提示: 可手動關閉, 不持久化 (刷新後恢復顯示)
-  const [dismissFreeHint, setDismissFreeHint] = useState(false)
   useEffect(() => {
     const compact = window.matchMedia('(max-width: 767px)')
     const syncSidebarWithViewport = (event: MediaQueryListEvent | MediaQueryList) => {
@@ -235,11 +232,9 @@ export function Layout() {
   const isTrading = quoteStatus?.is_trading_hours ?? false
   // 管道/數據修正運行期間實時行情被臨時暫停 — 此時禁止開啟
   const isPaused = quoteStatus?.paused ?? false
-  // 實時模式以 quote_status 為準 (數據源無關): none=不可用 / watchlist=自選實時 / full_market=全市場
-  const quoteMode = quoteStatus?.mode ?? 'none'
-  const realtimeUnavailable = quoteMode === 'none'
-  const isWatchlistMode = quoteMode === 'watchlist'
-  const realtimeModeLabel = isWatchlistMode ? '自選股' : '全市場'
+  // quote_status alone decides availability, whatever the data source; mode none means unavailable.
+  const realtimeUnavailable = (quoteStatus?.mode ?? 'none') === 'none'
+  const realtimeModeLabel = '全市場'
   // Only a custom realtime source is named; the built-in 'taiwan' source shows the mode instead.
   const realtimeProvider = prefs?.realtime_data_provider
   const realtimeProviderName = realtimeProvider && realtimeProvider !== 'taiwan'
@@ -276,7 +271,7 @@ export function Layout() {
 
   // 當前主數據源 (用於側邊欄數據源狀態卡)
   const activeProvider = prefs?.daily_data_provider || 'taiwan'
-  const activeProviderName = (activeProvider === 'taiwan' || activeProvider === 'tickflow')
+  const activeProviderName = activeProvider === 'taiwan'
     ? '台灣官方資料源'
     : (dataSources?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
 
@@ -344,10 +339,6 @@ export function Layout() {
       })
       if (!fresh.realtime_allowed) {
         toast('目前資料來源無即時行情能力,請先設定資料來源', 'error')
-        return
-      }
-      if (fresh.mode === 'watchlist' && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
-        navigate('/watchlist')
         return
       }
     }
@@ -628,24 +619,10 @@ export function Layout() {
           {/* 狀態提示 */}
           {realtimeEnabled
             && (!realtimeUnavailable || realtimeProviderName)
-            && (isPaused || (isWatchlistMode && !dismissFreeHint && !realtimeProviderName))
+            && isPaused
             && (
               <div className="mt-1.5 text-[10px] leading-snug space-y-0.5">
-                {isWatchlistMode && !dismissFreeHint && !realtimeProviderName && (
-                  <div className="flex items-start gap-1 text-amber-400/80">
-                    <span className="flex-1">自選即時模式監控前 5 檔,全市場即時依賴資料來源支援</span>
-                    <button
-                      onClick={() => setDismissFreeHint(true)}
-                      className="text-amber-400/50 hover:text-amber-400 shrink-0 transition-colors"
-                      title="關閉提示"
-                    >
-                      <X className="h-2.5 w-2.5" />
-                    </button>
-                  </div>
-                )}
-                {isPaused && (
-                  <div className="text-warning/80">資料同步進行中,即時行情已暫時暫停</div>
-                )}
+                <div className="text-warning/80">資料同步進行中,即時行情已暫時暫停</div>
               </div>
             )}
         </div>

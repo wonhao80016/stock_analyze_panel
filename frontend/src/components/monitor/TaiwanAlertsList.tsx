@@ -7,7 +7,7 @@ import {
   Flame,
   X,
 } from 'lucide-react'
-import { api, type AlertEvent, type TaiwanAlertEvent } from '@/lib/api'
+import { api, type AlertEvent } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useStockPreview } from '@/components/StockPreviewProvider'
 
@@ -15,8 +15,7 @@ import { cn } from '@/lib/cn'
 import { fmtPct } from '@/lib/format'
 
 interface TaiwanAlertsListProps {
-  alerts: (AlertEvent | TaiwanAlertEvent)[]
-  onSelectSymbol?: (symbol: string) => void
+  alerts: AlertEvent[]
 }
 
 const SEVERITY_CONFIG: Record<string, { bar: string; icon: any; iconCls: string; badgeCls: string; label: string }> = {
@@ -26,13 +25,6 @@ const SEVERITY_CONFIG: Record<string, { bar: string; icon: any; iconCls: string;
     iconCls: 'text-accent',
     badgeCls: 'bg-accent/10 text-accent border-accent/20',
     label: '一般 (INFO)',
-  },
-  warning: {
-    bar: 'bg-warning',
-    icon: AlertTriangle,
-    iconCls: 'text-warning',
-    badgeCls: 'bg-warning/10 text-warning border-warning/20',
-    label: '提醒 (WARN)',
   },
   warn: {
     bar: 'bg-warning',
@@ -69,7 +61,7 @@ function formatAlertTime(ts: number | string | undefined): string {
   return `${p.month}/${p.day} ${p.hour}:${p.minute}:${p.second}`
 }
 
-export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListProps) {
+export function TaiwanAlertsList({ alerts }: TaiwanAlertsListProps) {
   const qc = useQueryClient()
   const { openPreview } = useStockPreview()
   const deleteMut = useMutation({
@@ -94,10 +86,10 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
       {alerts.map((alert, idx) => {
         const recordId = typeof alert.id === 'string' && alert.id ? alert.id : undefined
         const key = recordId ?? `${alert.rule_id || 'rule'}_${alert.ts ?? ''}_${idx}`
-        const sev = (alert.severity || 'warning').toLowerCase()
-        const sevCfg = SEVERITY_CONFIG[sev] || SEVERITY_CONFIG.warning
+        const sev = (alert.severity || 'warn').toLowerCase()
+        const sevCfg = SEVERITY_CONFIG[sev] || SEVERITY_CONFIG.warn
         const SevIcon = sevCfg.icon
-        const isTaiwan = alert.symbol?.includes('.TWSE') || alert.symbol?.includes('.TPEX') || alert.source === 'twse:mis'
+        const isTaiwan = alert.symbol?.includes('.TWSE') || alert.symbol?.includes('.TPEX')
 
         return (
           <motion.div
@@ -115,14 +107,12 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
                 <div className="flex items-center gap-2">
                   <span className="flex items-center gap-1 font-mono text-[11px] text-muted" title="台灣時間 (Asia/Taipei)">
                     <Clock className="h-3 w-3" />
-                    {formatAlertTime(alert.ts ?? (alert as TaiwanAlertEvent).triggered_at)}
+                    {formatAlertTime(alert.ts)}
                   </span>
                   {alert.symbol && (
                     <button
                       type="button"
-                      onClick={() => onSelectSymbol
-                        ? onSelectSymbol(alert.symbol!)
-                        : openPreview(alert.symbol!, alert.name ?? undefined)}
+                      onClick={() => openPreview(alert.symbol!, alert.name ?? undefined)}
                       className="font-mono font-bold text-accent hover:underline flex items-center gap-0.5 cursor-pointer"
                     >
                       {alert.symbol}
@@ -165,14 +155,8 @@ export function TaiwanAlertsList({ alerts, onSelectSymbol }: TaiwanAlertsListPro
               </div>
 
               {/* 底部數值標籤 (若有) */}
-              {((alert as any).trigger_value != null || alert.price != null || alert.change_pct != null) && (
+              {(alert.price != null || alert.change_pct != null) && (
                 <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-muted border-t border-border/40 font-mono">
-                  {(alert as any).trigger_value != null && (
-                    <span>觸發值: <strong className="text-foreground font-semibold">{(alert as any).trigger_value}</strong></span>
-                  )}
-                  {(alert as any).threshold != null && (
-                    <span>閾值門檻: <strong className="text-foreground font-semibold">{(alert as any).threshold}</strong></span>
-                  )}
                   {alert.price != null && (
                     <span>價格: <strong className="text-foreground font-semibold">{alert.price.toFixed(2)}</strong></span>
                   )}

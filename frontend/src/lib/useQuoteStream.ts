@@ -1,7 +1,6 @@
 import { useEffect, useRef, useCallback, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { SSE_INVALIDATE_PREFIXES } from './queryKeys'
-import { getQueryConfig } from './useQueryConfig'
 import { toast } from '@/components/Toast'
 import { pushAlertToasts } from '@/components/AlertToast'
 import type { StrategyAlertEvent } from './api'
@@ -18,6 +17,7 @@ const _statusListeners = new Set<() => void>()
 const FAILS_BEFORE_TOAST = 3
 // 指數退避上限
 const BACKOFF_CAP_MS = 60_000
+const RECONNECT_BASE_MS = 5_000
 
 function _emitStatus() {
   _statusListeners.forEach((fn) => fn())
@@ -81,23 +81,12 @@ export function useQuoteStream(
   pagesRef.current = sseRefreshPages
 
   const handleAlerts = useCallback((alerts: StrategyAlertEvent[]) => {
-    // depth 系統接管通知: 單獨處理, 不走 strategy 回調
-    const depthAlerts = alerts.filter(a => a.source === 'depth')
-    const strategyAlerts = alerts.filter(a => a.source !== 'depth')
-
-    // depth 通知直接 toast(防刷屏: 後端已在狀態切換時才推)
-    for (const a of depthAlerts.slice(0, 1)) {
-      toast(a.message, 'success')
-    }
-
     // 監控告警: 用專用 AlertToast (整批只響一聲, 每條都彈, 受 maxVisible 上限保護)
-    if (strategyAlerts.length > 0) {
-      // 有 onAlert 回調時走回調, 否則彈 AlertToast
+    if (alerts.length > 0) {
       if (onAlert) {
-        onAlert(strategyAlerts)
+        onAlert(alerts)
       }
-      // 批量彈通知 (去掉了 slice(0,2) 截斷, 讓每隻新命中都彈 toast; 聲音整批只響一次)
-      pushAlertToasts(strategyAlerts as any)
+      pushAlertToasts(alerts as any)
     }
   }, [onAlert])
 
@@ -137,10 +126,7 @@ export function useQuoteStream(
             // 'quote-status' 始終刷新 (全局狀態)
             if (p === 'quote-status') return true
             // 兼容舊配置: 'watchlist' 拆成兩個精確前綴後, 未單獨設置時沿用舊 'watchlist' 開關
-            if (
-              (p === 'watchlist-quotes' || p === 'watchlist-enriched') &&
-              pages[p] === undefined
-            ) {
+            if (p === 'watchlist-enriched' && pages[p] === undefined) {
               return pages['watchlist'] !== false
             }
             return pages[p] !== false
@@ -172,12 +158,6 @@ export function useQuoteStream(
         qc.invalidateQueries({ queryKey: ['screener-cached'] })
       })
 
-      es.addEventListener('depth_updated', () => {
-        // 五檔修正完成後刷新看板封單數據。
-        // 不受實時行情開關限制 — 修正輪詢獨立於行情輪詢, 用戶開了修正就想看實時封單。
-        qc.invalidateQueries({ queryKey: ['overview-market'] })
-      })
-
       es.addEventListener('strategy_alert', (e: MessageEvent) => {
         try {
           const data = JSON.parse(e.data)
@@ -204,8 +184,7 @@ export function useQuoteStream(
           toast('即時連線已中斷，正在重連…', 'error')
         }
         // 指數退避 (base * 2^(n-1), 上限 60s), 替代原來固定 5s
-        const base = getQueryConfig().sse.reconnectDelay
-        const delay = Math.min(base * 2 ** (failCount - 1), BACKOFF_CAP_MS)
+        const delay = Math.min(RECONNECT_BASE_MS * 2 ** (failCount - 1), BACKOFF_CAP_MS)
         retryRef.current = setTimeout(connect, delay)
       }
     }

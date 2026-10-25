@@ -9,7 +9,6 @@ import {
   SUB_CHARTS,
   type ChartMarker,
   type ChartPriceLine,
-  type ChartRange,
   type LinkedPrice,
   type OHLC,
   type StockInfo,
@@ -41,14 +40,7 @@ interface Props {
   height?: number
   className?: string
   dateRange?: { start: string; end: string }
-  markers?: ChartMarker[]
-  ranges?: ChartRange[]
   priceLines?: ChartPriceLine[]
-  showLimitMarkers?: boolean
-  showIndicatorControls?: boolean
-  showMarkerToggle?: boolean
-  showMA?: boolean
-  showInfoBar?: boolean
   visibleBars?: number
   linkedPrice?: LinkedPrice | null
   onDateClick?: (date: string) => void
@@ -131,14 +123,7 @@ export function StockDailyKChart({
   height = 520,
   className,
   dateRange: externalDateRange,
-  markers,
-  ranges,
   priceLines,
-  showLimitMarkers = true,
-  showIndicatorControls = true,
-  showMarkerToggle = true,
-  showMA = true,
-  showInfoBar = true,
   visibleBars = 60,
   linkedPrice,
   onDateClick,
@@ -168,10 +153,6 @@ export function StockDailyKChart({
   const rows = useMemo(() => toOHLC(kline.data?.rows ?? []), [kline.data?.rows])
   const stockInfo = kline.data?.stock_info
   const limitMarkers = useMemo(() => buildLimitUpMarkers(kline.data?.rows ?? []), [kline.data?.rows])
-  const allMarkers = useMemo(() => [
-    ...(markers ?? []),
-    ...(showLimitMarkers ? limitMarkers : []),
-  ], [limitMarkers, markers, showLimitMarkers])
 
   const toggleIndicator = useCallback((key: string) => {
     setActiveIndicators(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -201,7 +182,7 @@ export function StockDailyKChart({
 
   return (
     <div className={className} style={{ minHeight: chartHeight }}>
-      {showIndicatorControls && rows.length > 0 && (
+      {rows.length > 0 && (
         <div className="flex items-center gap-1.5 px-1 pb-0.5">
           {SUB_CHARTS.map(ind => (
             <button
@@ -261,7 +242,7 @@ export function StockDailyKChart({
               </select>
             </div>
           )}
-          {showMarkerToggle && showLimitMarkers && limitMarkers.length > 0 && (
+          {limitMarkers.length > 0 && (
             <button
               onClick={() => setShowMarkers(v => !v)}
               className={`ml-auto px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
@@ -290,14 +271,10 @@ export function StockDailyKChart({
       {rows.length > 0 && (
         <EChartsCandlestick
           data={rows}
-          markers={allMarkers}
-          ranges={ranges}
+          markers={limitMarkers}
           priceLines={priceLines}
           height={chartHeight - 22}
-          showMA={showMA}
-          showInfoBar={showInfoBar}
           showMarkers={showMarkers}
-          symbol={symbol}
           linkedPrice={linkedPrice}
           onDateClick={onDateClick}
           onPriceDoubleClick={onPriceDoubleClick}

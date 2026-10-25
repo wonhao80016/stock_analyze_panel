@@ -1,12 +1,10 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { X } from 'lucide-react'
-import { type KlineRow, type FinancialMetricRecord } from '@/lib/api'
+import { type KlineRow } from '@/lib/api'
 import { StockInfoBar } from '@/components/StockInfoBar'
 import { StockDailyKChart, getDefaultRange, type StockDailyKChartResult } from '@/components/StockDailyKChart'
 import { StockIntradayChart } from '@/components/StockIntradayChart'
-import { useFinancialMetrics } from '@/lib/useFinancials'
-import { useCapabilities } from '@/lib/useSharedQueries'
-import { rawChangeBase, scaleToRaw, type ChartMarker, type ChartPriceLine, type ChartRange, type LinkedPrice } from '@/components/EChartsCandlestick'
+import { rawChangeBase, scaleToRaw, type ChartPriceLine, type LinkedPrice } from '@/components/EChartsCandlestick'
 import {
   loadInfoFields,
   saveInfoFields,
@@ -18,24 +16,10 @@ interface Props {
   symbol: string
   height?: number
   showIntraday?: boolean
-  className?: string
-  /** 當用戶點擊蠟燭選中日期時回調（用於外部自動開啟分時圖）。 */
-  onSelectDate?: (date: string) => void
   /** 外部傳入的日期範圍 */
   dateRange?: { start: string; end: string }
-  markers?: ChartMarker[]
-  ranges?: ChartRange[]
   priceLines?: ChartPriceLine[]
-  showLimitMarkers?: boolean
-  showMarkerToggle?: boolean
-  /** 加監控回調 (傳入後信息條顯示 RadioTower 圖標) */
-  onMonitor?: () => void
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
-  /** 自選操作（傳入後信息條顯示 Star 圖標） */
-  inWatchlist?: boolean
-  onAddToWatchlist?: (groupId: string | null) => void
-  onRemoveFromWatchlist?: () => void
-  watchlistPending?: boolean
   /** 分時圖自動刷新間隔(ms)。undefined = 不輪詢。個股對話框盤中實時刷新時傳入。 */
   refetchIntervalMs?: number
   /** 只渲染信息條, 隱藏圖表 (用於分時 tab 共享信息條) */
@@ -48,20 +32,9 @@ export function StockPanel({
   symbol,
   height = 520,
   showIntraday = true,
-  className,
-  onSelectDate,
   dateRange: externalDateRange,
-  markers,
-  ranges,
   priceLines,
-  showLimitMarkers = true,
-  showMarkerToggle = true,
-  onMonitor,
   onPriceDoubleClick,
-  inWatchlist,
-  onAddToWatchlist,
-  onRemoveFromWatchlist,
-  watchlistPending,
   refetchIntervalMs,
   infoBarOnly = false,
 }: Props) {
@@ -84,24 +57,12 @@ export function StockPanel({
     saveInfoFields(next)
   }, [])
 
-  // 財務指標：僅當信息條配置含可見的財務字段且用戶具備財務數據能力 (financial) 時才請求
-  // 無能力時跳過請求, 避免後端拋 CapabilityDenied (403) 導致 free/starter 檔彈錯誤提示
-  const { data: caps } = useCapabilities()
-  const hasFinancialCap = !!caps?.capabilities?.['financial']
-  const hasFinanceField = useMemo(
-    () => fields.some(f => f.visible && f.source.type === 'builtin'
-      && ['eps', 'bps', 'roe', 'pe_ttm', 'pb', 'gross_margin', 'net_margin', 'debt_ratio', 'revenue_yoy', 'net_income_yoy'].includes(f.source.key)),
-    [fields],
-  )
-  const financials = useFinancialMetrics(hasFinanceField && hasFinancialCap ? symbol : undefined)
-
   const dateRange = externalDateRange ?? getDefaultRange()
 
   const handleDateClick = useCallback((date: string) => {
     setSelectedDate(date)
     setIntradayDismissed(false)
-    onSelectDate?.(date)
-  }, [onSelectDate])
+  }, [])
 
   const rows = dailyResult?.rows ?? []
   const stockInfo = dailyResult?.stockInfo
@@ -137,11 +98,8 @@ export function StockPanel({
   )
   if (!symbol) return null
 
-  // 財務指標最新一期（metrics 按 period_end 排序，取首項）
-  const financialMetrics: FinancialMetricRecord | undefined = financials.data?.data?.[0]
-
   return (
-    <div className={className}>
+    <div>
       <StockInfoBar
         symbol={symbol}
         name={dailyResult?.name}
@@ -149,12 +107,6 @@ export function StockPanel({
         rows={rawRows}
         fields={fields}
         onFieldsChange={handleFieldsChange}
-        financialMetrics={financialMetrics}
-        onMonitor={onMonitor}
-        inWatchlist={inWatchlist}
-        onAddToWatchlist={onAddToWatchlist}
-        onRemoveFromWatchlist={onRemoveFromWatchlist}
-        watchlistPending={watchlistPending}
       />
 
       {infoBarOnly ? null : (
@@ -164,11 +116,7 @@ export function StockPanel({
           height={height}
           className="flex-1 min-w-0"
           dateRange={dateRange}
-          markers={markers}
-          ranges={ranges}
           priceLines={priceLines}
-          showLimitMarkers={showLimitMarkers}
-          showMarkerToggle={showMarkerToggle}
           linkedPrice={linkedPrice}
           onDateClick={handleDateClick}
           onPriceDoubleClick={onPriceDoubleClick}

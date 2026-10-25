@@ -27,16 +27,12 @@ import { CORE_NAV } from '@/lib/navigation'
 interface NavEntry {
   id: string
   label: string
-  type: 'builtin'
   visible: boolean
 }
 
-// Phase 8B-2.1 — 台股核心功能清單改由 @/lib/navigation.ts 的 CORE_NAV 產生,
-// 與 Layout.tsx 的 sidebar 共用同一份 metadata(不再各自維護一份易漂移的清單)。
-// 中國 A 股 legacy 功能(ASHARE_LEGACY_NAV)不在這裡 —— 它們不是獨立的核心
-// menu item, 改用下方「中國 A 股功能」小節的總開關 + 個別顯示管理。
+// Shares CORE_NAV with the Layout sidebar so the two lists cannot drift apart.
 const BUILTIN_PAGES: NavEntry[] = CORE_NAV.map(n => ({
-  id: n.to, label: n.label, type: 'builtin' as const, visible: true,
+  id: n.to, label: n.label, visible: true,
 }))
 
 const NAV_HIDDEN_MUTATION_KEY = ['nav-hidden'] as const

@@ -58,7 +58,7 @@ describe('StockPreviewDialog — 不再導向個股頁', () => {
   })
 
   it('非台股代碼同樣不提供該出口', async () => {
-    renderDialog('600000.SH')
+    renderDialog('DEMO.CUSTOM')
 
     await screen.findByTitle('關閉')
     expect(screen.queryByRole('button', { name: /查看.*完整個股頁/ })).not.toBeInTheDocument()

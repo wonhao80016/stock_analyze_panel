@@ -564,7 +564,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     return (
       <div className="rounded-card border border-border bg-surface p-5 space-y-4">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-medium text-foreground">{editing ? '編輯監控' : '加入監控'}</h3>
+          <h3 className="text-sm font-medium text-foreground">加入監控</h3>
           <button onClick={onClose} className="rounded p-1 text-muted hover:bg-elevated hover:text-foreground cursor-pointer">
             <X className="h-4 w-4" />
           </button>

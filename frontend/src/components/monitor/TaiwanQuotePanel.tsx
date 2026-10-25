@@ -19,7 +19,6 @@ import { DataQualityBadge, formatQuoteTime } from '@/components/taiwan/TaiwanDat
 import { taipeiSessionOpen, useMinuteClock } from '@/lib/taipeiSession'
 
 interface TaiwanQuotePanelProps {
-  onSelectSymbol?: (symbol: string) => void
   onAddRuleForSymbol?: (quote: TaiwanRealtimeQuote) => void
 }
 
@@ -215,7 +214,7 @@ function FiveLevelBook({
   )
 }
 
-export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQuotePanelProps) {
+export function TaiwanQuotePanel({ onAddRuleForSymbol }: TaiwanQuotePanelProps) {
   const { openPreview } = useStockPreview()
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [volUnit, setVolUnit] = useState<'shares' | 'lots'>('lots')
@@ -270,10 +269,7 @@ export function TaiwanQuotePanel({ onSelectSymbol, onAddRuleForSymbol }: TaiwanQ
             return (
               <button
                 key={sym}
-                onClick={() => {
-                  setSelectedSymbol(sym)
-                  onSelectSymbol?.(sym)
-                }}
+                onClick={() => setSelectedSymbol(sym)}
                 className={cn(
                   'rounded-lg px-2.5 py-1 text-xs font-medium transition-all border cursor-pointer',
                   active

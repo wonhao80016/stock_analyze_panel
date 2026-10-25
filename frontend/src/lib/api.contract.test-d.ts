@@ -23,15 +23,6 @@ describe('response types follow the backend payloads', () => {
     }>()
   })
 
-  it('strategy runs return the engine StrategyResult with strategy_id (backend/app/strategy/engine.py)', () => {
-    type Preset = Resolved<typeof api.screenerRunPreset>
-    type Run = Resolved<typeof api.strategyRun>
-    expectTypeOf<Preset>().toHaveProperty('strategy_id').toEqualTypeOf<string>()
-    expectTypeOf<Preset>().toHaveProperty('scores')
-    expectTypeOf<Run>().toEqualTypeOf<Preset>()
-    expectTypeOf<Preset>().not.toHaveProperty('strategy')
-  })
-
   it('intraday refresh returns the quote status or an unavailable error (backend/app/api/intraday.py)', () => {
     type Refresh = Resolved<typeof api.intradayRefresh>
     expectTypeOf<Refresh>().toEqualTypeOf<Resolved<typeof api.quoteStatus> | { error: string }>()

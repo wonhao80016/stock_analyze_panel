@@ -110,7 +110,7 @@ function MonitorWidget({ onStockClick }: { onStockClick: (event: AlertEvent) => 
                   title={isSector ? '在監控中心查看板塊告警' : ev.symbol ? `查看 ${ev.symbol} 日K` : undefined}
                   className={`inline-flex items-center gap-1 min-w-0 shrink-0 rounded hover:bg-elevated/60 transition-colors -mx-0.5 px-0.5 ${isSector || ev.symbol ? 'cursor-pointer' : 'cursor-default'}`}
                 >
-                  <span className="font-mono text-[10px] font-medium text-foreground/80 hover:text-accent">{ev.symbol?.replace(/\.(SH|SZ|BJ)$/, '')}</span>
+                  <span className="font-mono text-[10px] font-medium text-foreground/80 hover:text-accent">{ev.symbol}</span>
                   {ev.symbol && (() => {
                     const board = boardTag(ev.symbol)
                     return board && (
@@ -576,12 +576,8 @@ function StrategyPicksCard({ onStockClick }: { onStockClick: (symbol: string, na
   )
 }
 
-// ===== Phase 8B-2: 台股資料狀態卡 =====
-// 只讀既有 /api/taiwan/data-status(與 Onboarding 台股資料狀態步驟同一個 API,
-// 不建立重複 backend 邏輯)。沒有資料時顯示清楚的繁體 empty state, 不假造台股
-// 指數或任何資料。Phase 8C-B: 不再是首頁第一眼內容, 改列於監控中心之後的最下層
-// (資料新鮮度)。Phase 8C-D: 中國 A 股 legacy Dashboard 區塊已隨產品介面整體
-// 移除, 此卡不再有任何 legacy 開關依賴。
+// Taiwan data status card. Reads /api/taiwan/data-status, the same API as onboarding, and
+// shows an explicit empty state instead of fabricating index data.
 const TAIWAN_FRESHNESS_LABEL: Record<string, string> = {
   current: '最新',
   stale: '過期',
@@ -706,10 +702,6 @@ export function Dashboard() {
 
   return (
     <div className="min-h-full bg-base p-1.5">
-      {/* Phase 8C-B — Dashboard Market Clarity: 首頁第一印象為「今日市場強弱」,
-          其次為「產業強弱 + 自選股動態」, 監控事件摘要在下方, 台股資料狀態卡
-          (資料新鮮度) 移到最下層。Phase 8C-D: 中國 A 股 legacy 大盤看板整段已
-          移除產品介面, Dashboard 全站僅剩台股內容, 不再有任何 legacy 開關。 */}
       <MarketStrengthCard />
 
       <div className="mb-1.5 grid grid-cols-1 gap-1.5 lg:grid-cols-2">

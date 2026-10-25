@@ -25,8 +25,7 @@ type TabDef = {
   key: string
   label: string
   icon: ComponentType<{ className?: string }>
-  panel: ComponentType<{ highlight?: string }>
-  badge?: string
+  panel: ComponentType
 }
 
 const TABS: readonly TabDef[] = [
@@ -45,7 +44,6 @@ export function Settings() {
   const [searchParams, setSearchParams] = useSearchParams()
   const tabParam = searchParams.get('tab') as TabKey | null
   const activeTab = TABS.find((t) => t.key === tabParam) ?? TABS[0]
-  const highlight = searchParams.get('highlight') ?? ''
 
   // 設置菜單收起狀態 — 持久化到 localStorage
   const [collapsed, setCollapsed] = useState(() => {
@@ -88,7 +86,7 @@ export function Settings() {
               </button>
 
               {/* Tab 按鈕列表 — 收起時只顯示圖標 */}
-              {TABS.map(({ key, label, icon: Icon, badge }) => (
+              {TABS.map(({ key, label, icon: Icon }) => (
                 <button
                   key={key}
                   onClick={() => setSearchParams({ tab: key }, { replace: true })}
@@ -103,11 +101,6 @@ export function Settings() {
                 >
                   <Icon className="h-3.5 w-3.5 shrink-0" />
                   {!collapsed && <span>{label}</span>}
-                  {!collapsed && badge && (
-                    <span className="ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
-                      {badge}
-                    </span>
-                  )}
                 </button>
               ))}
             </div>
@@ -121,9 +114,7 @@ export function Settings() {
             transition={{ duration: 0.15 }}
             className="min-w-0 flex-1"
           >
-            {activeTab.key === 'monitoring'
-            ? <SettingsMonitoringPanel highlight={highlight} />
-            : <activeTab.panel />}
+            <activeTab.panel />
           </motion.div>
         </div>
       </div>

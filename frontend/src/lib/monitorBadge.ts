@@ -81,13 +81,6 @@ export function leaveMonitorPage(): void {
   onMonitorPage = false
 }
 
-/** 記錄被清空時調用。 */
-export function resetBadge(): void {
-  syncSeen()
-  recentTs = []
-  emit()
-}
-
 /** 讀取當前未讀數。 */
 export function useUnreadAlerts(): number {
   return useSyncExternalStore(subscribe, getUnreadAlertCount, () => 0)

@@ -159,7 +159,6 @@ export const router = createBrowserRouter([
       // 旧路由兼容重定向
       { path: 'settings/keys', element: <Navigate to="/settings?tab=data-sources" replace /> },
       { path: 'settings/ai', element: <Navigate to="/settings?tab=ai" replace /> },
-      { path: 'settings/queries', element: <Navigate to="/settings?tab=queries" replace /> },
       ...frontendExtensionRoutes.map(route => {
         const ExtensionPage = route.component
         return {

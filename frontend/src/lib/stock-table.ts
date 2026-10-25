@@ -19,7 +19,6 @@ export interface Signal {
 /** 訊號字段定義：[行字段名, 展示標籤, 訊號類型] */
 export const SIGNAL_FIELDS: [string, string, SignalType][] = [
   ['signal_limit_up', '漲停', 'bull'],
-  ['signal_broken_board_recovery', '反包', 'bull'],
   ['signal_volume_surge', '放量', 'neutral'],
   ['signal_ma_golden_5_20', 'MA金叉', 'bull'],
   ['signal_ma_dead_5_20', 'MA死叉', 'bear'],
@@ -62,13 +61,13 @@ export function getSortValue(r: any, col: ColumnConfig): any {
   const key = col.source.key
   switch (key) {
     case 'symbol':        return r.symbol
-    case 'price':         return r.rt_price ?? r.close
-    case 'pct':           return r.rt_pct ?? r.change_pct
+    case 'price':         return r.close
+    case 'pct':           return r.change_pct
     case 'change_amount': return r.change_amount
     case 'amplitude':     return r.amplitude
     case 'turnover':      return r.turnover_rate
-    case 'amount':        return r.rt_amount ?? r.amount
-    case 'float_val':     return r.float_shares && (r.rt_price ?? r.close) ? r.float_shares * (r.rt_price ?? r.close) : null
+    case 'amount':        return r.amount
+    case 'float_val':     return r.float_shares && r.close ? r.float_shares * r.close : null
     case 'vol_ratio':     return r.vol_ratio_5d
     case 'annual_vol':    return r.annual_vol_20d
     case 'ma5':           return r.ma5

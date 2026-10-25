@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Check, Folder, Inbox, List, LoaderCircle, RefreshCw } from 'lucide-react'
+import { Check, Folder, Inbox, LoaderCircle, RefreshCw } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { resolveWatchlistGroupColor } from '@/lib/watchlist-group-colors'
@@ -16,12 +16,7 @@ export interface WatchlistGroupMenuProps {
   onSelect: (groupId: string | null) => void
   disabled?: boolean
   preferredGroupId?: string | null
-  includeAll?: boolean
-  counts?: Record<string, number>
-  total?: number
-  disableEmpty?: boolean
   menuLabel?: string
-  align?: 'left' | 'right'
   triggerClassName?: string
   title?: string
   ariaLabel?: string
@@ -36,12 +31,7 @@ export function WatchlistGroupMenu({
   onSelect,
   disabled = false,
   preferredGroupId,
-  includeAll = false,
-  counts,
-  total = 0,
-  disableEmpty = false,
   menuLabel = '選擇自選分組',
-  align = 'right',
   triggerClassName = '',
   title = '加入自選',
   ariaLabel = title,
@@ -73,7 +63,7 @@ export function WatchlistGroupMenu({
     const top = dropUp
       ? Math.max(VIEWPORT_GAP, rect.top - menuHeight - TRIGGER_GAP)
       : Math.min(rect.bottom + TRIGGER_GAP, window.innerHeight - menuHeight - VIEWPORT_GAP)
-    const rawLeft = align === 'left' ? rect.left : rect.right - MENU_WIDTH
+    const rawLeft = rect.right - MENU_WIDTH
     const left = Math.max(
       VIEWPORT_GAP,
       Math.min(rawLeft, window.innerWidth - MENU_WIDTH - VIEWPORT_GAP),
@@ -153,8 +143,6 @@ export function WatchlistGroupMenu({
   }
 
   const menuItemClass = 'flex h-8 w-full items-center gap-2 rounded-btn px-2 text-left text-xs text-secondary outline-none transition-colors hover:bg-elevated hover:text-foreground focus:bg-elevated focus:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-secondary'
-  const showCounts = counts !== undefined
-  const ungroupedCount = counts?.ungrouped ?? 0
 
   return (
     <>
@@ -200,37 +188,19 @@ export function WatchlistGroupMenu({
             </button>
           ) : (
             <div className="max-h-60 overflow-y-auto">
-              {includeAll && (
-                <>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => choose('all')}
-                    disabled={disableEmpty && total === 0}
-                    className={menuItemClass}
-                  >
-                    <List className="h-3.5 w-3.5 shrink-0 text-accent" />
-                    <span className="min-w-0 flex-1 truncate">全部自選</span>
-                    {showCounts && <span className="font-mono text-[10px] tabular-nums text-muted">{total}</span>}
-                  </button>
-                  <div className="my-1 border-t border-border/70" />
-                </>
-              )}
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => choose(null)}
-                disabled={disableEmpty && ungroupedCount === 0}
                 className={menuItemClass}
               >
                 <Inbox className="h-3.5 w-3.5 shrink-0 text-muted" />
                 <span className="min-w-0 flex-1 truncate">未分組</span>
-                {showCounts && <span className="font-mono text-[10px] tabular-nums text-muted">{ungroupedCount}</span>}
                 {showPreferred && preferredGroupId == null && (
                   <Check className="h-3.5 w-3.5 shrink-0 text-accent" aria-label="目前分組" />
                 )}
               </button>
-              {!includeAll && groups.length > 0 && <div className="my-1 border-t border-border/70" />}
+              {groups.length > 0 && <div className="my-1 border-t border-border/70" />}
               {groups.map(group => {
                 const color = resolveWatchlistGroupColor(group.color)
                 return (
@@ -239,13 +209,11 @@ export function WatchlistGroupMenu({
                     type="button"
                     role="menuitem"
                     onClick={() => choose(group.id)}
-                    disabled={disableEmpty && (counts?.[group.id] ?? 0) === 0}
                     className={`${menuItemClass} border-l-2 ${color.border}`}
                     title={group.name}
                   >
                     <Folder className={`h-3.5 w-3.5 shrink-0 ${color.text}`} />
                     <span className="min-w-0 flex-1 truncate">{group.name}</span>
-                    {showCounts && <span className="font-mono text-[10px] tabular-nums text-muted">{counts[group.id] ?? 0}</span>}
                     {showPreferred && preferredGroupId === group.id && (
                       <Check className={`h-3.5 w-3.5 shrink-0 ${color.text}`} aria-label="目前分組" />
                     )}
@@ -261,10 +229,7 @@ export function WatchlistGroupMenu({
   )
 }
 
-type WatchlistAddMenuProps = Omit<
-  WatchlistGroupMenuProps,
-  'includeAll' | 'counts' | 'total' | 'disableEmpty' | 'menuLabel'
->
+type WatchlistAddMenuProps = Omit<WatchlistGroupMenuProps, 'menuLabel'>
 
 /** 所有“加入自選”入口共用的目標分組菜單。 */
 export function WatchlistAddMenu(props: WatchlistAddMenuProps) {

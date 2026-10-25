@@ -8,7 +8,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Layout } from './Layout'
-import { usePreferences, useCapabilities, useSettings, useQuoteStatus, useVersion } from '@/lib/useSharedQueries'
+import { usePreferences, useSettings, useQuoteStatus, useVersion } from '@/lib/useSharedQueries'
 import { useToggleRealtimeQuotes } from '@/lib/useSharedMutations'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { getFrontendExtensionNavigation } from '@/extensions/registry'
@@ -22,14 +22,12 @@ vi.mock('@/lib/api', () => ({
     watchlistEnriched: vi.fn().mockResolvedValue({ items: [] }),
     alertsList: vi.fn().mockResolvedValue({ items: [], total: 0 }),
     intradayRefresh: vi.fn().mockResolvedValue({}),
-    pipelineJobs: vi.fn().mockResolvedValue({ active_id: null }),
     authStatus: vi.fn().mockResolvedValue({ configured: true, authenticated: true }),
     authLogout: vi.fn().mockResolvedValue({ ok: true }),
   },
 }))
 
 vi.mock('@/lib/useSharedQueries', () => ({
-  useCapabilities: vi.fn(),
   useSettings: vi.fn(),
   usePreferences: vi.fn(),
   useQuoteStatus: vi.fn(),
@@ -60,7 +58,6 @@ vi.mock('@/components/Toast', () => ({
 vi.mock('@/components/AlertToast', () => ({ AlertToastContainer: () => null }))
 
 function mockCommonHooks() {
-  vi.mocked(useCapabilities).mockReturnValue({ data: undefined } as any)
   vi.mocked(useSettings).mockReturnValue({ data: undefined } as any)
   vi.mocked(useQuoteStatus).mockReturnValue({ data: undefined } as any)
   vi.mocked(useVersion).mockReturnValue({ data: undefined } as any)

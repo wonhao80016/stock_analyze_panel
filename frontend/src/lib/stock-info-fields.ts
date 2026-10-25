@@ -31,24 +31,12 @@ export const BUILTIN_INFO_FIELDS: ColumnConfig[] = [
   { id: 'builtin:open', source: { type: 'builtin', key: 'open' }, label: '開盤', visible: false, align: 'left' },
   { id: 'builtin:high', source: { type: 'builtin', key: 'high' }, label: '最高', visible: false, align: 'left' },
   { id: 'builtin:low', source: { type: 'builtin', key: 'low' }, label: '最低', visible: false, align: 'left' },
-  // 財務（數據來自 financials metrics 接口，默認隱藏；pe_ttm/pb 用 close 現算）
-  { id: 'builtin:eps', source: { type: 'builtin', key: 'eps' }, label: 'EPS', visible: false, align: 'left' },
-  { id: 'builtin:bps', source: { type: 'builtin', key: 'bps' }, label: 'BPS', visible: false, align: 'left' },
-  { id: 'builtin:roe', source: { type: 'builtin', key: 'roe' }, label: 'ROE', visible: false, align: 'left' },
-  { id: 'builtin:pe_ttm', source: { type: 'builtin', key: 'pe_ttm' }, label: 'PE', visible: false, align: 'left' },
-  { id: 'builtin:pb', source: { type: 'builtin', key: 'pb' }, label: 'PB', visible: false, align: 'left' },
-  { id: 'builtin:gross_margin', source: { type: 'builtin', key: 'gross_margin' }, label: '毛利率', visible: false, align: 'left' },
-  { id: 'builtin:net_margin', source: { type: 'builtin', key: 'net_margin' }, label: '淨利率', visible: false, align: 'left' },
-  { id: 'builtin:debt_ratio', source: { type: 'builtin', key: 'debt_ratio' }, label: '負債率', visible: false, align: 'left' },
-  { id: 'builtin:revenue_yoy', source: { type: 'builtin', key: 'revenue_yoy' }, label: '營收增速', visible: false, align: 'left' },
-  { id: 'builtin:net_income_yoy', source: { type: 'builtin', key: 'net_income_yoy' }, label: '淨利增速', visible: false, align: 'left' },
 ]
 
 export const INFO_GROUPS: ColumnGroup[] = [
   { id: 'scale', label: '規模', icon: '🏦', keys: ['market_cap', 'float_market_cap'] },
   { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'volume', 'amplitude'] },
   { id: 'quote', label: '行情', icon: '📈', keys: ['open', 'high', 'low'] },
-  { id: 'finance', label: '財務', icon: '📋', keys: ['eps', 'bps', 'roe', 'pe_ttm', 'pb', 'gross_margin', 'net_margin', 'debt_ratio', 'revenue_yoy', 'net_income_yoy'] },
 ]
 
 // ===== localStorage 持久化 =====

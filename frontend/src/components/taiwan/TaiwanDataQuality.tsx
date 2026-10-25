@@ -38,7 +38,6 @@ export interface TaiwanQuoteMetaLike {
 const SOURCE_DISPLAY_NAMES: Record<string, string> = {
   'twse:mis': '證交所即時報價',
   'yahoo:chart': 'Yahoo 延遲報價',
-  'twse:stock_day_all': '證交所官方收盤快照',
   'twse:STOCK_DAY_ALL': '證交所官方收盤快照',
   'tpex:mainboard_quotes': '櫃買中心官方收盤快照',
   'daily_kline': '本地日線資料',

@@ -36,8 +36,6 @@ interface Props {
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
   currentPrice?: number
   priceLines?: { value: number; label?: string; color?: string }[]
-  showLimitLines?: boolean
-  showAvgLine?: boolean
 }
 
 function fmtAmt(v: number): string {
@@ -64,7 +62,7 @@ function limitStatusLabel(priceLimit?: PriceLimitInfo): string | null {
   return '漲跌停價未知'
 }
 
-function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showLimitLines = true, showAvgLine = true, priceLines: Props['priceLines'] = [], volumeUnit: VolumeUnit = DEFAULT_VOLUME_UNIT): EChartsOption {
+function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgPrices: number[], lineColor: string, areaColor: string, yMode: YMode, ct: ChartTheme, priceLimit?: PriceLimitInfo, showAvgLine = true, priceLines: Props['priceLines'] = [], volumeUnit: VolumeUnit = DEFAULT_VOLUME_UNIT): EChartsOption {
   // 將數據映射到全天時間軸上的正確位置
   const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
   const closes = new Array(FULL_DAY_TIMES.length).fill(null) as (number | null)[]
@@ -150,7 +148,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         : largest
     ), 0) * 1.05
 
-    const limits = showLimitLines ? getLimitPrices(priceLimit) : null
+    const limits = getLimitPrices(priceLimit)
     if (limits && yMode === 'limit') {
       const { limitUp, limitDown } = limits
       const limitDiffUp = limitUp - prevClose
@@ -181,11 +179,8 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
         const limitDiff = Math.max(limits.limitUp - prevClose, prevClose - limits.limitDown)
         maxDiff = Math.min(maxDiff, limitDiff)
       }
-      if (!showLimitLines && maxDiff > 0) {
-        maxDiff *= 1.1
-      }
-      // 至少保證一個可視範圍 (防止數據平時 maxDiff=0)。指數不使用漲跌停範圍，最小範圍要更緊，否則低波動指數會被壓成橫線。
-      const minDiff = showLimitLines ? prevClose * 0.01 : prevClose * 0.001
+      // Keep a minimum visible range so a flat session (maxDiff = 0) still renders.
+      const minDiff = prevClose * 0.01
       if (maxDiff < minDiff) maxDiff = minDiff
       maxDiff = Math.max(maxDiff, monitoredDiff)
       yMin = prevClose - maxDiff
@@ -403,8 +398,6 @@ export function EChartsIntraday({
   onPriceDoubleClick,
   currentPrice,
   priceLines,
-  showLimitLines = true,
-  showAvgLine = true,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -431,7 +424,7 @@ export function EChartsIntraday({
   const limitLabel = limitStatusLabel(priceLimit)
   const avgPrices = useMemo(() => computeIntradayAverage(data), [data])
   const coverage = useMemo(() => computeVolumeCoverage(data), [data])
-  const avgVisible = showAvgLine && (coverage == null || coverage >= MIN_AVERAGE_COVERAGE)
+  const avgVisible = coverage == null || coverage >= MIN_AVERAGE_COVERAGE
 
   // 分時線顏色：基於最新價 vs 昨收
   const lastClose = data.length > 0 ? data[data.length - 1].close : null
@@ -519,11 +512,11 @@ export function EChartsIntraday({
       }
       fullDayToDataIdx.current = mapping
 
-      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines, volumeUnit), true)
+      chart.setOption(buildOption(data, prevClose, avgPrices, lineColor, areaFill, yMode, ct, priceLimit, avgVisible, priceLines, volumeUnit), true)
     } else {
       chart.clear()
     }
-  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, showLimitLines, avgVisible, priceLines, volumeUnit])
+  }, [data, prevClose, height, lineColor, areaFill, yMode, ct, priceLimit, avgVisible, priceLines, volumeUnit])
 
   useEffect(() => {
     return () => {
@@ -552,9 +545,9 @@ export function EChartsIntraday({
     <div className="w-full">
       {/* 按鈕行: 切換式按鈕組, 居右 */}
       <div className="flex items-center justify-end gap-2 px-1 pb-0.5">
-        {showLimitLines && limitLabel && <span className="text-[10px] text-muted">{limitLabel}</span>}
+        {limitLabel && <span className="text-[10px] text-muted">{limitLabel}</span>}
         <VolumeUnitToggle />
-        {showLimitLines && <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
+        <div className="inline-flex items-center rounded bg-elevated overflow-hidden">
           <button
             onClick={() => setYMode('adaptive')}
             className={`px-2.5 py-0.5 text-[10px] font-mono cursor-pointer transition-colors ${
@@ -579,7 +572,7 @@ export function EChartsIntraday({
           >
             漲跌停
           </button>
-        </div>}
+        </div>
       </div>
       <div style={{ backgroundColor: ct.infoBarBg }}>
         {/* 第一行: 日期 + OHLC */}
@@ -611,7 +604,7 @@ export function EChartsIntraday({
                 <span style={{ display: 'inline-block', width: 14, height: 2, background: THEME.avgLine }} />
                 <span style={{ color: THEME.avgLine }}>{avg?.toFixed(2)}</span>
               </span>}
-              {showAvgLine && coverage != null && <span className="text-muted">{formatCoverage(coverage)}</span>}
+              {coverage != null && <span className="text-muted">{formatCoverage(coverage)}</span>}
               <span className="text-muted">量</span>
               <span className="text-secondary">{formatVolume(d.volume, volumeUnit)}</span>
               <span className="text-muted">額</span>

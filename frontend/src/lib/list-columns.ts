@@ -8,7 +8,6 @@
 export type ColumnSource =
   | { type: 'builtin'; key: string }
   | { type: 'ext'; configId: string; fieldName: string; fieldLabel?: string; fieldType?: string }
-  | { type: 'computed'; key: string }
 
 /** 擴展列字符串值渲染配置 */
 export interface ExtColumnDisplayConfig {
@@ -133,7 +132,7 @@ export interface ColumnGroup {
   id: string
   label: string
   icon?: string
-  /** builtin/computed source key 列表 */
+  /** Keys of the builtin sources in this group. */
   keys: string[]
 }
 
@@ -217,20 +216,4 @@ export function buildExtColumnsParam(columns: ColumnConfig[]): string {
     .filter(c => c.visible && c.source.type === 'ext')
     .map(c => `${(c.source as { type: 'ext'; configId: string; fieldName: string }).configId}.${(c.source as { type: 'ext'; configId: string; fieldName: string }).fieldName}`)
     .join(',')
-}
-
-/** 根據 ext schema 數據創建 ext 列配置。 */
-export function createExtColumn(
-  configId: string,
-  _configLabel: string,
-  fieldName: string,
-  fieldLabel?: string,
-): ColumnConfig {
-  return {
-    id: `ext:${configId}:${fieldName}`,
-    source: { type: 'ext', configId, fieldName, fieldLabel },
-    label: fieldLabel || fieldName,
-    visible: false,
-    align: 'center',
-  }
 }

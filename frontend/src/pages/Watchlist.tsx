@@ -268,8 +268,6 @@ function StockSearchBox({
   const [activeIdx, setActiveIdx] = useState(-1)
 
   const search = useQuery({
-    // Taiwan-only 產品方向: 自選搜索只查台股證券主檔(TaiwanSecurityMaster),
-    // 不應再出現 A 股 .SH/.SZ/.BJ 結果。2330.TWSE / 6488.TPEX 這類標的可被搜到並加入自選。
     // Benchmark indices stay out: Taiwan watchlist enrichment types any symbol missing from the security master as a stock.
     queryKey: QK.instrumentSearch(query, 'stock,etf'),
     queryFn: () => api.instrumentSearch(query, 20, 'stock,etf'),
@@ -360,9 +358,6 @@ function StockSearchBox({
                       {r.asset_type === 'etf' && (
                         <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-accent/10 text-accent">ETF</span>
                       )}
-                      {r.asset_type === 'index' && (
-                        <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-sky-500/10 text-sky-400">指數</span>
-                      )}
                       {(() => {
                         const b = boardTag(r.symbol)
                         return b && (
@@ -429,27 +424,6 @@ function StockSearchBox({
   )
 }
 
-// ===== 實時監控圓點 =====
-// 自選頁 symbol 列代碼後的小圓點, 標識該標的正在被實時行情監控 (Free/低檔按自選監控模式)。
-// 視覺: 內圈實心點 + 外圈 animate-ping 擴散暈, 語義=「在線/活動」。
-// 配色用 accent (電光藍) 而非綠/紅: 項目設計規範規定紅綠僅用於價格/K線,
-// UI 狀態用 accent, 避免與 A 股漲跌色混淆。
-// 全市場模式不顯示 —— 全部都在監控, 標記無信息量。
-function RealtimeDot({ title = '即時監控中' }: { title?: string }) {
-  return (
-    <span
-      title={title}
-      className="relative inline-flex h-2 w-2 shrink-0"
-      aria-label={title}
-    >
-      {/* 外圈: 擴散暈 (ping 動畫) */}
-      <span className="absolute inline-flex h-full w-full rounded-full bg-accent/60 animate-ping motion-reduce:hidden" />
-      {/* 內圈: 實心點 + 微輝光 */}
-      <span className="relative inline-flex rounded-full h-2 w-2 bg-accent shadow-[0_0_5px_rgba(61,214,140,0.6)]" />
-    </span>
-  )
-}
-
 // ===== 卡片組件 =====
 
 // 共享的空 K 線數組常量 — 避免每次渲染傳入新的 [] 破壞 StockCard 的 memo
@@ -488,7 +462,6 @@ const StockCard = React.memo(function StockCard({
   expandedCells,
   onToggleExpand,
   onDimensionClick,
-  isMonitored,
   groups,
   onToggleMember,
   groupChangePending,
@@ -505,15 +478,14 @@ const StockCard = React.memo(function StockCard({
   expandedCells: Set<string>
   onToggleExpand: (key: string) => void
   onDimensionClick: (target: DimensionMembersTarget) => void
-  isMonitored?: boolean
   groups: WatchlistGroup[]
   onToggleMember: (symbol: string, groupId: string, member: boolean) => void
   groupChangePending: boolean
 }) {
   const board = boardTag(r.symbol)
-  const price = r.rt_price ?? r.close
-  const pct = r.rt_pct ?? r.change_pct
-  const name = r.rt_name ?? r.name
+  const price = r.close
+  const pct = r.change_pct
+  const name = r.name
   const signals = getSignals(r)
   const flagTag = earlierSessionTag(r.indicator_date)
   const turnover = turnoverDisplay(r)
@@ -596,7 +568,6 @@ const StockCard = React.memo(function StockCard({
           {r.consecutive_limit_ups > 0 && flagTag && (
             <span className="shrink-0 text-[9px] text-muted font-mono" title={`盤後資料 ${r.indicator_date}`}>{flagTag}</span>
           )}
-          {isMonitored && <span className="ml-auto"><RealtimeDot /></span>}
         </div>
 
         {/* 第二行: 大價格 + 漲跌幅膠囊 */}
@@ -911,9 +882,8 @@ export function Watchlist() {
     return patchLiveCandles(base, liveRows)
   }, [dailyKVisible, klineBatch.data, enriched.data])
 
-  // 批量分時數據 (有分鐘K批量能力時, 列可見才拉)
-  // 刷新策略: 僅當實時行情運行 且 用戶在實時監控設置裡開啟 minute_intraday_refresh 時
-  // 按用戶設定的間隔輪詢 (不接 SSE 高頻, 避免每秒拉 TickFlow 觸限流); 與 Screener / 設置卡片描述一致。
+  // Batch minute data, fetched only while the column is visible. It refreshes only while realtime
+  // quotes run with minute_intraday_refresh on, at the user's interval rather than per SSE tick.
   const { data: prefsData } = usePreferences()
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
   const intradayRefreshInterval = prefsData?.minute_intraday_refresh_interval ?? 6
@@ -1056,7 +1026,7 @@ export function Watchlist() {
     () => new Map(listEntries.map(entry => [entry.symbol, entry.group_ids ?? []])),
     [listEntries],
   )
-  // 分組等權平均漲跌幅 (實時優先 rt_pct, 收盤兜底 change_pct; 與表格同源)
+  // Equal-weight group change from change_pct, the same source as the table.
   const groupPcts = useMemo(
     () => computeGroupPcts(
       listEntries,
@@ -1094,18 +1064,6 @@ export function Watchlist() {
     : undefined
   const watchlistContentLoading = list.isLoading || (allSymbols.length > 0 && enriched.isLoading)
 
-  // 實時監控圓點: 僅 Free/低檔 "按自選股實時監控" 模式 (mode === 'watchlist') 下顯示;
-  // 全市場模式 (mode === 'full_market') 全部標的都在監控, 標圓點無意義, 故不顯示。
-  // 後端自選實時模式實際只監控自選頁前 N 個 (N = watchlist_symbol_count), 順序與 allSymbols 一致。
-  const realtimeMode = quoteStatus.data?.mode
-  const watchlistMonitoredCount = quoteStatus.data?.watchlist_symbol_count ?? 0
-  const showRealtimeDot = realtimeRunning && realtimeMode === 'watchlist'
-  // 真正被監控的標的集合 (自選列表前 watchlistMonitoredCount 個)
-  const monitoredSymbols = useMemo(
-    () => showRealtimeDot ? new Set(allSymbols.slice(0, watchlistMonitoredCount)) : new Set<string>(),
-    [showRealtimeDot, allSymbols, watchlistMonitoredCount],
-  )
-
   // ===== 篩選 =====
   const [filterOpen, setFilterOpen] = useState(false)
   const [filters, setFilters] = useState<Record<string, { min?: string; max?: string; text?: string }>>({})
@@ -1113,9 +1071,8 @@ export function Watchlist() {
 
   // 板塊篩選（持久化）
   const [boardFilter, setBoardFilter] = useState<Set<string>>(() => {
-    // BOARDS 從 A 股的五個板塊改成上市/上櫃後, 舊的持久化值仍在瀏覽器裡。原樣載入
-    // 會得到一個沒有任何個股符合的集合, 於是自選股的個股行全部消失 (ETF/指數因為
-    // 不受板塊篩選而留著), 而兩個板塊鈕都顯示未選取 —— 畫面上看不出原因。
+    // Persisted values from older board sets must be dropped; an unknown board would
+    // filter out every stock row while both board buttons show as unselected.
     const saved = storage.watchlistBoardFilter.get([]).filter(
       (b): b is BoardType => (BOARDS as readonly string[]).includes(b),
     )
@@ -1136,15 +1093,6 @@ export function Watchlist() {
     })
   }, [persistBoardFilter])
 
-  // 排除 ST (含 *ST/S*ST 等變體, 按簡稱含 "ST" 判定), 默認關閉並持久化
-  const [excludeST, setExcludeST] = useState(() => storage.watchlistExcludeST.get(false))
-  const toggleExcludeST = useCallback(() => {
-    setExcludeST(prev => {
-      storage.watchlistExcludeST.set(!prev)
-      return !prev
-    })
-  }, [])
-
   const updateFilter = useCallback((colId: string, patch: { min?: string; max?: string; text?: string }) => {
     setFilters(prev => {
       const next = { ...prev }
@@ -1162,8 +1110,6 @@ export function Watchlist() {
   const resetAllFilters = useCallback(() => {
     setFilters({})
     persistBoardFilter(new Set(BOARDS))
-    setExcludeST(false)
-    storage.watchlistExcludeST.set(false)
   }, [persistBoardFilter])
 
   // 可篩選的內置列
@@ -1197,10 +1143,6 @@ export function Watchlist() {
         return board != null && boardFilter.has(board)
       })
     }
-    // 排除 ST: 按簡稱判定 (ST/*ST/S*ST 均含 "ST"); 非股票名稱不含該標記, 天然不受影響
-    if (excludeST) {
-      result = result.filter(r => !((r.rt_name ?? r.name ?? '').toUpperCase().includes('ST')))
-    }
     // 數值/文本篩選
     const activeFilters = Object.entries(filters).filter(([, v]) => v.min || v.max || v.text)
     if (activeFilters.length > 0) {
@@ -1221,11 +1163,11 @@ export function Watchlist() {
       })
     }
     return result
-  }, [rowsInSelectedGroup, filters, columns, boardFilter, excludeST, volumeUnit])
+  }, [rowsInSelectedGroup, filters, columns, boardFilter, volumeUnit])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
   const hasBoardFilter = boardFilter.size > 0 && boardFilter.size < BOARDS.length
-  const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter || excludeST
+  const hasActiveFilters = activeFilterCount > 0 || hasBoardFilter
 
   // 排序（複用共享三態排序 hook）。分時列按「最新分鐘收盤 vs 昨收」排序（分時圖最後一點同口徑），
   // 其餘列走共享取值；眼睛關閉時不拉分鐘數據，取值為 null → 保持原序。
@@ -1299,7 +1241,6 @@ export function Watchlist() {
       expandedCells={expandedCells}
       onToggleExpand={handleToggleExpand}
       onDimensionClick={setDimensionTarget}
-      isMonitored={monitoredSymbols.has(r.symbol)}
       groups={groups}
       onToggleMember={handleToggleMember}
       groupChangePending={addGroupMember.isPending || removeGroupMember.isPending}
@@ -1550,23 +1491,6 @@ export function Watchlist() {
               })}
             </div>
           </div>
-          {/* 排除 ST */}
-          <div className="mb-2">
-            <div className="text-[10px] text-muted uppercase tracking-wider mb-0.5">風險警示</div>
-            <div className="flex flex-wrap gap-1">
-              <button
-                onClick={toggleExcludeST}
-                className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
-                  excludeST
-                    ? 'bg-accent/15 text-accent'
-                    : 'bg-elevated text-secondary hover:text-foreground hover:bg-elevated/80'
-                }`}
-                title="勾選後隱藏簡稱含 ST 標記的標的 (ST/*ST/S*ST)"
-              >
-                排除ST
-              </button>
-            </div>
-          </div>
           {COLUMN_GROUPS.map(cat => {
             const items = colsByCategory[cat.label]?.filter(i => i.col)
             if (!items?.length) return null
@@ -1743,9 +1667,9 @@ export function Watchlist() {
                   return renderExtCell(r, col, expandedCells, handleToggleExpand, setDimensionTarget)
                 }
                 const key = col.source.key
-                const price = r.rt_price ?? r.close
-                const pct = r.rt_pct ?? r.change_pct
-                const name = r.rt_name ?? r.name
+                const price = r.close
+                const pct = r.change_pct
+                const name = r.name
                 // 自選頁 symbol 列：預覽 + 內嵌刪除（減號圖標，二次確認）
                 if (key === 'symbol') {
                   const board = boardTag(r.symbol)
@@ -1781,7 +1705,6 @@ export function Watchlist() {
                               {board.label}
                             </span>
                           ) : null}
-                          {monitoredSymbols.has(r.symbol) && <span className="ml-2"><RealtimeDot /></span>}
                         </button>
                         {/* 刪除入口：從分組移除 + 從自選移除(二次確認) + 移到頂部 */}
                         <div className="ml-auto pl-1 shrink-0">
@@ -1844,12 +1767,8 @@ export function Watchlist() {
                     </td>
                   )
                 }
-                // 實時行情列：price/pct/amount 使用 rt_ 回退（自選頁有實時推送）
                 const numCls = 'px-2 py-1.5 text-right num tabular-nums'
                 if (key === 'price') {
-                  // Data Freshness & Source Labels batch: 現價旁補上精簡新鮮度徽章
-                  // (即時/延遲/快照/過期), 只有 Taiwan symbol 才有 source_meta —
-                  // legacy A 股 row 沒有這個欄位, DataQualityBadge 會直接不渲染。
                   return (
                     <td className={`${numCls} ${priceColorClass(pct)}`}>
                       <span className="inline-flex items-center justify-end gap-1 w-full">
@@ -1863,7 +1782,7 @@ export function Watchlist() {
                   return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPct(pct)}</td>
                 }
                 if (key === 'amount') {
-                  return <td className={`${numCls} text-secondary`} title={r.board_lot_volume ? BOARD_LOT_VOLUME_NOTE : undefined}>{fmtBigNum(r.rt_amount ?? r.amount)}</td>
+                  return <td className={`${numCls} text-secondary`} title={r.board_lot_volume ? BOARD_LOT_VOLUME_NOTE : undefined}>{fmtBigNum(r.amount)}</td>
                 }
                 if (key === 'turnover') {
                   const turnover = turnoverDisplay(r)

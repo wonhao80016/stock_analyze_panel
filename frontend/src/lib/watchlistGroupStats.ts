@@ -1,9 +1,6 @@
 /**
- * 自選分組漲跌幅 — 等權平均口徑。
- *
- * 組內每隻成員取「實時優先、收盤兜底」的漲跌幅(與自選表格展示同源:
- * rt_pct ?? change_pct, 小數單位), 算術平均即分組漲跌幅。等權最貼合
- * 自選的"個人組合"視角 — 透明且無需市值數據。
+ * Watchlist group change as the equal-weight mean of each member's change_pct
+ * (a fraction, the same value the table shows); no market-cap data is needed.
  */
 
 import { fmtPct } from '@/lib/format'
@@ -28,20 +25,17 @@ export interface GroupPctInfo {
 /** key: 'all' | 'ungrouped' | 分組 id */
 export type GroupPctMap = Record<string, GroupPctInfo>
 
-/**
- * 單隻標的的展示漲跌幅: 實時優先、收盤兜底(與自選表格/卡片展示同源,
- * 小數單位), 無有效數據為 null。分組統計與分組卡片排序共用此口徑。
- */
+/** Displayed change of one row as a fraction, or null; shared by group stats and card sorting. */
 export function rowPct(
-  row: { rt_pct?: number | null; change_pct?: number | null } | undefined,
+  row: { change_pct?: number | null } | undefined,
 ): number | null {
-  const pct = row ? row.rt_pct ?? row.change_pct : null
+  const pct = row ? row.change_pct : null
   return pct == null || !Number.isFinite(pct) ? null : pct
 }
 
 export function computeGroupPcts(
   entries: { symbol: string; group_ids?: string[] | null }[],
-  rowsBySymbol: Map<string, { rt_pct?: number | null; change_pct?: number | null }>,
+  rowsBySymbol: Map<string, { change_pct?: number | null }>,
 ): GroupPctMap {
   const buckets = new Map<string, { pcts: number[]; up: number; down: number; flat: number }>()
   const add = (key: string, pct: number | null | undefined) => {
@@ -85,7 +79,7 @@ export function computeGroupPcts(
   return out
 }
 
-/** 漲跌色 (A 股慣例紅漲綠跌) */
+/** Red-up / green-down color convention. */
 export function groupPctColor(pct: number | null): string {
   if (pct == null || pct === 0) return 'text-muted'
   return pct > 0 ? 'text-bull' : 'text-bear'

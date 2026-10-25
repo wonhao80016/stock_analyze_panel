@@ -15,12 +15,8 @@ export interface BuiltinSignalDefinition {
   description: string
 }
 
-/** 內置原子訊號清單 (權威展示來源, 兩頁統一)
- *
- * TAIWAN_LOCALIZATION_POLISH: name/category/description 全面改為正體中文，
- * 並把「連板」相關描述改為依實際語意翻譯的「連續漲停」，不再是 A 股「連板」
- * 慣例術語直接透傳；id 全數不變 (與 backend backtest/strategy.py 及既有
- * saved rule/策略 identifier 對齊)。
+/** Built-in atomic signals, the single display source for both pages.
+ * Ids match backend backtest/strategy.py and saved rules and strategies; never rename them.
  */
 export const BUILTIN_SIGNAL_DEFINITIONS: BuiltinSignalDefinition[] = [
   {
@@ -342,12 +338,6 @@ export const ABNORMAL_SIGNAL_DEFINITIONS: AbnormalSignalDefinition[] = [
     subtypeNames: { LEADER: '強於產業', LAGGARD: '弱於產業' },
   },
 ]
-
-export const ABNORMAL_SIGNAL_LABELS: Record<string, string> =
-  ABNORMAL_SIGNAL_DEFINITIONS.reduce<Record<string, string>>((acc, sig) => {
-    acc[sig.id] = sig.name
-    return acc
-  }, {})
 
 /** Display label of one triggered abnormal signal; unknown types come back unchanged. */
 export function abnormalSignalLabel(type: string, subtype?: string | null): string {

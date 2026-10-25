@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Layout } from './Layout'
@@ -28,7 +28,6 @@ vi.mock('@/lib/api', () => ({
     watchlistEnriched: vi.fn(),
     alertsList: vi.fn(),
     intradayRefresh: vi.fn(),
-    pipelineJobs: vi.fn(),
     authStatus: vi.fn(),
     authLogout: vi.fn(),
   },
@@ -106,7 +105,6 @@ beforeEach(() => {
   vi.mocked(api.watchlistEnriched).mockResolvedValue({ rows: [] } as any)
   vi.mocked(api.alertsList).mockResolvedValue({ alerts: [], total: 0 } as any)
   vi.mocked(api.intradayRefresh).mockResolvedValue({} as any)
-  vi.mocked(api.pipelineJobs).mockResolvedValue({ active_id: null } as any)
   vi.mocked(api.authStatus).mockResolvedValue({ configured: true, authenticated: true } as any)
   vi.mocked(api.authLogout).mockResolvedValue({ ok: true } as any)
   vi.mocked(useSettings).mockReturnValue({ data: undefined } as any)
@@ -146,22 +144,14 @@ describe('Layout global state', () => {
     expect(keys).toEqual([['watchlist-enriched', '']])
   })
 
-  it('does not poll pipeline jobs for a menu entry that no longer exists', async () => {
-    renderLayout('/')
-    await waitFor(() => expect(api.dataSources).toHaveBeenCalled())
-    await act(async () => { await Promise.resolve() })
-    expect(api.pipelineJobs).not.toHaveBeenCalled()
-  })
-
   it('treats the built-in taiwan realtime provider as built in, not as a custom source id', async () => {
     mockPreferences({ realtime_data_provider: 'taiwan', realtime_quotes_enabled: false })
-    mockQuoteStatus({ mode: 'watchlist', running: false, is_trading_hours: false })
+    mockQuoteStatus({ mode: 'full_market', running: false, is_trading_hours: false })
     renderLayout('/')
 
     await screen.findByText('即時行情')
     expect(screen.queryByText('taiwan')).not.toBeInTheDocument()
-    // One for the nav entry, one for the realtime mode label.
-    expect(screen.getAllByText('自選股')).toHaveLength(2)
+    expect(screen.getByText('全市場')).toBeInTheDocument()
   })
 
   it('reports realtime as unavailable when the built-in taiwan provider has no realtime mode', async () => {

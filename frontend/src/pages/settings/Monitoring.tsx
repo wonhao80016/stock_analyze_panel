@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Link } from 'react-router-dom'
-import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
+import { useQueryClient, useMutation } from '@tanstack/react-query'
 import {
   Activity,
   Wifi,
@@ -28,16 +27,13 @@ const PAGE_LABELS: Record<string, string> = {
 
 // ===== 導出為 Panel 組件 (由 Settings.tsx 嵌入) =====
 
-export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
+export function SettingsMonitoringPanel() {
   const qc = useQueryClient()
   const { data: prefs } = usePreferences()
   const { data: quoteStatus } = useQuoteStatus()
   const { data: intervalData } = useQuoteInterval()
   const updateInterval = useUpdateQuoteInterval()
   const toggleQuote = useToggleRealtimeQuotes()
-  // 實時模式以 quote_status 為準 (數據源無關): watchlist=自選實時 / full_market=全市場 / none=不可用
-  const quoteMode = quoteStatus?.mode ?? 'none'
-  const isWatchlistMode = quoteMode === 'watchlist'
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   const marketClosedToday = prefs?.taiwan_market_closed_today ?? false
   // 分時圖實時刷新間隔 (秒), 與後端 [3,60] clamp 對齊; 默認 6
@@ -73,16 +69,6 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
   useEffect(() => {
     setTelegramChatDraft(telegramChatId)
   }, [telegramChatId])
-  const watchlistSymbols = prefs?.realtime_watchlist_symbols ?? []
-  const watchlist = useQuery({
-    queryKey: QK.watchlist,
-    queryFn: () => api.watchlistList(),
-    enabled: isWatchlistMode && watchlistSymbols.length > 0,
-  })
-  const watchlistNameBySymbol = new Map(
-    (watchlist.data?.symbols ?? []).map(row => [row.symbol, row.name] as const),
-  )
-
   const save = useCallback(async (cfg: Record<string, unknown>) => {
     try {
       await api.updateRealtimeMonitorConfig(cfg)
@@ -220,7 +206,7 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
               <div className="min-w-0">
                 <div className="text-sm text-foreground">輪詢間隔</div>
                 <div className="text-[11px] text-muted">
-                  {isWatchlistMode ? '每輪拉取自選股即時行情的時間間隔' : '每輪拉取全市場行情的時間間隔'}
+                  每輪拉取全市場行情的時間間隔
                 </div>
               </div>
               <span className="text-[11px] font-mono text-foreground shrink-0 tabular-nums">
@@ -244,43 +230,6 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
           </div>
         </Card>
 
-        {isWatchlistMode && (
-        <Card icon={Activity} title="自選股即時">
-          <div className="mb-3 rounded-btn border border-accent/25 bg-accent/10 px-3 py-2 text-xs font-medium leading-snug text-accent">
-            自選即時模式下自動監控「自選」頁面前 5 檔標的,最低 6 秒重新整理。
-          </div>
-          {watchlistSymbols.length > 0 ? (
-            <div className="space-y-1.5">
-              {watchlistSymbols.map(symbol => {
-                const name = watchlistNameBySymbol.get(symbol)
-                return (
-                  <div key={symbol} className="flex items-center justify-between rounded-btn bg-base/50 border border-border px-2 py-1.5">
-                    <div className="min-w-0 flex items-baseline gap-1.5">
-                      <span className="text-xs font-mono text-foreground">{symbol}</span>
-                      {name && <span className="truncate text-[11px] text-secondary">{name}</span>}
-                    </div>
-                    <span className="text-[10px] text-muted shrink-0">自選頁</span>
-                  </div>
-                )
-              })}
-            </div>
-          ) : (
-            <div className="rounded-btn border border-border bg-base/40 px-3 py-3 text-xs text-muted">
-              自選清單為空,開啟自選即時前請先新增自選股。
-            </div>
-          )}
-          <div className="mt-2 flex items-center justify-between gap-3">
-            <span className="text-[10px] text-muted">目前 {watchlistSymbols.length}/5 檔</span>
-            <Link
-              to="/watchlist"
-              className="px-3 py-1 rounded-btn bg-elevated text-secondary text-xs font-medium hover:text-foreground transition-colors"
-            >
-              管理自選
-            </Link>
-          </div>
-        </Card>
-        )}
-        {!isWatchlistMode && (
         <Card icon={Wifi} title="頁面即時重新整理">
           <p className="text-xs text-secondary mb-4">
             選擇哪些頁面跟隨 SSE 即時重新整理資料。關閉的頁面不會被推送,
@@ -298,7 +247,6 @@ export function SettingsMonitoringPanel(_props: { highlight?: string } = {}) {
             ))}
           </div>
         </Card>
-        )}
 
         {/* 自選列表分時圖實時刷新 (默認關閉, 開啟後盤中按設定間隔輪詢刷新分時數據) */}
         <Card icon={Activity} title="分時圖重新整理">
@@ -640,7 +588,6 @@ function ToggleRow({
   desc,
   checked,
   onChange,
-  icon: Icon,
   disabled,
   wrapDesc,
 }: {
@@ -648,14 +595,12 @@ function ToggleRow({
   desc: string
   checked: boolean
   onChange: (v: boolean) => void
-  icon?: React.ComponentType<{ className?: string }>
   disabled?: boolean
   wrapDesc?: boolean
 }) {
   return (
     <div className="flex items-center justify-between gap-4 py-2">
       <div className="min-w-0 flex items-start gap-2">
-        {Icon && <Icon className="h-3.5 w-3.5 text-secondary shrink-0 mt-0.5" />}
         <div className="min-w-0">
           <div className="text-sm text-foreground">{label}</div>
           <div className={`text-[11px] text-muted ${wrapDesc ? 'break-words' : 'truncate'}`} title={desc}>{desc}</div>
@@ -684,25 +629,17 @@ function ToggleRow({
 interface CardProps {
   icon: React.ComponentType<{ className?: string }>
   title: string
-  badge?: string
-  right?: React.ReactNode
   children: React.ReactNode
 }
 
-function Card({ icon: Icon, title, badge, right, children }: CardProps) {
+function Card({ icon: Icon, title, children }: CardProps) {
   return (
     <section className="rounded-card border border-border bg-surface p-5">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2.5">
           <Icon className="h-4 w-4 text-secondary" />
           <h2 className="text-sm font-medium text-foreground">{title}</h2>
-          {badge && (
-            <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-elevated text-muted">
-              {badge}
-            </span>
-          )}
         </div>
-        {right}
       </div>
       {children}
     </section>

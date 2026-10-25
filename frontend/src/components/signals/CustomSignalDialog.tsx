@@ -10,22 +10,20 @@ import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 interface Props {
   open: boolean
   signal?: CustomSignal | null
-  defaultKind?: CustomSignal['kind']
   onClose: () => void
-  onSaved?: (signal: CustomSignal) => void
 }
 
-const emptySignal = (kind: CustomSignal['kind'] = 'exit'): CustomSignal => ({
-  id: '', name: '', kind, enabled: true,
+const emptySignal = (): CustomSignal => ({
+  id: '', name: '', kind: 'exit', enabled: true,
   conditions: [{ left: 'close', op: '>', right: 'field:ma20', leftDays: 0, rightDays: 0 }],
 })
 
-export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose, onSaved }: Props) {
+export function CustomSignalDialog({ open, signal, onClose }: Props) {
   const qc = useQueryClient()
   const backdrop = useDialogBackdrop(onClose)
   const options = useQuery({ queryKey: QK.customSignalsOptions, queryFn: api.customSignalsOptions, enabled: open })
 
-  const [draft, setDraft] = useState<CustomSignal>(() => emptySignal(defaultKind))
+  const [draft, setDraft] = useState<CustomSignal>(() => emptySignal())
   const [error, setError] = useState('')
 
   // AI 生成條件
@@ -46,10 +44,10 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
 
   useEffect(() => {
     if (!open) return
-    setDraft(signal ? { ...signal, conditions: signal.conditions.map(c => ({ ...c })) } : emptySignal(defaultKind))
+    setDraft(signal ? { ...signal, conditions: signal.conditions.map(c => ({ ...c })) } : emptySignal())
     setError('')
     setAiOpen(false); setAiDesc(''); setAiError(''); setAiLoading(false)
-  }, [open, signal, defaultKind])
+  }, [open, signal])
 
   // 打開時檢查一次 AI 是否已配置（複用策略構建器邏輯）
   useEffect(() => {
@@ -93,9 +91,8 @@ export function CustomSignalDialog({ open, signal, defaultKind = 'exit', onClose
       if (existing.data?.signals.some(s => s.id === d.id)) throw new Error(`訊號標識 ${d.id} 已存在，請換一個標識或改用編輯`)
       return api.customSignalCreate(d)
     },
-    onSuccess: res => {
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.customSignals })
-      onSaved?.(res.signal)
       onClose()
     },
     onError: err => setError(String((err as any)?.message ?? err)),
@@ -281,12 +278,6 @@ function FieldPicker({ value, fields, groups, onChange }: {
       .filter(g => g.fields.length > 0)
   }, [groups, query])
 
-  const filteredFields = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q || filteredGroups) return fields
-    return fields.filter(f => f.label.toLowerCase().includes(q) || f.key.toLowerCase().includes(q))
-  }, [fields, query, filteredGroups])
-
   return (
     <>
       <button
@@ -336,7 +327,7 @@ function FieldPicker({ value, fields, groups, onChange }: {
                 </div>
                 {/* 分組列表 */}
                 <div className="flex-1 overflow-y-auto p-2">
-                  {filteredGroups ? (
+                  {filteredGroups && (
                     filteredGroups.length > 0 ? filteredGroups.map(g => (
                       <div key={g.key} className="mb-1">
                         <div className="px-2 py-1 text-[10px] text-muted/60 font-medium">{g.label}</div>
@@ -355,18 +346,6 @@ function FieldPicker({ value, fields, groups, onChange }: {
                     )) : (
                       <div className="px-3 py-8 text-center text-xs text-muted">無相符欄位</div>
                     )
-                  ) : (
-                    filteredFields.map(f => (
-                      <button
-                        key={f.key}
-                        onClick={() => { onChange(f.key); setOpen(false) }}
-                        className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
-                          f.key === value ? 'bg-accent/10 text-accent' : 'text-foreground/80 hover:bg-elevated'
-                        }`}
-                      >
-                        {f.label}
-                      </button>
-                    ))
                   )}
                 </div>
               </motion.div>
