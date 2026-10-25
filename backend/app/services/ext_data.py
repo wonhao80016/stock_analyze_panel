@@ -273,6 +273,8 @@ class ExtConfigStore:
             json.dumps(config.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # An edit that keeps the size can land within the filesystem's mtime resolution.
+        _load_all_cache.pop(str(self._base), None)
 
     def delete(self, config_id: str) -> bool:
         import shutil
