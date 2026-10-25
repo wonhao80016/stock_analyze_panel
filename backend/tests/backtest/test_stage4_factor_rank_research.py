@@ -1,4 +1,4 @@
-"""factor_rank_research scores cross-sectional average-rank percentiles like the mining rank IC."""
+"""factor_rank_research scores cross-sectional average-rank percentiles."""
 
 from __future__ import annotations
 
@@ -14,11 +14,18 @@ from app.backtest.matrix import (
     build_market_data_matrix,
     validate_signal_matrix,
 )
-from app.backtest.mining import _average_rank as mining_average_rank
 from app.strategy.builtin import factor_rank_research
 from app.strategy.builtin.factor_rank_research import MATRIX_STRATEGY
 
 pytestmark = pytest.mark.usefixtures("deny_network")
+
+
+def _reference_average_rank(values: np.ndarray) -> np.ndarray:
+    """1-based ranks where tied values share their mean rank."""
+    return np.array([
+        1.0 + np.sum(values < value) + (np.sum(values == value) - 1) / 2.0
+        for value in values
+    ])
 
 
 def _market(factors: dict[str, list[list[float | None]]], closes: list[float] | None = None):
@@ -147,16 +154,16 @@ def test_missing_factor_is_unscored_and_never_triggers_the_factor_exit():
 
 
 @pytest.mark.parametrize("seed", range(5))
-def test_average_ranks_match_the_mining_rank(seed):
+def test_average_ranks_match_the_reference_rank(seed):
     rng = np.random.default_rng(seed)
     values = np.concatenate([rng.integers(0, 6, 40).astype(np.float64), rng.normal(size=25)])
 
     np.testing.assert_array_equal(
-        factor_rank_research._average_ranks(values), mining_average_rank(values)
+        factor_rank_research._average_ranks(values), _reference_average_rank(values)
     )
 
 
-def test_integer_weights_give_the_mining_rank_composite_with_its_ties():
+def test_integer_weights_give_the_reference_rank_composite_with_its_ties():
     rng = np.random.default_rng(7)
     assets = 40
     factors = {
@@ -170,10 +177,10 @@ def test_integer_weights_give_the_mining_rank_composite_with_its_ties():
 
     signals = _signals(market, scoring, directions)
 
-    ranks = np.column_stack([mining_average_rank(values) for values in factors.values()])
+    ranks = np.column_stack([_reference_average_rank(values) for values in factors.values()])
     signs = np.array([1.0 if directions[name] == "high" else -1.0 for name in factors])
     composite = (ranks * signs) @ np.array([scoring[name] for name in factors])
-    expected = (mining_average_rank(composite) - 1.0) * 100.0 / (assets - 1)
+    expected = (_reference_average_rank(composite) - 1.0) * 100.0 / (assets - 1)
     np.testing.assert_array_equal(signals.score[0], expected.astype(np.float32))
     assert len(np.unique(expected)) < assets
 

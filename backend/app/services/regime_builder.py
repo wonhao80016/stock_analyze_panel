@@ -1,6 +1,6 @@
 """Market regime history reader.
 
-The regime_history table is read by the backtest regime filter and the mining preflight.
+The regime_history table is read by the backtest regime filter.
 Nothing in the Taiwan deployment computes it, so it exists only where an earlier build wrote it.
 """
 from __future__ import annotations

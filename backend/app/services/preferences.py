@@ -402,43 +402,6 @@ def get_enriched_batch_size() -> int:
 REVIEW_PUSH_CHANNELS = {"line", "telegram"}
 
 
-MINING_BUDGET_PROFILES = frozenset({"balanced", "strict"})
-
-
-def get_mining_schedule() -> dict:
-    """返回周度自动 mining 配置。历史配置缺字段时默认关闭。"""
-    data = load()
-    weekday = data.get("mining_schedule_weekday", 4)
-    if isinstance(weekday, bool) or not isinstance(weekday, int) or not 0 <= weekday <= 4:
-        weekday = 4
-    profile = data.get("mining_budget_profile", "balanced")
-    if not isinstance(profile, str) or profile not in MINING_BUDGET_PROFILES:
-        profile = "balanced"
-    enabled = data.get("mining_schedule_enabled", False)
-    if not isinstance(enabled, bool):
-        enabled = False
-    return {
-        "mining_schedule_enabled": enabled,
-        "mining_schedule_weekday": weekday,
-        "mining_budget_profile": profile,
-    }
-
-
-def set_mining_schedule(enabled: bool, weekday: int, profile: str) -> dict:
-    """校验并一次写入周度自动 mining 的整组配置。"""
-    if isinstance(weekday, bool) or not isinstance(weekday, int) or not 0 <= weekday <= 4:
-        raise ValueError("mining schedule weekday must be between 0 and 4")
-    if profile not in MINING_BUDGET_PROFILES:
-        raise ValueError("mining budget profile must be balanced or strict")
-    result = {
-        "mining_schedule_enabled": bool(enabled),
-        "mining_schedule_weekday": weekday,
-        "mining_budget_profile": profile,
-    }
-    save(result)
-    return result
-
-
 # ===== 实时监控 =====
 
 # 页面 SSE 刷新配置: { "watchlist": true, "monitor": true, ... }

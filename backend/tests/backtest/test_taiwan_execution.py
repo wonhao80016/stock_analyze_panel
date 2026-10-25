@@ -8,7 +8,6 @@ import polars as pl
 import pytest
 
 from app.api.backtest import StrategyBacktestRequest
-from app.backtest.candidates import CandidateStore
 from app.backtest.engine import BacktestEngine, MatcherConfig
 from app.backtest.strategy import (
     StrategyBacktestConfig,
@@ -296,7 +295,7 @@ def test_same_day_exit_requires_an_eligible_day_trading_profile() -> None:
     assert eligible.can_exit_after_sessions("2330.TWSE", 0) is True
 
 
-def test_commission_discount_round_trips_api_worker_and_candidate(tmp_path) -> None:
+def test_commission_discount_round_trips_api_and_worker() -> None:
     request = StrategyBacktestRequest(strategy_id="test", commission_discount=0.5)
     config = StrategyBacktestConfig(
         strategy_id=request.strategy_id,
@@ -307,23 +306,9 @@ def test_commission_discount_round_trips_api_worker_and_candidate(tmp_path) -> N
         day_trade_eligible_symbols=("2330.TWSE",),
     )
     decoded = _decode_backtest_config(encode_backtest_config(config))
-    candidate = CandidateStore(tmp_path).create(
-        kind="strategy",
-        name="discount",
-        source_id="test",
-        config={
-            "strategy_id": "test",
-            "commission_discount": 0.5,
-            "day_trade_eligible_symbols": ["2330.TWSE"],
-        },
-        metrics={},
-        data_as_of="2026-01-02",
-    )
 
     assert decoded.commission_discount == 0.5
     assert decoded.day_trade_eligible_symbols == ("2330.TWSE",)
-    assert candidate["config"]["commission_discount"] == 0.5
-    assert candidate["config"]["day_trade_eligible_symbols"] == ["2330.TWSE"]
 
 
 def test_board_lot_portfolio_holds_until_the_next_session() -> None:

@@ -435,10 +435,6 @@ class StrategyEngine:
         """返回最近一次 _load_all 中加载失败的策略 [{file, error}]。"""
         return list(self._load_errors)
 
-    def file_disabled(self, path: Path) -> bool:
-        """Whether a strategy file at ``path`` would be listed in load_errors instead of run."""
-        return path.parent.resolve() in self._disabled_dirs
-
     @staticmethod
     def _validate_composite_references(
         sid: str,
@@ -748,21 +744,6 @@ class StrategyEngine:
         with self._realtime_matrix_lock:
             self._realtime_matrices.clear()
         return True
-
-    def find_dependents(self, strategy_id: str) -> list[str]:
-        """返回引用了 strategy_id 作为子策略的所有 composite 策略 id。
-
-        供删除校验使用: 删除被引用的子策略会令 composite 加载失败,
-        删除前应阻止(fail-closed)或提示用户先解除引用。策略数量通常很小,
-        线性遍历注册表即可, 无需维护反向索引。
-        """
-        dependents: list[str] = []
-        for sid, strategy in self._strategies.items():
-            if strategy.execution_backend != "composite" or strategy.composite is None:
-                continue
-            if any(c.strategy_id == strategy_id for c in strategy.composite.children):
-                dependents.append(sid)
-        return dependents
 
     def composite_children(
         self, strategy: StrategyDef, overrides: dict | None

@@ -239,20 +239,6 @@ def test_with_share_counts_the_bound_applies_in_selection_and_backtest(
     assert SMALL_CAP in {symbol for _, symbol in _trades(engine, repo, strategy_id, WITHOUT_BOUND)}
 
 
-def test_a_prepared_optimizer_matrix_ignores_the_bound_without_share_counts(market):
-    engine, repo = market
-    service = StrategyBacktestService(BacktestEngine(repo), engine)
-    config = _config("cap_matrix")
-
-    prepared = service.prepare_matrix_optimization([config])
-    result = service.run(config, prepared=prepared)
-
-    assert result.error is None, result.error
-    assert [(str(t["entry_date"])[:10], t["symbol"]) for t in result.trades] == _trades(
-        engine, repo, "cap_matrix", WITHOUT_BOUND
-    )
-
-
 def test_a_registered_bound_does_not_break_other_backtests_without_share_counts(market):
     engine, repo = market
 

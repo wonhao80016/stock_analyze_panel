@@ -1128,9 +1128,6 @@ class BacktestEngine:
         """暴露 PanelCache 遥测快照 (扫盘耗时/次数/命中/复用), 供上层量化 IO 占比。"""
         return self._cache.stats()
 
-    def clear_panel_cache(self) -> None:
-        self._cache.invalidate()
-
     def _load_panel_inner(
         self,
         symbols: list[str] | None,

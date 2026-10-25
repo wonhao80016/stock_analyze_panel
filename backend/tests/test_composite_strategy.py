@@ -4,7 +4,6 @@
 - 加载解析正确, source 推断为 composite
 - 引用缺失 → 移除孤儿 composite, 不波及无辜策略(插件隔离)
 - 禁止嵌套 composite、asset_types 不一致、超过上限均 fail-closed
-- find_dependents 用于删除防护
 - 选股 union / intersect 合并, 标准化排名加权融合 score
 
 子策略用 polars_expr 后端(返回 True)以便用轻量 DataFrame 验证合并逻辑,
@@ -224,30 +223,6 @@ def test_composite_with_filter_fn_rejected(tmp_path):
 
     assert not engine.has("bad")
     assert any("bad" in e["file"] for e in engine.load_errors())
-
-
-# ───────────────────────── find_dependents ─────────────────────────
-
-
-def test_find_dependents_locates_referencing_composites(tmp_path):
-    child_dir = tmp_path / "strategies" / "custom"
-    comp_dir = tmp_path / "strategies" / "composite"
-    child_dir.mkdir(parents=True)
-    comp_dir.mkdir(parents=True)
-    (child_dir / "shared.py").write_text(_filter_strategy_code("shared"), encoding="utf-8")
-    (child_dir / "other.py").write_text(_filter_strategy_code("other"), encoding="utf-8")
-    (comp_dir / "blend_a.py").write_text(
-        _composite_code("blend_a", [("shared", 0.5), ("other", 0.5)]), encoding="utf-8"
-    )
-    (comp_dir / "blend_b.py").write_text(
-        _composite_code("blend_b", [("shared", 1.0)]), encoding="utf-8"
-    )
-
-    engine = StrategyEngine(strategy_dirs=[child_dir, comp_dir])
-
-    assert sorted(engine.find_dependents("shared")) == ["blend_a", "blend_b"]
-    assert engine.find_dependents("other") == ["blend_a"]
-    assert engine.find_dependents("nonexistent") == []
 
 
 # ───────────────────────── 选股合并 ─────────────────────────

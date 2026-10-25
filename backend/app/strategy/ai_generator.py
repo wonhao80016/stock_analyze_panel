@@ -1,7 +1,6 @@
 """Static strategy-source checks: safety lint, META parsing and the execution entrypoint.
 
-Code is never executed here. The engine lints every strategy file it loads, and mining runs
-validate_code on a rendered candidate before publishing it.
+Code is never executed here. The engine lints every strategy file it loads.
 """
 from __future__ import annotations
 

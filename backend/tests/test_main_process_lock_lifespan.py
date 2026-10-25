@@ -9,7 +9,7 @@ import pytest
 import app.main as main_module
 
 
-def test_lifespan_holds_mining_process_lock_around_application(monkeypatch) -> None:
+def test_lifespan_holds_data_dir_process_lock_around_application(monkeypatch) -> None:
     events: list[str] = []
 
     class LockStub:
@@ -31,7 +31,7 @@ def test_lifespan_holds_mining_process_lock_around_application(monkeypatch) -> N
         finally:
             events.append("application_stopped")
 
-    monkeypatch.setattr(main_module, "MiningProcessLock", LockStub)
+    monkeypatch.setattr(main_module, "DataDirProcessLock", LockStub)
     monkeypatch.setattr(main_module, "_application_lifespan", application_lifespan)
 
     async def exercise() -> None:
@@ -70,7 +70,7 @@ def test_lifespan_releases_lock_when_application_shutdown_raises(monkeypatch) ->
         finally:
             raise RuntimeError("shutdown failed")
 
-    monkeypatch.setattr(main_module, "MiningProcessLock", LockStub)
+    monkeypatch.setattr(main_module, "DataDirProcessLock", LockStub)
     monkeypatch.setattr(main_module, "_application_lifespan", application_lifespan)
 
     async def exercise() -> None:
@@ -81,3 +81,35 @@ def test_lifespan_releases_lock_when_application_shutdown_raises(monkeypatch) ->
         asyncio.run(exercise())
 
     assert events == ["acquired", "released"]
+
+
+def test_second_backend_fails_before_startup_when_data_dir_is_owned(
+    monkeypatch, tmp_path
+) -> None:
+    from app.services.data_dir_process_lock import DataDirProcessLock, DataDirProcessLockError
+
+    started: list[str] = []
+
+    @asynccontextmanager
+    async def application_lifespan(_app):
+        started.append("application_started")
+        yield
+
+    monkeypatch.setattr(main_module.settings, "data_dir", tmp_path)
+    monkeypatch.setattr(main_module, "_application_lifespan", application_lifespan)
+    owner = DataDirProcessLock(tmp_path)
+    owner.acquire()
+
+    async def exercise() -> None:
+        async with main_module.lifespan(SimpleNamespace()):
+            pass
+
+    try:
+        with pytest.raises(DataDirProcessLockError, match="already using this data directory"):
+            asyncio.run(exercise())
+    finally:
+        owner.release()
+
+    assert started == []
+    asyncio.run(exercise())
+    assert started == ["application_started"]

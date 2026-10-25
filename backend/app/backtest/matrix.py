@@ -9,10 +9,8 @@ import shutil
 import threading
 import time
 import uuid
-import weakref
-from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date
@@ -96,277 +94,10 @@ def _raise_if_matrix_cancelled(cancel_event: threading.Event | None) -> None:
 _MATRIX_DISK_CACHE_LOCK = threading.RLock()
 _MATRIX_DISK_CACHE_LEASES: dict[str, int] = {}
 _MATRIX_DISK_CACHE_PENDING_DELETE: set[str] = set()
-_ACTIVE_MATRIX_CACHE: ContextVar[MatrixComputeCache | None] = ContextVar(
-    "active_matrix_compute_cache",
-    default=None,
-)
 _ACTIVE_VALID_BAR_INDEX: ContextVar[Any] = ContextVar(
     "active_valid_bar_index",
     default=None,
 )
-
-
-def _freeze_cache_value(value: Any) -> Any:
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, dict):
-        return tuple(
-            (str(key), _freeze_cache_value(item))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_cache_value(item) for item in value)
-    if isinstance(value, set):
-        return tuple(sorted((_freeze_cache_value(item) for item in value), key=repr))
-    if isinstance(value, float):
-        if np.isnan(value):
-            return ("float", "nan")
-        if np.isposinf(value):
-            return ("float", "inf")
-        if np.isneginf(value):
-            return ("float", "-inf")
-        return ("float", value)
-    if isinstance(value, (str, int, bool, bytes, type(None))):
-        return value
-    return (type(value).__qualname__, repr(value))
-
-
-class MatrixComputeCache:
-    """Job-scoped byte-bounded cache for deterministic matrix operations."""
-
-    def __init__(
-        self,
-        *,
-        max_bytes: int = 512 * 1024 * 1024,
-        max_item_bytes: int = 256 * 1024 * 1024,
-    ) -> None:
-        if max_bytes <= 0:
-            raise ValueError("matrix cache max_bytes must be positive")
-        if max_item_bytes <= 0:
-            raise ValueError("matrix cache max_item_bytes must be positive")
-        self.max_bytes = int(max_bytes)
-        self.max_item_bytes = min(int(max_item_bytes), self.max_bytes)
-        self._entries: OrderedDict[tuple, np.ndarray] = OrderedDict()
-        self._lineage: dict[int, tuple[weakref.ReferenceType[np.ndarray], tuple]] = {}
-        self._market_tokens: dict[int, tuple[MarketDataMatrix, tuple]] = {}
-        self._market_counter = 0
-        self._lock = threading.RLock()
-        self._closed = False
-        self._current_bytes = 0
-        self._peak_bytes = 0
-        self._calls = 0
-        self._hits = 0
-        self._misses = 0
-        self._evictions = 0
-        self._skipped = 0
-        self._fingerprint_bytes = 0
-        self._fingerprint_ms = 0.0
-        self._operations: dict[str, dict[str, int | float]] = {}
-
-    @contextmanager
-    def activate(self, market: MarketDataMatrix) -> Iterator[MatrixComputeCache]:
-        self.register_market(market)
-        token = _ACTIVE_MATRIX_CACHE.set(self)
-        try:
-            yield self
-        finally:
-            _ACTIVE_MATRIX_CACHE.reset(token)
-
-    def register_market(self, market: MarketDataMatrix) -> tuple:
-        self._ensure_open()
-        market_id = id(market)
-        with self._lock:
-            existing = self._market_tokens.get(market_id)
-            if existing is not None and existing[0] is market:
-                return existing[1]
-            self._market_counter += 1
-            token = ("market", self._market_counter)
-            self._market_tokens[market_id] = (market, token)
-            arrays = {
-                "timestamps": market.timestamps,
-                "session_ids": market.session_ids,
-                "valid_bar_offsets": market.valid_bars.offsets,
-                "valid_bar_rows": market.valid_bars.rows,
-                "open": market.open,
-                "high": market.high,
-                "low": market.low,
-                "close": market.close,
-                "volume": market.volume,
-                "tradable": market.tradable,
-                "limit_up_locked": market.limit_up_locked,
-                "limit_down_locked": market.limit_down_locked,
-                **{f"field:{name}": values for name, values in market.fields.items()},
-            }
-            for name, values in arrays.items():
-                self._register_lineage(values, (token, name))
-            return token
-
-    @contextmanager
-    def suspend(self) -> Iterator[None]:
-        """Temporarily bypass this cache without changing its retained entries."""
-        token = _ACTIVE_MATRIX_CACHE.set(None)
-        try:
-            yield
-        finally:
-            _ACTIVE_MATRIX_CACHE.reset(token)
-
-    def market_token(self, market: MarketDataMatrix) -> tuple:
-        return self.register_market(market)
-
-    def get_or_compute(
-        self,
-        operation: str,
-        inputs: tuple[np.ndarray, ...],
-        params: Any,
-        compute: Callable[[], np.ndarray],
-        *,
-        key_parts: Any = (),
-    ) -> np.ndarray:
-        self._ensure_open()
-        input_tokens = tuple(self._array_token(values) for values in inputs)
-        key = (
-            _MATRIX_CACHE_VERSION,
-            str(operation),
-            input_tokens,
-            _freeze_cache_value(params),
-            _freeze_cache_value(key_parts),
-        )
-        with self._lock:
-            self._calls += 1
-            op_stats = self._operations.setdefault(
-                str(operation),
-                {
-                    "calls": 0,
-                    "hits": 0,
-                    "misses": 0,
-                    "compute_ms": 0.0,
-                    "computed_bytes": 0,
-                },
-            )
-            op_stats["calls"] += 1
-            cached = self._entries.get(key)
-            if cached is not None:
-                self._hits += 1
-                op_stats["hits"] += 1
-                self._entries.move_to_end(key)
-                return cached
-            self._misses += 1
-            op_stats["misses"] += 1
-
-        compute_started = time.perf_counter()
-        result = np.asarray(compute())
-        compute_ms = (time.perf_counter() - compute_started) * 1000.0
-        with self._lock:
-            op_stats = self._operations[str(operation)]
-            op_stats["compute_ms"] = float(op_stats["compute_ms"]) + compute_ms
-            op_stats["computed_bytes"] = int(op_stats["computed_bytes"]) + int(result.nbytes)
-        if result.ndim == 0:
-            raise ValueError(f"cached matrix operation {operation} returned a scalar")
-        if result.flags.writeable:
-            result.flags.writeable = False
-        if result.nbytes > self.max_item_bytes or result.nbytes > self.max_bytes:
-            with self._lock:
-                self._skipped += 1
-            return result
-
-        with self._lock:
-            existing = self._entries.get(key)
-            if existing is not None:
-                self._entries.move_to_end(key)
-                return existing
-            self._evict_for(result.nbytes)
-            self._entries[key] = result
-            self._current_bytes += int(result.nbytes)
-            self._peak_bytes = max(self._peak_bytes, self._current_bytes)
-            derived = hashlib.blake2b(repr(key).encode("utf-8"), digest_size=16).digest()
-            self._register_lineage(result, ("derived", derived))
-        return result
-
-    def snapshot(self) -> dict[str, Any]:
-        with self._lock:
-            hit_rate = self._hits / self._calls if self._calls else 0.0
-            return {
-                "enabled": True,
-                "max_bytes": self.max_bytes,
-                "max_item_bytes": self.max_item_bytes,
-                "current_bytes": self._current_bytes,
-                "peak_bytes": self._peak_bytes,
-                "entries": len(self._entries),
-                "calls": self._calls,
-                "hits": self._hits,
-                "misses": self._misses,
-                "evictions": self._evictions,
-                "skipped": self._skipped,
-                "hit_rate": round(float(hit_rate), 6),
-                "fingerprint_bytes": self._fingerprint_bytes,
-                "fingerprint_ms": round(self._fingerprint_ms, 3),
-                "operations": {
-                    name: {
-                        **values,
-                        "compute_ms": round(float(values["compute_ms"]), 3),
-                    }
-                    for name, values in sorted(self._operations.items())
-                },
-            }
-
-    @property
-    def current_bytes(self) -> int:
-        with self._lock:
-            return int(self._current_bytes)
-
-    def has_cached_operation(self, operation: str) -> bool:
-        with self._lock:
-            return any(key[1] == operation for key in self._entries)
-
-    def close(self) -> None:
-        with self._lock:
-            self._entries.clear()
-            self._lineage.clear()
-            self._market_tokens.clear()
-            self._current_bytes = 0
-            self._closed = True
-
-    def _ensure_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("matrix compute cache is closed")
-
-    def _array_token(self, values: np.ndarray) -> tuple:
-        array = np.asarray(values)
-        with self._lock:
-            existing = self._lineage.get(id(array))
-            if existing is not None and existing[0]() is array:
-                return existing[1]
-
-        contiguous = array if array.flags.c_contiguous else np.ascontiguousarray(array)
-        started = time.perf_counter()
-        digest = hashlib.blake2b(contiguous.view(np.uint8), digest_size=16).digest()
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        with self._lock:
-            self._fingerprint_bytes += int(contiguous.nbytes)
-            self._fingerprint_ms += elapsed_ms
-        return ("content", array.dtype.str, tuple(array.shape), digest)
-
-    def _register_lineage(self, array: np.ndarray, token: tuple) -> None:
-        array_id = id(array)
-
-        def _remove(reference: weakref.ReferenceType[np.ndarray]) -> None:
-            with self._lock:
-                current = self._lineage.get(array_id)
-                if current is not None and current[0] is reference:
-                    self._lineage.pop(array_id, None)
-
-        reference = weakref.ref(array, _remove)
-        self._lineage[array_id] = (reference, token)
-
-    def _evict_for(self, incoming_bytes: int) -> None:
-        while self._entries and self._current_bytes + incoming_bytes > self.max_bytes:
-            _, evicted = self._entries.popitem(last=False)
-            self._current_bytes -= int(evicted.nbytes)
-            self._evictions += 1
-
-
-def active_matrix_compute_cache() -> MatrixComputeCache | None:
-    return _ACTIVE_MATRIX_CACHE.get()
 
 
 @contextmanager
@@ -376,26 +107,6 @@ def _activate_valid_bar_index(index: ValidBarIndex) -> Iterator[None]:
         yield
     finally:
         _ACTIVE_VALID_BAR_INDEX.reset(token)
-
-
-def _cached_matrix_operation(
-    operation: str,
-    inputs: tuple[np.ndarray, ...],
-    params: Any,
-    compute: Callable[[], np.ndarray],
-    *,
-    key_parts: Any = (),
-) -> np.ndarray:
-    cache = active_matrix_compute_cache()
-    if cache is None:
-        return compute()
-    return cache.get_or_compute(
-        operation,
-        inputs,
-        params,
-        compute,
-        key_parts=key_parts,
-    )
 
 
 @dataclass(frozen=True)
@@ -3114,74 +2825,44 @@ def valid_shift(
         return out
     index = _resolve_valid_bar_index(source, valid, bar_index)
 
-    return _cached_matrix_operation(
-        "valid_shift",
-        (source, valid, index.offsets, index.rows),
-        {"periods": int(periods)},
-        lambda: run_numba_parallel(
-            lambda: _valid_shift_kernel(
-                source,
-                valid,
-                index.offsets,
-                index.rows,
-                int(periods),
-            )
-        ),
+    return run_numba_parallel(
+        lambda: _valid_shift_kernel(
+            source,
+            valid,
+            index.offsets,
+            index.rows,
+            int(periods),
+        )
     )
 
 
 def rolling_min(values: np.ndarray, window: int) -> np.ndarray:
     source = np.asarray(values, dtype=np.float32)
-    return _cached_matrix_operation(
-        "rolling_min",
-        (source,),
-        {"window": int(window)},
-        lambda: _rolling_reduce(source, window, np.min),
-    )
+    return _rolling_reduce(source, window, np.min)
 
 
 def rolling_max(values: np.ndarray, window: int) -> np.ndarray:
     source = np.asarray(values, dtype=np.float32)
-    return _cached_matrix_operation(
-        "rolling_max",
-        (source,),
-        {"window": int(window)},
-        lambda: _rolling_reduce(source, window, np.max),
-    )
+    return _rolling_reduce(source, window, np.max)
 
 
 def rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
     source = np.asarray(values, dtype=np.float32)
-    return _cached_matrix_operation(
-        "rolling_mean",
-        (source,),
-        {"window": int(window)},
-        lambda: _rolling_reduce(source, window, np.mean),
-    )
+    return _rolling_reduce(source, window, np.mean)
 
 
 def rolling_sum(values: np.ndarray, window: int) -> np.ndarray:
     source = np.asarray(values, dtype=np.float32)
-    return _cached_matrix_operation(
-        "rolling_sum",
-        (source,),
-        {"window": int(window)},
-        lambda: _rolling_reduce(source, window, np.sum),
-    )
+    return _rolling_reduce(source, window, np.sum)
 
 
 def rolling_std(values: np.ndarray, window: int, *, ddof: int = 0) -> np.ndarray:
     source = np.asarray(values, dtype=np.float32)
-    return _cached_matrix_operation(
-        "rolling_std",
-        (source,),
-        {"window": int(window), "ddof": int(ddof)},
-        lambda: _rolling_reduce(
-            source,
-            window,
-            lambda view, axis: np.std(view, axis=axis, ddof=int(ddof)),
-            materialized_window_budget_bytes=_ROLLING_MATERIALIZED_WINDOW_BUDGET_BYTES,
-        ),
+    return _rolling_reduce(
+        source,
+        window,
+        lambda view, axis: np.std(view, axis=axis, ddof=int(ddof)),
+        materialized_window_budget_bytes=_ROLLING_MATERIALIZED_WINDOW_BUDGET_BYTES,
     )
 
 
@@ -3293,17 +2974,12 @@ def valid_rolling_min(
     source = np.asarray(values, dtype=np.float32)
     valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
     index = _resolve_valid_bar_index(source, valid, bar_index)
-    return _cached_matrix_operation(
-        "valid_rolling_min",
-        (source, valid, index.offsets, index.rows),
-        {"window": int(window)},
-        lambda: _valid_rolling_reduce(
-            source,
-            valid,
-            window,
-            _VALID_REDUCE_MIN,
-            bar_index=index,
-        ),
+    return _valid_rolling_reduce(
+        source,
+        valid,
+        window,
+        _VALID_REDUCE_MIN,
+        bar_index=index,
     )
 
 
@@ -3317,17 +2993,12 @@ def valid_rolling_max(
     source = np.asarray(values, dtype=np.float32)
     valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
     index = _resolve_valid_bar_index(source, valid, bar_index)
-    return _cached_matrix_operation(
-        "valid_rolling_max",
-        (source, valid, index.offsets, index.rows),
-        {"window": int(window)},
-        lambda: _valid_rolling_reduce(
-            source,
-            valid,
-            window,
-            _VALID_REDUCE_MAX,
-            bar_index=index,
-        ),
+    return _valid_rolling_reduce(
+        source,
+        valid,
+        window,
+        _VALID_REDUCE_MAX,
+        bar_index=index,
     )
 
 
@@ -3341,17 +3012,12 @@ def valid_rolling_mean(
     source = np.asarray(values, dtype=np.float32)
     valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
     index = _resolve_valid_bar_index(source, valid, bar_index)
-    return _cached_matrix_operation(
-        "valid_rolling_mean",
-        (source, valid, index.offsets, index.rows),
-        {"window": int(window)},
-        lambda: _valid_rolling_reduce(
-            source,
-            valid,
-            window,
-            _VALID_REDUCE_MEAN,
-            bar_index=index,
-        ),
+    return _valid_rolling_reduce(
+        source,
+        valid,
+        window,
+        _VALID_REDUCE_MEAN,
+        bar_index=index,
     )
 
 
@@ -3366,18 +3032,13 @@ def valid_rolling_std(
     source = np.asarray(values, dtype=np.float32)
     valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
     index = _resolve_valid_bar_index(source, valid, bar_index)
-    return _cached_matrix_operation(
-        "valid_rolling_std",
-        (source, valid, index.offsets, index.rows),
-        {"window": int(window), "ddof": int(ddof)},
-        lambda: _valid_rolling_reduce(
-            source,
-            valid,
-            window,
-            _VALID_REDUCE_STD,
-            ddof=int(ddof),
-            bar_index=index,
-        ),
+    return _valid_rolling_reduce(
+        source,
+        valid,
+        window,
+        _VALID_REDUCE_STD,
+        ddof=int(ddof),
+        bar_index=index,
     )
 
 
@@ -3391,17 +3052,12 @@ def valid_rolling_sum(
     source = np.asarray(values, dtype=np.float32)
     valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(source)
     index = _resolve_valid_bar_index(source, valid, bar_index)
-    return _cached_matrix_operation(
-        "valid_rolling_sum",
-        (source, valid, index.offsets, index.rows),
-        {"window": int(window)},
-        lambda: _valid_rolling_reduce(
-            source,
-            valid,
-            window,
-            _VALID_REDUCE_SUM,
-            bar_index=index,
-        ),
+    return _valid_rolling_reduce(
+        source,
+        valid,
+        window,
+        _VALID_REDUCE_SUM,
+        bar_index=index,
     )
 
 
@@ -3410,16 +3066,11 @@ def rolling_quantile(values: np.ndarray, window: int, quantile: float) -> np.nda
     q = float(quantile)
     if not 0.0 <= q <= 1.0:
         raise ValueError("rolling quantile must be in [0, 1]")
-    return _cached_matrix_operation(
-        "rolling_quantile",
-        (source,),
-        {"window": int(window), "quantile": q},
-        lambda: _rolling_reduce(
-            source,
-            window,
-            lambda view, axis: np.quantile(view, q, axis=axis),
-            materialized_window_budget_bytes=_ROLLING_MATERIALIZED_WINDOW_BUDGET_BYTES,
-        ),
+    return _rolling_reduce(
+        source,
+        window,
+        lambda view, axis: np.quantile(view, q, axis=axis),
+        materialized_window_budget_bytes=_ROLLING_MATERIALIZED_WINDOW_BUDGET_BYTES,
     )
 
 
@@ -3500,22 +3151,17 @@ def valid_rolling_quantile(
     upper = min(lower + 1, size - 1)
     gamma = virtual - lower
     index = _resolve_valid_bar_index(source, valid, bar_index)
-    return _cached_matrix_operation(
-        "valid_rolling_quantile",
-        (source, valid, index.offsets, index.rows),
-        {"window": size, "quantile": q},
-        lambda: run_numba_parallel(
-            lambda: _valid_rolling_quantile_kernel(
-                source,
-                valid,
-                index.offsets,
-                index.rows,
-                size,
-                lower,
-                upper,
-                gamma,
-            )
-        ),
+    return run_numba_parallel(
+        lambda: _valid_rolling_quantile_kernel(
+            source,
+            valid,
+            index.offsets,
+            index.rows,
+            size,
+            lower,
+            upper,
+            gamma,
+        )
     )
 
 
@@ -3564,12 +3210,7 @@ def ewm_adjust_false(
             out[time_id, initialized] = weighted[initialized].astype(np.float32)
         return out
 
-    return _cached_matrix_operation(
-        "ewm_adjust_false",
-        (source,),
-        {"alpha": alpha_value},
-        _compute,
-    )
+    return _compute()
 
 
 @njit(cache=True, nogil=True, parallel=True)
@@ -3623,19 +3264,14 @@ def valid_ewm_adjust_false(
     alpha_value = float(alpha)
     index = _resolve_valid_bar_index(source, valid, bar_index)
 
-    return _cached_matrix_operation(
-        "valid_ewm_adjust_false",
-        (source, valid, index.offsets, index.rows),
-        {"alpha": alpha_value},
-        lambda: run_numba_parallel(
-            lambda: _valid_ewm_kernel(
-                source,
-                valid,
-                index.offsets,
-                index.rows,
-                alpha_value,
-            )
-        ),
+    return run_numba_parallel(
+        lambda: _valid_ewm_kernel(
+            source,
+            valid,
+            index.offsets,
+            index.rows,
+            alpha_value,
+        )
     )
 
 
@@ -3823,7 +3459,6 @@ class MatrixPipelineConfig:
     descending: bool
     scoring_directions: dict[str, str] = field(default_factory=dict)
     asset_mask: np.ndarray | None = None
-    protect_strategy_cache: bool = False
 
 
 class MatrixStrategyPipeline:
@@ -3864,43 +3499,29 @@ class MatrixStrategyPipeline:
             )
 
         filter_started = time.perf_counter()
-        cache = active_matrix_compute_cache()
-        protect_cache = (
-            cache is not None
-            and config.protect_strategy_cache
-            and not cache.has_cached_operation("basic_filter_mask")
-            and cache.current_bytes + _estimate_pipeline_cache_bytes(market, config)
-            > cache.max_bytes
+        basic_mask = build_pipeline_filter_mask(market, config)
+        entry = signals.entry.astype(bool) & basic_mask
+        limit_entries = getattr(strategy, "limit_entries", None)
+        if callable(limit_entries):
+            kept = np.asarray(limit_entries(entry.copy(), signals.score, params), dtype=bool)
+            if kept.shape != market.shape:
+                raise ValueError(
+                    f"matrix strategy limit_entries must return a mask of shape {market.shape}, "
+                    f"got {kept.shape}"
+                )
+            entry &= kept
+        entry = entry.astype(np.uint8)
+        score = build_matrix_score(
+            market,
+            entry.astype(bool),
+            config.scoring,
+            config.order_by,
+            config.descending,
+            fallback=signals.score,
+            directions=config.scoring_directions,
         )
-        cache_scope = (
-            cache.suspend()
-            if protect_cache
-            else nullcontext()
-        )
-        with cache_scope:
-            basic_mask = build_pipeline_filter_mask(market, config)
-            entry = signals.entry.astype(bool) & basic_mask
-            limit_entries = getattr(strategy, "limit_entries", None)
-            if callable(limit_entries):
-                kept = np.asarray(limit_entries(entry.copy(), signals.score, params), dtype=bool)
-                if kept.shape != market.shape:
-                    raise ValueError(
-                        f"matrix strategy limit_entries must return a mask of shape {market.shape}, "
-                        f"got {kept.shape}"
-                    )
-                entry &= kept
-            entry = entry.astype(np.uint8)
-            score = build_matrix_score(
-                market,
-                entry.astype(bool),
-                config.scoring,
-                config.order_by,
-                config.descending,
-                fallback=signals.score,
-                directions=config.scoring_directions,
-            )
-            entry_codes = np.where(entry != 0, signals.entry_signal_code, -1).astype(np.int16)
-            exit_codes = np.where(signals.exit != 0, signals.exit_signal_code, -1).astype(np.int16)
+        entry_codes = np.where(entry != 0, signals.entry_signal_code, -1).astype(np.int16)
+        exit_codes = np.where(signals.exit != 0, signals.exit_signal_code, -1).astype(np.int16)
         if timing_ms is not None:
             timing_ms["filter_score"] = round(
                 (time.perf_counter() - filter_started) * 1000,
@@ -3918,30 +3539,6 @@ class MatrixStrategyPipeline:
         )
 
 
-def _estimate_pipeline_cache_bytes(
-    market: MarketDataMatrix,
-    config: MatrixPipelineConfig,
-) -> int:
-    float_bytes = int(market.close.nbytes)
-    bool_bytes = int(market.shape[0] * market.shape[1])
-    estimated = bool_bytes
-    if config.asset_mask is not None:
-        estimated += bool_bytes
-
-    feature_names = {
-        name
-        for name, weight in config.scoring.items()
-        if float(weight) != 0.0
-    }
-    if not feature_names and config.order_by and config.order_by != "score":
-        feature_names.add(str(config.order_by))
-    for name in feature_names:
-        if name in {"open", "high", "low", "close", "volume"} or name in market.fields:
-            continue
-        estimated += 5 * float_bytes
-    return estimated
-
-
 def build_pipeline_filter_mask(
     market: MarketDataMatrix,
     config: MatrixPipelineConfig,
@@ -3953,28 +3550,10 @@ def build_pipeline_filter_mask(
     asset_mask = np.asarray(config.asset_mask, dtype=bool)
     if asset_mask.shape != (market.shape[1],):
         raise ValueError("matrix strategy asset mask length does not match market")
-    return _cached_matrix_operation(
-        "pipeline_filter_mask",
-        (basic_mask, asset_mask),
-        {},
-        lambda: basic_mask & asset_mask[None, :],
-    )
+    return basic_mask & asset_mask[None, :]
 
 
 def build_basic_filter_mask(market: MarketDataMatrix, config: dict) -> np.ndarray:
-    cache = active_matrix_compute_cache()
-    if cache is None:
-        return _build_basic_filter_mask_uncached(market, config)
-    return cache.get_or_compute(
-        "basic_filter_mask",
-        (),
-        config,
-        lambda: _build_basic_filter_mask_uncached(market, config),
-        key_parts=cache.market_token(market),
-    )
-
-
-def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) -> np.ndarray:
     if not config or not config.get("enabled", True):
         return np.ones(market.shape, dtype=bool)
 
@@ -4152,12 +3731,7 @@ def matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     if not supported:
         raise ValueError(f"unsupported matrix feature: {name}")
     with _activate_valid_bar_index(market.valid_bars):
-        return _cached_matrix_operation(
-            "matrix_feature",
-            (market.close,),
-            {"name": name},
-            lambda: _compute_matrix_feature(market, name),
-        )
+        return _compute_matrix_feature(market, name)
 
 
 def session_coverage(

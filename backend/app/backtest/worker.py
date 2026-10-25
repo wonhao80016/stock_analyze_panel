@@ -1,4 +1,4 @@
-"""Spawn-isolated strategy backtest and mining task runner."""
+"""Spawn-isolated strategy backtest task runner."""
 from __future__ import annotations
 
 import json
@@ -50,7 +50,7 @@ def _start_parent_watchdog(parent=None, exit_fn: Callable[[int], Any] = os._exit
 
 
 class _PeakRssSampler:
-    """Track whole-task and resettable phase RSS peaks with one sampling thread."""
+    """Track the whole-task RSS peak with one sampling thread."""
 
     def __init__(self, interval_seconds: float = 0.05) -> None:
         if interval_seconds <= 0:
@@ -61,9 +61,7 @@ class _PeakRssSampler:
         self._thread = threading.Thread(target=self._sample, daemon=True)
         self._lock = threading.Lock()
         self._started = False
-        current = int(self._process.memory_info().rss)
-        self.peak_rss_bytes = current
-        self._phase_peak_rss_bytes = current
+        self.peak_rss_bytes = int(self._process.memory_info().rss)
 
     def start(self) -> None:
         if self._started:
@@ -78,21 +76,10 @@ class _PeakRssSampler:
         self._record_current()
         return self.peak_rss_bytes
 
-    def reset_phase(self) -> None:
-        current = int(self._process.memory_info().rss)
-        with self._lock:
-            self._phase_peak_rss_bytes = current
-
-    def phase_peak_rss_bytes(self) -> int:
-        self._record_current()
-        with self._lock:
-            return self._phase_peak_rss_bytes
-
     def _record_current(self) -> None:
         current = int(self._process.memory_info().rss)
         with self._lock:
             self.peak_rss_bytes = max(self.peak_rss_bytes, current)
-            self._phase_peak_rss_bytes = max(self._phase_peak_rss_bytes, current)
 
     def _sample(self) -> None:
         while not self._stop.wait(self._interval_seconds):
@@ -131,30 +118,13 @@ def encode_backtest_config(config) -> dict[str, Any]:
 
 
 def make_worker_task(kind: str, data_dir: Path, config) -> dict[str, Any]:
-    if kind == "backtest":
-        encoded = encode_backtest_config(config)
-    elif kind == "mining":
-        if not isinstance(config, dict):
-            raise TypeError("mining worker config must be a dict")
-        encoded = dict(config)
-    else:
+    if kind != "backtest":
         raise ValueError(f"unsupported worker task kind: {kind}")
     return {
         "kind": kind,
         "data_dir": str(data_dir.resolve()),
-        "config": encoded,
+        "config": encode_backtest_config(config),
     }
-
-
-def _attach_worker_metrics(
-    kind: str,
-    result: dict[str, Any],
-    metrics: dict[str, Any],
-) -> None:
-    if kind == "backtest":
-        result.setdefault("stats", {})["worker"] = metrics
-    else:
-        result["worker"] = metrics
 
 
 def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
@@ -187,23 +157,10 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
             event_queue.put({"type": "progress", "payload": message})
 
         kind = task["kind"]
-        if kind == "backtest":
-            config = _decode_backtest_config(task["config"])
-            result = asdict(service.run(config, _progress, cancel_event))
-        elif kind == "mining":
-            from app.backtest.mining_runtime import run_mining_runtime
-
-            result = run_mining_runtime(
-                task["config"],
-                data_dir=data_dir,
-                service=service,
-                strategy_engine=strategy_engine,
-                progress_cb=_progress,
-                cancel_check=cancel_event,
-                rss_sampler=sampler,
-            )
-        else:
+        if kind != "backtest":
             raise ValueError(f"unsupported worker task kind: {kind}")
+        config = _decode_backtest_config(task["config"])
+        result = asdict(service.run(config, _progress, cancel_event))
 
         serialization_started = time.perf_counter()
         serialized_bytes = len(
@@ -222,7 +179,7 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
             "serialized_result_bytes": serialized_bytes,
             "task_elapsed_ms": round((time.perf_counter() - started) * 1000, 1),
         }
-        _attach_worker_metrics(kind, result, metrics)
+        result.setdefault("stats", {})["worker"] = metrics
         event_queue.put({"type": "result", "payload": result})
     except BaseException as exc:
         with suppress(Exception):
@@ -333,11 +290,7 @@ def run_worker_task(
             "worker_exitcode": process.exitcode,
             "worker_exit_forcibly": worker_exit_forcibly,
         }
-        kind = task["kind"]
-        if kind == "backtest":
-            result.setdefault("stats", {}).setdefault("worker", {}).update(parent_metrics)
-        else:
-            result.setdefault("worker", {}).update(parent_metrics)
+        result.setdefault("stats", {}).setdefault("worker", {}).update(parent_metrics)
         return result
     finally:
         if process.is_alive():

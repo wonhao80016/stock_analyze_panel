@@ -19,7 +19,6 @@ from app.api import (
     ext_data,
     intraday,
     kline,
-    mining,
     monitor_rules,
     screener,
     signals,
@@ -41,8 +40,8 @@ from app.extensions.loader import (
 from app.jobs import daily_pipeline
 from app.repository import DataStore, KlineRepository
 from app.services.auth import AuthStoreCorruptError
+from app.services.data_dir_process_lock import DataDirProcessLock
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
-from app.services.mining_process_lock import MiningProcessLock
 from app.services.preferences import PREFERENCES_STORE_UNAVAILABLE_DETAIL, PreferencesStoreError
 from app.services.quote_service import QuoteService
 from app.taiwan.universe.service import SecurityMasterUnavailableError
@@ -108,13 +107,6 @@ async def _application_lifespan(app: FastAPI):
     store = DataStore()
     repo = KlineRepository(store)
     app.state.repo = repo
-    from app.services.mining_manager import MiningJobManager
-
-    mining_manager = MiningJobManager(store.data_dir)
-    recovered_mining_runs = mining_manager.recover_interrupted()
-    app.state.mining_manager = mining_manager
-    if recovered_mining_runs:
-        logger.warning("recovered %d interrupted mining runs", recovered_mining_runs)
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
     if settings.backtest_matrix_disk_cache_enabled:
         try:
@@ -292,9 +284,6 @@ async def _application_lifespan(app: FastAPI):
         repo._on_refresh_done = None  # noqa: SLF001
         if not matrix_prewarm_owner.shutdown(timeout=5.0):
             logger.warning("matrix cache prewarm did not stop within 5 seconds")
-        mmanager = getattr(app.state, "mining_manager", None)
-        if mmanager:
-            mmanager.shutdown()
         if app.state.scheduler:
             app.state.scheduler.shutdown(wait=False)
         ps = getattr(app.state, "pull_scheduler", None)
@@ -308,13 +297,15 @@ async def _application_lifespan(app: FastAPI):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    mining_process_lock = MiningProcessLock(settings.data_dir)
-    mining_process_lock.acquire()
+    # Taken before startup work: uvicorn runs startup before binding, so a second process
+    # would otherwise start schedulers, monitors and prewarm against the same data_dir.
+    process_lock = DataDirProcessLock(settings.data_dir)
+    process_lock.acquire()
     try:
         async with _application_lifespan(app):
             yield
     finally:
-        mining_process_lock.release()
+        process_lock.release()
 
 
 app = FastAPI(
@@ -388,7 +379,6 @@ app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
 app.include_router(backtest.router)
-app.include_router(mining.router)
 app.include_router(intraday.router)
 app.include_router(data.router)
 app.include_router(ext_data.router)

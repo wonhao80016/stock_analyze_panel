@@ -38,7 +38,8 @@ def test_shutdown_cancels_limiter_wait_and_rejects_new_work() -> None:
     owner = MatrixCachePrewarmOwner()
     waiting = threading.Event()
     cancelled = threading.Event()
-    assert limiter.acquire("mining", timeout=0)
+    assert limiter.acquire("normal", timeout=0)
+    assert limiter.acquire("normal", timeout=0)
 
     def target() -> None:
         waiting.set()
@@ -53,7 +54,8 @@ def test_shutdown_cancels_limiter_wait_and_rejects_new_work() -> None:
     assert owner.shutdown(timeout=1)
     assert cancelled.is_set()
     assert not owner.schedule(target)
-    limiter.release("mining")
+    limiter.release("normal")
+    limiter.release("normal")
 
 
 def test_shutdown_join_is_bounded_for_uncooperative_target() -> None:

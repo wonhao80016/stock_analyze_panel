@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import ClassVar, Literal
 
-HeavyJobKind = Literal["normal", "mining"]
+HeavyJobKind = Literal["normal"]
 
 
 class HeavyJobLimitTimeoutError(TimeoutError):
@@ -20,9 +20,9 @@ class HeavyJobCancelledError(RuntimeError):
 
 
 class HeavyJobLimiter:
-    """A weighted limiter where normal jobs cost one slot and mining costs two."""
+    """A weighted limiter where a normal job costs one slot."""
 
-    _WEIGHTS: ClassVar[dict[HeavyJobKind, int]] = {"normal": 1, "mining": 2}
+    _WEIGHTS: ClassVar[dict[HeavyJobKind, int]] = {"normal": 1}
 
     def __init__(self, capacity: int = 2, *, cancel_poll_interval: float = 0.05) -> None:
         if capacity <= 0:
@@ -32,7 +32,7 @@ class HeavyJobLimiter:
         self.capacity = capacity
         self._cancel_poll_interval = cancel_poll_interval
         self._used = 0
-        self._acquired = {"normal": 0, "mining": 0}
+        self._acquired = {"normal": 0}
         self._condition = threading.Condition()
 
     @property

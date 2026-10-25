@@ -1,5 +1,4 @@
-"""Backtest package: strategy backtests and strategy mining.
+"""Backtest package: strategy backtests.
 
-Architecture: shared BacktestEngine -> StrategyBacktestService; mining reuses the factor
-catalog and factor computation in factor.py.
+Architecture: shared BacktestEngine -> StrategyBacktestService.
 """

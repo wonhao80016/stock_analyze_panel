@@ -1,7 +1,7 @@
 """asset_type=etf reads the Taiwan ETF rows of the shared daily enriched partitions.
 
 Taiwan ETFs are published into kline_daily_enriched next to the stocks; only the security
-master tells them apart. Backtests, mining and ETF strategy rules asking for etf must see
+master tells them apart. Backtests and ETF strategy rules asking for etf must see
 those rows and nothing else.
 """
 
@@ -18,7 +18,6 @@ from app.backtest.engine import BacktestEngine
 from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
 from app.indicators.pipeline import compute_indicators, compute_signals
 from app.repository import DataStore, KlineRepository
-from app.services.mining_preflight import enriched_partition_dates
 from app.services.screener import ScreenerService
 from app.strategy.engine import StrategyEngine
 from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
@@ -155,9 +154,3 @@ def test_the_etf_history_loader_returns_only_the_etf_rows(market):
 
     assert set(history["symbol"].to_list()) == {ETF}
     assert history["date"].max() == DAYS[-1]
-
-
-def test_mining_preflight_counts_the_shared_partitions_for_etf(tmp_path):
-    _write_published(tmp_path)
-
-    assert enriched_partition_dates(tmp_path, "etf") == DAYS

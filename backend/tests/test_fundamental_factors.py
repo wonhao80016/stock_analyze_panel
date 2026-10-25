@@ -8,7 +8,6 @@ import numpy as np
 import polars as pl
 
 from app.backtest.fundamentals import (
-    FUNDAMENTAL_FACTOR_NAMES,
     attach_fundamental_factors,
     build_fundamental_matrices,
     load_fundamental_snapshot,
@@ -152,10 +151,3 @@ def test_snapshot_requires_announce_date(tmp_path: Path):
     }).write_parquet(out / "part.parquet")
     # 公告日缺失的行无法做点时门控, 视为无有效快照
     assert load_fundamental_snapshot(tmp_path) is None
-
-
-def test_fundamental_factor_names_are_catalogued():
-    from app.backtest.factor import FACTOR_COLUMNS
-
-    catalog_ids = {item["id"] for item in FACTOR_COLUMNS}
-    assert catalog_ids >= FUNDAMENTAL_FACTOR_NAMES

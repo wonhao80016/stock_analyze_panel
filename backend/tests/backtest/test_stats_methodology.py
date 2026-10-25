@@ -235,29 +235,6 @@ def test_config_rejects_unreasonable_risk_free_rate(rate: float):
         MatcherConfig(risk_free_rate=rate)
 
 
-def test_mining_policy_keeps_short_window_sharpe():
-    from app.backtest.mining_runtime import _RESULT_POLICY
-
-    assert _RESULT_POLICY.simulation_options().min_annualized_sessions == 0
-    assert SimulationOptions().min_annualized_sessions == 60
-
-
-def test_strategy_candidates_record_rate_and_methodology_version(tmp_path):
-    from app.backtest.candidates import CandidateStore
-
-    created = CandidateStore(tmp_path).create(
-        kind="strategy",
-        name="rf candidate",
-        source_id="ma_cross",
-        config={"strategy_id": "ma_cross", "risk_free_rate": 0.015},
-        metrics={"sharpe": 0.6, "methodology_version": "stats_v3"},
-        data_as_of="2025-12-31",
-    )
-
-    assert created["config"]["risk_free_rate"] == 0.015
-    assert created["metrics"]["methodology_version"] == "stats_v3"
-
-
 def _full_mode_trades(sessions: list[str], exits: dict[int, float]) -> list[TradeRecord]:
     return [
         TradeRecord(

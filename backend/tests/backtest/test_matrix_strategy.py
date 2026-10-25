@@ -12,7 +12,6 @@ import polars as pl
 import pytest
 
 from app.backtest import matrix as matrix_module
-from app.backtest.factor import FACTOR_COLUMNS, FactorBacktestService
 from app.backtest.matrix import (
     MatrixPipelineConfig,
     MatrixStrategyPipeline,
@@ -35,8 +34,35 @@ from app.indicators.pipeline import (
     compute_signals as compute_indicator_signals,
 )
 from app.strategy.engine import StrategyDataContext, StrategyEngine
+from app.strategy.scoring import VIRTUAL_SCORING_DEPENDENCIES, materialize_scoring_columns
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# Factor IDs that published factor-rank strategy files may score with.
+PUBLISHED_FACTOR_IDS = frozenset({
+    "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
+    "change_pct", "ma5_bias", "ma10_bias", "ma20_bias", "ma30_bias", "ma60_bias",
+    "ema5_bias", "ema10_bias", "ema20_bias", "ema30_bias", "ema60_bias",
+    "rsi_6", "rsi_14", "rsi_24", "macd_hist", "macd_dif_pct", "macd_dea_pct", "macd_hist_pct",
+    "kdj_k", "kdj_d", "kdj_j", "boll_position", "annual_vol_20d", "atr_14", "atr_pct",
+    "amplitude", "boll_width", "vol_ratio_5d", "vol_ratio_10d", "vol_trend_5_10",
+    "turnover_rate", "turnover_ratio_5d", "log_amount", "amount_ratio_5d",
+    "gap_return", "intraday_return", "close_position", "distance_to_high_60d",
+    "distance_from_low_60d", "vwap_bias", "max_ret_20d", "ret_skew_20d", "up_days_20d",
+    "amihud_20d", "turnover_z_60d", "vol_price_corr_20d", "vol_trend_5_60",
+    "limit_up_count_20d", "limit_up_count_60d",
+    "pb_latest", "roe_latest", "gross_margin_latest", "net_margin_latest",
+    "revenue_yoy_latest", "net_income_yoy_latest", "debt_ratio_latest",
+})
+
+
+def _reference_factor_panel(panel: pl.DataFrame, names: set[str]) -> pl.DataFrame:
+    derived = names & set(VIRTUAL_SCORING_DEPENDENCIES)
+    indicator_columns = names - derived
+    for name in derived:
+        indicator_columns.update(VIRTUAL_SCORING_DEPENDENCIES[name])
+    panel = compute_indicators(panel, needed=indicator_columns)
+    return materialize_scoring_columns(panel, derived)
 
 
 def test_common_matrix_features_match_polars_indicator_pipeline():
@@ -82,7 +108,7 @@ def test_common_matrix_features_match_polars_indicator_pipeline():
     )
 
 
-def test_research_factor_catalog_matches_matrix_features():
+def test_published_factor_ids_match_matrix_features():
     rows = []
     start = date(2024, 1, 1)
     for offset in range(120):
@@ -106,8 +132,8 @@ def test_research_factor_catalog_matches_matrix_features():
                 ),
             })
     panel = pl.DataFrame(rows)
-    factor_names = {item["id"] for item in FACTOR_COLUMNS}
-    expected = FactorBacktestService._compute_missing_factors(panel, factor_names)
+    factor_names = set(PUBLISHED_FACTOR_IDS)
+    expected = _reference_factor_panel(panel, factor_names)
     from app.backtest.fundamentals import (
         FUNDAMENTAL_FACTOR_NAMES,
         attach_matrix_fundamental_fields,

@@ -4,14 +4,16 @@ import os
 from pathlib import Path
 from typing import BinaryIO
 
-
-class MiningProcessLockError(RuntimeError):
-    """Another application process owns mining for this data directory."""
+_CONTENTION_MESSAGE = "another backend process is already using this data directory"
 
 
-class MiningProcessLock:
+class DataDirProcessLockError(RuntimeError):
+    """Another backend process owns this data directory."""
+
+
+class DataDirProcessLock:
     def __init__(self, data_dir: Path) -> None:
-        self._path = Path(data_dir) / ".mining_process.lock"
+        self._path = Path(data_dir) / ".backend.lock"
         self._stream: BinaryIO | None = None
 
     def acquire(self) -> None:
@@ -50,9 +52,7 @@ def _try_lock_file(stream: BinaryIO) -> None:
         try:
             msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError as exc:
-            raise MiningProcessLockError(
-                "another application process already owns mining for this data directory"
-            ) from exc
+            raise DataDirProcessLockError(_CONTENTION_MESSAGE) from exc
         return
 
     import fcntl
@@ -60,9 +60,7 @@ def _try_lock_file(stream: BinaryIO) -> None:
     try:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
-        raise MiningProcessLockError(
-            "another application process already owns mining for this data directory"
-        ) from exc
+        raise DataDirProcessLockError(_CONTENTION_MESSAGE) from exc
 
 
 def _unlock_file(stream: BinaryIO) -> None:

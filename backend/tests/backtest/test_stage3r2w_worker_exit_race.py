@@ -71,11 +71,11 @@ def test_result_enqueued_while_get_times_out_is_not_dropped(monkeypatch, tmp_pat
     events = Queue()
     _install(monkeypatch, process, events)
 
-    result = run_worker_task({"kind": "mining", "data_dir": str(tmp_path), "config": {}})
+    result = run_worker_task({"kind": "backtest", "data_dir": str(tmp_path), "config": {}})
 
     assert result["status"] == "ok"
-    assert result["worker"]["worker_exitcode"] == 0
-    assert result["worker"]["worker_exit_forcibly"] is False
+    assert result["stats"]["worker"]["worker_exitcode"] == 0
+    assert result["stats"]["worker"]["worker_exit_forcibly"] is False
 
 
 def test_dead_worker_with_empty_queue_still_reports_missing_result(monkeypatch, tmp_path):
@@ -101,5 +101,5 @@ def test_dead_worker_with_empty_queue_still_reports_missing_result(monkeypatch, 
     _install(monkeypatch, process, events)
 
     with pytest.raises(BacktestWorkerError, match="exitcode=3"):
-        run_worker_task({"kind": "mining", "data_dir": str(tmp_path), "config": {}})
+        run_worker_task({"kind": "backtest", "data_dir": str(tmp_path), "config": {}})
     assert events.calls >= 2

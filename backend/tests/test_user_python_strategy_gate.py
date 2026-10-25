@@ -75,8 +75,6 @@ def test_user_strategy_files_do_not_run_by_default(tmp_path, caplog) -> None:
     assert len(errors) == 1
     assert SWITCH in errors[0]["error"]
     assert any("custom_marker.py" in r.getMessage() and SWITCH in r.getMessage() for r in caplog.records)
-    assert engine.file_disabled(custom_dir / "custom_other.py")
-    assert not engine.file_disabled(BUILTIN_DIR / "any.py")
 
 
 def test_builtin_strategies_load_while_user_strategies_are_disabled(tmp_path) -> None:
@@ -126,5 +124,4 @@ def test_main_wires_the_switch_into_the_strategy_engine(tmp_path, monkeypatch, a
 
     assert marker.exists() is allowed
     assert engine.has("custom_marker") is allowed
-    assert engine.file_disabled(strategy_file) is not allowed
     assert any(s.source == "builtin" for s in engine.strategy_definitions())

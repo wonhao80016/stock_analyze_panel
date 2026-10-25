@@ -1,8 +1,8 @@
 """Fixed matrix-native strategy for controlled factor-rank research.
 
 The score is a cross-sectional percentile from 0 to 100: each bar ranks the weighted sum of every
-factor's average rank, signed by its direction, which is the rank composite the mining rank IC
-measures. Tied values share their mean rank and a lone scored asset sits at 50, so entry_score 70
+factor's average rank, signed by its direction. Tied values share their mean rank and a lone
+scored asset sits at 50, so entry_score 70
 keeps the top 30% whatever the factor distribution. An asset missing any factor value is unscored
 (NaN) on that bar: it neither enters nor takes the factor exit, so a held position exits only
 on the normal rules (stop loss, holding limit) until its factors return.
@@ -74,6 +74,7 @@ _MAX_FACTORS = 4
 _VALID_DIRECTIONS = {"high", "low"}
 
 
+# Published factor-rank strategy files import this class; keep its name and constructor.
 class FactorRankResearchMatrixStrategy:
     def __init__(
         self,
@@ -216,7 +217,7 @@ def _rank_percentile_score(
     scored = universe.copy()
     for values in factors.values():
         scored &= np.isfinite(values)
-    # Unnormalised like mining's (ranks * directions) @ weights, so equal composites tie alike.
+    # Unnormalised (ranks * directions) @ weights, so equal composites tie alike.
     weights = {
         name: -weight if directions.get(name) == "low" else weight
         for name, weight in scoring.items()

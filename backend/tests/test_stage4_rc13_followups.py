@@ -7,13 +7,6 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 
-from app.backtest.mining import (
-    FactorMetric,
-    MiningBudget,
-    MiningRequest,
-    MiningService,
-    NestedValidationConfig,
-)
 from app.strategy.engine import StrategyDataContext, StrategyEngine
 
 pytestmark = pytest.mark.usefixtures("deny_network")
@@ -196,47 +189,3 @@ def test_app_context_carries_stored_turnover_for_scoring_and_filters(tmp_path, m
 
     assert as_of == sessions[-1]
     assert results["turnover_scored"].scores == {"600000.SH": 100.0, "000001.SZ": 0.0}
-
-
-def test_mining_reports_the_error_every_candidate_hit():
-    rows = []
-    for day_id in range(10):
-        for asset_id in range(6):
-            target = float(asset_id + (day_id % 2) * 0.1)
-            rows.append(
-                {
-                    "symbol": f"{asset_id:06d}.SZ",
-                    "date": date(2024, 1, 2) + timedelta(days=day_id * 2),
-                    "good": target,
-                    "_next_return": target,
-                }
-            )
-    request = MiningRequest(
-        factor_names=("good",),
-        budget=MiningBudget(max_combination_size=1, max_proxy_trials=12, max_trials=8),
-        validation=NestedValidationConfig(
-            outer_train_bars=8,
-            outer_test_bars=2,
-            outer_step_bars=2,
-            inner_train_bars=4,
-            inner_test_bars=2,
-            inner_step_bars=2,
-            purge_bars=0,
-            embargo_bars=0,
-            min_train_bars=4,
-        ),
-        profile="exploratory",
-    )
-
-    class _Failing:
-        def evaluate_candidate(self, train, test, definition):
-            raise ValueError("turnover_rate 0.00%")
-
-    result = MiningService().run(
-        pl.DataFrame(rows),
-        request,
-        metric_provider=lambda _train, _names: (FactorMetric("good", 1.0, 1.0, 1.0, 0.1),),
-        evaluator=_Failing(),
-    )
-
-    assert "turnover_rate 0.00%" in result.folds[0].error

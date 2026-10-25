@@ -20,17 +20,14 @@ import numpy as np
 import polars as pl
 
 from app.backtest.engine import (
-    MIN_ANNUALIZED_SESSIONS,
     BacktestEngine,
     MatcherConfig,
-    SimulationOptions,
     validate_risk_free_rate,
 )
 from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES
 from app.backtest.matrix import (
     MarketDataMatrix,
     MatrixCacheProfile,
-    MatrixComputeCache,
     MatrixPipelineConfig,
     MatrixPrewarmCancelledError,
     MatrixStrategyPipeline,
@@ -955,77 +952,6 @@ class StrategyBacktestResult:
     error: str | None = None
 
 
-@dataclass(frozen=True)
-class BacktestResultPolicy:
-    """Explicit result contract for full backtests and lightweight mining trials."""
-
-    required_stats: frozenset[str] | None = None
-    include_monte_carlo: bool = True
-    include_curves: bool = True
-    include_trades: bool = True
-    include_per_symbol_stats: bool = True
-    include_return_distribution: bool = True
-    include_benchmark: bool = True
-    include_strategy_info: bool = True
-    min_annualized_sessions: int = MIN_ANNUALIZED_SESSIONS
-
-    def simulation_options(self) -> SimulationOptions:
-        return SimulationOptions(
-            include_monte_carlo=self.include_monte_carlo,
-            include_curves=self.include_curves,
-            include_trades=self.include_trades,
-            include_per_symbol_stats=self.include_per_symbol_stats,
-            include_return_distribution=self.include_return_distribution,
-            min_annualized_sessions=self.min_annualized_sessions,
-        )
-
-    def select_stats(self, stats: dict) -> dict:
-        if self.required_stats is None:
-            return stats
-        diagnostic = {
-            "error",
-            "timing_ms",
-            "execution",
-            "selection",
-            "field_coverage",
-            "exchange_coverage_warnings",
-            "execution_backend",
-            "shared_market_data",
-            "shared_market_data_bytes",
-            "shared_prepare_timing_ms",
-            "matrix_data_cache_hit",
-            "matrix_compute_cache",
-            "market_matrix_shape",
-            "market_matrix_bytes",
-            "panel_rows",
-            "panel_columns",
-            "feature_columns",
-            "full_feature_fallback",
-        }
-        keep = set(self.required_stats) | diagnostic
-        return {key: value for key, value in stats.items() if key in keep}
-
-
-@dataclass(frozen=True)
-class PreparedMatrixBacktest:
-    """Job-scoped immutable market data reused by every trial of one job."""
-
-    signature: tuple
-    market_data: MarketDataMatrix
-    feature_width: int
-    load_start: date
-    load_end: date
-    sim_end: date
-    entry_time_mask: np.ndarray
-    exit_time_mask: np.ndarray
-    start_id: int
-    stop_id: int
-    entry_reference_price: np.ndarray | None
-    exit_reference_price: np.ndarray | None
-    prepare_timing_ms: dict[str, float]
-    compute_cache: MatrixComputeCache
-
-
 class StrategyBacktestService:
     def __init__(
         self,
@@ -1034,21 +960,6 @@ class StrategyBacktestService:
     ) -> None:
         self.engine = engine
         self.strategy_engine = strategy_engine
-
-    @staticmethod
-    def _matrix_prepare_signature(config: StrategyBacktestConfig) -> tuple:
-        return (
-            config.strategy_id,
-            None if config.symbols is None else tuple(config.symbols),
-            config.start,
-            config.end,
-            config.mode,
-            config.asset_type,
-            config.holding_days,
-            config.minute_fill,
-            json.dumps(config.overrides or {}, sort_keys=True, ensure_ascii=False, default=str),
-            json.dumps(config.regime_filter or {}, sort_keys=True, ensure_ascii=False, default=str),
-        )
 
     def _resolve_composite_feature_plan(
         self,
@@ -1111,7 +1022,6 @@ class StrategyBacktestService:
                 ),
                 order_by=child_def.meta.get("order_by"),
                 descending=bool(child_def.meta.get("descending", True)),
-                protect_strategy_cache=False,
             )
             resolved_children.append((child_def, child_params, child_pipeline_cfg))
 
@@ -1168,200 +1078,14 @@ class StrategyBacktestService:
             max_hold,
         )
 
-    def prepare_matrix_optimization(
-        self,
-        configs: list[StrategyBacktestConfig],
-        *,
-        matrix_cache_max_bytes: int = 512 * 1024 * 1024,
-        market_data_override: MarketDataMatrix | None = None,
-    ) -> PreparedMatrixBacktest:
-        """Load and encode one immutable base matrix for all matrix-native trials.
-
-        ``market_data_override`` is an optional shared WF matrix.  Fold-local
-        prepared objects take a read-only time view of it, so the base mmap and
-        its arrays are not copied while each fold still receives a bounded
-        history window for strict out-of-sample evaluation.
-        """
-        if not configs:
-            raise ValueError("matrix preparation requires at least one backtest config")
-
-        signature = self._matrix_prepare_signature(configs[0])
-        if any(self._matrix_prepare_signature(config) != signature for config in configs[1:]):
-            raise ValueError("matrix preparation configs must share strategy, universe, range and overrides")
-
-        first = configs[0]
-        strategy = self.strategy_engine.get(first.strategy_id)
-        if strategy.execution_backend != "matrix_native":
-            raise ValueError("shared MarketDataMatrix preparation requires matrix_native strategy")
-        StrategyEngine.validate_context(
-            strategy,
-            StrategyDataContext(
-                asset_type=first.asset_type,
-                timeframe="1d",
-                as_of=first.end,
-            ),
-        )
-
-        overrides = first.overrides or {}
-        basic_filter = self._backtest_basic_filter(strategy, overrides, first.asset_type)
-        entry_signals = self._effective_signals(overrides, "entry_signals", strategy.entry_signals)
-        exit_signals = self._effective_signals(overrides, "exit_signals", strategy.exit_signals)
-        resolver = StrategyDependencyResolver()
-        plans: list[ResolvedFeaturePlan] = []
-        for config in configs:
-            params = self._normalize_params(config.params or {}, strategy)
-            plans.append(resolver.resolve(
-                strategy,
-                params=params,
-                basic_filter=basic_filter,
-                entry_signals=entry_signals,
-                exit_signals=exit_signals,
-                overrides=overrides,
-                minute_fill=config.minute_fill,
-                asset_type=config.asset_type,
-            ))
-        feature_plan = _merge_resolved_feature_plans(plans)
-
-        max_hold_days = self._override_value(overrides, "max_hold_days", strategy.max_hold_days)
-        full_horizon_days = max(int(max_hold_days or first.holding_days or 5), 1)
-        cache_profile = build_matrix_cache_profile(
-            self.strategy_engine,
-            first.asset_type,
-            requested_plan=feature_plan,
-            requested_forward_bars=full_horizon_days,
-            max_disk_bytes=settings.backtest_matrix_cache_max_mb * 1024 * 1024,
-            backtest_engine=self.engine,
-        )
-        load_start = first.start - timedelta(days=warmup_calendar_days(feature_plan.warmup_bars))
-        coverage_start = first.start - timedelta(
-            days=warmup_calendar_days(cache_profile.warmup_bars)
-        )
-        load_end = first.end
-        coverage_end = first.end
-        if first.mode == "full":
-            load_end = first.end + timedelta(days=(full_horizon_days + 5) * 2)
-            coverage_end = first.end + timedelta(days=(cache_profile.forward_bars + 5) * 2)
-        sim_end = load_end if first.mode == "full" else first.end
-
-        timing_ms: dict[str, float] = {}
-        prepare_started = time.perf_counter()
-        if market_data_override is None:
-            started = time.perf_counter()
-            market_data = self.engine.load_market_data_matrix_for_backtest(
-                first.symbols,
-                load_start,
-                load_end,
-                feature_plan,
-                asset_type=first.asset_type,
-                cache_profile=cache_profile,
-                coverage_start=coverage_start,
-                coverage_end=coverage_end,
-            )
-            direct_load_ms = round((time.perf_counter() - started) * 1000, 1)
-        else:
-            labels = market_data_override.timestamp_labels
-            visible_ids = np.flatnonzero(
-                np.fromiter(
-                    (
-                        str(load_start) <= label[:10] <= str(load_end)
-                        for label in labels
-                    ),
-                    dtype=bool,
-                    count=len(labels),
-                )
-            )
-            if visible_ids.size == 0:
-                raise ValueError("shared WF matrix does not cover the fold window")
-            market_data = slice_market_data_matrix(
-                market_data_override,
-                int(visible_ids[0]),
-                int(visible_ids[-1]) + 1,
-            )
-            direct_load_ms = 0.0
-        timing_ms["load_panel"] = direct_load_ms
-        timing_ms["market_data_matrix_build"] = 0.0
-        timing_ms["market_data_direct_load"] = direct_load_ms
-        # 环境过滤下正式起点=矩阵首日时顺延 (首日让渡为预热), 见 _clamp_regime_formal_start
-        first = self._clamp_regime_formal_start(first, market_data.timestamp_labels)
-        formal_range = self._matrix_date_range_mask(
-            market_data.timestamp_labels,
-            first.start,
-            first.end,
-        )
-        if not formal_range.any():
-            raise ValueError("正式回测区间内无数据")
-
-        feature_width = len(feature_plan.matrix_columns)
-
-        entry_time_mask = self._matrix_date_range_mask(
-            market_data.timestamp_labels,
-            first.start,
-            first.end,
-        )
-        # 市场环境过滤(优化器共享, 用首个 config 的 regime_filter)
-        _rm = self._build_regime_mask(
-            market_data.timestamp_labels, first.regime_filter,
-            getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
-            required_start=first.start,
-            required_end=first.end,
-        )
-        if _rm is not None:
-            entry_time_mask = entry_time_mask & _rm
-        exit_time_mask = self._matrix_date_range_mask(
-            market_data.timestamp_labels,
-            first.start,
-            load_end if first.mode == "full" else first.end,
-        )
-        sim_time_mask = self._matrix_date_range_mask(
-            market_data.timestamp_labels,
-            first.start,
-            sim_end,
-        )
-        time_ids = np.flatnonzero(sim_time_mask)
-        if time_ids.size == 0:
-            raise ValueError("正式回测区间内无数据")
-        start_id = int(time_ids[0])
-        stop_id = int(time_ids[-1]) + 1
-        entry_reference_price = (
-            _minute_fill_reference(market_data.close, first.entry_fill)[start_id:stop_id]
-            if first.minute_fill
-            else None
-        )
-        exit_reference_price = (
-            _minute_fill_reference(market_data.close, first.exit_fill)[start_id:stop_id]
-            if first.minute_fill
-            else None
-        )
-        timing_ms["total"] = round((time.perf_counter() - prepare_started) * 1000, 1)
-        compute_cache = MatrixComputeCache(max_bytes=matrix_cache_max_bytes)
-        return PreparedMatrixBacktest(
-            signature=signature,
-            market_data=market_data,
-            feature_width=feature_width,
-            load_start=load_start,
-            load_end=load_end,
-            sim_end=sim_end,
-            entry_time_mask=entry_time_mask,
-            exit_time_mask=exit_time_mask,
-            start_id=start_id,
-            stop_id=stop_id,
-            entry_reference_price=entry_reference_price,
-            exit_reference_price=exit_reference_price,
-            prepare_timing_ms=timing_ms,
-            compute_cache=compute_cache,
-        )
-
     def run(
         self,
         config: StrategyBacktestConfig,
         progress_cb: Callable[[dict], None] | None = None,
         cancel_event: threading.Event | None = None,
-        prepared: PreparedMatrixBacktest | None = None,
-        result_policy: BacktestResultPolicy | None = None,
     ) -> StrategyBacktestResult:
         t0 = time.perf_counter()
         run_id = uuid.uuid4().hex[:10]
-        result_policy = result_policy or BacktestResultPolicy()
 
         def _err(msg: str) -> StrategyBacktestResult:
             return StrategyBacktestResult(
@@ -1474,26 +1198,7 @@ class StrategyBacktestService:
         panel: pl.DataFrame | None = None
         formal_range: pl.Series | None = None
         market_data: MarketDataMatrix | None = None
-        if prepared is not None:
-            if s.execution_backend != "matrix_native":
-                return _err("共享基础矩阵只能用于 matrix_native 策略")
-            if prepared.signature != self._matrix_prepare_signature(config):
-                return _err("共享基础矩阵与当前回测配置不匹配")
-            load_start = prepared.load_start
-            load_end = prepared.load_end
-            sim_end = prepared.sim_end
-            feature_width = prepared.feature_width
-            timing_ms["load_panel"] = 0.0
-            timing_ms["market_data_matrix_build"] = 0.0
-            matrix_data_cache_status = prepared.market_data.cache_status
-            matrix_data_cache_hit = matrix_data_cache_status in {"exact", "covering"}
-            matrix_data_cache_timing_ms = prepared.market_data.cache_timing_ms
-            # 环境过滤下正式起点=矩阵首日时顺延 (首日让渡为预热)
-            if config.regime_filter:
-                config = self._clamp_regime_formal_start(
-                    config, prepared.market_data.timestamp_labels
-                )
-        elif s.execution_backend in ("matrix_native", "composite"):
+        if s.execution_backend in ("matrix_native", "composite"):
             t_load = time.perf_counter()
             max_hold_for_profile = self._override_value(
                 overrides,
@@ -1599,28 +1304,27 @@ class StrategyBacktestService:
                 [(s, params)] if s.execution_backend == "matrix_native" else []
             )
         filter_fields = _filter_fields(basic_filter)
-        coverage_market = prepared.market_data if prepared is not None else market_data
         exchange_coverage_warnings: list[dict] = []
-        if coverage_market is not None:
+        if market_data is not None:
             formal_sessions = self._matrix_date_range_mask(
-                coverage_market.timestamp_labels, config.start, config.end
+                market_data.timestamp_labels, config.start, config.end
             )
             try:
                 scope = (
-                    _asset_scope_mask(coverage_market.symbols, s.meta.get("asset_types", ["stock"]))
+                    _asset_scope_mask(market_data.symbols, s.meta.get("asset_types", ["stock"]))
                     if entry_coverage_fields
                     else None
                 )
             except ValueError as e:
                 return _err(str(e))
             uncovered_session, exchange_coverage_warnings = _entry_coverage_check(
-                coverage_market, entry_coverage_fields, formal_sessions, scope
+                market_data, entry_coverage_fields, formal_sessions, scope
             )
             if uncovered_session:
                 return _err(uncovered_session)
-            formal_rows = np.isfinite(coverage_market.close) & formal_sessions[:, None]
+            formal_rows = np.isfinite(market_data.close) & formal_sessions[:, None]
             universe_coverage = _matrix_field_coverage(
-                coverage_market, filter_fields | parameter_scoring_fields, formal_rows
+                market_data, filter_fields | parameter_scoring_fields, formal_rows
             )
         elif panel is not None and formal_range is not None:
             universe_coverage = _panel_field_coverage(
@@ -1679,8 +1383,6 @@ class StrategyBacktestService:
         )
         if market_data is not None:
             execution_symbols = list(market_data.symbols)
-        elif prepared is not None:
-            execution_symbols = list(prepared.market_data.symbols)
         elif panel is not None:
             execution_symbols = [
                 str(value)
@@ -1822,68 +1524,57 @@ class StrategyBacktestService:
             if self._has_matrix_signal_override(s, overrides):
                 return _err("matrix_native 策略的进出场信号由策略协议生成，不支持列信号覆盖")
 
-            if prepared is not None:
-                market_data = prepared.market_data
-                entry_time_mask = prepared.entry_time_mask
-                exit_time_mask = prepared.exit_time_mask
-                start_id = prepared.start_id
-                stop_id = prepared.stop_id
-                entry_reference_price = prepared.entry_reference_price
-                exit_reference_price = prepared.exit_reference_price
-                panel_rows = int(np.isfinite(market_data.close[start_id:stop_id]).sum())
-                panel_columns = len(feature_plan.matrix_columns)
-            else:
-                if market_data is None:
-                    return _err("矩阵回测缺少基础行情矩阵")
-                entry_time_mask = self._matrix_date_range_mask(
-                    market_data.timestamp_labels,
-                    config.start,
-                    config.end,
+            if market_data is None:
+                return _err("矩阵回测缺少基础行情矩阵")
+            entry_time_mask = self._matrix_date_range_mask(
+                market_data.timestamp_labels,
+                config.start,
+                config.end,
+            )
+            try:
+                _rm = self._build_regime_mask(
+                    market_data.timestamp_labels, config.regime_filter,
+                    getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+                    required_start=config.start,
+                    required_end=config.end,
                 )
-                try:
-                    _rm = self._build_regime_mask(
-                        market_data.timestamp_labels, config.regime_filter,
-                        getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
-                        required_start=config.start,
-                        required_end=config.end,
-                    )
-                except ValueError as e:
-                    return _err(str(e))
-                if _rm is not None:
-                    entry_time_mask = entry_time_mask & _rm
-                exit_time_mask = self._matrix_date_range_mask(
-                    market_data.timestamp_labels,
-                    config.start,
-                    load_end if config.mode == "full" else config.end,
-                )
-                sim_time_mask = self._matrix_date_range_mask(
-                    market_data.timestamp_labels,
-                    config.start,
-                    sim_end,
-                )
-                time_ids = np.flatnonzero(sim_time_mask)
-                if time_ids.size == 0:
-                    return _err("正式回测区间内无数据")
-                start_id = int(time_ids[0])
-                stop_id = int(time_ids[-1]) + 1
-                panel_rows = int(np.isfinite(market_data.close[start_id:stop_id]).sum())
-                panel_columns = len(feature_plan.matrix_columns)
-                entry_reference_price = (
-                    _minute_fill_reference(
-                        market_data.close,
-                        str(matcher_config.entry_fill),
-                    )[start_id:stop_id]
-                    if matcher_config.minute_fill
-                    else None
-                )
-                exit_reference_price = (
-                    _minute_fill_reference(
-                        market_data.close,
-                        str(matcher_config.exit_fill),
-                    )[start_id:stop_id]
-                    if matcher_config.minute_fill
-                    else None
-                )
+            except ValueError as e:
+                return _err(str(e))
+            if _rm is not None:
+                entry_time_mask = entry_time_mask & _rm
+            exit_time_mask = self._matrix_date_range_mask(
+                market_data.timestamp_labels,
+                config.start,
+                load_end if config.mode == "full" else config.end,
+            )
+            sim_time_mask = self._matrix_date_range_mask(
+                market_data.timestamp_labels,
+                config.start,
+                sim_end,
+            )
+            time_ids = np.flatnonzero(sim_time_mask)
+            if time_ids.size == 0:
+                return _err("正式回测区间内无数据")
+            start_id = int(time_ids[0])
+            stop_id = int(time_ids[-1]) + 1
+            panel_rows = int(np.isfinite(market_data.close[start_id:stop_id]).sum())
+            panel_columns = len(feature_plan.matrix_columns)
+            entry_reference_price = (
+                _minute_fill_reference(
+                    market_data.close,
+                    str(matcher_config.entry_fill),
+                )[start_id:stop_id]
+                if matcher_config.minute_fill
+                else None
+            )
+            exit_reference_price = (
+                _minute_fill_reference(
+                    market_data.close,
+                    str(matcher_config.exit_fill),
+                )[start_id:stop_id]
+                if matcher_config.minute_fill
+                else None
+            )
 
             scoring = effective_scoring(s.meta.get("scoring"), overrides)
             try:
@@ -1896,25 +1587,14 @@ class StrategyBacktestService:
                     order_by=s.meta.get("order_by"),
                     descending=bool(s.meta.get("descending", True)),
                     asset_mask=asset_mask_without(market_data.symbols, excluded),
-                    protect_strategy_cache=prepared is not None,
                 )
-                if prepared is None:
-                    signal_matrix = MatrixStrategyPipeline().run(
-                        s.matrix_strategy,
-                        market_data,
-                        params,
-                        pipeline_config,
-                        timing_ms,
-                    )
-                else:
-                    with prepared.compute_cache.activate(market_data):
-                        signal_matrix = MatrixStrategyPipeline().run(
-                            s.matrix_strategy,
-                            market_data,
-                            params,
-                            pipeline_config,
-                            timing_ms,
-                        )
+                signal_matrix = MatrixStrategyPipeline().run(
+                    s.matrix_strategy,
+                    market_data,
+                    params,
+                    pipeline_config,
+                    timing_ms,
+                )
             except (TypeError, ValueError) as e:
                 return _err(f"矩阵策略信号计算失败: {e}")
 
@@ -2055,7 +1735,6 @@ class StrategyBacktestService:
                 matcher_config,
                 progress_cb,
                 cancel_event,
-                result_policy.simulation_options(),
                 formal_end=config.end,
             )
         else:
@@ -2064,7 +1743,6 @@ class StrategyBacktestService:
                 matcher_config,
                 progress_cb,
                 cancel_event,
-                result_policy.simulation_options(),
             )
         timing_ms["simulate"] = round((time.perf_counter() - t_sim) * 1000, 1)
         timing_ms["statistics"] = float(result.stats.pop("statistics_ms", 0.0))
@@ -2093,36 +1771,29 @@ class StrategyBacktestService:
         result.stats["exchange_coverage_warnings"] = exchange_coverage_warnings
         result.stats["excluded_symbols"] = excluded_symbols
         result.stats["minimum_commission"] = config.minimum_commission
-        result.stats["shared_market_data"] = prepared is not None
         result.stats["matrix_data_cache_hit"] = matrix_data_cache_hit
         result.stats["matrix_data_cache_status"] = matrix_data_cache_status
         result.stats["matrix_data_cache_timing_ms"] = dict(matrix_data_cache_timing_ms)
-        if prepared is not None:
-            result.stats["shared_market_data_bytes"] = prepared.market_data.nbytes
-            result.stats["shared_prepare_timing_ms"] = prepared.prepare_timing_ms
-            result.stats["matrix_compute_cache"] = prepared.compute_cache.snapshot()
 
-        benchmark_curve: list[dict] = []
-        if result_policy.include_benchmark:
-            start_text, end_text = str(config.start), str(config.end)
-            sessions = [
-                label[:10]
-                for label in market_matrix.timestamp_labels
-                if start_text <= label[:10] <= end_text
-            ]
-            benchmark_curve, benchmark_info, benchmark_return = self._build_benchmark(
-                config.start, config.end, sessions,
-            )
-            total_return = result.stats.get("total_return")
-            # Full-mode total_return compounds candidate samples, not an account, so it has no excess.
-            excess = (
-                round(float(total_return) - benchmark_return, 4)
-                if config.mode != "full" and benchmark_return is not None and total_return is not None
-                else None
-            )
-            result.stats["benchmark"] = benchmark_info
-            result.stats["benchmark_return"] = benchmark_return
-            result.stats["excess"] = excess
+        start_text, end_text = str(config.start), str(config.end)
+        sessions = [
+            label[:10]
+            for label in market_matrix.timestamp_labels
+            if start_text <= label[:10] <= end_text
+        ]
+        benchmark_curve, benchmark_info, benchmark_return = self._build_benchmark(
+            config.start, config.end, sessions,
+        )
+        total_return = result.stats.get("total_return")
+        # Full-mode total_return compounds candidate samples, not an account, so it has no excess.
+        excess = (
+            round(float(total_return) - benchmark_return, 4)
+            if config.mode != "full" and benchmark_return is not None and total_return is not None
+            else None
+        )
+        result.stats["benchmark"] = benchmark_info
+        result.stats["benchmark_return"] = benchmark_return
+        result.stats["excess"] = excess
 
         # 构建策略信息
         strategy_info = {
@@ -2155,29 +1826,19 @@ class StrategyBacktestService:
                 if s.execution_backend == "composite"
                 else {}
             ),
-        } if result_policy.include_strategy_info else {}
-
-        selected_stats = result_policy.select_stats(result.stats)
+        }
 
         elapsed = (time.perf_counter() - t0) * 1000
 
         return StrategyBacktestResult(
             run_id=run_id,
             config=self._config_to_dict(config),
-            stats=selected_stats,
-            equity_curve=result.equity_curve if result_policy.include_curves else [],
-            drawdown_curve=result.drawdown_curve if result_policy.include_curves else [],
+            stats=result.stats,
+            equity_curve=result.equity_curve,
+            drawdown_curve=result.drawdown_curve,
             benchmark_curve=benchmark_curve,
-            trades=(
-                [self._trade_to_dict(t) for t in result.trades]
-                if result_policy.include_trades
-                else []
-            ),
-            per_symbol_stats=(
-                result.per_symbol_stats
-                if result_policy.include_per_symbol_stats
-                else []
-            ),
+            trades=[self._trade_to_dict(t) for t in result.trades],
+            per_symbol_stats=result.per_symbol_stats,
             strategy_info=strategy_info,
             elapsed_ms=round(elapsed, 1),
         )

@@ -115,7 +115,7 @@ def _plan(strategy: StrategyDef, *, entry_signals=(), exit_signals=()):
 
 def test_the_calendar_days_per_session_ratio_is_defined_once():
     literals = []
-    for name in ("strategy.py", "mining_runtime.py", "factor.py"):
+    for name in ("strategy.py",):
         tree = ast.parse((BACKTEST_DIR / name).read_text(encoding="utf-8"))
         literals += [
             f"{name}:{node.lineno}"
