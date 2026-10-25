@@ -209,7 +209,7 @@ export function Auth() {
               <p>
                 詳細配置說明見{' '}
                 <a
-                  href="https://github.com/Itoy1212/TWstockfor_tick-stock-panel/blob/main/docs/deploy-password.md"
+                  href="https://github.com/Itoy1212/TWstockfor_tick-stock-panel/blob/main/docs/deployment.md#訪問密碼設置公網部署必讀"
                   target="_blank"
                   rel="noreferrer"
                   className="text-accent underline-offset-2 hover:underline"
