@@ -169,7 +169,7 @@
 | 7 前端顯示與狀態 | 程式已完成（2026-10-24），待瀏覽器檢查 | 7A 版面與共用函式庫：`4551cf8`；7B 圖表與個股頁：`5c6193a`；7C 選股與自選：`dd4534d`；7D 看板、監控中心、策略頁：`d48dc76`；7E 設定頁：`78d7e89`。合併後的後端全套：5330 passed、1 xfailed、12 deselected，1 failed（`test_stage2_master_refresh` 偶發，單獨重跑通過）；前端 tsc 通過，vitest 757 passed，`pnpm build` 通過（2026-10-24，echarts chunk 1.03 MB 有大小警告）。手動檢查清單見下方 |
 | 8 效能 | 已完成（2026-10-25） | B049、B064：`ba5a9be`；B056、B053：`08f997f`。合併後的後端全套：5374 passed、1 skipped、1 xfailed、12 deselected，0 failed；前端 tsc 通過，vitest 770 passed，`pnpm build` 通過。量測與後續事項見下方 |
 | 9 Dead code 與遺留移除 | 已完成（2026-10-25） | 第一輪：`1b7d67c`（前端）、`4505586`（後端）；第二、三輪：`b073f5f`（ext 設定快取修正）、`da2efe8`（前端）、`2e87ed3`（後端，含台股 ETF asset_type 修正）；mining 移除：`a99262d`。最後的後端全套 4700 passed、1 xfailed，0 failed；前端 tsc 通過，vitest 771 passed，`pnpm build` 通過。後續事項見下方 |
-| 10 文件與冗餘檔案 | 未開始 | 待 D9 |
+| 10 文件與冗餘檔案 | 已完成（2026-10-25） | 提交紀錄見 git log；連結檢查 0 錯；後續事項見下方 |
 
 ### 階段 0 留下的後續事項
 
@@ -199,7 +199,7 @@
 
 1. Docker：`docker compose up --build` 後 `curl http://127.0.0.1:3018/health`，應回 VERSION 的版本；確認容器啟動時沒有重新安裝開發工具。
 2. Linux 桌面版：以 `platforms=linux` 跑 release workflow，確認 Qt 步驟與 QtWebEngineProcess 檢查通過，並在有桌面的 Linux 上實際開出視窗。
-3. Windows 桌面版：本機打包後確認 `_internal/app/strategy/prompts/*.md` 與 `app.custom` 存在；不帶 `/D` 執行 ISCC，產物版本應為 VERSION；先裝到非預設目錄再升級，確認沿用原目錄。
+3. Windows 桌面版：本機打包後確認 `_internal/app/custom` 存在（AI 提示詞在階段 9 已不再打包）；不帶 `/D` 執行 ISCC，產物版本應為 VERSION；先裝到非預設目錄再升級，確認沿用原目錄。
 
 後續事項：
 
@@ -359,6 +359,22 @@
 4. 台股 ETF 價位用的是股票的升降單位（`_TICK_CLASSES["etf"]` 不可達），屬既有問題。
 5. 階段 10 要同步的文件：`CONTRIBUTING.md`（`app/tickflow/`、優化與步進優化、lightweight-charts）、`docs/configuration.md`（已刪端點、mining 發佈、TICKFLOW_API_KEY）、`docs/deployment.md`、`docs/plugin-development.md`（回退 TickFlow、`plugins/` 目錄）、`docs/taiwan-data-sources.md`（`/api/data/status`）、`docs/radar-strategies-validation.md`（optimizer）、`.env.example`；audit README 階段 2 的實機步驟仍提到已不再打包的 prompts。
 6. 本階段有三次 subagent 讀到正式 data/（遞迴 grep、未隔離的驗證腳本），都沒有寫入；派工限制已改為明列「不得從 repo 根目錄遞迴、驗證腳本必須設 DATA_DIR」。
+
+### 階段 10 處置與後續事項
+
+處置摘要：
+
+1. D9：刪除 `screenshots/`、`gui-test-screenshots/`、`community-qr-code.jpg` 與未使用的 `packaging/tickflow-logo.svg`；`frontend/vite.config.d.ts` 移出版控；`docs/deploy-password.md` 併入 `docs/deployment.md`；`docs/features.md` 併入操作說明書後刪除，README 只留簡介與文件導覽。
+2. 使用者與開發者文件依現行程式改寫（頁面、設定分頁、排程、AI 用途、插件能力、環境變數與優先級、Docker 建置參數、模組邊界），並修正 findings.md「文件」區 18 項。
+3. 兩份計畫文件移到 `docs/archive/`；`docs/audit-2026-09-24/` 與 `docs/code-review-2026-09-22.md` 加封存註記，A03#6、A06#10、G05#7 改判已修正。
+4. redundant-files.md 的 55 項都有處置；其中多數程式與測試項目已在階段 9 刪除。
+
+後續事項：
+
+1. 選股頁的排程說明只寫 16:30，文字來自 `backend/app/taiwan/daily_update.py:104`、`:506`，沒有提 21:40 的資券更新。
+2. 舊審查其他條目在 `1724b12` 之後沒有重判；本目錄的 findings.md 與 verification.md 仍以文字提到已移到 `docs/archive/` 的計畫文件路徑，屬於當時的紀錄，不改。
+3. `.dockerignore` 仍有 `screenshots` 一行，無害。
+4. `frontend/src/pages/StrategyBacktest.test.tsx` 在工作區仍有一段與既有測試重複的新增測試，來源不明，未提交。
 
 ## 維護方式
 
