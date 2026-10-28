@@ -1,0 +1,158 @@
+# 個股頁「體質與估值定位」與「觸發的訊號」規劃（2026-10-27）
+
+> 評估基準：HEAD `3c4afc7`（分支 `feat/market-filter-volume-patterns`）。評估日 2026-10-27，外部網站查證日 2026-10-27（台北時間；上櫃券商分點一列為 2026-10-28）。本目錄所有行號都對這個版本；之後改過的檔案請以函式名稱重新定位。
+> 本頁是入口與決策正本：結論、待決事項、分期與完成條件以本頁為準。finlab 頁面盤點在 [finlab-reference.md](finlab-reference.md)，逐項差距在 [capability-gap.md](capability-gap.md)，官方歷史資料端點與回補估算在 [data-sources.md](data-sources.md)。
+> 對照對象是 finlab 個股頁 <https://finlab.finance/stocks/6491>。原始需求寫的 `/stocks/64916` 回 HTTP 404、sitemap 也沒有這個代號，推測原意是 6491（推論）。finlab 盤點只有撰寫者自行讀回，未經獨立驗收。
+> 標示方式：「事實」附行號連結或外部 URL；「推論」由事實推得、未直接驗證；「未查明」是查不到或沒有查。文中提到的新端點、元件、store、模組一律是「提案，尚不存在」，不是既有 API。
+
+## 文件導覽
+
+| 檔案 | 內容 | 什麼時候看 |
+|---|---|---|
+| README.md（本頁） | 結論、修正進度的影響、待決事項、分期與完成條件、維護方式、已知文件漂移 | 決策與排工 |
+| [finlab-reference.md](finlab-reference.md) | finlab 個股頁 14 區塊、9 指標與分級規則、3 個訊號的定義與統計、資料需求、查證方法與限制 | 確認對照基準 |
+| [capability-gap.md](capability-gap.md) | finlab 每個區塊、指標、訊號對到本專案現況，判定、所需改動與規模 | 實作前查依據 |
+| [data-sources.md](data-sources.md) | 已查證的官方歷史端點、最早日期、限制、6G 衝突、回補量估算 | 決定 PD2、做資料層 |
+
+## 目前結論
+
+1. 現在就能做，不需新資料源、不違反 6G：
+   - 「體質與估值定位」的當日全市場百分位。9 個指標中 7 個可直接做；ROE 改用年初至今累計年化、營業利益率改用年初至今累計，並在畫面標明口徑與期別。
+   - 「這檔目前觸發的訊號」：重用逐日存檔的內建 `signal_*`、漲跌停訊號、`vp_*`、自訂 `csg_*`、策略入選與近期警示。
+   - 同產業排名（產業分類只有一層）。
+
+   理由：這三項只拿「當日的目前參考值」做橫斷面排名，或只用價量與籌碼資料，不建立基本面歷史，也不進回測。6G 禁止的是把沒有可用時間的基本面當成歷史使用（[data-sources.md](data-sources.md) 第 4 節）。
+2. 卡在 6G 政策，而不是缺資料：合理價與本益比河流圖、近 8 季財報、近 12 個月營收、營收訊號的歷史勝率、估值分桶回測。官方有估值與月營收的歷史端點，但本專案依 6G 不建立沒有可用時間的基本面歷史，要做須先決定 PD1、PD2。
+3. 不建議做：主力分點（使用條件不允許）、概念股與上下游（沒有官方資料）、預測遊戲（價值低）。
+
+另外，技術面訊號的歷史統計只用價格，第一期就能做，但沒有現成程式，須新寫；日 K 從 2024-01-02 起，樣本數要一起顯示。
+
+## 目前修正進度的影響
+
+依 [2026-10-22 稽核的進度表](../audit-2026-10-22/README.md#L160-L172)，並以 HEAD 程式核對：
+
+| 項目 | 現況 | 對本規劃的影響 |
+|---|---|---|
+| 階段 0–10 | 都已完成程式；階段 2 待實機驗證（[README:164](../audit-2026-10-22/README.md#L164)），階段 7 待瀏覽器檢查（[README:169](../audit-2026-10-22/README.md#L169)） | 本規劃不依賴這兩項待驗證的內容。個股頁與預覽框的手動檢查（[README:297](../audit-2026-10-22/README.md#L297)）尚未做，新區塊上線時一起檢查 |
+| B049、B064 | 已修（`ba5a9be`），個股頁不再每次下載全市場法人與融資表 | 新區塊不得把全市場下載帶回個股頁的請求路徑；全市場排名只能用已存資料或每日一次的快取 |
+| B006–B008 | 已修（`70725a3`），有回歸測試 | 訊號歷史統計沿用 `strategy_pick_performance` 的口徑（次日開盤進場），不另訂一套 |
+| 舊財務欄位與 `/api/financials/metrics` | 已移除（`4505586`）；資訊列只剩市值、換手、量、振幅、開高低（[stock-info-fields.ts:22-33](../../frontend/src/lib/stock-info-fields.ts#L22-L33)） | 沒有可沿用的 A 股財務路徑；新的基本面一律走 `backend/app/taiwan` 的官方 adapter |
+| 歷史層 `TaiwanFundamentalStore` | 已在 `2e87ed3`（階段 9）刪除，HEAD 沒有基本面歷史層 | PD1 若同意，是新建一層「僅供顯示」的歷史，不是恢復舊的 point-in-time 介面 |
+| B201（仍開著） | 部分修正：已有每日快取與重試，但類別迴圈只吞 `LookupError`，資產負債表的請求不在 try 內（[fundamentals.py:181-190](../../backend/app/taiwan/fundamentals.py#L181-L190)），重試用完仍失敗時整張卡錯誤 | 體質卡要讀全市場財報清單；建議第一期一起處理，讓 ROE 與營業利益率個別降級，不拖垮整張卡 |
+| D301（仍開著） | 回測財務因子模組沒有寫入端（[dead-code.md:315](../audit-2026-10-22/dead-code.md#L315)、[README:358](../audit-2026-10-22/README.md#L358)），讀的是 `financials/metrics/part.parquet`（[backtest/fundamentals.py:50](../../backend/app/backtest/fundamentals.py#L50)） | 任何新 store 都不得寫到這個路徑，否則回測會開始讀到沒有可用時間的基本面，違反 6G |
+
+## 需要先決定的事項
+
+編號用 PD，避免與 2026-10-22 稽核的 D1–D9 混淆。每項附建議與替代方案；決定後記在本節的「已定案」。
+
+| 編號 | 問題 | 建議 | 替代方案 | 影響 |
+|---|---|---|---|---|
+| PD1 | 要不要在 6G 之外新增「僅供顯示」的基本面與估值歷史層？ | 可以加，但明文禁止進入回測、選股歷史與任何 as-of 查詢，6G 對回測的規則不變。用途標記可沿用既有的 `historical_reference`（[current_data.py:16](../../backend/app/taiwan/current_data.py#L16)），但它目前的定義是「有官方歷史證據、沒有正式匯入」（[taiwan-data-sources.md:748-749](../taiwan-data-sources.md#L748-L749)），要改寫成「有正式匯入、僅供顯示」；`available_at` 維持 None。風險：遲交或更正的公司，回溯取得的值可能是事後修正過的數字，仍有前視偏差，畫面須標示「回溯取得的歷史值，非當時可得」 | 維持 6G，不做任何歷史類功能，第二期整期取消 | 決定第二期哪些功能成立 |
+| PD2 | 要不要接新資料源並回補：TWSE `BWIBBU_d`、TPEx `peQryDate`、MOPS `t21sc03`、MI_INDEX 報酬指數、TDCC 週資料？ | PD1 同意後才接基本面與估值類。回補須節流、可續傳；估值一天一請求，5 年兩市場約 2,500 次（[data-sources.md](data-sources.md) 第 5 節）。新增資料源須同步 `docs/custom-data-source.md` 或 `docs/plugin-development.md` 的契約（[CONTRIBUTING.md:139](../../CONTRIBUTING.md#L139)）。MI_INDEX 報酬指數只是把已經抓回的表落地，從上線日起累積屬第一期；要回補過去日期才需要 PD2 | 只接報酬指數回補與 TDCC 週資料（都不碰 6G），估值與營收維持目前參考 | 第二期的資料範圍、第三期 |
+| PD3 | 確認不做主力分點、概念股、上下游、預測遊戲？ | 確認不做。主力分點：TWSE 查詢頁需圖形驗證碼並註明不得散布或販售，TPEx 需驗證非機器人且只提供當日；概念股與上下游：沒有官方資料；預測遊戲：要另建群眾統計後端，對本專案價值低。主力分點的需求由第三期的集保大戶比例部分替代 | 改列「暫緩」：不排入任何一期，但保留在本頁，官方開放相關資料時重新評估 | 範圍確認，不影響第一期 |
+
+依賴關係：PD1 決定第二期哪些功能成立；PD2 決定第二期與第三期的資料來源；PD3 只是確認範圍。
+
+即使 PD1 同意，下列兩項仍不開放：營收訊號的歷史勝率、估值分桶後的後續報酬（含估值×動能）。兩者都是以歷史基本面為條件去算之後的報酬，屬回測性質，PD1 明文禁止；而且 finlab 的營收事件日用「公告截止日後第一個交易日」，正是 6G 明列拒絕的對應方式（[6G:72-80](../taiwan-fundamentals-availability-phase-6g.md#L72-L80)）。要開放須另立決策，並先解決可用時間。
+
+已定案：（尚無）
+
+## 分期與完成條件
+
+### 共通約束
+
+1. 新端點、元件、store、模組都是提案，名稱在實作時定；文中的範例名稱不得寫成既有 API。
+2. 路由頁 `TaiwanStockDetail.tsx` 沒有擴展插槽；`frontend/src` 內的 `<ExtensionSlot` 只在 `Layout.tsx`、`StockPreviewDialog.tsx`、`Watchlist.tsx`。新區塊兩案擇一，第一期開工前選定並記在本頁：
+   - 甲案：直接改核心頁（[secondary-development.md](../secondary-development.md#L57-L72) 的 L3）。改動集中、少一層抽象；之後合併上游時要複核這個檔。
+   - 乙案：先在路由頁加一個型別化插槽（提案，尚不存在），新區塊以擴展註冊接入。依 [secondary-development.md:151](../secondary-development.md#L151)，要同時定義 context 型別、異常隔離與測試，並跑[插槽驗證](../secondary-development.md#L363-L369)（無註冊、單註冊、多註冊排序、異常隔離、窄屏、建置）。
+   - 兩案都要讓預覽對話框內嵌的 `TaiwanStockDetail`（[StockPreviewDialog.tsx:454-460](../../frontend/src/components/StockPreviewDialog.tsx#L454-L460)）同樣顯示，不另寫第二份。
+3. API 層保持薄，全市場計算放 `backend/app/taiwan/` 的服務模組（[CONTRIBUTING.md:67](../../CONTRIBUTING.md#L67)）；請求與型別加在 `frontend/src/lib/api.ts`，查詢鍵加在 `queryKeys.ts`（[CONTRIBUTING.md:76-78](../../CONTRIBUTING.md#L76-L78)）。
+4. 比例單位在邊界明確轉換並加單位測試：官方月營收年增率是百分數（[fundamentals.py:169](../../backend/app/taiwan/fundamentals.py#L169)），enriched 的 `momentum_60d` 是小數（[pipeline.py:637-638](../../backend/app/indicators/pipeline.py#L637-L638)）；禁止「小於 1 就乘 100」這類啟發式（[CONTRIBUTING.md:97](../../CONTRIBUTING.md#L97)）。
+5. 視窗一律以交易日計（[CONTRIBUTING.md:114](../../CONTRIBUTING.md#L114)）。個股頁現有的法人 5 日窗口以已存分區計（[稽核 README:265](../audit-2026-10-22/README.md#L265)），20 日強度不得沿用這個做法。
+6. 每個資料日期只算一次並快取，快取鍵包含資料集與資料日期（[CONTRIBUTING.md:181](../../CONTRIBUTING.md#L181)）；持鎖期間不發網路請求（CONTRIBUTING.md 6.2）。
+
+### 第一期：不碰 6G、不需新資料源
+
+| 編號 | 項目 | 內容 |
+|---|---|---|
+| 1-1 | 目前訊號區塊 | 列出這檔在最新已發佈 enriched 分區中成立的 `signal_*`（技術 16 個、漲跌停 4 個）、`vp_*`（6 個）、`csg_*`；目前入選的內建策略（策略快取依代號過濾）；近 7 日警示（detail 已有）。每項附中文名稱與資料日期 |
+| 1-2 | 體質與估值定位卡 | 9 指標的當日全市場百分位、指標等級、構面等級；口徑見 [capability-gap.md](capability-gap.md) 第 3 節 |
+| 1-3 | 同產業排名 | 同一產業內排 20 日漲跌、外資與投信 20 日買超強度、本益比；與 1-2 共用同一份全市場計算 |
+| 1-4 | 毛利欄位解析 | 財報加讀「營業毛利（毛損）」或「營業毛利（毛損）淨額」，可算年初至今累計毛利率 |
+| 1-5 | 報酬指數落地 | MI_INDEX 回應中的發行量加權股價報酬指數表改為存檔，從上線日起累積 |
+| 1-6 | 技術面訊號 20／60 日統計 | 這檔每個技術面訊號歷史觸發後 20、60 日的報酬統計，附樣本數 |
+
+完成條件（每項都要可客觀檢查）：
+
+- 1-1
+  1. 以固定樣本分區測試：回應恰好列出成立的欄位；不成立與空值不列；分區缺某個欄位時回「未評估」，不得當成「未觸發」（比照 [watchlist_enrichment.py:206-207](../../backend/app/taiwan/watchlist_enrichment.py#L206-L207) 的處理）。
+  2. 策略入選與 `/api/screener/cached` 同樣經 `_cached_with_realtime`（[screener.py:211-214](../../backend/app/api/screener.py#L211-L214)）取得：先讀盤後快取，再疊上監控引擎較新交易日的結果。兩者標同一個資料日期；快取不存在時回明確狀態。只讀 `read_cache` 會在盤中與 `/cached` 的資料日期不同。
+  3. 成功、無資料、錯誤三種回應各有 API 測試；ETF 與指數各有一例。
+  4. 前端載入、空資料、錯誤、切換代號（不得沿用上一檔的結果）四種狀態可操作；`pnpm build` 通過。
+  5. 不含異常診斷：目前每次請求都做全市場計算、沒有單股入口（[稽核 README:266](../audit-2026-10-22/README.md#L266)）。
+  6. 選配：finlab 的 3 個訊號（252 日新高、外資連 5 買、月營收年增 ≥ 20%）的觸發判定都可做（[capability-gap.md](capability-gap.md) 4.3），是否在 1-1 一併加入於開工前定。建議在 1-1 的服務內以日 K、法人分區與目前月營收即時判定，不改 enriched；若要加成 enriched 欄位，先依 CONTRIBUTING.md 3.4 評估是否提高 `INDICATOR_DEFINITION_VERSION`（[pipeline.py:49](../../backend/app/indicators/pipeline.py#L49)）。
+- 1-2
+  1. 固定樣本的數值斷言：百分位、同值處理、本益比與淨值比反向、缺值排除而不是當 0、母體定義（建議只含上市櫃普通股，ETF 與 TDR 不排名）。
+  2. ROE 標示「年初至今累計年化」、營業利益率標示「年初至今累計」，兩者都標期別；月營收年增率標示資料年月。只與同一期別比較，或在畫面標示期別混雜。
+  3. 百分數與小數的邊界轉換有單位測試。
+  4. 同一資料日期只計算一次；換日失效；某個資料集失敗時只有該指標顯示「無法計算」，其他照常（含 B201 的降級）。
+  5. 畫面標示「目前參考」；百分位不寫入任何歷史檔。
+  6. 以 mock 計數：當日第一次計算的官方請求數符合 [capability-gap.md](capability-gap.md) 3.3 的估算，同日第二次為 0。
+- 1-3：產業只有 1 檔、未分類、TDR（industry 為空）各有測試；畫面顯示排名的分母。
+- 1-4：一般業樣本有值；金融保險等類別沒有這個欄位時為 None，不是 0；`TaiwanReferenceData` 顯示；`docs/taiwan-data-sources.md` 的財報欄位清單同步。
+- 1-5：不增加任何請求；表存在、缺表、標題改變三種樣本各有測試，缺表時明確記錄而不是存 0；沿用回應日期戳記檢查。歷史日期的 MI_INDEX 是否都有這張表未查明，要回補屬 PD2。
+- 1-6
+  1. 口徑沿用 `strategy_pick_performance`：次日開盤進場、前復權含息、不扣成本（[strategy_pick_performance.py:563-571](../../backend/app/services/strategy_pick_performance.py#L563-L571)）；60 日期間須新增（目前只有 1、5、10、20 日，[:33](../../backend/app/services/strategy_pick_performance.py#L33)）。
+  2. 事件要定義去重：`signal_*` 是逐日狀態，例如 60 日新高可能連續多日成立。
+  3. 固定樣本的數值斷言涵蓋訊號日與進場日錯開一個交易日、漲停買不到、缺資料日。
+  4. 樣本數一起顯示；去重後少於 5 次時顯示「樣本不足」而不是數字（5 為提案值，開工前定案並記在本頁）。
+  5. 超額報酬只在報酬指數有覆蓋的期間計算；不得改用不含息的價格指數混算。
+
+對照 [CONTRIBUTING.md 第 9 節](../../CONTRIBUTING.md#L224-L235)：1-1 適用「API 契約」「前端組件或頁面」「前後端契約同時變化」；1-2、1-3 適用「後端純函數」「指標」「緩存或性能」「前端組件或頁面」；1-4、1-5 適用「數據源或插件」；1-6 適用「回測」「指標」。
+
+### 第二期：PD1、PD2 同意後
+
+1. 估值歷史回補（TWSE `BWIBBU_d`、TPEx `peQryDate`），做合理價（本益比與淨值比 5 年分位換算）、本益比／淨值比河流圖、本益比在自身歷史的位階（今日重點用）。同業模型應得價不做，算法未查明。
+2. 月營收 12 個月：MOPS `t21sc03` 回補，之後每月增量。
+3. 財報每季快照：官方 OpenAPI 只有最新一季，只能從上線起每季記一次，8 季要約 2 年才累積完整。
+4. 加深法人回補：放寬 250 個交易日的上限（[enrichment_backfill.py:34-35](../../backend/app/taiwan/enrichment_backfill.py#L34-L35)）；官方最早可查日期未查明。
+
+完成條件：
+
+1. 新 store 標為僅供顯示；回測、選股、比較頁的歷史比較日期都讀不到它，各有一個負向測試；回補後 `load_fundamental_snapshot` 仍回 None（D301 的路徑沒有被寫入）。
+2. `available_at` 一律為 None；任何 as-of 查詢遇到它回「資料不足」（[6G:93-96](../taiwan-fundamentals-availability-phase-6g.md#L93-L96)）。
+3. 回補節流、可續傳、記錄失敗日；測試不連網、不寫正式 `data/`。
+4. 畫面標示「回溯取得的歷史值」。
+5. 適用 CONTRIBUTING.md 第 9 節的「數據源或插件」「緩存或性能」「前後端契約同時變化」；資料源契約文件同步。
+
+### 第三期：從現在起累積
+
+1. 集保股權分散：TDCC 開放資料只有最新一週，每週抓一次、從現在起累積；累積滿 4 週才顯示大戶比例變化（4 週為提案值，開工前定案並記在本頁）。是否接由 PD2 決定。
+2. 完成條件：每週排程、缺週記錄、單位（張與股）有測試；週數不足時顯示「累積中」。
+
+### 不排入
+
+主力分點、概念股、上下游、預測遊戲（PD3）；同業模型應得價（算法未查明）；Email 通知（未查明，見 [capability-gap.md](capability-gap.md) 區塊 14）。
+
+## 進度
+
+| 期別 | 狀態 | 備註 |
+|---|---|---|
+| 第一期 | 未開始 | 開工前選定甲案或乙案 |
+| 第二期 | 待 PD1、PD2 | — |
+| 第三期 | 待 PD2 | — |
+
+## 維護方式
+
+- 決策定案後，寫進「需要先決定的事項」的「已定案」。
+- 每完成一項，在「進度」記下提交與項目編號；本目錄其他檔保留評估當時的紀錄，不改寫結論。
+- 實作後，資料源事實（端點、欄位、單位、更新時點、限制）移入 `docs/taiwan-data-sources.md`；本目錄的 data-sources.md 只留作查證紀錄。
+- 行號只對 `3c4afc7` 有效，引用前以函式名稱重新定位。
+- finlab 改版時不追改 finlab-reference.md；需要時重新盤點，另記日期。
+
+## 已知文件漂移（只記錄，本次不修）
+
+1. [taiwan-data-sources.md:771-777](../taiwan-data-sources.md#L771-L777) 仍寫 `TaiwanFundamentalStore` 是 point-in-time 介面、`research_context.py` 是它的消費者；這個 class 已在 `2e87ed3` 刪除，HEAD 的 `backend/`、`frontend/` 搜尋 0 筆。
+2. [稽核 README:308](../audit-2026-10-22/README.md#L308) 說資訊列財務欄位仍走 A 股 financial、比較頁的 `TaiwanFundamentalStore` 沒有寫入端；HEAD 資訊列已沒有財務欄位，store 也已刪除。屬階段 7 當時的紀錄。
+3. [稽核 README:309](../audit-2026-10-22/README.md#L309) 說 `SIGNAL_FIELDS` 含不存在的 `signal_broken_board_recovery`；HEAD 已沒有這個字串（[stock-table.ts:20-34](../../frontend/src/lib/stock-table.ts#L20-L34)），但跌停與 MA5／MA10 訊號仍缺。
+4. [watchlist_enrichment.py:19](../../backend/app/taiwan/watchlist_enrichment.py#L19) 的模組說明寫漲停與連板相關的 `signal_*` 維持 None，但同檔 [:54-61](../../backend/app/taiwan/watchlist_enrichment.py#L54-L61) 實際讀了 13 個訊號欄位（含漲停、跌停）與連板數（程式內說明與程式不符）。
