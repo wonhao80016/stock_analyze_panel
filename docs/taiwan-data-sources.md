@@ -591,6 +591,20 @@ live samples are recorded in
 
 第 4 階段（2026-10-10）起，每個交易日在自己的盤後發佈時算出的換手率會保留，之後的重新發佈沿用已發佈的值；重算更早的日子仍然 fail-closed，不用目前股本回推。細節見上述文件的「第 4 階段」小節。
 
+個股頁「股本資料」的來源：
+
+- 先即時查詢官方公司資料（`source` 為 `twse:share_capital_record` 或 `tpex:share_capital_record`），來源列顯示「即時查詢」與取得時間。
+- 只有清單取不到時（非 JSON、HTTP 錯誤、逾時、格式改變，包括失敗快取期間），才退回盤後排程落地的 `data/taiwan/share_capital.parquet`（`TaiwanShareCapitalStore`，接點在 `TaiwanOfficialFundamentals.share_capital`）。這時 `source` 為 `twse:share_capital_store` 或 `tpex:share_capital_store`，`retrieved_at` 是該次盤後刷新的時間，`period_end` 是出表日期，`values.live_error` 記錄即時查詢失敗的原因。前端來源列顯示「即時查詢失敗，改用盤後存檔」與刷新時間。
+- 存檔只保存已發行普通股數，所以退回存檔時 `capital_twd` 與面額欄位是 null，畫面顯示 `--`。
+- 清單取到了但沒有該代號時，維持 `LookupError`，不退回存檔：官方當日清單沒有這檔，代表它可能已下市或改代號，存檔的舊值不該掩蓋這件事。存檔也沒有該代號或檔案不存在時，維持 error 段。
+- 兩種來源都是目前參考值：`status=data_insufficient`、`available_at=None`，不進歷史或回測。
+
+官方 JSON 清單的共用取值（`TaiwanOfficialFundamentals._rows`）：
+
+- 回應無法解析為 JSON 時（例如 TWSE 回 HTTP 200 的 HTML 資安阻擋頁），錯誤原因寫成 `upstream returned non-JSON response (<Content-Type>)`。
+- 取值失敗後，同一個 URL 在同一個台北日期內 5 分鐘（`FAILURE_CACHE_SECONDS`）不再重打，直接回報同一個錯誤。
+- 成功的清單仍然每個台北日期只下載一次；空清單仍然不快取。
+
 ## Official fundamentals availability investigation (Phase 6C.1)
 
 Investigation on 2026-08-31 distinguished an official timestamp from a safe

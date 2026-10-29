@@ -24,13 +24,6 @@ const USAGE_LABELS: Record<TaiwanUsageScope, string> = {
   unsupported: '不適用',
 }
 
-function statusLabel(section: TaiwanDataSection) {
-  if (section.status === 'data_insufficient' && section.usage_scope === 'current_reference') {
-    return '目前參考'
-  }
-  return STATUS_LABELS[section.status] ?? section.status
-}
-
 function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -39,6 +32,29 @@ function record(value: unknown): Record<string, unknown> {
 
 function present(value: unknown): value is string | number {
   return typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')
+}
+
+// Company records keep their figures under `values`, where `reason` explains a missing capability.
+function hasValues(section: TaiwanDataSection) {
+  const data = record(section.data)
+  const values = 'values' in data ? record(data.values) : data
+  return Object.entries(values).some(([key, value]) => key !== 'reason' && present(value))
+}
+
+// The usage badge already marks a current reference, so this badge only tells whether official figures arrived.
+function statusLabel(section: TaiwanDataSection): string | null {
+  if (section.status === 'data_insufficient' && section.usage_scope === 'current_reference') {
+    return hasValues(section) ? STATUS_LABELS.official : null
+  }
+  return STATUS_LABELS[section.status] ?? section.status
+}
+
+// retrieved_at carries the Taipei offset, so its leading characters are Taipei wall-clock time.
+function capitalSourceDetail(section?: TaiwanDataSection) {
+  const retrievedAt = record(section?.data).retrieved_at
+  if (!section || !present(retrievedAt)) return null
+  const kind = section.source?.endsWith(':share_capital_store') ? '即時查詢失敗，改用盤後存檔' : '即時查詢'
+  return `${kind} ${String(retrievedAt).slice(0, 16).replace('T', ' ')}`
 }
 
 function numberValue(value: unknown): number | null {
@@ -104,25 +120,30 @@ function DataRow({ label, value }: { label: string; value: string }) {
 function SectionCard({
   title,
   section,
+  sourceDetail,
   children,
 }: {
   title: string
   section?: TaiwanDataSection
+  sourceDetail?: string | null
   children: React.ReactNode
 }) {
   if (!section) return null
   const failed = section.status === 'error'
+  const status = statusLabel(section)
   return (
     <article className="rounded-2xl border border-border bg-surface p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h4 className="text-sm font-bold text-foreground">{title}</h4>
         <div className="flex flex-wrap items-center justify-end gap-1.5 text-[10px]">
-          <span className={cn(
-            'rounded-full px-2 py-0.5 font-medium',
-            failed ? 'bg-rose-500/10 text-rose-500' : 'bg-accent/10 text-accent',
-          )}>
-            {statusLabel(section)}
-          </span>
+          {status && (
+            <span className={cn(
+              'rounded-full px-2 py-0.5 font-medium',
+              failed ? 'bg-rose-500/10 text-rose-500' : 'bg-accent/10 text-accent',
+            )}>
+              {status}
+            </span>
+          )}
           <span className="rounded-full bg-elevated px-2 py-0.5 text-muted">
             {USAGE_LABELS[section.usage_scope]}
           </span>
@@ -137,7 +158,7 @@ function SectionCard({
         </div>
       ) : children}
       <div className="mt-3 flex flex-wrap justify-between gap-2 border-t border-border/60 pt-2 text-[10px] text-muted">
-        <span>來源：{section.provider || section.source || '--'}</span>
+        <span>來源：{section.provider || section.source || '--'}{sourceDetail ? `・${sourceDetail}` : ''}</span>
         <span>{section.available_at ? `可用時間：${section.available_at}` : '未提供可驗證的首次公開時間'}</span>
       </div>
     </article>
@@ -189,7 +210,7 @@ function StockSections({ sections, isTdr }: { sections: Record<string, TaiwanDat
           <DataRow label="殖利率" value={percent(valuationValues.dividend_yield)} />
         </div>
       </SectionCard>
-      <SectionCard title="股本資料" section={capital}>
+      <SectionCard title="股本資料" section={capital} sourceDetail={capitalSourceDetail(capital)}>
         <div className="text-xs">
           <DataRow label="出表日期" value={text(capitalData.period_end)} />
           <DataRow label={isTdr ? 'TDR原股發行股數' : '已發行普通股數'} value={number(capitalValues.issued_shares, 0)} />

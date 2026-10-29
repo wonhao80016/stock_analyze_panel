@@ -12,19 +12,26 @@ import re
 import threading
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, timedelta
+from time import monotonic
 from typing import Any
 
 import httpx
+import polars as pl
 
 from app.taiwan.providers.snapshot_provider import get_with_retry
 from app.taiwan.providers.taiwan_values import MISSING_VALUES, TAIPEI, parse_number, parse_taiwan_date
 from app.taiwan.realtime.calendar import taipei_today
+from app.taiwan.share_capital_store import TPEX_URL, TWSE_URL, TaiwanShareCapitalStore
 
 STATEMENT_CATEGORIES = ("ci", "basi", "bd", "fh", "ins", "mim")
 NORMALIZED_STATUSES = {
     "official", "third_party", "third_party_fallback", "unsupported",
     "data_insufficient", "stale", "schema_changed", "error",
 }
+# Long enough that reopening a page does not hit a blocked endpoint again, short enough to
+# notice its recovery within the same session.
+FAILURE_CACHE_SECONDS = 300.0
+SHARE_CAPITAL_ARCHIVE_SOURCE = "share_capital_store"
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -145,15 +152,22 @@ class TaiwanOfficialFundamentals:
 
     Each market-wide list is downloaded at most once per Taipei date per instance, so a list the
     exchange republishes later that day is not seen until the next date. Transport errors and HTTP
-    5xx are retried (get_with_retry).
+    5xx are retried (get_with_retry); a list that still fails is not asked for again for
+    FAILURE_CACHE_SECONDS within the same Taipei date.
     """
 
     TWSE = "https://openapi.twse.com.tw/v1"
     TPEX = "https://www.tpex.org.tw/openapi/v1"
 
-    def __init__(self, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        share_capital_store: TaiwanShareCapitalStore | None = None,
+    ) -> None:
         self.client = client or _official_client()
+        self._share_capital_store = share_capital_store
         self._rows_cache: dict[tuple[str, date], tuple[list[dict[str, Any]], datetime]] = {}
+        self._failure_cache: dict[tuple[str, date], tuple[float, Exception]] = {}
         self._rows_cache_lock = threading.Lock()
 
     def monthly_revenue(self, symbol: str, exchange: str, *, security_type: str = "stock") -> FundamentalRecord:
@@ -224,11 +238,23 @@ class TaiwanOfficialFundamentals:
         return self._record(symbol, "valuation", trade_date, row, exchange, url, retrieved, values, "ratio", None)
 
     def share_capital(self, symbol: str, exchange: str, *, security_type: str = "stock") -> FundamentalRecord:
-        """Return the official current/reference capital snapshot without historical inference."""
+        """Return the official current/reference capital snapshot without historical inference.
+
+        The live company profile is authoritative. Only when its list cannot be fetched is the
+        after-close archive (TaiwanShareCapitalStore) used; a symbol absent from a fetched list
+        stays a LookupError.
+        """
         if security_type == "etf":
             return self._unsupported(symbol, "share_capital_record")
         path = "opendata/t187ap03_L" if exchange == "TWSE" else "mopsfin_t187ap03_O"
-        url, row, retrieved = self._company_row(symbol, exchange, path)
+        try:
+            url, rows, retrieved = self._rows(exchange, path)
+        except Exception as exc:
+            archived = self._archived_share_capital(symbol, exchange, exc)
+            if archived is None:
+                raise
+            return archived
+        row = _find_row(rows, symbol, path)
         report_date = parse_taiwan_date(str(row.get("出表日期") or row.get("Date"))).isoformat()
         values = {
             "total_shares": None,
@@ -244,6 +270,43 @@ class TaiwanOfficialFundamentals:
         return self._record(
             symbol, "share_capital_record", report_date, row, exchange, url,
             retrieved, values, "structured", None,
+        )
+
+    def _archived_share_capital(
+        self, symbol: str, exchange: str, live_error: Exception
+    ) -> FundamentalRecord | None:
+        """The archive's row for *symbol*, or None when the archive is absent or lacks it.
+
+        The archive keeps issued shares only, so capital and par value stay null; ``live_error``
+        records why the live profile was not used.
+        """
+        store = self._share_capital_store or TaiwanShareCapitalStore()
+        rows = store.load().filter(pl.col("symbol") == symbol)
+        if rows.is_empty():
+            return None
+        row = rows.row(0, named=True)
+        try:
+            retrieved = _datetime(row.get("retrieved_at"))
+        except ValueError:
+            return None
+        if retrieved is None:
+            return None
+        report_date = str(row.get("report_date") or "")
+        values = {
+            "total_shares": None,
+            "issued_shares": row.get("issued_shares"),
+            "float_shares": None,
+            "capital_twd": None,
+            **_par_value(None),
+            "live_error": f"{type(live_error).__name__}: {live_error}",
+        }
+        return FundamentalRecord(
+            symbol=symbol, dataset="share_capital_record", period_start=None, period_end=report_date,
+            published_at=None, available_at=None, retrieved_at=retrieved, revision=report_date,
+            provider="TWSE" if exchange == "TWSE" else "TPEx",
+            source=f"{exchange.lower()}:{SHARE_CAPITAL_ARCHIVE_SOURCE}",
+            source_url=TWSE_URL if exchange == "TWSE" else TPEX_URL,
+            status="data_insufficient", normalized_unit="structured", values=values,
         )
 
     def dividend_lifecycle_events(
@@ -281,24 +344,30 @@ class TaiwanOfficialFundamentals:
 
     def _company_row(self, symbol: str, exchange: str, path: str) -> tuple[str, dict[str, Any], datetime]:
         url, rows, retrieved = self._rows(exchange, path)
-        for row in rows:
-            code = str(row.get("公司代號") or row.get("SecuritiesCompanyCode") or row.get("Code") or "").strip()
-            if code == symbol.split(".")[0]:
-                return url, row, retrieved
-        raise LookupError(f"official {path} row not found for {symbol}")
+        return url, _find_row(rows, symbol, path), retrieved
 
     def _rows(self, exchange: str, path: str) -> tuple[str, list[dict[str, Any]], datetime]:
         url = f"{self.TWSE if exchange == 'TWSE' else self.TPEX}/{path}"
         key = (url, taipei_today())
         with self._rows_cache_lock:
             cached = self._rows_cache.get(key)
+            failure = self._failure_cache.get(key)
         if cached is not None:
             return url, cached[0], cached[1]
-        response = get_with_retry(self.client, url)
-        retrieved = datetime.now(TAIPEI)
-        rows = response.json()
-        if not isinstance(rows, list):
-            raise ValueError(f"official {path} schema changed")
+        if failure is not None and monotonic() - failure[0] < FAILURE_CACHE_SECONDS:
+            raise failure[1].with_traceback(None)
+        try:
+            response = get_with_retry(self.client, url)
+            retrieved = datetime.now(TAIPEI)
+            rows = _json_rows(response, path)
+        except Exception as exc:
+            with self._rows_cache_lock:
+                for stale in [k for k in self._failure_cache if k[1] != key[1]]:
+                    del self._failure_cache[stale]
+                self._failure_cache[key] = (monotonic(), exc)
+            raise
+        with self._rows_cache_lock:
+            self._failure_cache.pop(key, None)
         if not rows:
             # Not cached, so an empty answer is asked for again on the next call instead of all day.
             return url, rows, retrieved
@@ -307,3 +376,22 @@ class TaiwanOfficialFundamentals:
                 del self._rows_cache[stale]
             self._rows_cache[key] = (rows, retrieved)
         return url, rows, retrieved
+
+
+def _find_row(rows: list[dict[str, Any]], symbol: str, path: str) -> dict[str, Any]:
+    for row in rows:
+        code = str(row.get("公司代號") or row.get("SecuritiesCompanyCode") or row.get("Code") or "").strip()
+        if code == symbol.split(".")[0]:
+            return row
+    raise LookupError(f"official {path} row not found for {symbol}")
+
+
+def _json_rows(response: httpx.Response, path: str) -> list[dict[str, Any]]:
+    try:
+        rows = response.json()
+    except ValueError as exc:
+        content_type = response.headers.get("content-type") or "no content type"
+        raise ValueError(f"official {path}: upstream returned non-JSON response ({content_type})") from exc
+    if not isinstance(rows, list):
+        raise ValueError(f"official {path} schema changed")
+    return rows
