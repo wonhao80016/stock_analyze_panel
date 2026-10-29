@@ -342,6 +342,10 @@ class TaiwanOfficialFundamentals:
         now = datetime.now(TAIPEI)
         return FundamentalRecord(symbol, dataset, None, "", None, None, now, "", "Taiwan", "taiwan:capability", "", "data_insufficient", "unavailable", values={"reason": reason})
 
+    def market_rows(self, exchange: str, path: str) -> tuple[str, list[dict[str, Any]], datetime]:
+        """The whole official list at *path* through the same per-day and failure caches."""
+        return self._rows(exchange, path)
+
     def _company_row(self, symbol: str, exchange: str, path: str) -> tuple[str, dict[str, Any], datetime]:
         url, rows, retrieved = self._rows(exchange, path)
         return url, _find_row(rows, symbol, path), retrieved

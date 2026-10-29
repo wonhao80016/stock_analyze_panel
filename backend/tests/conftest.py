@@ -280,6 +280,14 @@ def _data_bound_singletons_are_fresh(monkeypatch):
     monkeypatch.setattr(detail_service, "_detail_service", None)
 
 
+@pytest.fixture(autouse=True)
+def _scheduled_runs_skip_the_quarterly_archive(monkeypatch):
+    """A scheduled run would otherwise retry 24 official lists against the network guard."""
+    from app.jobs import daily_pipeline
+
+    monkeypatch.setattr(daily_pipeline, "refresh_quarterly_financials", lambda label: None)
+
+
 # --- Network isolation ----------------------------------------------------------------------
 
 _network_allowed = False

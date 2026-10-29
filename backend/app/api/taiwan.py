@@ -60,6 +60,10 @@ from app.taiwan.screener_nl import (
     TaiwanScreenerTranslation,
     TaiwanScreenerTranslator,
 )
+from app.taiwan.quarterly_financials import (
+    TaiwanQuarterlyFinancialsResponse,
+    get_taiwan_quarterly_financials_service,
+)
 from app.taiwan.symbol import parse_symbol
 from app.taiwan.universe.service import SecurityMasterUnavailableError
 
@@ -338,6 +342,27 @@ def get_taiwan_margin_history(
     except Exception as e:
         logger.exception("Failed to get margin history for %s: %s", symbol, e)
         raise HTTPException(status_code=500, detail=f"融資融券歷史查詢失敗: {e}") from e
+
+
+@router.get("/stocks/{symbol}/quarterly-financials", response_model=TaiwanQuarterlyFinancialsResponse)
+def get_taiwan_quarterly_financials(symbol: str):
+    """獲取單一台股已存的季度財報快照 (僅供顯示，讀取本地存檔，不觸發即時抓取)。"""
+    try:
+        parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
+
+    try:
+        return get_taiwan_quarterly_financials_service().get(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to read quarterly financials for %s: %s", symbol, e)
+        raise HTTPException(status_code=500, detail="季度財報讀取失敗") from e
 
 
 @router.get("/stocks/{symbol}/research-context", response_model=TaiwanStockResearchContext)

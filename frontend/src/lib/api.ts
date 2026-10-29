@@ -931,6 +931,62 @@ export interface TaiwanCurrentDataResponse {
   sections: Record<string, TaiwanDataSection>
 }
 
+// Amounts in TWD, EPS in TWD per share, *_pct in percent (53.2 means 53.2%).
+export interface TaiwanQuarterlyFigures {
+  revenue: number | null
+  gross_profit: number | null
+  operating_income: number | null
+  net_income: number | null
+  parent_net_income: number | null
+  eps: number | null
+  gross_margin_pct: number | null
+  operating_margin_pct: number | null
+  net_margin_pct: number | null
+  roe_pct: number | null
+}
+
+export interface TaiwanQuarterlyPeriod {
+  fiscal_year: number
+  fiscal_quarter: number
+  period_end: string
+  accounting_category: string | null
+  cumulative: TaiwanQuarterlyFigures
+  single: TaiwanQuarterlyFigures
+  single_missing_reason: 'previous_quarter_missing' | null
+  roe_missing_reason: 'opening_equity_missing' | 'closing_equity_missing' | null
+  balance: {
+    assets: number | null
+    liabilities: number | null
+    equity: number | null
+    parent_equity: number | null
+  }
+  year_ago: {
+    fiscal_year: number
+    fiscal_quarter: number
+    cumulative: TaiwanQuarterlyFigures
+    single: TaiwanQuarterlyFigures
+  } | null
+  source: string | null
+  source_url: string | null
+  first_retrieved_at: string | null
+  last_retrieved_at: string | null
+  revised_at: string | null
+}
+
+export interface TaiwanQuarterlyFinancialsResponse {
+  symbol: string
+  exchange: string
+  applicable: boolean
+  not_applicable_reason: 'etf' | 'tdr' | null
+  usage_scope: 'historical_reference'
+  display_only: true
+  available_at: null
+  target_quarters: number
+  accumulating: boolean
+  quarters: TaiwanQuarterlyPeriod[]
+  annual_eps: { fiscal_year: number; eps: number | null }[]
+}
+
 // ===== Taiwan Screener Types (Phase 6B) =====
 export interface TaiwanScreenerRequest {
   exchange?: 'TWSE' | 'TPEX' | 'ALL'
@@ -2343,6 +2399,11 @@ export const api = {
 
   taiwanCurrentData: (symbol: string) =>
     request<TaiwanCurrentDataResponse>(`/api/taiwan/data/${encodeURIComponent(symbol)}`),
+
+  taiwanQuarterlyFinancials: (symbol: string) =>
+    request<TaiwanQuarterlyFinancialsResponse>(
+      `/api/taiwan/stocks/${encodeURIComponent(symbol)}/quarterly-financials`,
+    ),
 
   taiwanInstitutionalHistory: (symbol: string, days = 60) =>
     request<TaiwanInstitutionalHistoryResponse>(

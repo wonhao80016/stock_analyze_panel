@@ -605,6 +605,60 @@ live samples are recorded in
 - 取值失敗後，同一個 URL 在同一個台北日期內 5 分鐘（`FAILURE_CACHE_SECONDS`）不再重打，直接回報同一個錯誤。
 - 成功的清單仍然每個台北日期只下載一次；空清單仍然不快取。
 
+
+## 季度財報快照（僅供顯示）
+
+`TaiwanQuarterlyFinancialStore`（`app/taiwan/quarterly_financials_store.py`）從上線起每季保存官方 OpenAPI 的最新一季財報，供個股頁「季度財報」區塊顯示。官方清單只有最新一季，無法回補，季數只能逐季累積；PD2 決定不使用 MOPS 舊站（`docs/stock-positioning-signals-plan/README.md`）。
+
+邊界：
+
+- 用途標記為 `historical_reference`（能力矩陣 `quarterly_financial_snapshot`），`status=data_insufficient`、`available_at=None`。
+- 不得進入回測、選股歷史、比較頁的歷史比較日期與任何 as-of 查詢。`tests/test_taiwan_quarterly_financials.py` 以 import 掃描確認 `app/backtest`、`app/strategy` 與選股相關模組都沒有直接或間接引用這個 store 與服務。
+- 不寫 `financials/metrics/part.parquet`（回測財務因子會讀這個路徑）。
+- 畫面標示「回溯取得，可能為更正後數值」。
+
+來源與刷新：
+
+- 端點：TWSE `opendata/t187ap06_L_{類別}`（損益）、`opendata/t187ap07_L_{類別}`（資產負債），TPEx `mopsfin_t187ap06_O_{類別}`、`mopsfin_t187ap07_O_{類別}`。類別為 ci、basi、bd、fh、ins、mim，共 24 份清單。
+- 時點：接在盤後排程 16:30 與 21:40 兩班的最後（`app/jobs/daily_pipeline.py` 的 `refresh_quarterly_financials`），不論日 K 更新成功與否都會執行。失敗只記錄，不影響同班其他工作。
+- 取值：經 `TaiwanOfficialFundamentals.market_rows`，與個股頁「財務報表」卡共用同一個實例的每日快取與 300 秒失敗快取，不另做全市場下載。每份清單每個台北日期最多成功下載一次；同日第二班與個股頁都直接用快取。
+- 某類別的損益或資產負債清單失敗時，略過該類別；同一公司出現在多個類別時不寫入並記錄。
+- 存檔：`data/taiwan/quarterly_financials/year=YYYY/quarter=Q/part.parquet`，一季一個分區，以暫存檔加 `os.replace` 原子取代（`write_atomically`；Windows 上檔案被開啟時短暫重試，仍失敗就拋出，原檔不動）。既有分區讀不出來時不覆寫。
+
+每列欄位（金額單位元，官方仟元已換算；EPS 單位元）：
+
+| 欄位 | 官方欄位（依序取第一個非空白） | 說明 |
+| --- | --- | --- |
+| `symbol`、`exchange`、`accounting_category` | 公司代號／SecuritiesCompanyCode；清單類別 | |
+| `fiscal_year`、`fiscal_quarter`、`period_end` | 年度／Year、季別／Season（民國年加 1911） | 期末日為該季最後一天 |
+| `revenue` | 營業收入、收益合計、淨收益、收益、收入 | 累計；銀行業（basi）沒有營收總額欄位，為 null |
+| `gross_profit` | 營業毛利（毛損）淨額、營業毛利（毛損） | 累計；只有一般業（ci）有，其他類別為 null |
+| `operating_income` | 營業利益（損失）、營業利益 | 累計；ci、ins、bd 有，其他類別為 null |
+| `net_income` | 本期淨利（淨損）、本期稅後淨利（淨損） | 累計 |
+| `parent_net_income` | 淨利（淨損）歸屬於母公司業主、淨利（損）歸屬於母公司業主 | 累計；後者為 basi、bd 的欄名 |
+| `cumulative_eps` | 基本每股盈餘（元） | 累計 |
+| `assets`、`liabilities`、`equity` | 資產總計／資產總額、負債總計／負債總額、權益總計／權益總額 | 季末時點值 |
+| `parent_equity` | 歸屬於母公司業主之權益合計、歸屬於母公司業主權益合計、歸屬於母公司業主之權益 | 季末時點值；後兩者分別為 bd、fh 的欄名 |
+| `source`、`source_url` | `twse_openapi`／`tpex_openapi`；損益與資產負債清單的 URL | 日後若放入第三方回補資料，以 `source` 區分 |
+| `first_retrieved_at`、`last_retrieved_at`、`revised_at`、`revised_fields` | | 台北時間 ISO 字串 |
+
+欄位名稱為 2026-10-29 對 24 份清單實測的結果。資產負債列的年度季別與損益列不同時，資產負債欄位為 null。
+
+同一（symbol、年度、季別）再次取得：
+
+- 比較會計類別、期末日與所有數值欄位。相同時只更新 `last_retrieved_at`。
+- 不同時以新值覆蓋，`revised_at` 記錄取得時間，`revised_fields` 記錄變動欄位，並以 warning 記下新舊值。
+
+查詢與口徑（`GET /api/taiwan/stocks/{symbol}/quarterly-financials`，`TaiwanQuarterlyFinancialsService` 只讀存檔，不觸發抓取）：
+
+- 單季值：本季累計減上一季累計；第 1 季等於累計。缺上一季時單季值全為 null，`single_missing_reason=previous_quarter_missing`，前端顯示 `--` 並附說明。單季 EPS 為累計 EPS 相減。
+- 三率：毛利率、營業利益率、稅後淨利率為對應金額除以營收，單位百分數（`53.2` 表示 53.2%）；營收缺值或不大於 0 時為 null。單季模式用單季金額，累計模式用官方累計值。稅後淨利率的分子是 `net_income`（本期淨利），不是歸屬母公司淨利。
+- ROE：單季、不年化，單季歸屬母公司淨利除以（上一季末與本季末歸屬母公司權益的平均）；缺期初時為 null，`roe_missing_reason=opening_equity_missing`；有期初但缺期末時也為 null，`roe_missing_reason=closing_equity_missing`。累計模式不提供 ROE。
+- `year_ago` 為去年同季的累計與單季值，前端依此上色並在滑過時顯示差距（三率為百分點，金額與 EPS 為變動率）。
+- `annual_eps`：各年度第 4 季的累計 EPS。
+- `accumulating`：已存季數少於 `target_quarters`（8）。
+- ETF 回 `applicable=false`、`not_applicable_reason=etf`；TDR 回 `tdr`。證券主檔沒有的代號回 404，存檔讀取失敗回 500。
+
 ## Official fundamentals availability investigation (Phase 6C.1)
 
 Investigation on 2026-08-31 distinguished an official timestamp from a safe
@@ -772,8 +826,8 @@ usage through these values:
 
 - `current_reference`: may be shown as the latest official reference value but
   is not eligible for historical queries;
-- `historical_reference`: official historical evidence exists, but there is no
-  production ingest or verified point-in-time availability;
+- `historical_reference`: 沒有經驗證的可用時間，僅供顯示或參考，不得進入回測與 as-of 查詢；
+  是否已正式匯入看 `production_supported`；
 - `pit_historical`: the production record has a verified availability seam;
 - `unsupported`: no production capability exists.
 

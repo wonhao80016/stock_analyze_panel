@@ -87,3 +87,23 @@
 | 集保（逐檔查詢回補） | 一檔、一週（推論） | 約 51 週 | 檔數 × 約 51；以 1,000 檔計約 51,000 次，不建議 |
 
 以既有的 0.4 秒間隔計，2,500 次約 17 分鐘（不含回應時間）；實際要依節流情況調整，並支援中斷後續傳。
+
+## 6. 第三方季度財報資料源查證摘要（2026-10-29）
+
+PD2 的 C 案：查有授權、可用於回補的第三方來源。本節是查證摘要，尚未接任何第三方；方案 A 的存檔已預留 `source` 欄位區分來源。
+
+| 來源 | 結論 | 限制 |
+|---|---|---|
+| FinMind | 首選 | 一次回補需付費方案；本地儲存與自架顯示的條款未明示，待使用者寫信確認 |
+| FinLab | 條款寬鬆 | 免費版資料只到 2023-12-31；VIP 最少 12 個月 |
+| TEJ | 未評估到可用 | 價格與條款不公開（<https://api.tej.com.tw/documents.html>、<https://tejtw.github.io/EN-TEJAPI>） |
+| Fugle | 不適用 | 沒有財報資料（<https://developer.fugle.tw/docs/data/http-api/getting-started>） |
+| CMoney | 不適用 | 沒有公開 API；查證時未取得 API 文件 URL，只找到產品頁 <https://www.cmoney.tw/app/ItemContent.aspx?id=5778> |
+
+口徑注意：FinMind 的 `EquityAttributableToOwnersOfParent` 是「綜合損益總額歸屬於母公司業主」，不是本期淨利歸屬於母公司業主；若日後回補，不能填入本專案的 `parent_net_income`。
+
+來源：
+
+- <https://finmind.github.io/tutor/TaiwanMarket/Fundamental/>
+- <https://finmind.github.io/en/Disclaimer/>
+- <https://finlab.finance/terms>

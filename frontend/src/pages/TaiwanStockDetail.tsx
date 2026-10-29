@@ -39,6 +39,7 @@ import { conditionSummary } from '@/components/monitor/GenericRulesList'
 import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
 import { VolumeUnitToggle } from '@/components/VolumeUnitToggle'
 import { TaiwanReferenceData } from '@/components/taiwan/TaiwanReferenceData'
+import { TaiwanQuarterlyFinancials } from '@/components/taiwan/TaiwanQuarterlyFinancials'
 import { DataQualityBadge, formatQuoteSource } from '@/components/taiwan/TaiwanDataQuality'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useSafeBack } from '@/lib/useSafeBack'
@@ -216,6 +217,13 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const currentDataQuery = useQuery({
     queryKey: QK.taiwanCurrentData(symbol),
     queryFn: () => api.taiwanCurrentData(symbol),
+    staleTime: 5 * 60_000,
+    enabled: !isIndex,
+  })
+
+  const quarterlyQuery = useQuery({
+    queryKey: QK.taiwanQuarterlyFinancials(symbol),
+    queryFn: () => api.taiwanQuarterlyFinancials(symbol),
     staleTime: 5 * 60_000,
     enabled: !isIndex,
   })
@@ -925,6 +933,17 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             isError={currentDataQuery.isError}
             isFetching={currentDataQuery.isFetching}
             onRetry={() => currentDataQuery.refetch()}
+          />
+          )}
+
+          {!isIndex && (
+          <TaiwanQuarterlyFinancials
+            symbol={symbol}
+            response={quarterlyQuery.data}
+            isLoading={quarterlyQuery.isLoading}
+            isError={quarterlyQuery.isError}
+            isFetching={quarterlyQuery.isFetching}
+            onRetry={() => quarterlyQuery.refetch()}
           />
           )}
 

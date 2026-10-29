@@ -75,6 +75,17 @@ CAPABILITIES = (
     ),
     TaiwanDatasetCapability(
         domain="company",
+        dataset="quarterly_financial_snapshot",
+        exchanges=["TWSE", "TPEX"],
+        production_supported=True,
+        current_reference=False,
+        pit_historical=False,
+        usage_scope="historical_reference",
+        status="data_insufficient",
+        reason="display-only archive of each latest official quarter; no availability time",
+    ),
+    TaiwanDatasetCapability(
+        domain="company",
         dataset="dividend_lifecycle_event",
         exchanges=["TWSE", "TPEX"],
         production_supported=True,

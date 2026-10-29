@@ -119,6 +119,26 @@ def refresh_benchmark_index(label: str) -> date | None:
         return None
 
 
+def refresh_quarterly_financials(label: str) -> None:
+    """Archive the latest official quarter's statements for display only. Never raises.
+
+    Its 24 statement lists share TaiwanOfficialFundamentals' per-day cache, so a later run on the
+    same Taipei date sends no request for a list that already loaded.
+    """
+    try:
+        from app.taiwan.quarterly_financials import refresh_latest_quarter
+
+        report = refresh_latest_quarter()
+        logger.info(
+            "quarterly financials archived (%s): added=%d unchanged=%d revised=%d "
+            "ambiguous=%d failed_lists=%d",
+            label, report.added, report.unchanged, report.revised,
+            len(report.ambiguous), len(report.failures),
+        )
+    except Exception as e:
+        logger.exception("quarterly financials archive (%s) failed: %s", label, e)
+
+
 def _enriched_partition_mtime(data_dir: Path, day: date) -> float | None:
     """Never raises: a missing or unreadable mtime only disables the stale-input check."""
     try:
@@ -139,7 +159,13 @@ def start_scheduler() -> AsyncIOScheduler:
     # Inst (2) + Margin (2) = ~6 次 HTTP 請求 / 日。
     # 拆班原因: 交易所公布資券餘額的時間晚於三大法人, 單一 16:30 班次抓不到當日
     # 資券, 於是資券永遠落後一個交易日, 資料狀態也就天天顯示「尚未完全更新」。
-    def _scheduled_taiwan_update(
+    def _scheduled_taiwan_update(label: str, **datasets: bool) -> None:
+        try:
+            _update_and_publish(label, **datasets)
+        finally:
+            refresh_quarterly_financials(label)
+
+    def _update_and_publish(
         label: str,
         *,
         refresh_daily: bool,
