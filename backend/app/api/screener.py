@@ -21,6 +21,7 @@ from app.services import (
     strategy_pick_backfill,
     strategy_pick_history,
     strategy_pick_performance,
+    strategy_realtime,
 )
 from app.services.screener import ScreenerService
 from app.strategy import config as strategy_config
@@ -182,61 +183,12 @@ def _cache_payload_with_ext(cached: dict, ext_values: dict[str, dict[str, Any]])
     return payload
 
 
-def _realtime_overrides(cached: dict, realtime_results: dict[str, dict]) -> dict[str, dict]:
-    """Pick the monitor results that are newer than the post-close cache entry of the same strategy.
-
-    Monitor results cover only the polling pool, so a post-close result of the same or a later
-    session must win; a strategy the cache has no result for is filled only from the same or a later session.
-    """
-    cached_results = cached.get("results") or {}
-    cached_as_of = cached.get("as_of")
-    picked: dict[str, dict] = {}
-    for sid, result in realtime_results.items():
-        realtime_as_of = result.get("as_of") if isinstance(result, dict) else None
-        cached_result = cached_results.get(sid)
-        if isinstance(cached_result, dict):
-            post_close_as_of = cached_result.get("as_of") or cached_as_of
-            newer = isinstance(realtime_as_of, str) and (
-                not isinstance(post_close_as_of, str) or realtime_as_of > post_close_as_of
-            )
-        else:
-            newer = not isinstance(cached_as_of, str) or (
-                isinstance(realtime_as_of, str) and realtime_as_of >= cached_as_of
-            )
-        if newer:
-            picked[sid] = result
-    return picked
-
-
 def _cached_with_realtime(request: Request) -> dict:
-    """读取盘后缓存，并用监控引擎较新交易日的实时结果覆盖同策略。"""
-    data_dir = request.app.state.repo.store.data_dir
-    return _overlay_realtime(request, strategy_cache.read_cache(data_dir))
+    return strategy_realtime.cached_with_realtime(request.app.state)
 
 
 def _overlay_realtime(request: Request, cached: dict | None) -> dict:
-    if cached is None:
-        cached = {"as_of": None, "results": {}, "updated_at": None}
-
-    monitor_engine = getattr(request.app.state, "monitor_engine", None)
-    if monitor_engine is not None:
-        realtime_results = _realtime_overrides(cached, monitor_engine.latest_strategy_results() or {})
-        if realtime_results:
-            results = dict(cached.get("results") or {})
-            results.update(realtime_results)
-            cached = dict(cached)
-            cached["results"] = results
-            if cached.get("failures"):
-                cached["failures"] = {
-                    sid: failure
-                    for sid, failure in cached["failures"].items()
-                    if sid not in realtime_results
-                }
-            # 有实时数据时, 以最新时间戳为准
-            import time as _time
-            cached["updated_at"] = int(_time.time() * 1000)
-
-    return cached
+    return strategy_realtime.overlay_realtime(request.app.state, cached)
 
 
 def _attach_instrument_names(repo, payload: dict) -> dict:

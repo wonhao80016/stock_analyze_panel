@@ -30,6 +30,7 @@ vi.mock('@/lib/api', async importOriginal => ({
     taiwanStockResearchContext: vi.fn().mockResolvedValue(null),
     taiwanMarginHistory: vi.fn().mockResolvedValue({ rows: [] }),
     taiwanDataStatus: vi.fn(),
+    taiwanCurrentSignals: vi.fn().mockResolvedValue(null),
   },
 }))
 
@@ -132,9 +133,16 @@ describe('B064 detail refresh after the post-close publication', () => {
     await vi.waitFor(() => expect(api.taiwanStockDetail).toHaveBeenCalledTimes(2))
   })
 
+  it('reloads the current signals when a dataset date moves', async () => {
+    await afterClose('2026-10-21')
+
+    await vi.waitFor(() => expect(api.taiwanCurrentSignals).toHaveBeenCalledTimes(2))
+  })
+
   it('stays quiet when nothing new was published', async () => {
     await afterClose('2026-10-20')
 
     expect(api.taiwanStockDetail).toHaveBeenCalledTimes(1)
+    expect(api.taiwanCurrentSignals).toHaveBeenCalledTimes(1)
   })
 })

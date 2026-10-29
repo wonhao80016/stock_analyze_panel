@@ -95,6 +95,7 @@ export const QK = {
   taiwanCurrentData:    (symbol: string) => ['taiwan-current-data', symbol] as const,
   taiwanQuarterlyFinancials: (symbol: string) => ['taiwan-quarterly-financials', symbol] as const,
   taiwanMonthlyRevenue: (symbol: string) => ['taiwan-monthly-revenue', symbol] as const,
+  taiwanCurrentSignals: (symbol: string) => ['taiwan-current-signals', symbol] as const,
   taiwanInstitutionalHistory: (symbol: string, days: number) => ['taiwan-institutional-history', symbol, days] as const,
   taiwanMarginHistory:  (symbol: string, days: number) => ['taiwan-margin-history', symbol, days] as const,
 } as const

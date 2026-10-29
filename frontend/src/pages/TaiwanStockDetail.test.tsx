@@ -19,6 +19,7 @@ vi.mock('@/lib/api', () => ({
     watchlistGroups: vi.fn().mockResolvedValue({ groups: [] }),
     taiwanStockDetail: vi.fn(),
     taiwanCurrentData: vi.fn().mockResolvedValue(null),
+    taiwanCurrentSignals: vi.fn().mockResolvedValue(null),
     taiwanStockResearchContext: vi.fn().mockResolvedValue(null),
     taiwanStockAIResearch: vi.fn(),
   },
@@ -149,6 +150,23 @@ describe('TaiwanStockDetail — back navigation (DAILY_USE_CORE_UX_FIXES P1-2)',
     fireEvent.click(await screen.findByText('返回'))
 
     expect(await screen.findByText('SCREENER PAGE')).toBeInTheDocument()
+  })
+})
+
+describe('TaiwanStockDetail — current signals', () => {
+  it('requests and shows the section for a stock', async () => {
+    renderAt(['/stocks/2330.TWSE'], 0)
+
+    expect(await screen.findByRole('heading', { name: '目前觸發的訊號' })).toBeInTheDocument()
+    expect(api.taiwanCurrentSignals).toHaveBeenCalledWith('2330.TWSE')
+  })
+
+  it('neither requests nor shows it for an index', async () => {
+    renderAt(['/stocks/t00.TWSE'], 0)
+
+    await screen.findAllByText('台積電')
+    expect(screen.queryByRole('heading', { name: '目前觸發的訊號' })).not.toBeInTheDocument()
+    expect(api.taiwanCurrentSignals).not.toHaveBeenCalled()
   })
 })
 

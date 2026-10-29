@@ -987,6 +987,51 @@ export interface TaiwanQuarterlyFinancialsResponse {
   annual_eps: { fiscal_year: number; eps: number | null }[]
 }
 
+export type TaiwanSignalDirection = 'bullish' | 'bearish' | 'neutral'
+
+export interface TaiwanCurrentSignal {
+  id: string
+  source: 'builtin' | 'volume_pattern' | 'custom'
+  direction: TaiwanSignalDirection
+  /** Set for custom signals; built-in and volume-pattern names come from lib/signals.ts. */
+  name: string | null
+}
+
+export interface TaiwanStrategySelection {
+  strategy_id: string
+  strategy_name: string
+  as_of: string | null
+  rank: number
+  total: number | null
+  score: number | null
+  grade: PickGrade | null
+  grade_reason: PickGradeReason | null
+  limit_up_locked: boolean
+  missing_scoring_fields: string[] | null
+  missing_scoring_children: { strategy_id: string; name: string; fields: string[] }[] | null
+}
+
+export interface TaiwanCurrentSignalsResponse {
+  symbol: string
+  exchange: string
+  applicable: boolean
+  not_applicable_reason: 'index' | null
+  signals: {
+    status: 'ok' | 'unpublished' | 'no_row'
+    as_of: string | null
+    triggered: TaiwanCurrentSignal[]
+    not_evaluated: TaiwanCurrentSignal[]
+  } | null
+  strategies: {
+    status: 'ok' | 'no_cache'
+    as_of: string | null
+    updated_at: number | null
+    market_state: MarketState | null
+    grading: PickGrading | null
+    selections: TaiwanStrategySelection[]
+  } | null
+}
+
 // Amounts in TWD, *_pct in percent (12.5 means 12.5%), as the official monthly list stated them.
 export interface TaiwanMonthlyRevenuePeriod {
   year: number
@@ -2449,6 +2494,11 @@ export const api = {
   taiwanMonthlyRevenue: (symbol: string) =>
     request<TaiwanMonthlyRevenueResponse>(
       `/api/taiwan/stocks/${encodeURIComponent(symbol)}/monthly-revenue`,
+    ),
+
+  taiwanCurrentSignals: (symbol: string) =>
+    request<TaiwanCurrentSignalsResponse>(
+      `/api/taiwan/stocks/${encodeURIComponent(symbol)}/current-signals`,
     ),
 
   taiwanInstitutionalHistory: (symbol: string, days = 60) =>

@@ -59,6 +59,7 @@
 
 - PD1（2026-10-29，使用者採用建議方案）：新增「僅供顯示」的基本面與估值歷史層。可用於個股頁顯示與顯示用統計；不得進入回測、選股歷史與任何 as-of 查詢；`available_at` 維持 None；畫面標示「回溯取得，可能為更正後數值」。上方「即使 PD1 同意仍不開放」的兩項維持不開放。實作時（2026-10-29）`historical_reference` 的定義定為「沒有經驗證的可用時間，僅供顯示或參考，不得進入回測與 as-of 查詢；是否已正式匯入看 `production_supported`」，取代上表建議的「有正式匯入、僅供顯示」寫法，以免與 ETF 的 `historical_nav`、`distribution`（同標記、未匯入）矛盾。
 - 第一期接入方式（2026-10-29）：甲案，直接改 `TaiwanStockDetail.tsx`；1-1 先不加入 finlab 的 3 個訊號，留待 1-6。
+- 1-1 細節（2026-10-29，使用者核可）：分區缺欄位一律回「未評估」；訊號與策略入選各標自己的資料日期；策略入選帶分級與大盤濾網狀態，與選股頁同一套 `grade_cached_payload`；不在盤中輪詢，只在盤後發佈刷新時重新讀取；不重複列警示（頁面已有「最近警報事件」）；訊號分偏多／偏空／中性，方向對照表只在後端服務定義一份，內建與量價型態的中文名稱取自 `frontend/src/lib/signals.ts`，自訂訊號名稱由後端回傳；指數頁不顯示、不發請求。
 - 季度財報顯示（2026-10-29）：表格加三率走勢圖，依去年同季比較上色，附單季／累計切換與歷年全年 EPS；單季值以本季累計減上季累計推算；ROE 為單季、不年化，口徑為歸屬母公司淨利 ÷ 平均母公司權益；TWSE OpenAPI `t187ap06_L_ci`、`t187ap07_L_ci` 都有歸屬母公司欄位（2026-10-29 查證）。
 - PD2 季度財報來源（2026-10-29）：MOPS 舊站彙總表 `ajax_t163sb04`／`ajax_t163sb05` 技術上可回補到民國 102 年第 1 季，但 robots.txt 為 `Disallow: /`，證交所條款禁止未經同意的自動化下載，因此不採用。改為：A，從現在起每季把 OpenAPI 最新一季存成快照；C，另查有授權的第三方資料源，結果出來再決定是否用於回補。月營收 12 個月的回補比照辦理。
 
@@ -143,7 +144,7 @@
 
 | 期別 | 狀態 | 備註 |
 |---|---|---|
-| 第一期 | 進行中 | 採甲案；1-4 已實作、待提交；1-5 已實作、待提交（存檔 `data/taiwan/return_index/`、讀取函式 `read_return_index_series`，見 `docs/taiwan-data-sources.md`「發行量加權股價報酬指數（含息）」） |
+| 第一期 | 進行中 | 採甲案；1-1 已實作、待提交（`/api/taiwan/stocks/{symbol}/current-signals`、服務 `backend/app/taiwan/current_signals.py`、個股頁「目前觸發的訊號」區塊；策略快取疊加即時結果移到 `backend/app/services/strategy_realtime.py`，選股頁與本區塊共用）；1-4 已實作、待提交；1-5 已實作、待提交（存檔 `data/taiwan/return_index/`、讀取函式 `read_return_index_series`，見 `docs/taiwan-data-sources.md`「發行量加權股價報酬指數（含息）」） |
 | 第二期 | 進行中 | PD1、PD2 已定案（2026-10-29）；第 3 項財報每季快照採方案 A，已實作、待提交（存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/quarterly-financials`、個股頁「季度財報」區塊）；月營收快照比照方案 A，已實作、待提交（存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/monthly-revenue`、個股頁「月營收走勢」區塊）；C 案第三方回補待使用者確認 FinMind 條款 |
 | 第三期 | 待 PD2 | — |
 

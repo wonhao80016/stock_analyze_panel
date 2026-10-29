@@ -15,6 +15,10 @@ from app.taiwan.current_data import (
     capability_matrix,
     get_taiwan_current_data_service,
 )
+from app.taiwan.current_signals import (
+    TaiwanCurrentSignalsResponse,
+    get_taiwan_current_signals_service,
+)
 from app.taiwan.daily_update import FreshnessStatus, TaiwanDailyUpdateService, TaiwanUpdateBusyError
 from app.taiwan.detail_models import TaiwanStockDetailResponse
 from app.taiwan.detail_service import get_taiwan_stock_detail_service
@@ -388,6 +392,27 @@ def get_taiwan_monthly_revenue(symbol: str):
     except Exception as e:
         logger.exception("Failed to read monthly revenue for %s: %s", symbol, e)
         raise HTTPException(status_code=500, detail="月營收讀取失敗") from e
+
+
+@router.get("/stocks/{symbol}/current-signals", response_model=TaiwanCurrentSignalsResponse)
+def get_taiwan_current_signals(symbol: str, request: Request):
+    """Signals of the newest published enriched partition and current strategy picks; never computes."""
+    try:
+        parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
+
+    try:
+        return get_taiwan_current_signals_service(request.app.state).get(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to read current signals for %s: %s", symbol, e)
+        raise HTTPException(status_code=500, detail="目前訊號讀取失敗") from e
 
 
 @router.get("/stocks/{symbol}/research-context", response_model=TaiwanStockResearchContext)

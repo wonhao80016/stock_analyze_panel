@@ -41,6 +41,7 @@ import { VolumeUnitToggle } from '@/components/VolumeUnitToggle'
 import { TaiwanReferenceData } from '@/components/taiwan/TaiwanReferenceData'
 import { TaiwanQuarterlyFinancials } from '@/components/taiwan/TaiwanQuarterlyFinancials'
 import { TaiwanMonthlyRevenue } from '@/components/taiwan/TaiwanMonthlyRevenue'
+import { TaiwanCurrentSignals } from '@/components/taiwan/TaiwanCurrentSignals'
 import { DataQualityBadge, formatQuoteSource } from '@/components/taiwan/TaiwanDataQuality'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useSafeBack } from '@/lib/useSafeBack'
@@ -80,7 +81,9 @@ function useDetailPublicationRefresh(symbol: string) {
     if (datasetDates == null) return
     const moved = seen.current != null && seen.current !== datasetDates
     seen.current = datasetDates
-    if (moved) void qc.invalidateQueries({ queryKey: QK.taiwanStockDetail(symbol).slice(0, 2) })
+    if (!moved) return
+    void qc.invalidateQueries({ queryKey: QK.taiwanStockDetail(symbol).slice(0, 2) })
+    void qc.invalidateQueries({ queryKey: QK.taiwanCurrentSignals(symbol) })
   }, [qc, symbol, datasetDates])
 }
 
@@ -232,6 +235,13 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const monthlyRevenueQuery = useQuery({
     queryKey: QK.taiwanMonthlyRevenue(symbol),
     queryFn: () => api.taiwanMonthlyRevenue(symbol),
+    staleTime: 5 * 60_000,
+    enabled: !isIndex,
+  })
+
+  const currentSignalsQuery = useQuery({
+    queryKey: QK.taiwanCurrentSignals(symbol),
+    queryFn: () => api.taiwanCurrentSignals(symbol),
     staleTime: 5 * 60_000,
     enabled: !isIndex,
   })
@@ -931,6 +941,17 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
               )}
             </div>
           </div>
+          )}
+
+          {!isIndex && (
+          <TaiwanCurrentSignals
+            symbol={symbol}
+            response={currentSignalsQuery.data}
+            isLoading={currentSignalsQuery.isLoading}
+            isError={currentSignalsQuery.isError}
+            isFetching={currentSignalsQuery.isFetching}
+            onRetry={() => currentSignalsQuery.refetch()}
+          />
           )}
 
           {!isIndex && (
