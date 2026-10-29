@@ -678,6 +678,57 @@ live samples are recorded in
 - `accumulating`：已存季數少於 `target_quarters`（8）。
 - ETF 回 `applicable=false`、`not_applicable_reason=etf`；TDR 回 `tdr`。證券主檔沒有的代號回 404，存檔讀取失敗回 500。
 
+## 月營收快照（僅供顯示）
+
+`TaiwanMonthlyRevenueStore`（`app/taiwan/monthly_revenue_store.py`）從上線起每月保存官方 OpenAPI 的最新一期月營收，供個股頁「月營收走勢」區塊顯示。官方清單只有最新一個月，無法回補，月數只能逐月累積；PD2 決定不使用 MOPS 舊站（`docs/stock-positioning-signals-plan/README.md`）。
+
+邊界：
+
+- 用途標記為 `historical_reference`（能力矩陣 `monthly_revenue_snapshot`），`status=data_insufficient`、`available_at=None`。
+- 不得進入回測、選股歷史、比較頁的歷史比較日期與任何 as-of 查詢。`tests/test_taiwan_quarterly_financials.py` 的 import 掃描同時涵蓋 `app.taiwan.monthly_revenue` 與 `app.taiwan.monthly_revenue_store`。
+- 不寫 `financials/metrics/part.parquet`。
+- 畫面標示「回溯取得，可能為更正後數值」。
+- 參考資料卡的「月營收」卡仍走 `TaiwanOfficialFundamentals.monthly_revenue` 讀當日官方清單，與本存檔無關。
+
+來源與刷新：
+
+- 端點：TWSE `opendata/t187ap05_L`、TPEx `mopsfin_t187ap05_O`，共 2 份清單。兩者欄位名稱相同（2026-10-29 查 TWSE、TPEx 的 swagger.json）。
+- 時點：接在盤後排程 16:30 與 21:40 兩班的最後，在季度財報存檔之後（`app/jobs/daily_pipeline.py` 的 `refresh_monthly_revenue`）。不論日 K 更新或季度財報存檔成功與否都會執行；失敗只記錄，不影響同班其他工作。
+- 取值：經 `TaiwanOfficialFundamentals.market_rows`，與參考資料卡「月營收」共用同一個實例的每日快取與 300 秒失敗快取。每份清單每個台北日期最多成功下載一次；同日第二班與個股頁都直接用快取，不發請求。
+- 某交易所的清單失敗時略過該交易所；同一公司在同一份清單同一月份出現兩次時不寫入並記錄。缺代號、資料年月無效或數字格式錯誤的列略過。
+- 存檔：`data/taiwan/monthly_revenue/year=YYYY/month=MM/part.parquet`，一個月份一個分區，以 `write_atomically` 原子取代；取代失敗就拋出，原檔不動。既有分區讀不出來時不覆寫。
+
+每列欄位（金額單位元，官方仟元已換算；`*_pct` 為官方百分數，`12.5` 表示 12.5%；官方欄位空白、`--` 或不存在時為 null）：
+
+| 欄位 | 官方欄位 | 說明 |
+| --- | --- | --- |
+| `symbol`、`exchange` | 公司代號 | |
+| `year`、`month` | 資料年月（民國年月，加 1911） | 營收所屬月份 |
+| `revenue` | 營業收入-當月營收 | |
+| `previous_month_revenue` | 營業收入-上月營收 | 該期報表內附帶的上月值 |
+| `previous_year_revenue` | 營業收入-去年當月營收 | 該期報表內附帶的去年同月值 |
+| `cumulative_revenue` | 累計營業收入-當月累計營收 | 當年 1 月至該月 |
+| `previous_year_cumulative_revenue` | 累計營業收入-去年累計營收 | |
+| `mom_pct` | 營業收入-上月比較增減(%) | |
+| `yoy_pct` | 營業收入-去年同月增減(%) | |
+| `cumulative_yoy_pct` | 累計營業收入-前期比較增減(%) | |
+| `report_date` | 出表日期（民國日期） | 目前數值所屬那次取得的出表日期 |
+| `source`、`source_url` | `twse_openapi`／`tpex_openapi`；清單 URL | 日後若放入第三方回補資料，以 `source` 區分 |
+| `first_retrieved_at`、`last_retrieved_at`、`revised_at`、`revised_fields` | | 台北時間 ISO 字串 |
+
+同一（symbol、年、月）再次取得：
+
+- 比較所有金額與百分比欄位，不比較 `report_date`（出表日期是清單的產出日期，不是營收數值；只有它改變不算修訂）。相同時只更新 `last_retrieved_at`。
+- 不同時以新值覆蓋（含 `report_date`），`revised_at` 記錄取得時間，`revised_fields` 記錄變動欄位，並以 warning 記下新舊值。
+
+查詢（`GET /api/taiwan/stocks/{symbol}/monthly-revenue`，`TaiwanMonthlyRevenueService` 只讀存檔，不觸發抓取）：
+
+- `months`：該股已存的所有月份，新到舊，數值照官方原值，不自行推算月增或年增。
+- `latest_comparison`：最新一筆的月份、上月與去年同月的年月，以及該期報表附帶的上月營收與去年同月營收。前端在只存 1 個月時顯示，標明取自最新一期報表。
+- `accumulating`：已存月數少於 `target_months`（12）。前端顯示最近 12 個月的營收長條、年增率折線與表格，窄螢幕改為卡片。
+- 回應帶 `usage_scope=historical_reference`、`display_only=true`、`available_at=null`。
+- ETF 回 `applicable=false`、`not_applicable_reason=etf`；TDR 回 `tdr`。代號格式錯誤回 400，證券主檔沒有的代號回 404，存檔讀取失敗回 500（訊息不含路徑或例外內容）。
+
 ## Official fundamentals availability investigation (Phase 6C.1)
 
 Investigation on 2026-08-31 distinguished an official timestamp from a safe

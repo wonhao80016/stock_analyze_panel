@@ -60,6 +60,10 @@ from app.taiwan.screener_nl import (
     TaiwanScreenerTranslation,
     TaiwanScreenerTranslator,
 )
+from app.taiwan.monthly_revenue import (
+    TaiwanMonthlyRevenueResponse,
+    get_taiwan_monthly_revenue_service,
+)
 from app.taiwan.quarterly_financials import (
     TaiwanQuarterlyFinancialsResponse,
     get_taiwan_quarterly_financials_service,
@@ -363,6 +367,27 @@ def get_taiwan_quarterly_financials(symbol: str):
     except Exception as e:
         logger.exception("Failed to read quarterly financials for %s: %s", symbol, e)
         raise HTTPException(status_code=500, detail="季度財報讀取失敗") from e
+
+
+@router.get("/stocks/{symbol}/monthly-revenue", response_model=TaiwanMonthlyRevenueResponse)
+def get_taiwan_monthly_revenue(symbol: str):
+    """Stored display-only monthly revenue of one listing; reads the archive and never fetches."""
+    try:
+        parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
+
+    try:
+        return get_taiwan_monthly_revenue_service().get(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to read monthly revenue for %s: %s", symbol, e)
+        raise HTTPException(status_code=500, detail="月營收讀取失敗") from e
 
 
 @router.get("/stocks/{symbol}/research-context", response_model=TaiwanStockResearchContext)

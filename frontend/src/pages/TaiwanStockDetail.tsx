@@ -40,6 +40,7 @@ import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
 import { VolumeUnitToggle } from '@/components/VolumeUnitToggle'
 import { TaiwanReferenceData } from '@/components/taiwan/TaiwanReferenceData'
 import { TaiwanQuarterlyFinancials } from '@/components/taiwan/TaiwanQuarterlyFinancials'
+import { TaiwanMonthlyRevenue } from '@/components/taiwan/TaiwanMonthlyRevenue'
 import { DataQualityBadge, formatQuoteSource } from '@/components/taiwan/TaiwanDataQuality'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useSafeBack } from '@/lib/useSafeBack'
@@ -224,6 +225,13 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const quarterlyQuery = useQuery({
     queryKey: QK.taiwanQuarterlyFinancials(symbol),
     queryFn: () => api.taiwanQuarterlyFinancials(symbol),
+    staleTime: 5 * 60_000,
+    enabled: !isIndex,
+  })
+
+  const monthlyRevenueQuery = useQuery({
+    queryKey: QK.taiwanMonthlyRevenue(symbol),
+    queryFn: () => api.taiwanMonthlyRevenue(symbol),
     staleTime: 5 * 60_000,
     enabled: !isIndex,
   })
@@ -944,6 +952,17 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             isError={quarterlyQuery.isError}
             isFetching={quarterlyQuery.isFetching}
             onRetry={() => quarterlyQuery.refetch()}
+          />
+          )}
+
+          {!isIndex && (
+          <TaiwanMonthlyRevenue
+            symbol={symbol}
+            response={monthlyRevenueQuery.data}
+            isLoading={monthlyRevenueQuery.isLoading}
+            isError={monthlyRevenueQuery.isError}
+            isFetching={monthlyRevenueQuery.isFetching}
+            onRetry={() => monthlyRevenueQuery.refetch()}
           />
           )}
 

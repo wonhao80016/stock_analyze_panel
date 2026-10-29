@@ -987,6 +987,47 @@ export interface TaiwanQuarterlyFinancialsResponse {
   annual_eps: { fiscal_year: number; eps: number | null }[]
 }
 
+// Amounts in TWD, *_pct in percent (12.5 means 12.5%), as the official monthly list stated them.
+export interface TaiwanMonthlyRevenuePeriod {
+  year: number
+  month: number
+  period: string
+  revenue: number | null
+  previous_month_revenue: number | null
+  previous_year_revenue: number | null
+  cumulative_revenue: number | null
+  previous_year_cumulative_revenue: number | null
+  mom_pct: number | null
+  yoy_pct: number | null
+  cumulative_yoy_pct: number | null
+  report_date: string | null
+  source: string | null
+  source_url: string | null
+  first_retrieved_at: string | null
+  last_retrieved_at: string | null
+  revised_at: string | null
+}
+
+export interface TaiwanMonthlyRevenueResponse {
+  symbol: string
+  exchange: string
+  applicable: boolean
+  not_applicable_reason: 'etf' | 'tdr' | null
+  usage_scope: 'historical_reference'
+  display_only: true
+  available_at: null
+  target_months: number
+  accumulating: boolean
+  months: TaiwanMonthlyRevenuePeriod[]
+  latest_comparison: {
+    period: string
+    previous_month: string
+    previous_month_revenue: number | null
+    previous_year_month: string
+    previous_year_revenue: number | null
+  } | null
+}
+
 // ===== Taiwan Screener Types (Phase 6B) =====
 export interface TaiwanScreenerRequest {
   exchange?: 'TWSE' | 'TPEX' | 'ALL'
@@ -2403,6 +2444,11 @@ export const api = {
   taiwanQuarterlyFinancials: (symbol: string) =>
     request<TaiwanQuarterlyFinancialsResponse>(
       `/api/taiwan/stocks/${encodeURIComponent(symbol)}/quarterly-financials`,
+    ),
+
+  taiwanMonthlyRevenue: (symbol: string) =>
+    request<TaiwanMonthlyRevenueResponse>(
+      `/api/taiwan/stocks/${encodeURIComponent(symbol)}/monthly-revenue`,
     ),
 
   taiwanInstitutionalHistory: (symbol: string, days = 60) =>

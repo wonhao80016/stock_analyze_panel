@@ -288,6 +288,14 @@ def _scheduled_runs_skip_the_quarterly_archive(monkeypatch):
     monkeypatch.setattr(daily_pipeline, "refresh_quarterly_financials", lambda label: None)
 
 
+@pytest.fixture(autouse=True)
+def _scheduled_runs_skip_the_monthly_revenue_archive(monkeypatch):
+    """A scheduled run would otherwise retry 2 official lists against the network guard."""
+    from app.jobs import daily_pipeline
+
+    monkeypatch.setattr(daily_pipeline, "refresh_monthly_revenue", lambda label: None)
+
+
 # --- Network isolation ----------------------------------------------------------------------
 
 _network_allowed = False

@@ -544,7 +544,10 @@ def test_api_errors(tmp_path, monkeypatch, client):
 # --- display-only boundary -----------------------------------------------------------------
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
-DISPLAY_ONLY_MODULES = {"app.taiwan.quarterly_financials", "app.taiwan.quarterly_financials_store"}
+DISPLAY_ONLY_MODULES = {
+    "app.taiwan.quarterly_financials", "app.taiwan.quarterly_financials_store",
+    "app.taiwan.monthly_revenue", "app.taiwan.monthly_revenue_store",
+}
 SELECTION_ROOTS = (
     "app/backtest", "app/strategy", "app/api/backtest.py", "app/api/screener.py",
     "app/services/screener.py", "app/services/strategy_cache.py", "app/services/strategy_inputs.py",

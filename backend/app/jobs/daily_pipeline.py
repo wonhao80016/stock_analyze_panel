@@ -139,6 +139,26 @@ def refresh_quarterly_financials(label: str) -> None:
         logger.exception("quarterly financials archive (%s) failed: %s", label, e)
 
 
+def refresh_monthly_revenue(label: str) -> None:
+    """Archive both exchanges' latest official monthly revenue for display only. Never raises.
+
+    Its 2 lists share TaiwanOfficialFundamentals' per-day cache, so a later run on the same
+    Taipei date sends no request for a list that already loaded.
+    """
+    try:
+        from app.taiwan.monthly_revenue import refresh_latest_month
+
+        report = refresh_latest_month()
+        logger.info(
+            "monthly revenue archived (%s): added=%d unchanged=%d revised=%d "
+            "ambiguous=%d failed_lists=%d",
+            label, report.added, report.unchanged, report.revised,
+            len(report.ambiguous), len(report.failures),
+        )
+    except Exception as e:
+        logger.exception("monthly revenue archive (%s) failed: %s", label, e)
+
+
 def _enriched_partition_mtime(data_dir: Path, day: date) -> float | None:
     """Never raises: a missing or unreadable mtime only disables the stale-input check."""
     try:
@@ -164,6 +184,7 @@ def start_scheduler() -> AsyncIOScheduler:
             _update_and_publish(label, **datasets)
         finally:
             refresh_quarterly_financials(label)
+            refresh_monthly_revenue(label)
 
     def _update_and_publish(
         label: str,
