@@ -75,6 +75,12 @@ function percent(value: unknown) {
   return parsed == null ? '--' : `${number(parsed)}%`
 }
 
+function ratioPercent(numerator: unknown, denominator: unknown): number | null {
+  const top = numberValue(numerator)
+  const bottom = numberValue(denominator)
+  return top == null || bottom == null || bottom === 0 ? null : top / bottom * 100
+}
+
 // Statement amounts accumulate from the fiscal year start, so the period shows both ends.
 function accumulationPeriod(data: Record<string, unknown>) {
   if (!present(data.period_end)) return '--'
@@ -167,6 +173,8 @@ function StockSections({ sections, isTdr }: { sections: Record<string, TaiwanDat
         <div className="text-xs">
           <DataRow label="累計期間" value={accumulationPeriod(statementData)} />
           <DataRow label="累計營業收入" value={money(statementValues.revenue)} />
+          <DataRow label="累計營業毛利" value={money(statementValues.gross_profit)} />
+          <DataRow label="累計毛利率" value={percent(ratioPercent(statementValues.gross_profit, statementValues.revenue))} />
           <DataRow label="累計營業利益" value={money(statementValues.operating_income)} />
           <DataRow label="累計本期淨利" value={money(statementValues.net_income)} />
           <DataRow label="累計 EPS" value={number(statementValues.cumulative_eps)} />

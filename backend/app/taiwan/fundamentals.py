@@ -198,6 +198,7 @@ class TaiwanOfficialFundamentals:
             return thousand_twd(next((rows[name] for name in names if str(rows.get(name, "")).strip()), None))
         values = {
             "revenue": amount(income, "營業收入", "收益合計", "淨收益"),
+            "gross_profit": amount(income, "營業毛利（毛損）淨額", "營業毛利（毛損）"),
             "operating_income": amount(income, "營業利益（損失）"),
             "net_income": amount(income, "本期淨利（淨損）", "本期稅後淨利（淨損）"),
             "cumulative_eps": parse_number(income.get("基本每股盈餘（元）")),

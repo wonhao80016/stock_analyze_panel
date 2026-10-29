@@ -561,6 +561,19 @@ Official financial amounts reported in `仟元` are normalized to TWD. Missing
 values remain null, explicit zero remains zero, and malformed values are errors.
 Company monthly revenue and statements are `unsupported` for ETFs.
 
+財報（`financial_statement`）的欄位只有官方最新一季，屬目前參考值，不建立歷史、不進回測。損益欄位是年初至今累計（`period_start` 為該年 1 月 1 日），會計類別由 `t187ap06` 六個類別（ci、basi、bd、fh、ins、mim）中唯一有該公司資料的那份決定。多個官方欄位名依序取第一個非空白的值：
+
+| 欄位 | 官方欄位（依序） | 說明 |
+| --- | --- | --- |
+| `revenue` | 營業收入、收益合計、淨收益 | 累計 |
+| `gross_profit` | 營業毛利（毛損）淨額、營業毛利（毛損） | 累計；已查證一般業（ci）有此欄，其他類別未查明；沒有此欄時為 null，不是 0 |
+| `operating_income` | 營業利益（損失） | 累計 |
+| `net_income` | 本期淨利（淨損）、本期稅後淨利（淨損） | 累計 |
+| `cumulative_eps` | 基本每股盈餘（元） | 累計，單位元 |
+| `assets`、`liabilities`、`equity` | 資產總計／資產總額、負債總計／負債總額、權益總計／權益總額（`t187ap07`） | 季末時點值 |
+
+毛利率不另存，由前端以 `gross_profit ÷ revenue` 計算；毛利缺值、營收缺值或營收為 0 時顯示 `--`。
+
 Share-capital fields are not interchangeable: `total_shares`, `issued_shares`,
 `float_shares`, and monetary `capital` retain their own meanings. In particular,
 issued shares or capital divided by par value are not used as historical float

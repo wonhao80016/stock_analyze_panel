@@ -47,8 +47,40 @@ def test_statement_category_is_resolved_by_unique_official_dataset_not_symbol_he
     got = TaiwanOfficialFundamentals(httpx.Client(transport=httpx.MockTransport(handler))).financial_statement("2881.TWSE", "TWSE")
     assert got.accounting_category == "fh" and got.statement_type == "unknown"
     assert got.values["revenue"] == 100_000 and got.values["assets"] == 1_000_000
+    assert got.values["gross_profit"] is None
     assert got.available_at is None and got.published_at is None
     assert got.status == "data_insufficient"
+
+
+def _general_statement(income_fields: dict[str, str]):
+    income = {"出表日期": "1150830", "年度": "115", "季別": "2", "公司代號": "2330", "營業收入": "1,000", **income_fields}
+    balance = {"公司代號": "2330", "資產總計": "5,000", "負債總計": "2,000", "權益總計": "3,000"}
+    def handler(request):
+        if request.url.path.endswith("06_L_ci"):
+            return httpx.Response(200, json=[income])
+        if request.url.path.endswith("07_L_ci"):
+            return httpx.Response(200, json=[balance])
+        return httpx.Response(200, json=[])
+    return TaiwanOfficialFundamentals(httpx.Client(transport=httpx.MockTransport(handler))).financial_statement("2330.TWSE", "TWSE")
+
+
+@pytest.mark.parametrize(
+    ("income_fields", "expected"),
+    [
+        ({"營業毛利（毛損）": "620", "營業毛利（毛損）淨額": "600"}, 600_000),
+        ({"營業毛利（毛損）": "620"}, 620_000),
+        ({"營業毛利（毛損）": "620", "營業毛利（毛損）淨額": " "}, 620_000),
+        ({"營業毛利（毛損）淨額": "0"}, 0),
+        ({"營業毛利（毛損）淨額": "-50"}, -50_000),
+        ({"營業毛利（毛損）淨額": "--"}, None),
+        ({}, None),
+    ],
+)
+def test_general_statement_gross_profit_prefers_the_net_line(income_fields, expected):
+    got = _general_statement(income_fields)
+    assert got.accounting_category == "ci" and got.period_start == "2026-01-01"
+    assert got.values["revenue"] == 1_000_000
+    assert got.values["gross_profit"] == expected
 
 
 def test_valuation_trade_date_and_retrieval_do_not_create_availability():
