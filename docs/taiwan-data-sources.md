@@ -73,6 +73,7 @@ ETF classification for price limits:
 - TPEx capital reduction resumption prices: `bulletin/revivt`
 - TPEx ETF directory: the ISIN table `isin.twse.com.tw/isin/C_public.jsp?strMode=4`
 - TPEx ETF product spec (management style): `www.tpex.org.tw/www/zh-tw/ETF/detail`
+- TWSE total return index: the 報酬指數 table of the `afterTrading/MI_INDEX` response (see 發行量加權股價報酬指數)
 - TWSE market open/closed schedule: `rwd/zh/holidaySchedule/holidaySchedule` (see Trading calendar and holidays)
 
 TPEx ETF identity is retained from the official ISIN directory. Product
@@ -275,6 +276,24 @@ figures: they are share counts that mix stocks, ETF units and warrants.
   and whose two responses are both empty is taken as a holiday. If a later day is
   stored in the same run, that day is not refetched automatically and needs the
   backfill command.
+
+## 發行量加權股價報酬指數（含息）
+
+`app/taiwan/return_index.py` 把每日已抓的 TWSE `rwd/zh/afterTrading/MI_INDEX?date=YYYYMMDD&type=ALL&response=json` 回應中的報酬指數表存檔，供之後個股訊號統計的超額報酬基準使用（`docs/stock-positioning-signals-plan/README.md` 1-5、1-6）。不另發請求：接點在 `OfficialDailySnapshotAdapter.fetch_twse`，用的是取收盤行情的同一份回應。
+
+- 選表：標題同時含「報酬指數」與「臺灣證券交易所」（「台」先正規化為「臺」）的表，只能有一張；價格指數表與其他表不讀。欄位以欄名定位：名稱欄為「報酬指數」或「指數」，收盤欄為「收盤指數」，不靠位置。2026-10-29 實抓 20261028 的回應，已確認表標題（`報酬指數(臺灣證券交易所)`，沒有日期前綴；另有 `報酬指數(跨市場)`、`報酬指數(臺灣指數公司)` 兩張不讀）、欄名（`報酬指數 | 收盤指數 | 漲跌(+/-) | 漲跌點數 | 漲跌百分比(%) | 特殊處理註記`）、收盤值帶千分位（如 `108,763.96`）與頂層 `date` 欄位。日後欄名改變時每天會記 error 而不存，需對照實際回應調整。
+- 必要列：「發行量加權股價報酬指數」。表中其他有數值收盤的列一併保存；其他列收盤為 `--` 等缺值時略過。
+- 日期戳記：回應 `stat` 不是 OK、`date` 缺少或與請求日不同時不存。這比收盤行情的檢查嚴格一點：收盤行情允許缺少戳記，報酬指數不允許。
+- 缺表時記 warning、不存任何列（不會存 0）；表標題改變視同缺表。欄名改變、必要列缺少或收盤不是數字時記 error、不存。
+- 失敗隔離：解析與寫入的任何例外只記錄，不影響同一份回應的收盤行情解析與日 K 寫入（`tests/test_taiwan_return_index.py`）。
+- 存檔：`data/taiwan/return_index/date=YYYY-MM-DD/part.parquet`，一個交易日一個分區，以 `write_atomically` 原子取代（Windows 上檔案被開啟時短暫重試，仍失敗就拋出並只記錄，原檔不動）。既有分區讀不出來時不覆寫。
+- 欄位：`date`（交易日）、`index_name`（官方指數名稱）、`close`（收盤指數，點）、`source`（`twse_mi_index`）、`source_url`、`retrieved_at`（台北時間）。
+- 同日再次取得：所有列的名稱與收盤都相同時不重寫（`retrieved_at` 保留第一次）；不同時以新值整日覆蓋，並以 warning 記下新舊值。
+- 讀取：`read_return_index_series(start, end, index_name=...)` 回傳期間內已存日期的 `date`、`close`，由舊到新；沒存的日期不補值。目前沒有 API 端點與前端。
+- 累積起始日：從這段程式上線後第一次盤後刷新的交易日起累積（2026-10-29 尚未上線）。之後補抓舊日 K（修補日、上櫃個股回補會呼叫 `fetch_twse`）時，也會順手存下那天的報酬指數，所以已存日期可能早於上線日、且不連續。
+- 歷史日期回補未查明（屬 PD2）：過去日期的 MI_INDEX 是否都有這張表尚未查證，不主動回補。
+- 櫃買報酬指數不在範圍：現有 TPEx `dailyQuotes` 解析只取「上櫃股票行情」表，回應中是否附有櫃買報酬指數未查證，也沒有為此新增請求。
+- 用途判斷：這是交易所公布、有交易日期的市場指數，不屬於 6G 管的公司基本面資料集，因此不登錄 `app/taiwan/current_data.py` 的能力矩陣（矩陣的 `domain` 只有 company 與 etf，現有的 `index_daily`、`market_institutional` 也都沒有登錄）。用途定為「歷史參考、不進回測」：存檔只記錄本系統取得的時間，沒有查證官方首次公布時間，因此不得作為 as-of 查詢或回測輸入；1-6 的顯示用統計可以使用。
 
 ## Corporate actions and forward adjustment
 

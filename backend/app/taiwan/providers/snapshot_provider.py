@@ -25,6 +25,7 @@ import polars as pl
 
 from app.data_providers.normalizer import DAILY_COLS
 from app.taiwan.providers.base import AmountUnit, PriceSemantics, SourceMetadata, VolumeUnit
+from app.taiwan.return_index import TaiwanReturnIndexStore, archive_mi_index_return_index
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 
 logger = logging.getLogger(__name__)
@@ -107,8 +108,10 @@ class OfficialDailySnapshotAdapter:
         security_master: TaiwanSecurityMaster | None = None,
         timeout: float = 20.0,
         client: httpx.Client | None = None,
+        return_index_store: TaiwanReturnIndexStore | None = None,
     ) -> None:
         self.security_master = security_master or get_security_master()
+        self.return_index_store = return_index_store or TaiwanReturnIndexStore()
         self.timeout = timeout
         self.client = client or httpx.Client(
             timeout=timeout,
@@ -182,6 +185,7 @@ class OfficialDailySnapshotAdapter:
         if not self._stamped_for(payload, target_date):
             logger.warning("TWSE MI_INDEX answered %s with data for %s", target_date, payload.get("date"))
             return pl.DataFrame()
+        self._archive_return_index(payload, target_date, url)
 
         tables = payload.get("tables", [])
         quote_table = None
@@ -199,6 +203,13 @@ class OfficialDailySnapshotAdapter:
         fields = quote_table.get("fields", [])
         data_rows = quote_table.get("data", [])
         return self._parse_twse_table(data_rows, fields, target_date)
+
+    def _archive_return_index(self, payload: dict[str, Any], target_date: date, url: str) -> None:
+        """Archive the return index table; a failure is only logged so the quotes still publish."""
+        try:
+            archive_mi_index_return_index(payload, target_date, url, self.return_index_store)
+        except Exception:
+            logger.exception("TWSE return index archive failed for %s", target_date)
 
     def _parse_twse_table(
         self,

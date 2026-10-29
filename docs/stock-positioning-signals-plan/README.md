@@ -143,7 +143,7 @@
 
 | 期別 | 狀態 | 備註 |
 |---|---|---|
-| 第一期 | 進行中 | 採甲案；1-4 已實作、待提交 |
+| 第一期 | 進行中 | 採甲案；1-4 已實作、待提交；1-5 已實作、待提交（存檔 `data/taiwan/return_index/`、讀取函式 `read_return_index_series`，見 `docs/taiwan-data-sources.md`「發行量加權股價報酬指數（含息）」） |
 | 第二期 | 進行中 | PD1、PD2 已定案（2026-10-29）；第 3 項財報每季快照採方案 A，已實作、待提交（存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/quarterly-financials`、個股頁「季度財報」區塊）；C 案第三方回補待使用者確認 FinMind 條款 |
 | 第三期 | 待 PD2 | — |
 
