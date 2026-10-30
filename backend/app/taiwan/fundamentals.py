@@ -201,7 +201,13 @@ class TaiwanOfficialFundamentals:
         if len(matches) != 1:
             raise LookupError(f"accounting category data_insufficient: matches={len(matches)}")
         category, income_url, income, retrieved = matches[0]
-        balance_url, sheet, _ = self._company_row(symbol, exchange, balance + category)
+        # A failed balance sheet only blanks its three amounts; the income figures stay usable.
+        balance_error: str | None = None
+        try:
+            balance_url, sheet, _ = self._company_row(symbol, exchange, balance + category)
+        except Exception as exc:
+            balance_url = f"{self.TWSE if exchange == 'TWSE' else self.TPEX}/{balance + category}"
+            sheet, balance_error = {}, f"{type(exc).__name__}: {exc}"
         year = int(str(income.get("年度") or income.get("Year") or "").strip()) + 1911
         quarter = int(str(income.get("季別") or income.get("Season") or "").strip())
         if not 1 <= quarter <= 4:
@@ -220,6 +226,8 @@ class TaiwanOfficialFundamentals:
             "liabilities": amount(sheet, "負債總計", "負債總額"),
             "equity": amount(sheet, "權益總計", "權益總額"),
         }
+        if balance_error is not None:
+            values["balance_sheet_error"] = balance_error
         record = self._record(symbol, "financial_statement", period_end, income, exchange, income_url + " | " + balance_url, retrieved, values, "TWD", "thousand_TWD")
         return FundamentalRecord(**{**record.to_dict(), "published_at": record.published_at, "available_at": record.available_at, "retrieved_at": record.retrieved_at, "period_start": f"{year:04d}-01-01", "accounting_category": category})
 

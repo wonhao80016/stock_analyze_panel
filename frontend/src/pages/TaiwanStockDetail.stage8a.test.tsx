@@ -31,6 +31,7 @@ vi.mock('@/lib/api', async importOriginal => ({
     taiwanMarginHistory: vi.fn().mockResolvedValue({ rows: [] }),
     taiwanDataStatus: vi.fn(),
     taiwanCurrentSignals: vi.fn().mockResolvedValue(null),
+    taiwanPositioning: vi.fn().mockResolvedValue(null),
   },
 }))
 
@@ -67,11 +68,11 @@ function dataStatus(asOf: string) {
   return { daily_as_of: asOf, institutional_as_of: asOf, margin_as_of: asOf }
 }
 
-function renderDetail() {
+function renderDetail(symbol = '2330.TWSE') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={['/stocks/2330.TWSE']}>
+      <MemoryRouter initialEntries={[`/stocks/${symbol}`]}>
         <Routes>
           <Route path="/stocks/:symbol" element={<TaiwanStockDetail />} />
         </Routes>
@@ -111,6 +112,37 @@ describe('B064 detail polling follows the Taipei session', () => {
   })
 })
 
+describe('positioning is asked for ordinary stocks only', () => {
+  it('does not ask for an ETF', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...detail('closed'),
+      identity: { symbol: '2330.TWSE', code: '2330', name: '台積電', exchange: 'TWSE', instrument_type: 'etf', is_supported: true },
+    } as any)
+    vi.mocked(api.taiwanDataStatus).mockResolvedValue(dataStatus('2026-10-20') as any)
+    renderDetail()
+    await screen.findByRole('heading', { name: '台積電' })
+    await act(async () => {})
+
+    expect(api.taiwanPositioning).not.toHaveBeenCalled()
+    expect(screen.queryByRole('heading', { name: '體質與估值定位' })).toBeNull()
+  })
+
+  it('does not ask for an index', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...detail('closed'),
+      symbol: 't00.TWSE',
+      identity: { symbol: 't00.TWSE', code: 't00', name: '發行量加權股價指數', exchange: 'TWSE', instrument_type: 'index', is_supported: true },
+    } as any)
+    vi.mocked(api.taiwanDataStatus).mockResolvedValue(dataStatus('2026-10-20') as any)
+    renderDetail('t00.TWSE')
+    await screen.findByRole('heading', { name: '發行量加權股價指數' })
+    await act(async () => {})
+
+    expect(api.taiwanPositioning).not.toHaveBeenCalled()
+    expect(screen.queryByRole('heading', { name: '體質與估值定位' })).toBeNull()
+  })
+})
+
 describe('B064 detail refresh after the post-close publication', () => {
   async function afterClose(nextAsOf: string) {
     vi.useFakeTimers({ shouldAdvanceTime: true })
@@ -139,10 +171,17 @@ describe('B064 detail refresh after the post-close publication', () => {
     await vi.waitFor(() => expect(api.taiwanCurrentSignals).toHaveBeenCalledTimes(2))
   })
 
+  it('reloads the positioning when a dataset date moves', async () => {
+    await afterClose('2026-10-21')
+
+    await vi.waitFor(() => expect(api.taiwanPositioning).toHaveBeenCalledTimes(2))
+  })
+
   it('stays quiet when nothing new was published', async () => {
     await afterClose('2026-10-20')
 
     expect(api.taiwanStockDetail).toHaveBeenCalledTimes(1)
     expect(api.taiwanCurrentSignals).toHaveBeenCalledTimes(1)
+    expect(api.taiwanPositioning).toHaveBeenCalledTimes(1)
   })
 })

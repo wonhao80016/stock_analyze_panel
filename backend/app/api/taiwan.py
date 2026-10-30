@@ -72,6 +72,7 @@ from app.taiwan.quarterly_financials import (
     TaiwanQuarterlyFinancialsResponse,
     get_taiwan_quarterly_financials_service,
 )
+from app.taiwan.positioning import TaiwanPositioningResponse, get_taiwan_positioning_service
 from app.taiwan.symbol import parse_symbol
 from app.taiwan.universe.service import SecurityMasterUnavailableError
 
@@ -413,6 +414,27 @@ def get_taiwan_current_signals(symbol: str, request: Request):
     except Exception as e:
         logger.exception("Failed to read current signals for %s: %s", symbol, e)
         raise HTTPException(status_code=500, detail="目前訊號讀取失敗") from e
+
+
+@router.get("/stocks/{symbol}/positioning", response_model=TaiwanPositioningResponse)
+def get_taiwan_positioning(symbol: str):
+    """Whole-market percentiles of one stock on current-reference metrics; computed once per data date."""
+    try:
+        parse_symbol(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"無效的台股代碼格式: {symbol}") from e
+
+    try:
+        return get_taiwan_positioning_service().get(symbol)
+    except SecurityMasterUnavailableError:
+        raise
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Failed to read positioning for %s: %s", symbol, e)
+        raise HTTPException(status_code=500, detail="定位資料讀取失敗") from e
 
 
 @router.get("/stocks/{symbol}/research-context", response_model=TaiwanStockResearchContext)

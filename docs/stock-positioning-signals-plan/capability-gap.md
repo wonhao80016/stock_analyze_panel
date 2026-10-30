@@ -68,7 +68,7 @@
 | 本益比 | 當日、反向 | 估值 `pe`（[fundamentals.py:219](../../backend/app/taiwan/fundamentals.py#L219)） | 可做 | 同 finlab | ETF 不提供（[:212-213](../../backend/app/taiwan/fundamentals.py#L212-L213)）；沒有數值者排除，不排名 |
 | 股價淨值比 | 當日、反向 | `pb`（[:220](../../backend/app/taiwan/fundamentals.py#L220)） | 可做 | 同 finlab | 同上 |
 | 殖利率 | 當日 | `dividend_yield`（[:221](../../backend/app/taiwan/fundamentals.py#L221)） | 可做 | 同 finlab | ETF 不提供 |
-| ROE | 最新一季、單季、稅後 | 年初至今累計淨利、期末權益總計（[:202](../../backend/app/taiwan/fundamentals.py#L202)、[:206](../../backend/app/taiwan/fundamentals.py#L206)） | 換口徑 | 累計年化 ROE = 累計淨利 × 4 ÷ 季別 ÷ 期末權益總計，標「年初至今累計年化」與期別 | 推論：淨利與權益都含非控制權益；沒有前期權益，不能用平均權益；數值與 finlab 不可直接比 |
+| ROE | 最新一季、單季、稅後 | 年初至今累計淨利、期末權益總計（[:202](../../backend/app/taiwan/fundamentals.py#L202)、[:206](../../backend/app/taiwan/fundamentals.py#L206)） | 換口徑 | 累計年化 ROE = 年初至今累計歸屬母公司淨利 × 4 ÷ 季別 ÷ 期末歸屬母公司權益，標「年初至今累計年化」與期別（2026-10-30 定案，取代原提案的「累計淨利 ÷ 期末權益總計」；資料取自季度財報快照的 `parent_net_income`、`parent_equity`） | 不含非控制權益；沒有前期權益，不能用平均權益；數值與 finlab 不可直接比。快照有連續兩季後改為單季不年化另立決策，同一個排名不混用兩種口徑 |
 | 營業利益率 | 最新一季 | 累計營業利益 ÷ 累計營收（[:200-201](../../backend/app/taiwan/fundamentals.py#L200-L201)） | 換口徑 | 年初至今累計營業利益率 | 金融保險類可能沒有營業利益（測試樣本 2881 只有淨收益，[test_taiwan_fundamentals.py:39](../../backend/tests/test_taiwan_fundamentals.py#L39)）；建議只排一般業（`accounting_category` 為 `ci`，[fundamentals.py:209](../../backend/app/taiwan/fundamentals.py#L209)） |
 | 月營收年增率 | 最新公告月份單月 | `yoy`，百分數（[:169](../../backend/app/taiwan/fundamentals.py#L169)） | 可做 | 同 finlab | 每月 1–10 日全市場清單可能混雜不同月份（未查明），只與同一資料年月比較或標示 |
 | 60 日報酬 | 還原股價 60 日 | enriched `momentum_60d`，前復權收盤、小數（[pipeline.py:637-638](../../backend/app/indicators/pipeline.py#L637-L638)） | 可做 | 同 finlab | 小數轉百分數在邊界做 |
@@ -81,13 +81,15 @@
 2. 母體：建議上市加上櫃普通股；ETF、TDR 另列不排名。finlab 的母體未查明，數值不必對齊。
 3. 期別：財報申報期與每月 1–10 日，全市場清單可能混雜不同期別（未查明）；排名限同一期別，或在畫面標示期別。
 4. 快取：每個資料日期算一次，鍵含資料集與資料日期；計算在鎖外進行，完成後原子替換。
-5. 失敗隔離：任一資料集失敗只讓對應指標顯示「無法計算」。目前 B201 會讓整張財報卡失敗（[fundamentals.py:181-190](../../backend/app/taiwan/fundamentals.py#L181-L190)），要一起處理。
+5. 失敗隔離：任一資料集失敗只讓對應指標顯示「無法計算」。評估當時 B201 會讓整張財報卡失敗（[fundamentals.py:181-190](../../backend/app/taiwan/fundamentals.py#L181-L190)）；1-2 實作時（2026-10-30）已最小修正：資產負債表清單失敗時只讓資產、負債、權益為空並記下 `balance_sheet_error`，損益數字照常回傳。類別迴圈只吞 `LookupError` 的部分未改。
 6. 存取：全市場清單目前只能從私有的 `_rows` 取得（[fundamentals.py:289](../../backend/app/taiwan/fundamentals.py#L289)），需要新增公開方法（提案）。
 7. 分級門檻可沿用 finlab 的級距（[finlab-reference.md](finlab-reference.md) 3.3）或自訂，開工前定。
 
 ### 3.3 官方請求數估算
 
 推論，依程式結構計算：財報每個類別各有損益與資產負債兩份清單、共 6 類（[fundamentals.py:23](../../backend/app/taiwan/fundamentals.py#L23)、[:178-190](../../backend/app/taiwan/fundamentals.py#L178-L190)），兩個市場合計 24 份；月營收與估值各 2 份。當日第一次計算最多 28 份清單，之後同一台北日期讀快取（[fundamentals.py:146-148](../../backend/app/taiwan/fundamentals.py#L146-L148)）。60／240 日報酬與外資強度只讀已存的日 K、法人分區，不發請求。
+
+1-2 實作後（2026-10-30）：財報與月營收改讀已存快照，不發請求；每個資料日期只有估值 2 份清單，同一台北日期第二次計算為 0（見 [README.md](README.md) 的 1-2 定案）。上段的 28 份是評估當時的估算。
 
 ## 4. 訊號
 

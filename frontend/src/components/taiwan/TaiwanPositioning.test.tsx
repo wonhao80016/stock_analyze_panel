@@ -1,0 +1,189 @@
+import { describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import type { TaiwanPositioningDimension, TaiwanPositioningMetric, TaiwanPositioningResponse } from '@/lib/api'
+import { TaiwanPositioning } from './TaiwanPositioning'
+
+function metric(overrides: Partial<TaiwanPositioningMetric> & Pick<TaiwanPositioningMetric, 'id'>): TaiwanPositioningMetric {
+  return {
+    status: 'ranked',
+    reason: null,
+    value: 10,
+    unit: 'percent',
+    lower_is_better: false,
+    percentile: 50,
+    score: 50,
+    grade: 'good',
+    tier: 2,
+    compared: 1800,
+    as_of: '2026-10-29',
+    period: null,
+    basis: null,
+    ...overrides,
+  }
+}
+
+function dimensions(): TaiwanPositioningDimension[] {
+  return [
+    {
+      id: 'valuation', score: 29.2, grade: 'pricey', tier: 1, segments: 2,
+      metrics: [
+        metric({ id: 'pe', value: 20, unit: 'times', lower_is_better: true, percentile: 75, score: 25, grade: 'pricey', tier: 1, compared: 950 }),
+        metric({ id: 'pb', value: 5, unit: 'times', lower_is_better: true, percentile: 87.5, score: 12.5, grade: 'expensive', tier: 0 }),
+        metric({ id: 'dividend_yield', value: 2.36 }),
+      ],
+    },
+    {
+      id: 'profitability', score: 62.5, grade: 'good', tier: 2, segments: 4,
+      metrics: [
+        metric({ id: 'roe', value: 20, period: '2026Q2', basis: 'ytd_annualized' }),
+        metric({ id: 'operating_margin', status: 'not_ranked', reason: 'not_general_industry', value: null, percentile: null, score: null, grade: null, tier: null, compared: 1500, period: '2026Q2', basis: 'ytd' }),
+      ],
+    },
+    {
+      id: 'growth', score: 75, grade: 'good', tier: 2, segments: 4,
+      metrics: [metric({ id: 'revenue_yoy', value: 25, period: '2026-09', compared: 1700 })],
+    },
+    {
+      id: 'momentum', score: 60, grade: 'good', tier: 2, segments: 3,
+      metrics: [
+        metric({ id: 'return_60d', value: -5.5 }),
+        metric({ id: 'return_240d', status: 'not_ranked', reason: 'insufficient_history', value: null, percentile: null, score: null, grade: null, tier: null }),
+      ],
+    },
+    {
+      id: 'chips', score: null, grade: null, tier: null, segments: null,
+      metrics: [metric({ id: 'foreign_flow_20d', status: 'unavailable', reason: 'incomplete_window', value: null, percentile: null, score: null, grade: null, tier: null, compared: null })],
+    },
+  ]
+}
+
+function response(overrides: Partial<TaiwanPositioningResponse> = {}): TaiwanPositioningResponse {
+  return {
+    symbol: '2330.TWSE',
+    exchange: 'TWSE',
+    applicable: true,
+    not_applicable_reason: null,
+    usage_scope: 'current_reference',
+    available_at: null,
+    universe_size: 1850,
+    valuation_dates: { TWSE: '2026-10-29', TPEX: '2026-10-29' },
+    valuation_period_mixed: false,
+    dimensions: dimensions(),
+    ...overrides,
+  }
+}
+
+function renderCard(props: Partial<Parameters<typeof TaiwanPositioning>[0]> = {}) {
+  return render(
+    <TaiwanPositioning
+      symbol="2330.TWSE"
+      response={response()}
+      isLoading={false}
+      isError={false}
+      isFetching={false}
+      onRetry={() => {}}
+      {...props}
+    />,
+  )
+}
+
+describe('TaiwanPositioning', () => {
+  it('labels the card as current reference with the universe size', () => {
+    renderCard()
+    expect(screen.getByRole('heading', { name: '體質與估值定位' })).toBeInTheDocument()
+    expect(screen.getByText('目前參考')).toBeInTheDocument()
+    expect(screen.getByText(/共 1,850 檔/)).toBeInTheDocument()
+    expect(screen.getByText(/回溯取得，可能為更正後數值/)).toBeInTheDocument()
+  })
+
+  it('renders dimension grades and five-segment bars', () => {
+    renderCard()
+    const valuation = screen.getByTestId('positioning-dimension-valuation')
+    expect(within(valuation).getAllByText('偏貴')[0]).toBeInTheDocument()
+    const bar = screen.getByTestId('positioning-segments-valuation')
+    expect(bar).toHaveAttribute('data-filled', '2')
+    expect(bar.children).toHaveLength(5)
+    expect(within(valuation).getByText('29.2 分')).toBeInTheDocument()
+    expect(screen.getByTestId('positioning-segments-profitability')).toHaveAttribute('data-filled', '4')
+    expect(within(screen.getByTestId('positioning-metric-pb')).getByText('昂貴')).toBeInTheDocument()
+  })
+
+  it('shows values in their units with percentiles, denominators and periods', () => {
+    renderCard()
+    const pe = screen.getByTestId('positioning-metric-pe')
+    expect(within(pe).getByText('20.00 倍')).toBeInTheDocument()
+    expect(within(pe).getByText('百分位 75.0')).toBeInTheDocument()
+    expect(within(pe).getByText('950 檔比較')).toBeInTheDocument()
+    expect(within(pe).getByText('（越低越便宜）')).toBeInTheDocument()
+    expect(within(screen.getByTestId('positioning-metric-dividend_yield')).getByText('2.36%')).toBeInTheDocument()
+    expect(within(screen.getByTestId('positioning-metric-roe')).getByText('年初至今累計年化・2026Q2')).toBeInTheDocument()
+    expect(within(screen.getByTestId('positioning-metric-revenue_yoy')).getByText('單月・資料年月 2026-09')).toBeInTheDocument()
+    expect(within(screen.getByTestId('positioning-metric-revenue_yoy')).getByText('+25.00%')).toHaveClass('text-bull')
+    expect(within(screen.getByTestId('positioning-metric-return_60d')).getByText('-5.50%')).toHaveClass('text-bear')
+  })
+
+  it('explains not-ranked and unavailable metrics', () => {
+    renderCard()
+    expect(screen.getByTestId('positioning-reason-operating_margin')).toHaveTextContent('不排名：此產業類別不適用（只比一般業）（1,500 檔比較）')
+    expect(screen.getByTestId('positioning-reason-return_240d')).toHaveTextContent('交易日數不足')
+    expect(screen.getByTestId('positioning-reason-foreign_flow_20d')).toHaveTextContent('無法計算：期間內外資資料不完整')
+    expect(within(screen.getByTestId('positioning-dimension-chips')).getByText('無法計算')).toBeInTheDocument()
+  })
+
+  it('marks loss-making PE', () => {
+    const [valuation, ...rest] = dimensions()
+    valuation.metrics[0] = metric({ id: 'pe', status: 'not_ranked', reason: 'loss_or_not_applicable', value: null, unit: 'times', lower_is_better: true, percentile: null, score: null, grade: null, tier: null })
+    renderCard({ response: response({ dimensions: [valuation, ...rest] }) })
+    expect(screen.getByTestId('positioning-reason-pe')).toHaveTextContent('虧損或不適用')
+  })
+
+  it('flags mixed valuation dates', () => {
+    renderCard({ response: response({ valuation_dates: { TWSE: '2026-10-29', TPEX: '2026-10-28' }, valuation_period_mixed: true }) })
+    const dates = screen.getByTestId('positioning-valuation-dates')
+    expect(dates).toHaveTextContent('上市 2026-10-29／上櫃 2026-10-28')
+    expect(within(dates).getByText('期別混雜')).toBeInTheDocument()
+  })
+
+  it('does not flag matching valuation dates', () => {
+    renderCard()
+    expect(screen.queryByText('期別混雜')).toBeNull()
+  })
+
+  it('shows a loading state', () => {
+    renderCard({ response: undefined, isLoading: true })
+    expect(screen.getByTestId('positioning-loading')).toBeInTheDocument()
+  })
+
+  it('shows an empty cross-section as not computable rather than zero', () => {
+    const empty = dimensions().map(d => ({
+      ...d, score: null, grade: null, tier: null, segments: null,
+      metrics: d.metrics.map(m => ({ ...m, status: 'unavailable' as const, reason: 'not_archived' as const, value: null, percentile: null, score: null, grade: null, tier: null, compared: null })),
+    }))
+    renderCard({ response: response({ dimensions: empty, valuation_dates: {} }) })
+    expect(screen.getAllByText('無法計算')).toHaveLength(5)
+    expect(screen.queryByText(/^百分位 [0-9]/)).toBeNull()
+    expect(screen.queryByTestId('positioning-valuation-dates')).toBeNull()
+  })
+
+  it('shows an error with a retry', () => {
+    const onRetry = vi.fn()
+    renderCard({ isError: true, onRetry })
+    expect(screen.getByText('定位資料暫時讀取失敗')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重試' }))
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not show the previous stock after a symbol switch', () => {
+    renderCard({ symbol: '2317.TWSE' })
+    expect(screen.getByTestId('positioning-loading')).toBeInTheDocument()
+    expect(screen.queryByTestId('positioning-dimension-valuation')).toBeNull()
+  })
+
+  it.each([
+    ['etf', 'ETF 沒有公司財報與本益比'],
+    ['tdr', 'TDR 的財報與估值屬海外原股公司'],
+  ] as const)('explains why a %s is not ranked', (reason, text) => {
+    renderCard({ response: response({ applicable: false, not_applicable_reason: reason, dimensions: [], valuation_dates: {} }) })
+    expect(screen.getByTestId('positioning-not-applicable')).toHaveTextContent(text)
+  })
+})

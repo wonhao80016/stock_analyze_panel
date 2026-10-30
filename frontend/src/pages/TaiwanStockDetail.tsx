@@ -42,6 +42,7 @@ import { TaiwanReferenceData } from '@/components/taiwan/TaiwanReferenceData'
 import { TaiwanQuarterlyFinancials } from '@/components/taiwan/TaiwanQuarterlyFinancials'
 import { TaiwanMonthlyRevenue } from '@/components/taiwan/TaiwanMonthlyRevenue'
 import { TaiwanCurrentSignals } from '@/components/taiwan/TaiwanCurrentSignals'
+import { TaiwanPositioning } from '@/components/taiwan/TaiwanPositioning'
 import { DataQualityBadge, formatQuoteSource } from '@/components/taiwan/TaiwanDataQuality'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { useSafeBack } from '@/lib/useSafeBack'
@@ -84,6 +85,7 @@ function useDetailPublicationRefresh(symbol: string) {
     if (!moved) return
     void qc.invalidateQueries({ queryKey: QK.taiwanStockDetail(symbol).slice(0, 2) })
     void qc.invalidateQueries({ queryKey: QK.taiwanCurrentSignals(symbol) })
+    void qc.invalidateQueries({ queryKey: QK.taiwanPositioning(symbol) })
   }, [qc, symbol, datasetDates])
 }
 
@@ -244,6 +246,15 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
     queryFn: () => api.taiwanCurrentSignals(symbol),
     staleTime: 5 * 60_000,
     enabled: !isIndex,
+  })
+
+  // Only ordinary stocks are ranked; an ETF or index page never asks.
+  const isStockListing = !isIndex && detailQuery.data?.identity?.instrument_type === 'stock'
+  const positioningQuery = useQuery({
+    queryKey: QK.taiwanPositioning(symbol),
+    queryFn: () => api.taiwanPositioning(symbol),
+    staleTime: 5 * 60_000,
+    enabled: isStockListing,
   })
 
   // Phase 7C: Structured Research Context Query
@@ -951,6 +962,17 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             isError={currentSignalsQuery.isError}
             isFetching={currentSignalsQuery.isFetching}
             onRetry={() => currentSignalsQuery.refetch()}
+          />
+          )}
+
+          {isStockListing && (
+          <TaiwanPositioning
+            symbol={symbol}
+            response={positioningQuery.data}
+            isLoading={positioningQuery.isLoading}
+            isError={positioningQuery.isError}
+            isFetching={positioningQuery.isFetching}
+            onRetry={() => positioningQuery.refetch()}
           />
           )}
 

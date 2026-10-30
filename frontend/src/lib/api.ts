@@ -1032,6 +1032,54 @@ export interface TaiwanCurrentSignalsResponse {
   } | null
 }
 
+export type TaiwanPositioningMetricId =
+  | 'pe' | 'pb' | 'dividend_yield' | 'roe' | 'operating_margin' | 'revenue_yoy'
+  | 'return_60d' | 'return_240d' | 'foreign_flow_20d'
+export type TaiwanPositioningDimensionId = 'valuation' | 'profitability' | 'growth' | 'momentum' | 'chips'
+export type TaiwanPositioningReason =
+  | 'loss_or_not_applicable' | 'not_general_industry' | 'insufficient_history' | 'incomplete_window'
+  | 'non_positive_equity' | 'no_value' | 'not_archived' | 'dataset_unavailable'
+
+// value is in unit (percent: 12.5 means 12.5%); percentile ranks the raw value ascending among `compared` stocks.
+export interface TaiwanPositioningMetric {
+  id: TaiwanPositioningMetricId
+  status: 'ranked' | 'not_ranked' | 'unavailable'
+  reason: TaiwanPositioningReason | null
+  value: number | null
+  unit: 'times' | 'percent'
+  lower_is_better: boolean
+  percentile: number | null
+  score: number | null
+  grade: string | null
+  tier: number | null
+  compared: number | null
+  as_of: string | null
+  period: string | null
+  basis: string | null
+}
+
+export interface TaiwanPositioningDimension {
+  id: TaiwanPositioningDimensionId
+  score: number | null
+  grade: string | null
+  tier: number | null
+  segments: number | null
+  metrics: TaiwanPositioningMetric[]
+}
+
+export interface TaiwanPositioningResponse {
+  symbol: string
+  exchange: string
+  applicable: boolean
+  not_applicable_reason: 'index' | 'etf' | 'tdr' | null
+  usage_scope: 'current_reference'
+  available_at: null
+  universe_size: number | null
+  valuation_dates: Record<string, string | null>
+  valuation_period_mixed: boolean
+  dimensions: TaiwanPositioningDimension[]
+}
+
 // Amounts in TWD, *_pct in percent (12.5 means 12.5%), as the official monthly list stated them.
 export interface TaiwanMonthlyRevenuePeriod {
   year: number
@@ -2500,6 +2548,9 @@ export const api = {
     request<TaiwanCurrentSignalsResponse>(
       `/api/taiwan/stocks/${encodeURIComponent(symbol)}/current-signals`,
     ),
+
+  taiwanPositioning: (symbol: string) =>
+    request<TaiwanPositioningResponse>(`/api/taiwan/stocks/${encodeURIComponent(symbol)}/positioning`),
 
   taiwanInstitutionalHistory: (symbol: string, days = 60) =>
     request<TaiwanInstitutionalHistoryResponse>(

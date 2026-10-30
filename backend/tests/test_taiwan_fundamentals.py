@@ -64,6 +64,24 @@ def _general_statement(income_fields: dict[str, str]):
     return TaiwanOfficialFundamentals(httpx.Client(transport=httpx.MockTransport(handler))).financial_statement("2330.TWSE", "TWSE")
 
 
+def test_a_failed_balance_sheet_list_only_blanks_the_balance_amounts():
+    income = {"出表日期": "1150830", "年度": "115", "季別": "2", "公司代號": "2330", "營業收入": "1,000", "營業利益（損失）": "400", "本期淨利（淨損）": "300"}
+
+    def handler(request):
+        if request.url.path.endswith("06_L_ci"):
+            return httpx.Response(200, json=[income])
+        if request.url.path.endswith("07_L_ci"):
+            return httpx.Response(200, text="<html>blocked</html>", headers={"content-type": "text/html"})
+        return httpx.Response(200, json=[])
+
+    got = TaiwanOfficialFundamentals(httpx.Client(transport=httpx.MockTransport(handler))).financial_statement("2330.TWSE", "TWSE")
+    assert got.accounting_category == "ci"
+    assert got.values["revenue"] == 1_000_000 and got.values["operating_income"] == 400_000
+    assert got.values["assets"] is None and got.values["liabilities"] is None and got.values["equity"] is None
+    assert got.values["balance_sheet_error"].startswith("ValueError: official opendata/t187ap07_L_ci")
+    assert got.source_url.endswith("t187ap06_L_ci | https://openapi.twse.com.tw/v1/opendata/t187ap07_L_ci")
+
+
 @pytest.mark.parametrize(
     ("income_fields", "expected"),
     [

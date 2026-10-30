@@ -169,6 +169,18 @@ class TaiwanMonthlyRevenueStore:
             _read_cache[key] = (signature, frame)
         return frame
 
+    def _partitions(self) -> list[Path]:
+        return sorted(self.root.glob("year=*/month=*/part.parquet")) if self.root.exists() else []
+
+    def read_all(self) -> pl.DataFrame:
+        """Every stored row of every month; empty when nothing is stored, an unreadable partition raises."""
+        frames = [self._read(path) for path in self._partitions()]
+        return pl.concat(frames) if frames else pl.DataFrame(schema=SCHEMA)
+
+    def signature(self) -> tuple[tuple[str, int, int], ...]:
+        """(path, mtime_ns, size) of every stored partition; it changes whenever one is written."""
+        return tuple((str(p), (s := p.stat()).st_mtime_ns, s.st_size) for p in self._partitions())
+
     def rows_for(self, symbol: str) -> list[dict[str, Any]]:
         """Every stored month of *symbol*, newest first."""
         rows: list[dict[str, Any]] = []
