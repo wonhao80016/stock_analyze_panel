@@ -1,5 +1,9 @@
-import { AlertTriangle, RefreshCw } from 'lucide-react'
+import { AlertTriangle, RefreshCw, Scale } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import type {
+  TaiwanIndustryMetricId,
+  TaiwanIndustryRankMetric,
+  TaiwanIndustryRanking,
   TaiwanPositioningDimension,
   TaiwanPositioningDimensionId,
   TaiwanPositioningMetric,
@@ -8,6 +12,7 @@ import type {
   TaiwanPositioningResponse,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import { canonicalizeSymbols } from '@/lib/taiwanCompareSymbols'
 
 type Props = {
   symbol: string
@@ -62,17 +67,25 @@ const REASON_LABELS: Record<TaiwanPositioningReason, string> = {
   loss_or_not_applicable: '虧損或不適用',
   not_general_industry: '此產業類別不適用（只比一般業）',
   insufficient_history: '交易日數不足（上市未滿期間或當日無成交）',
-  incomplete_window: '期間內外資資料不完整',
+  incomplete_window: '期間內法人資料不完整',
   non_positive_equity: '母公司權益非正值，不適用',
   no_value: '沒有這檔的資料',
   not_archived: '累積中：快照尚未存到任何一期',
   dataset_unavailable: '資料暫時無法取得',
+  insufficient_peers: '同業不足',
 }
 
 const NOT_APPLICABLE: Record<string, string> = {
   index: '指數不適用體質與估值定位。',
   etf: 'ETF 沒有公司財報與本益比，不適用體質與估值定位。',
-  tdr: 'TDR 的財報與估值屬海外原股公司，不列入全市場定位。',
+  tdr: 'TDR 的財報與估值屬海外原股公司，不列入全市場與同產業定位。',
+}
+
+const INDUSTRY_METRIC_LABELS: Record<TaiwanIndustryMetricId, string> = {
+  return_20d: '近 20 日漲跌',
+  foreign_flow_20d: '外資 20 日買超強度',
+  trust_flow_20d: '投信 20 日買超強度',
+  pe: '本益比',
 }
 
 const SIGNED_METRICS = new Set<TaiwanPositioningMetricId>([
@@ -81,11 +94,10 @@ const SIGNED_METRICS = new Set<TaiwanPositioningMetricId>([
 
 const EXCHANGE_LABELS: Record<string, string> = { TWSE: '上市', TPEX: '上櫃' }
 
-function formatValue(metric: TaiwanPositioningMetric) {
-  if (metric.value == null) return '--'
-  if (metric.unit === 'times') return `${metric.value.toFixed(2)} 倍`
-  const sign = SIGNED_METRICS.has(metric.id) && metric.value > 0 ? '+' : ''
-  return `${sign}${metric.value.toFixed(2)}%`
+function formatNumber(value: number | null, unit: 'times' | 'percent', signed: boolean) {
+  if (value == null) return '--'
+  if (unit === 'times') return `${value.toFixed(2)} 倍`
+  return `${signed && value > 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
 function metricContext(metric: TaiwanPositioningMetric) {
@@ -142,20 +154,24 @@ function Segments({ dimension }: { dimension: TaiwanPositioningDimension }) {
   )
 }
 
-function ValueText({ metric }: { metric: TaiwanPositioningMetric }) {
-  const signed = SIGNED_METRICS.has(metric.id) && metric.value != null && metric.value !== 0
+function SignedNumber({ value, unit, signed }: { value: number | null; unit: 'times' | 'percent'; signed: boolean }) {
+  const colored = signed && value != null && value !== 0
   return (
     <span
       className={cn(
         'font-mono',
-        !signed && 'text-foreground',
-        signed && metric.value! > 0 && 'text-bull',
-        signed && metric.value! < 0 && 'text-bear',
+        !colored && 'text-foreground',
+        colored && value! > 0 && 'text-bull',
+        colored && value! < 0 && 'text-bear',
       )}
     >
-      {formatValue(metric)}
+      {formatNumber(value, unit, signed)}
     </span>
   )
+}
+
+function ValueText({ metric }: { metric: TaiwanPositioningMetric }) {
+  return <SignedNumber value={metric.value} unit={metric.unit} signed={SIGNED_METRICS.has(metric.id)} />
 }
 
 function MetricRow({ metric }: { metric: TaiwanPositioningMetric }) {
@@ -231,6 +247,93 @@ function ValuationDates({ response }: { response: TaiwanPositioningResponse }) {
   )
 }
 
+function IndustryRankRow({ metric }: { metric: TaiwanIndustryRankMetric }) {
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-2 border-b border-border/50 py-2 text-xs last:border-0" data-testid={`industry-metric-${metric.id}`}>
+      <div className="min-w-0">
+        <span className="font-medium text-foreground">{INDUSTRY_METRIC_LABELS[metric.id]}</span>
+        {metric.lower_is_better && <span className="ml-1 text-[11px] text-muted">（越低越前面）</span>}
+        {metric.period_mixed && (
+          <span className="ml-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-600">期別混雜</span>
+        )}
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center gap-2 text-[11px] text-muted">
+        <SignedNumber value={metric.value} unit={metric.unit} signed={metric.id !== 'pe'} />
+        {metric.status === 'ranked' && metric.rank != null && metric.compared != null ? (
+          <>
+            <span className="font-semibold text-foreground" data-testid={`industry-rank-${metric.id}`}>
+              第 {metric.rank} / {metric.compared} 名
+            </span>
+            {metric.percentile != null && <span>百分位 {metric.percentile.toFixed(1)}</span>}
+          </>
+        ) : (
+          <span data-testid={`industry-reason-${metric.id}`}>
+            {metric.reason === 'insufficient_peers'
+              ? `同業不足（${metric.compared ?? 0} 檔）`
+              : `${metric.status === 'unavailable' ? '無法計算' : '不排名'}：${REASON_LABELS[metric.reason ?? 'no_value']}`}
+          </span>
+        )}
+      </div>
+    </li>
+  )
+}
+
+function IndustryBlock({ symbol, industry }: { symbol: string; industry: TaiwanIndustryRanking }) {
+  if (!industry.applicable) {
+    return (
+      <div className="rounded-xl border border-border/80 bg-base p-3" data-testid="positioning-industry">
+        <h4 className="text-xs font-semibold text-foreground">同產業排名</h4>
+        <p className="mt-1 text-[11px] text-muted" data-testid="industry-not-applicable">
+          證券主檔沒有可用的產業分類（未分類），不做同產業排名。
+        </p>
+      </div>
+    )
+  }
+  const compareSymbols = canonicalizeSymbols([symbol, ...industry.peers.map(peer => peer.symbol)])
+  return (
+    <div className="rounded-xl border border-border/80 bg-base p-3" data-testid="positioning-industry">
+      <div className="flex flex-wrap items-center gap-2">
+        <h4 className="text-xs font-semibold text-foreground">同產業排名</h4>
+        <span className="text-[11px] text-muted">
+          {industry.industry}・上市櫃合併共 {(industry.members ?? 0).toLocaleString('zh-TW')} 檔
+        </span>
+      </div>
+      <ul className="mt-1">
+        {industry.metrics.map(metric => <IndustryRankRow key={metric.id} metric={metric} />)}
+      </ul>
+      {industry.peers.length > 0 && (
+        <div className="mt-2 space-y-1" data-testid="industry-peers">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[11px] text-muted">同業近 20 日漲幅前 {industry.peers.length} 名</span>
+            <Link
+              to={`/stocks/compare?symbols=${encodeURIComponent(compareSymbols.join(','))}`}
+              className="flex items-center gap-1 rounded-lg border border-border/60 bg-surface px-1.5 py-0.5 text-[10px] font-medium text-muted transition-colors hover:border-accent/50 hover:text-accent"
+            >
+              <Scale className="h-3 w-3" />
+              加入比較
+            </Link>
+          </div>
+          <ol className="space-y-0.5 text-xs">
+            {industry.peers.map(peer => (
+              <li key={peer.symbol} className="flex items-center justify-between gap-2">
+                <Link to={`/stocks/${encodeURIComponent(peer.symbol)}`} className="min-w-0 truncate text-foreground hover:text-accent">
+                  {peer.name ?? peer.symbol}
+                  <span className="ml-1 text-[11px] text-muted">{peer.symbol}</span>
+                </Link>
+                <SignedNumber value={peer.value} unit="percent" signed />
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+      <p className="mt-2 text-[11px] leading-5 text-muted">
+        第 1 名為最好：本益比最低、其他指標最高；百分位與名次同向，越高越前面；同值共用名次。可排名的同業少於 3 檔時不給名次。
+        許多中小型股 20 日投信買賣超為 0，會有大量同值共用名次。
+      </p>
+    </div>
+  )
+}
+
 function Body({ response }: { response: TaiwanPositioningResponse }) {
   if (!response.applicable) {
     return (
@@ -249,6 +352,7 @@ function Body({ response }: { response: TaiwanPositioningResponse }) {
         百分位越高代表在全市場越前面；本益比、股價淨值比反向計分（越便宜分數越高）。構面分數是可排名指標的平均，
         等級不超出構面內最好與最差指標的等級。報酬與年增率紅色為正、綠色為負。
       </p>
+      {response.industry && <IndustryBlock symbol={response.symbol} industry={response.industry} />}
     </div>
   )
 }

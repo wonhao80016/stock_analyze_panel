@@ -1038,7 +1038,7 @@ export type TaiwanPositioningMetricId =
 export type TaiwanPositioningDimensionId = 'valuation' | 'profitability' | 'growth' | 'momentum' | 'chips'
 export type TaiwanPositioningReason =
   | 'loss_or_not_applicable' | 'not_general_industry' | 'insufficient_history' | 'incomplete_window'
-  | 'non_positive_equity' | 'no_value' | 'not_archived' | 'dataset_unavailable'
+  | 'non_positive_equity' | 'no_value' | 'not_archived' | 'dataset_unavailable' | 'insufficient_peers'
 
 // value is in unit (percent: 12.5 means 12.5%); percentile ranks the raw value ascending among `compared` stocks.
 export interface TaiwanPositioningMetric {
@@ -1078,6 +1078,40 @@ export interface TaiwanPositioningResponse {
   valuation_dates: Record<string, string | null>
   valuation_period_mixed: boolean
   dimensions: TaiwanPositioningDimension[]
+  industry: TaiwanIndustryRanking | null
+}
+
+export type TaiwanIndustryMetricId = 'return_20d' | 'foreign_flow_20d' | 'trust_flow_20d' | 'pe'
+
+// rank 1 is the best end (lowest PE, highest otherwise) and ties share it; percentile points the same way as rank.
+export interface TaiwanIndustryRankMetric {
+  id: TaiwanIndustryMetricId
+  status: 'ranked' | 'not_ranked' | 'unavailable'
+  reason: TaiwanPositioningReason | null
+  value: number | null
+  unit: 'times' | 'percent'
+  lower_is_better: boolean
+  rank: number | null
+  compared: number | null
+  percentile: number | null
+  as_of: string | null
+  period_mixed: boolean
+}
+
+export interface TaiwanIndustryPeer {
+  symbol: string
+  name: string | null
+  value: number
+}
+
+export interface TaiwanIndustryRanking {
+  applicable: boolean
+  not_applicable_reason: 'unclassified' | null
+  industry: string | null
+  members: number | null
+  metrics: TaiwanIndustryRankMetric[]
+  peers_metric: 'return_20d'
+  peers: TaiwanIndustryPeer[]
 }
 
 // Amounts in TWD, *_pct in percent (12.5 means 12.5%), as the official monthly list stated them.

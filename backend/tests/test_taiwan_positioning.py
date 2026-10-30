@@ -80,6 +80,11 @@ def test_dimension_grade_is_held_between_its_metric_grades():
     assert segments(58.1) == 3 and segments(0.0) == 1 and segments(100.0) == 5 and segments(20.0) == 1
 
 
+def test_return_windows_are_twenty_and_two_hundred_forty_sessions():
+    assert positioning.SHORT_MOMENTUM_SESSIONS == 20
+    assert positioning.LONG_MOMENTUM_SESSIONS == 240
+
+
 def test_unit_conversion_happens_once_at_the_boundary():
     assert decimal_to_percent(0.0366) == pytest.approx(3.66)
     assert decimal_to_percent(-0.05) == pytest.approx(-5.0)
@@ -543,3 +548,223 @@ def test_api_errors(tmp_path, monkeypatch, client):
     assert str(tmp_path) not in failed.text and "parquet" not in failed.text.lower()
     assert client.get(URL.format("9999.TWSE")).status_code == 404
     assert client.get(URL.format("not-a-symbol")).status_code == 400
+
+
+INDUSTRY_SESSIONS = SESSIONS[-25:]
+LOOKBACK_20D = len(INDUSTRY_SESSIONS) - 1 - positioning.SHORT_MOMENTUM_SESSIONS
+SEMICONDUCTOR = "半導體業"
+# symbol: (industry, close before the 20-session lookback, close at it, newest close, foreign net, trust net)
+INDUSTRY_STOCKS = {
+    "2330.TWSE": (SEMICONDUCTOR, 70.0, 100.0, 110.0, 100, 0),
+    "2303.TWSE": (SEMICONDUCTOR, 50.0, 100.0, 120.0, 50, 0),
+    "2454.TWSE": (SEMICONDUCTOR, 90.0, 100.0, 110.0, 100, 0),
+    "6488.TPEX": (SEMICONDUCTOR, 50.0, 50.0, 40.0, 0, 0),
+    "5274.TPEX": (SEMICONDUCTOR, 80.0, 100.0, 130.0, -100, 20),
+    "1101.TWSE": ("水泥工業", 10.0, 10.0, 11.0, 10, 0),
+    "1102.TWSE": ("水泥工業", 10.0, 10.0, 9.0, -10, 0),
+    "2603.TWSE": ("航運業", 10.0, 10.0, 12.0, 10, 0),
+    "1234.TWSE": (None, 10.0, 10.0, 10.0, 0, 0),
+    "4444.TWSE": ("未知產業（77）", 10.0, 10.0, 10.0, 0, 0),
+}
+# 2303 has no bar on these sessions, so a row-count lookback would reach an older close.
+MISSING_2303 = set(INDUSTRY_SESSIONS[LOOKBACK_20D + 1:LOOKBACK_20D + 3])
+EX_DIVIDEND_6488 = INDUSTRY_SESSIONS[-10]
+
+
+def _industry_master():
+    instruments = {
+        symbol: SimpleNamespace(symbol=symbol, code=symbol[:4], name=f"name-{symbol[:4]}", industry=spec[0],
+                                instrument_type="stock", security_class=None)
+        for symbol, spec in INDUSTRY_STOCKS.items()
+    }
+    instruments["9103.TWSE"] = SimpleNamespace(symbol="9103.TWSE", code="9103", name="美德醫療-DR", industry=None,
+                                               instrument_type="stock", security_class="tdr")
+    return SimpleNamespace(get_universe=lambda _kind: sorted(instruments), get_instrument=instruments.get)
+
+
+class _IndustryLists(_Lists):
+    def handler(self, request):
+        self.requests.append(request.url.path)
+        if request.url.path.endswith("BWIBBU_ALL"):
+            pes = {"2330": "20", "2303": "10", "2454": "30", "1101": "8", "1102": "12", "2603": "5",
+                   "1234": "15", "4444": "15"}
+            return httpx.Response(200, json=[_twse(code, pe=pe) for code, pe in pes.items()])
+        if request.url.path.endswith("tpex_mainboard_peratio_analysis"):
+            return httpx.Response(200, json=[_tpex("6488", pe="15"), _tpex("5274", pe="－")])
+        raise AssertionError(f"unexpected request {request.url}")
+
+
+def _industry_close(symbol: str, i: int, session: date) -> float:
+    _industry, early, then, now, _foreign, _trust = INDUSTRY_STOCKS[symbol]
+    if symbol == "6488.TPEX" and session >= EX_DIVIDEND_6488:
+        return 40.0
+    return early if i < LOOKBACK_20D else now if i == len(INDUSTRY_SESSIONS) - 1 else then
+
+
+@pytest.fixture
+def industry_market(tmp_path, monkeypatch):
+    from app.config import settings
+    from app.taiwan.corporate_actions import TaiwanCorporateActionStore, corporate_action_schema
+    from app.taiwan.enrichment.corporate_actions import EXDIV
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    root = tmp_path / "taiwan"
+    daily = TaiwanDailyStore(root / "daily")
+    institutional = TaiwanInstitutionalStore(root / "institutional")
+    actions = TaiwanCorporateActionStore(root / "corporate_actions")
+    window = INDUSTRY_SESSIONS[-positioning.CHIP_WINDOW_SESSIONS:]
+    bars, flows = [], []
+    for i, session in enumerate(INDUSTRY_SESSIONS):
+        for symbol, (*_prices, foreign, trust) in INDUSTRY_STOCKS.items():
+            if not (symbol == "2303.TWSE" and session in MISSING_2303):
+                close = _industry_close(symbol, i, session)
+                bars.append({"symbol": symbol, "date": session, "open": close, "high": close, "low": close,
+                             "close": close, "volume": 1000.0, "amount": close * 1000.0, "quote_ts": None})
+            if session in window:
+                flows.append({"symbol": symbol, "date": session, "trade_date": session, "foreign_net": foreign,
+                              "investment_trust_net": trust, "dealer_net": 0, "status": "official",
+                              "source": "synthetic"})
+    daily.write_batch(pl.DataFrame(bars))
+    institutional.write_batch(pl.DataFrame(flows))
+    actions.upsert(pl.DataFrame([{
+        "symbol": "6488.TPEX", "date": EX_DIVIDEND_6488, "kind": EXDIV, "pre_close": 50.0, "ref_price": 40.0,
+        "limit_up": 44.0, "limit_down": 36.0, "open_ref": 40.0, "ex_factor": None, "official_label": None,
+        "provider": "test", "source": "twse:twt49u", "source_url": None, "retrieved_at": None,
+        "trade_date": EX_DIVIDEND_6488, "status": "ok",
+    }], schema=corporate_action_schema()))
+    master = _industry_master()
+    lists = _IndustryLists()
+    service = TaiwanPositioningService(
+        fundamentals=lists.fundamentals(),
+        security_master=master,
+        quarterly_store=TaiwanQuarterlyFinancialStore(root / "quarterly_financials"),
+        revenue_store=TaiwanMonthlyRevenueStore(root / "monthly_revenue"),
+        daily_store=daily,
+        institutional_store=institutional,
+        corporate_actions=actions,
+    )
+    return SimpleNamespace(service=service, master=master, lists=lists, data_dir=tmp_path)
+
+
+def _industry_metrics(response) -> dict[str, dict]:
+    return {m.id: m.model_dump() for m in response.industry.metrics}
+
+
+def test_industry_ranks_use_competition_ranks_with_ascending_mid_rank_percentiles(industry_market):
+    response = industry_market.service.get("2330.TWSE")
+    industry = response.industry
+    assert industry.applicable and industry.industry == SEMICONDUCTOR and industry.members == 5
+    assert [metric.id for metric in industry.metrics] == ["return_20d", "foreign_flow_20d", "trust_flow_20d", "pe"]
+    m = _industry_metrics(response)
+    ret = m["return_20d"]
+    assert ret["status"] == "ranked" and ret["value"] == pytest.approx(10.0)
+    assert (ret["rank"], ret["compared"]) == (3, 5), "tied with 2454 behind 5274 and 2303"
+    assert ret["percentile"] == pytest.approx(40.0) and ret["as_of"] == LAST_SESSION.isoformat()
+    foreign = m["foreign_flow_20d"]
+    assert (foreign["rank"], foreign["compared"]) == (1, 5) and foreign["percentile"] == pytest.approx(80.0)
+    assert foreign["value"] == pytest.approx(10.0), "2000 shares over 20000 shares"
+    other = _industry_metrics(industry_market.service.get("2454.TWSE"))
+    assert other["return_20d"]["rank"] == 3 and other["foreign_flow_20d"]["rank"] == 1
+    assert _industry_metrics(industry_market.service.get("2303.TWSE"))["foreign_flow_20d"]["rank"] == 3
+
+
+def test_industry_pe_ranks_the_cheapest_first_and_leaves_out_loss_pe(industry_market):
+    pe = _industry_metrics(industry_market.service.get("2330.TWSE"))["pe"]
+    assert pe["lower_is_better"] is True and pe["unit"] == "times"
+    assert (pe["rank"], pe["compared"]) == (3, 4), "PE 20 after 10 and 15; the loss-making 5274 is not compared"
+    assert pe["percentile"] == pytest.approx(37.5), "100 - 62.5, so a better rank has a higher percentile"
+    assert pe["period_mixed"] is True, "TWSE and TPEx valuation dates differ within the industry"
+    cheapest = _industry_metrics(industry_market.service.get("2303.TWSE"))["pe"]
+    assert cheapest["rank"] == 1 and cheapest["percentile"] == pytest.approx(87.5)
+    loss = _industry_metrics(industry_market.service.get("5274.TPEX"))["pe"]
+    assert loss["status"] == "not_ranked" and loss["reason"] == "loss_or_not_applicable" and loss["compared"] == 4
+    assert _industry_metrics(industry_market.service.get("1101.TWSE"))["pe"]["period_mixed"] is False
+
+
+def test_trust_strength_zeros_tie_at_a_shared_rank(industry_market):
+    trust = {s: _industry_metrics(industry_market.service.get(s))["trust_flow_20d"]
+             for s in ("2330.TWSE", "2303.TWSE", "2454.TWSE", "6488.TPEX", "5274.TPEX")}
+    assert trust["5274.TPEX"]["value"] == pytest.approx(2.0) and trust["5274.TPEX"]["rank"] == 1
+    assert trust["5274.TPEX"]["percentile"] == pytest.approx(90.0)
+    for symbol in ("2330.TWSE", "2303.TWSE", "2454.TWSE", "6488.TPEX"):
+        assert trust[symbol]["value"] == 0.0 and trust[symbol]["rank"] == 2 and trust[symbol]["compared"] == 5
+        assert trust[symbol]["percentile"] == pytest.approx(40.0), "a zero is a ranked value, not missing"
+
+
+def test_twenty_day_return_counts_trading_sessions_and_adjusts_for_corporate_actions(industry_market):
+    ret = {s: _industry_metrics(industry_market.service.get(s))["return_20d"]["value"]
+           for s in ("2303.TWSE", "6488.TPEX", "5274.TPEX")}
+    assert ret["2303.TWSE"] == pytest.approx(20.0), "the close 20 sessions back, though 2303 skipped two sessions"
+    assert ret["6488.TPEX"] == pytest.approx(0.0), "50 before a 50 -> 40 ex-dividend is 40 on today's scale"
+    assert ret["5274.TPEX"] == pytest.approx(30.0)
+
+
+def test_fewer_than_three_rankable_peers_get_no_rank(industry_market):
+    pair = industry_market.service.get("1101.TWSE").industry
+    assert pair.members == 2
+    for metric in pair.metrics:
+        assert metric.status == "not_ranked" and metric.reason == "insufficient_peers" and metric.compared == 2
+        assert metric.rank is None and metric.value is not None
+    alone = industry_market.service.get("2603.TWSE").industry
+    assert alone.applicable and alone.members == 1 and alone.peers == []
+    assert {(m.reason, m.compared) for m in alone.metrics} == {("insufficient_peers", 1)}
+
+
+@pytest.mark.parametrize("symbol", ["1234.TWSE", "4444.TWSE"])
+def test_unclassified_and_unresolved_industries_are_not_applicable(industry_market, symbol):
+    response = industry_market.service.get(symbol)
+    assert response.applicable is True and response.dimensions
+    assert response.industry.applicable is False and response.industry.not_applicable_reason == "unclassified"
+    assert response.industry.metrics == [] and response.industry.peers == []
+    ranks = industry_market.service.snapshot().industry_ranks
+    assert not any(ranks[m]["symbol"].is_in([symbol]).any() for m in positioning.INDUSTRY_METRICS)
+
+
+def test_a_tdr_gets_no_industry_section(industry_market):
+    response = industry_market.service.get("9103.TWSE")
+    assert response.not_applicable_reason == "tdr" and response.industry is None
+    assert "9103.TWSE" not in industry_market.service.snapshot().industries
+
+
+def test_top_three_peers_by_twenty_day_return_leave_out_the_stock_itself(industry_market):
+    industry = industry_market.service.get("2330.TWSE").industry
+    assert industry.peers_metric == "return_20d"
+    assert [(p.symbol, p.name) for p in industry.peers] == [
+        ("5274.TPEX", "name-5274"), ("2303.TWSE", "name-2303"), ("2454.TWSE", "name-2454"),
+    ]
+    assert [p.value for p in industry.peers] == pytest.approx([30.0, 20.0, 10.0])
+    top = [p.symbol for p in industry_market.service.get("5274.TPEX").industry.peers]
+    assert top == ["2303.TWSE", "2330.TWSE", "2454.TWSE"], "a tie falls back to symbol order"
+
+
+def test_an_industry_change_rebuilds_the_cross_section_without_new_requests(industry_market, monkeypatch):
+    service, lists = industry_market.service, industry_market.lists
+    builds: list[int] = []
+    original = TaiwanPositioningService.build_snapshot
+
+    def counting(self, *args):
+        builds.append(1)
+        return original(self, *args)
+
+    monkeypatch.setattr(TaiwanPositioningService, "build_snapshot", counting)
+    before = sorted(p for p in industry_market.data_dir.rglob("*") if p.is_file())
+    assert service.get("2330.TWSE").industry.members == 5
+    service.get("1101.TWSE")
+    assert len(builds) == 1 and len(lists.requests) == 2, "two valuation lists per data date"
+
+    industry_market.master.get_instrument("2603.TWSE").industry = SEMICONDUCTOR
+    response = service.get("2330.TWSE")
+    assert len(builds) == 2 and response.industry.members == 6
+    assert _industry_metrics(response)["pe"]["compared"] == 5
+    assert len(lists.requests) == 2
+    service.get("2330.TWSE")
+    assert len(builds) == 2
+    assert sorted(p for p in industry_market.data_dir.rglob("*") if p.is_file()) == before, "nothing is written"
+
+
+def test_api_returns_the_industry_section(market, monkeypatch, client):
+    monkeypatch.setattr("app.api.taiwan.get_taiwan_positioning_service", lambda: _service(market, _Lists()))
+    industry = client.get(URL.format("2330.TWSE")).json()["industry"]
+    assert industry["applicable"] is True and industry["industry"] == SEMICONDUCTOR
+    assert [m["id"] for m in industry["metrics"]] == ["return_20d", "foreign_flow_20d", "trust_flow_20d", "pe"]
+    assert industry["peers_metric"] == "return_20d"

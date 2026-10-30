@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import type { TaiwanPositioningDimension, TaiwanPositioningMetric, TaiwanPositioningResponse } from '@/lib/api'
+import { MemoryRouter } from 'react-router-dom'
+import type {
+  TaiwanIndustryRankMetric,
+  TaiwanIndustryRanking,
+  TaiwanPositioningDimension,
+  TaiwanPositioningMetric,
+  TaiwanPositioningResponse,
+} from '@/lib/api'
 import { TaiwanPositioning } from './TaiwanPositioning'
 
 function metric(overrides: Partial<TaiwanPositioningMetric> & Pick<TaiwanPositioningMetric, 'id'>): TaiwanPositioningMetric {
@@ -57,6 +64,44 @@ function dimensions(): TaiwanPositioningDimension[] {
   ]
 }
 
+function rankMetric(overrides: Partial<TaiwanIndustryRankMetric> & Pick<TaiwanIndustryRankMetric, 'id'>): TaiwanIndustryRankMetric {
+  return {
+    status: 'ranked',
+    reason: null,
+    value: 10,
+    unit: 'percent',
+    lower_is_better: false,
+    rank: 3,
+    compared: 25,
+    percentile: 90,
+    as_of: '2026-10-29',
+    period_mixed: false,
+    ...overrides,
+  }
+}
+
+function industry(overrides: Partial<TaiwanIndustryRanking> = {}): TaiwanIndustryRanking {
+  return {
+    applicable: true,
+    not_applicable_reason: null,
+    industry: '半導體業',
+    members: 26,
+    metrics: [
+      rankMetric({ id: 'return_20d', value: 12.5 }),
+      rankMetric({ id: 'foreign_flow_20d', value: -1.2, rank: 20, percentile: 22 }),
+      rankMetric({ id: 'trust_flow_20d', status: 'not_ranked', reason: 'insufficient_peers', value: 0, rank: null, percentile: null, compared: 2 }),
+      rankMetric({ id: 'pe', value: 20, unit: 'times', lower_is_better: true, rank: 1, compared: 18, percentile: 97.2 }),
+    ],
+    peers_metric: 'return_20d',
+    peers: [
+      { symbol: '5274.TPEX', name: '信驊', value: 30 },
+      { symbol: '2303.TWSE', name: '聯電', value: 20 },
+      { symbol: '2454.TWSE', name: '聯發科', value: 15 },
+    ],
+    ...overrides,
+  }
+}
+
 function response(overrides: Partial<TaiwanPositioningResponse> = {}): TaiwanPositioningResponse {
   return {
     symbol: '2330.TWSE',
@@ -69,21 +114,24 @@ function response(overrides: Partial<TaiwanPositioningResponse> = {}): TaiwanPos
     valuation_dates: { TWSE: '2026-10-29', TPEX: '2026-10-29' },
     valuation_period_mixed: false,
     dimensions: dimensions(),
+    industry: industry(),
     ...overrides,
   }
 }
 
 function renderCard(props: Partial<Parameters<typeof TaiwanPositioning>[0]> = {}) {
   return render(
-    <TaiwanPositioning
-      symbol="2330.TWSE"
-      response={response()}
-      isLoading={false}
-      isError={false}
-      isFetching={false}
-      onRetry={() => {}}
-      {...props}
-    />,
+    <MemoryRouter>
+      <TaiwanPositioning
+        symbol="2330.TWSE"
+        response={response()}
+        isLoading={false}
+        isError={false}
+        isFetching={false}
+        onRetry={() => {}}
+        {...props}
+      />
+    </MemoryRouter>,
   )
 }
 
@@ -126,7 +174,7 @@ describe('TaiwanPositioning', () => {
     renderCard()
     expect(screen.getByTestId('positioning-reason-operating_margin')).toHaveTextContent('不排名：此產業類別不適用（只比一般業）（1,500 檔比較）')
     expect(screen.getByTestId('positioning-reason-return_240d')).toHaveTextContent('交易日數不足')
-    expect(screen.getByTestId('positioning-reason-foreign_flow_20d')).toHaveTextContent('無法計算：期間內外資資料不完整')
+    expect(screen.getByTestId('positioning-reason-foreign_flow_20d')).toHaveTextContent('無法計算：期間內法人資料不完整')
     expect(within(screen.getByTestId('positioning-dimension-chips')).getByText('無法計算')).toBeInTheDocument()
   })
 
@@ -159,7 +207,7 @@ describe('TaiwanPositioning', () => {
       ...d, score: null, grade: null, tier: null, segments: null,
       metrics: d.metrics.map(m => ({ ...m, status: 'unavailable' as const, reason: 'not_archived' as const, value: null, percentile: null, score: null, grade: null, tier: null, compared: null })),
     }))
-    renderCard({ response: response({ dimensions: empty, valuation_dates: {} }) })
+    renderCard({ response: response({ dimensions: empty, valuation_dates: {}, industry: null }) })
     expect(screen.getAllByText('無法計算')).toHaveLength(5)
     expect(screen.queryByText(/^百分位 [0-9]/)).toBeNull()
     expect(screen.queryByTestId('positioning-valuation-dates')).toBeNull()
@@ -183,7 +231,90 @@ describe('TaiwanPositioning', () => {
     ['etf', 'ETF 沒有公司財報與本益比'],
     ['tdr', 'TDR 的財報與估值屬海外原股公司'],
   ] as const)('explains why a %s is not ranked', (reason, text) => {
-    renderCard({ response: response({ applicable: false, not_applicable_reason: reason, dimensions: [], valuation_dates: {} }) })
+    renderCard({ response: response({ applicable: false, not_applicable_reason: reason, dimensions: [], valuation_dates: {}, industry: null }) })
     expect(screen.getByTestId('positioning-not-applicable')).toHaveTextContent(text)
+    expect(screen.queryByTestId('positioning-industry')).toBeNull()
+  })
+})
+
+describe('TaiwanPositioning industry ranking', () => {
+  it('shows rank over the ranked peers with the percentile beside it', () => {
+    const metrics = industry().metrics.map(m => (m.id === 'pe' ? { ...m, period_mixed: true } : m))
+    renderCard({ response: response({ industry: industry({ metrics }) }) })
+    const block = screen.getByTestId('positioning-industry')
+    expect(within(block).getByText('同產業排名')).toBeInTheDocument()
+    expect(block).toHaveTextContent('半導體業・上市櫃合併共 26 檔')
+    expect(screen.getByTestId('industry-rank-return_20d')).toHaveTextContent('第 3 / 25 名')
+    const ret = screen.getByTestId('industry-metric-return_20d')
+    expect(within(ret).getByText('百分位 90.0')).toBeInTheDocument()
+    expect(within(ret).getByText('+12.50%')).toHaveClass('text-bull')
+    expect(screen.getByTestId('industry-rank-pe')).toHaveTextContent('第 1 / 18 名')
+    const pe = screen.getByTestId('industry-metric-pe')
+    expect(within(pe).getByText('百分位 97.2')).toBeInTheDocument()
+    expect(within(pe).getByText('20.00 倍')).toBeInTheDocument()
+    expect(within(pe).getByText('期別混雜')).toBeInTheDocument()
+    expect(within(ret).queryByText('期別混雜')).toBeNull()
+    expect(block).toHaveTextContent('投信買賣超為 0')
+  })
+
+  it('shows too few peers instead of a rank', () => {
+    renderCard()
+    expect(screen.getByTestId('industry-reason-trust_flow_20d')).toHaveTextContent('同業不足（2 檔）')
+    expect(screen.queryByTestId('industry-rank-trust_flow_20d')).toBeNull()
+  })
+
+  it('shows other not-ranked reasons', () => {
+    const metrics = industry().metrics.map(m => m.id === 'pe'
+      ? { ...m, status: 'not_ranked' as const, reason: 'loss_or_not_applicable' as const, value: null, rank: null, percentile: null }
+      : m)
+    renderCard({ response: response({ industry: industry({ metrics }) }) })
+    expect(screen.getByTestId('industry-reason-pe')).toHaveTextContent('不排名：虧損或不適用')
+  })
+
+  it('explains an unclassified stock', () => {
+    renderCard({ response: response({ industry: industry({ applicable: false, not_applicable_reason: 'unclassified', industry: null, members: null, metrics: [], peers: [] }) }) })
+    expect(screen.getByTestId('industry-not-applicable')).toHaveTextContent('未分類')
+    expect(screen.queryByTestId('industry-peers')).toBeNull()
+  })
+
+  it('links the top peers and a compare page with the stock first', () => {
+    renderCard()
+    const peers = screen.getByTestId('industry-peers')
+    expect(peers).toHaveTextContent('同業近 20 日漲幅前 3 名')
+    expect(within(peers).getByRole('link', { name: /信驊/ })).toHaveAttribute('href', '/stocks/5274.TPEX')
+    expect(within(peers).getByRole('link', { name: '加入比較' })).toHaveAttribute(
+      'href', `/stocks/compare?symbols=${encodeURIComponent('2330.TWSE,5274.TPEX,2303.TWSE,2454.TWSE')}`,
+    )
+  })
+
+  it('keeps the compare link within five symbols', () => {
+    const peers = ['1101.TWSE', '1102.TWSE', '2303.TWSE', '2454.TWSE', '2330.TWSE', '5274.TPEX'].map(symbol => ({ symbol, name: null, value: 1 }))
+    renderCard({ response: response({ industry: industry({ peers }) }) })
+    const href = screen.getByRole('link', { name: '加入比較' }).getAttribute('href')!
+    const symbols = new URLSearchParams(href.split('?')[1]).get('symbols')!.split(',')
+    expect(symbols).toEqual(['2330.TWSE', '1101.TWSE', '1102.TWSE', '2303.TWSE', '2454.TWSE'])
+  })
+
+  it('shows no compare link without peers', () => {
+    renderCard({ response: response({ industry: industry({ peers: [] }) }) })
+    expect(screen.queryByRole('link', { name: '加入比較' })).toBeNull()
+  })
+
+  it('switches the peers and compare link with the symbol', () => {
+    const { rerender } = renderCard()
+    const next = response({
+      symbol: '2317.TWSE',
+      industry: industry({ industry: '其他電子業', peers: [{ symbol: '6196.TWSE', name: '帆宣', value: 8 }] }),
+    })
+    rerender(
+      <MemoryRouter>
+        <TaiwanPositioning symbol="2317.TWSE" response={next} isLoading={false} isError={false} isFetching={false} onRetry={() => {}} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('positioning-industry')).toHaveTextContent('其他電子業')
+    expect(screen.queryByText('信驊')).toBeNull()
+    expect(screen.getByRole('link', { name: '加入比較' })).toHaveAttribute(
+      'href', `/stocks/compare?symbols=${encodeURIComponent('2317.TWSE,6196.TWSE')}`,
+    )
   })
 })

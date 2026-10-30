@@ -74,6 +74,19 @@
   9. 擺在「目前觸發的訊號」與「官方基本面資料」之間。
   10. B201 最小修正：資產負債表清單失敗時只讓資產、負債、權益為空並記下 `balance_sheet_error`，損益數字照常回傳。
   11. 百分位 =（低於者 + 同值者的一半，含自己）÷ 可排名檔數 × 100，同值共用平均名次；缺值不排名、不當 0。母體為證券主檔 `instrument_type == "stock"` 的上市櫃普通股，排除 ETF、TDR；ETF、TDR、指數回 not applicable，前端在指數與 ETF 頁不發請求。一個資料集讀取失敗只讓它的指標顯示「無法計算」（估值任一市場清單失敗時，三個估值指標都不排名，避免只排半個市場）。外資 20 日窗口以日 K 的交易日曆往回數 20 個交易日、結束於最新法人日；窗口內缺法人分區時整項無法計算，個股缺任一日資料時不排名。
+- 1-3 細節（2026-10-30，使用者核可）：
+  1. 產業內只排 4 項：近 20 日漲跌、外資 20 日買超強度、投信 20 日買超強度、本益比。本益比反向（越低越前面），虧損本益比不排名，同 1-2。
+  2. 產業取證券主檔的 `industry`（官方 34 類、單層），上市與上櫃合併；空值與「未知產業（xx）」視為未分類。
+  3. 產業內可排名檔數（含自己）少於 3 時不給名次，顯示「同業不足（N 檔）」。
+  4. 以「第 N / M 名」為主，旁附百分位；M 為該指標在產業內可排名的檔數。名次採競賽排名（同值共用最好的名次、下一名跳號），百分位沿用 1-2 的中位名次公式，並與名次同向：本益比取 100 減原值由小到大的百分位（同 1-2 分數的方向），第 1 名永遠配最高百分位；畫面上的本益比數值照原值顯示。
+  5. 未分類回 `industry.not_applicable_reason = "unclassified"`；TDR 沿用 1-2 的 `tdr`，回應沒有產業區塊。
+  6. ETF 與指數頁同 1-2：不顯示、不發請求。
+  7. 擴充 `/api/taiwan/stocks/{symbol}/positioning` 的回應，新增 `industry` 區塊；與 1-2 共用同一份全市場計算與記憶體快取，快取鍵加入產業對照的 hash。
+  8. 放在「體質與估值定位」卡內最後一段。
+  9. 列出同產業近 20 日漲幅前 3 名（不含自己，同值依代號排序），附「加入比較」連到 `/stocks/compare?symbols=`（含目前個股、最多 5 檔）；不改選股頁。
+  10. 近 20 日漲跌與 240 日同一函式：回看日 K 交易日曆的第 20 個交易日，回看收盤以公司行動換到目前尺度；不用 enriched 的 `momentum_20d`（以列數往回）。
+  11. 投信 20 日強度 = 投信 20 日買賣超 ÷ 同期成交量 × 100，窗口與不完整規則同外資；中小型股多為 0、同值多，畫面附說明。
+  12. 本益比在產業內混有上市與上櫃、估值日期不同時，該列標「期別混雜」。
 
 ## 分期與完成條件
 
@@ -156,8 +169,8 @@
 
 | 期別 | 狀態 | 備註 |
 |---|---|---|
-| 第一期 | 進行中 | 採甲案；1-1 已實作、待提交（`/api/taiwan/stocks/{symbol}/current-signals`、服務 `backend/app/taiwan/current_signals.py`、個股頁「目前觸發的訊號」區塊；策略快取疊加即時結果移到 `backend/app/services/strategy_realtime.py`，選股頁與本區塊共用）；1-4 已實作、待提交；1-5 已實作、待提交（存檔 `data/taiwan/return_index/`、讀取函式 `read_return_index_series`，見 `docs/taiwan-data-sources.md`「發行量加權股價報酬指數（含息）」）；1-2 已實作、待提交（`/api/taiwan/stocks/{symbol}/positioning`、服務 `backend/app/taiwan/positioning.py`、個股頁「體質與估值定位」區塊；含 B201 最小修正） |
-| 第二期 | 進行中 | PD1、PD2 已定案（2026-10-29）；第 3 項財報每季快照採方案 A，已實作、待提交（存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/quarterly-financials`、個股頁「季度財報」區塊）；月營收快照比照方案 A，已實作、待提交（存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/monthly-revenue`、個股頁「月營收走勢」區塊）；C 案第三方回補待使用者確認 FinMind 條款 |
+| 第一期 | 進行中 | 採甲案；1-1 已提交（`3ee31ed`；`/api/taiwan/stocks/{symbol}/current-signals`、服務 `backend/app/taiwan/current_signals.py`、個股頁「目前觸發的訊號」區塊；策略快取疊加即時結果移到 `backend/app/services/strategy_realtime.py`，選股頁與本區塊共用）；1-4 已提交（`fee4470`）；1-5 已提交（`4e711e1`；存檔 `data/taiwan/return_index/`、讀取函式 `read_return_index_series`，見 `docs/taiwan-data-sources.md`「發行量加權股價報酬指數（含息）」）；1-2 已提交（`c1da208`；`/api/taiwan/stocks/{symbol}/positioning`、服務 `backend/app/taiwan/positioning.py`、個股頁「體質與估值定位」區塊；含 B201 最小修正）；1-3 已實作、待提交（同一端點的 `industry` 區塊、「體質與估值定位」卡內「同產業排名」段，含同業前 3 名與「加入比較」） |
+| 第二期 | 進行中 | PD1、PD2 已定案（2026-10-29）；第 3 項財報每季快照採方案 A，已提交（`9080c62`；存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/quarterly-financials`、個股頁「季度財報」區塊）；月營收快照比照方案 A，已提交（`7a99828`；存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/monthly-revenue`、個股頁「月營收走勢」區塊）；C 案第三方回補待使用者確認 FinMind 條款 |
 | 第三期 | 待 PD2 | — |
 
 ## 維護方式

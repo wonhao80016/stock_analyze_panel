@@ -1,4 +1,4 @@
-"""Whole-market percentile positioning of one Taiwan stock on nine current-reference metrics.
+"""Whole-market percentile positioning of one Taiwan stock on nine metrics, plus ranks within its industry.
 Kept in memory once per set of dataset dates, never written; no availability time, so never for backtests.
 """
 # ruff: noqa: RUF001 -- official placeholders contain full-width punctuation.
@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +27,7 @@ from app.taiwan.monthly_revenue_store import TaiwanMonthlyRevenueStore
 from app.taiwan.providers.taiwan_values import MISSING_VALUES, parse_number, parse_taiwan_date
 from app.taiwan.quarterly_financials_store import TaiwanQuarterlyFinancialStore
 from app.taiwan.symbol import parse_symbol
+from app.taiwan.universe.industry_classification import resolve_industry_name
 from app.taiwan.universe.models import MarketProfileBridge, UniverseType
 
 logger = logging.getLogger(__name__)
@@ -34,9 +35,14 @@ logger = logging.getLogger(__name__)
 EXCHANGES = ("TWSE", "TPEX")
 VALUATION_PATHS = {"TWSE": "exchangeReport/BWIBBU_ALL", "TPEX": "tpex_mainboard_peratio_analysis"}
 LONG_MOMENTUM_SESSIONS = 240
+SHORT_MOMENTUM_SESSIONS = 20
 CHIP_WINDOW_SESSIONS = 20
+MIN_INDUSTRY_PEERS = 3
+INDUSTRY_PEER_COUNT = 3
 # Seen for loss-making or not-applicable ratios; a dash is a placeholder, never a number.
 _DASH_PLACEHOLDERS = {"－", "—", "–"}
+# resolve_industry_name's fallback for an unmapped numeric code; not a trustworthy group.
+_UNRESOLVED_INDUSTRY_PREFIX = "未知產業"
 
 MetricId = Literal[
     "pe", "pb", "dividend_yield", "roe", "operating_margin", "revenue_yoy",
@@ -46,8 +52,10 @@ DimensionId = Literal["valuation", "profitability", "growth", "momentum", "chips
 MetricStatus = Literal["ranked", "not_ranked", "unavailable"]
 Reason = Literal[
     "loss_or_not_applicable", "not_general_industry", "insufficient_history", "incomplete_window",
-    "non_positive_equity", "no_value", "not_archived", "dataset_unavailable",
+    "non_positive_equity", "no_value", "not_archived", "dataset_unavailable", "insufficient_peers",
 ]
+IndustryMetricId = Literal["return_20d", "foreign_flow_20d", "trust_flow_20d", "pe"]
+INDUSTRY_METRICS: tuple[IndustryMetricId, ...] = ("return_20d", "foreign_flow_20d", "trust_flow_20d", "pe")
 
 DIMENSIONS: tuple[tuple[DimensionId, tuple[MetricId, ...]], ...] = (
     ("valuation", ("pe", "pb", "dividend_yield")),
@@ -145,6 +153,40 @@ class PositioningDimension(BaseModel):
     metrics: list[PositioningMetric]
 
 
+class IndustryRankMetric(BaseModel):
+    """``rank`` 1 is the best end (lowest PE, highest otherwise); tied values share the best rank.
+    ``percentile`` points the same way as ``rank``: for PE it is 100 minus the ascending mid-rank percentile.
+    """
+
+    id: IndustryMetricId
+    status: MetricStatus
+    reason: Reason | None = None
+    value: float | None = None
+    unit: Literal["times", "percent"]
+    lower_is_better: bool
+    rank: int | None = None
+    compared: int | None = None
+    percentile: float | None = None
+    as_of: str | None = None
+    period_mixed: bool = False
+
+
+class IndustryPeer(BaseModel):
+    symbol: str
+    name: str | None = None
+    value: float
+
+
+class IndustryRanking(BaseModel):
+    applicable: bool
+    not_applicable_reason: Literal["unclassified"] | None = None
+    industry: str | None = None
+    members: int | None = None
+    metrics: list[IndustryRankMetric] = Field(default_factory=list)
+    peers_metric: Literal["return_20d"] = "return_20d"
+    peers: list[IndustryPeer] = Field(default_factory=list)
+
+
 class TaiwanPositioningResponse(BaseModel):
     symbol: str
     exchange: str
@@ -156,6 +198,7 @@ class TaiwanPositioningResponse(BaseModel):
     valuation_dates: dict[str, str | None] = Field(default_factory=dict)
     valuation_period_mixed: bool = False
     dimensions: list[PositioningDimension] = Field(default_factory=list)
+    industry: IndustryRanking | None = None
 
 
 _TABLE_SCHEMA: dict[str, pl.DataType] = {
@@ -182,6 +225,8 @@ class MarketSnapshot:
     universe_size: int
     valuation_dates: dict[str, str | None]
     metrics: dict[str, MetricTable]
+    industries: dict[str, str | None] = field(default_factory=dict)
+    industry_ranks: dict[str, pl.DataFrame] = field(default_factory=dict)
 
 
 def _unavailable(reason: Reason = "dataset_unavailable") -> MetricTable:
@@ -332,16 +377,16 @@ def momentum_60d_table(universe: set[str]) -> MetricTable:
     return _table(rows)
 
 
-def momentum_240d_table(
-    universe: set[str], daily: TaiwanDailyStore, actions: TaiwanCorporateActionStore
+def trailing_return_table(
+    universe: set[str], daily: TaiwanDailyStore, actions: TaiwanCorporateActionStore, sessions_back: int
 ) -> MetricTable:
-    """Return over 240 trading sessions, the older close moved onto today's scale by corporate actions.
-    A stock without a close 240 sessions back is not ranked (listed too recently, or untraded that day).
+    """Return over *sessions_back* trading sessions, the older close moved onto today's scale by corporate actions.
+    A stock without a close that many sessions back is not ranked (listed too recently, or untraded that day).
     """
     sessions = daily.available_dates()
-    if len(sessions) <= LONG_MOMENTUM_SESSIONS:
+    if len(sessions) <= sessions_back:
         return _unavailable("insufficient_history")
-    target, lookback = sessions[-1], sessions[-1 - LONG_MOMENTUM_SESSIONS]
+    target, lookback = sessions[-1], sessions[-1 - sessions_back]
     bars = daily.read_dates([lookback, target], list(universe))
     now = bars.filter(pl.col("date") == target).select("symbol", pl.col("close").alias("close_now"))
     then = bars.filter(pl.col("date") == lookback).select("symbol", pl.col("close").alias("close_then"))
@@ -366,10 +411,10 @@ def momentum_240d_table(
     return _table(rows)
 
 
-def foreign_flow_table(
-    universe: set[str], daily: TaiwanDailyStore, institutional: TaiwanInstitutionalStore
+def institutional_flow_table(
+    universe: set[str], daily: TaiwanDailyStore, institutional: TaiwanInstitutionalStore, net_column: str
 ) -> MetricTable:
-    """Foreign net buy / volume over the 20 daily-store sessions ending on the newest flow date, in percent.
+    """*net_column* net buy / volume over the 20 daily-store sessions ending on the newest flow date, in percent.
     A missing flow partition makes the metric unavailable; a stock lacking any session is not ranked.
     """
     end = institutional.latest_date()
@@ -384,7 +429,7 @@ def foreign_flow_table(
         institutional.read_range(symbols, window[0], end)
         .filter(pl.col("date").is_in(window))
         .group_by("symbol")
-        .agg(pl.col("foreign_net").sum().alias("net"), pl.col("foreign_net").count().alias("days"))
+        .agg(pl.col(net_column).sum().alias("net"), pl.col(net_column).count().alias("days"))
     )
     volume = (
         daily.read_dates(window, symbols)
@@ -418,6 +463,69 @@ def _guarded_many(names: tuple[str, ...], build) -> dict[str, MetricTable]:
     except Exception:
         logger.warning("taiwan positioning: %s unavailable", ", ".join(names), exc_info=True)
         return {name: _unavailable() for name in names}
+
+
+def industry_group(raw: str | None) -> str | None:
+    """The official industry name; blank values and unresolved numeric codes count as unclassified."""
+    name = resolve_industry_name(raw)
+    return None if name is None or name.startswith(_UNRESOLVED_INDUSTRY_PREFIX) else name
+
+
+def industry_rank_table(table: MetricTable, industries: dict[str, str | None], metric: str) -> pl.DataFrame:
+    """Rankable rows of classified stocks with ``rank``, ``percentile`` and ``compared`` within their industry.
+    ``rank`` is the competition rank from the best end; ``percentile`` is the mid-rank one in the same direction.
+    """
+    mapping = pl.DataFrame(
+        {"symbol": list(industries), "industry": list(industries.values())},
+        schema={"symbol": pl.Utf8, "industry": pl.Utf8},
+    ).filter(pl.col("industry").is_not_null())
+    rows = (
+        table.rows.filter(pl.col("reason").is_null())
+        .select("symbol", "value", "as_of")
+        .join(mapping, on="symbol", how="inner")
+    )
+    lower_is_better = metric in LOWER_IS_BETTER
+    best_first = pl.col("value") if lower_is_better else -pl.col("value")
+    return mid_rank_percentile(rows, ["industry"]).with_columns(
+        best_first.rank("min").over("industry").cast(pl.Int64).alias("rank"),
+        (100.0 - pl.col("percentile") if lower_is_better else pl.col("percentile")).alias("percentile"),
+    )
+
+
+def _industry_metric(metric: str, snapshot: MarketSnapshot, symbol: str, industry: str) -> IndustryRankMetric:
+    base = {"id": metric, "unit": UNITS.get(metric, "percent"), "lower_is_better": metric in LOWER_IS_BETTER}
+    table = snapshot.metrics.get(metric)
+    if table is None or table.unavailable is not None:
+        reason = table.unavailable if table is not None else "dataset_unavailable"
+        return IndustryRankMetric(**base, status="unavailable", reason=reason)
+    peers = snapshot.industry_ranks[metric].filter(pl.col("industry") == industry)
+    context: dict[str, Any] = {"compared": peers.height, "period_mixed": peers["as_of"].n_unique() > 1}
+    own = table.rows.filter(pl.col("symbol") == symbol)
+    if own.is_empty():
+        return IndustryRankMetric(**base, **context, status="not_ranked", reason="no_value")
+    entry = own.row(0, named=True)
+    context.update(value=entry["value"], as_of=entry["as_of"])
+    if entry["reason"] is not None:
+        return IndustryRankMetric(**base, **context, status="not_ranked", reason=entry["reason"])
+    if peers.height < MIN_INDUSTRY_PEERS:
+        return IndustryRankMetric(**base, **context, status="not_ranked", reason="insufficient_peers")
+    mine = peers.filter(pl.col("symbol") == symbol).row(0, named=True)
+    return IndustryRankMetric(
+        **base, **context, status="ranked", rank=mine["rank"], percentile=mine["percentile"]
+    )
+
+
+def top_industry_peers(snapshot: MarketSnapshot, symbol: str, industry: str) -> list[tuple[str, float]]:
+    """Other stocks of the industry with the highest 20-day return; ties fall back to symbol order."""
+    ranked = snapshot.industry_ranks.get("return_20d")
+    if ranked is None:
+        return []
+    top = (
+        ranked.filter((pl.col("industry") == industry) & (pl.col("symbol") != symbol))
+        .sort(["rank", "symbol"])
+        .head(INDUSTRY_PEER_COUNT)
+    )
+    return list(zip(top["symbol"].to_list(), top["value"].to_list(), strict=True))
 
 
 
@@ -538,6 +646,11 @@ class TaiwanPositioningService:
             if (inst := self.security_master.get_instrument(s)) is not None and not MarketProfileBridge.is_tdr(inst)
         }
 
+    def industries(self, universe: set[str]) -> dict[str, str | None]:
+        return {
+            s: industry_group(getattr(self.security_master.get_instrument(s), "industry", None)) for s in universe
+        }
+
     def _valuation_lists(self) -> dict[str, list[dict[str, Any]] | None]:
         lists: dict[str, list[dict[str, Any]] | None] = {}
         for exchange in EXCHANGES:
@@ -549,7 +662,12 @@ class TaiwanPositioningService:
                 lists[exchange] = None
         return lists
 
-    def _key(self, universe: set[str], lists: dict[str, list[dict[str, Any]] | None]) -> tuple:
+    def _key(
+        self,
+        universe: set[str],
+        lists: dict[str, list[dict[str, Any]] | None],
+        industries: dict[str, str | None],
+    ) -> tuple:
         def valuation_marker(rows):
             if not rows:
                 return None
@@ -560,6 +678,7 @@ class TaiwanPositioningService:
         inst_latest = self.institutional_store.latest_date()
         return (
             hash(frozenset(universe)),
+            hash(frozenset(industries.items())),
             tuple(valuation_marker(lists[e]) for e in EXCHANGES),
             _enriched_signature(),
             (daily_latest, self.daily_store.partition_mtime(daily_latest) if daily_latest else None),
@@ -569,7 +688,12 @@ class TaiwanPositioningService:
             self.revenue_store.signature(),
         )
 
-    def build_snapshot(self, universe: set[str], lists: dict[str, list[dict[str, Any]] | None]) -> MarketSnapshot:
+    def build_snapshot(
+        self,
+        universe: set[str],
+        lists: dict[str, list[dict[str, Any]] | None],
+        industries: dict[str, str | None],
+    ) -> MarketSnapshot:
         valuation, dates = valuation_tables(lists, universe)
         metrics: dict[str, MetricTable] = dict(valuation)
         metrics.update(_guarded_many(
@@ -578,25 +702,34 @@ class TaiwanPositioningService:
         ))
         metrics["revenue_yoy"] = _guarded("revenue_yoy", lambda: revenue_table(self.revenue_store.read_all(), universe))
         metrics["return_60d"] = _guarded("return_60d", lambda: momentum_60d_table(universe))
-        metrics["return_240d"] = _guarded(
-            "return_240d", lambda: momentum_240d_table(universe, self.daily_store, self.corporate_actions)
+        for metric, sessions_back in (("return_20d", SHORT_MOMENTUM_SESSIONS), ("return_240d", LONG_MOMENTUM_SESSIONS)):
+            metrics[metric] = _guarded(metric, lambda n=sessions_back: trailing_return_table(
+                universe, self.daily_store, self.corporate_actions, n
+            ))
+        for metric, column in (("foreign_flow_20d", "foreign_net"), ("trust_flow_20d", "investment_trust_net")):
+            metrics[metric] = _guarded(metric, lambda c=column: institutional_flow_table(
+                universe, self.daily_store, self.institutional_store, c
+            ))
+        industry_ranks = {
+            metric: industry_rank_table(metrics[metric], industries, metric) for metric in INDUSTRY_METRICS
+        }
+        return MarketSnapshot(
+            universe_size=len(universe), valuation_dates=dates, metrics=metrics,
+            industries=industries, industry_ranks=industry_ranks,
         )
-        metrics["foreign_flow_20d"] = _guarded(
-            "foreign_flow_20d", lambda: foreign_flow_table(universe, self.daily_store, self.institutional_store)
-        )
-        return MarketSnapshot(universe_size=len(universe), valuation_dates=dates, metrics=metrics)
 
     def snapshot(self) -> MarketSnapshot:
         """The cross-section for the current dataset dates, built outside the lock and swapped in whole."""
         global _snapshot
         universe = self.universe()
+        industries = self.industries(universe)
         lists = self._valuation_lists()
-        key = self._key(universe, lists)
+        key = self._key(universe, lists, industries)
         with _snapshot_lock:
             cached = _snapshot
         if cached is not None and cached[0] == key:
             return cached[1]
-        built = self.build_snapshot(universe, lists)
+        built = self.build_snapshot(universe, lists, industries)
         with _snapshot_lock:
             _snapshot = (key, built)
         return built
@@ -622,6 +755,26 @@ class TaiwanPositioningService:
             valuation_dates=snapshot.valuation_dates,
             valuation_period_mixed=len(set(snapshot.valuation_dates.values())) > 1,
             dimensions=positioning_for(symbol.canonical, snapshot),
+            industry=self._industry_ranking(symbol.canonical, instrument, snapshot),
+        )
+
+    def _industry_ranking(self, symbol: str, instrument: Any, snapshot: MarketSnapshot) -> IndustryRanking:
+        if symbol in snapshot.industries:
+            industry = snapshot.industries[symbol]
+        else:
+            industry = industry_group(getattr(instrument, "industry", None))
+        if industry is None:
+            return IndustryRanking(applicable=False, not_applicable_reason="unclassified")
+        peers = [
+            IndustryPeer(symbol=s, name=getattr(self.security_master.get_instrument(s), "name", None), value=v)
+            for s, v in top_industry_peers(snapshot, symbol, industry)
+        ]
+        return IndustryRanking(
+            applicable=True,
+            industry=industry,
+            members=sum(1 for name in snapshot.industries.values() if name == industry),
+            metrics=[_industry_metric(m, snapshot, symbol, industry) for m in INDUSTRY_METRICS],
+            peers=peers,
         )
 
 
