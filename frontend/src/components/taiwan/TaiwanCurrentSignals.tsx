@@ -3,11 +3,12 @@ import type {
   TaiwanCurrentSignal,
   TaiwanCurrentSignalsResponse,
   TaiwanSignalDirection,
+  TaiwanSignalStatsResponse,
   TaiwanStrategySelection,
 } from '@/lib/api'
 import { cn } from '@/lib/cn'
-import { VOLUME_PATTERN_DEFINITIONS, cnSignal } from '@/lib/signals'
 import { MarketFilterNote, PickGradeBadge } from '@/components/PickGrade'
+import { SignalStatSummary, TaiwanSignalStats, signalName, type SignalStatsQuery } from './TaiwanSignalStats'
 
 type Props = {
   symbol: string
@@ -16,14 +17,11 @@ type Props = {
   isError: boolean
   isFetching: boolean
   onRetry: () => void
+  stats?: SignalStatsQuery
 }
 
 type SignalsSection = NonNullable<TaiwanCurrentSignalsResponse['signals']>
 type StrategiesSection = NonNullable<TaiwanCurrentSignalsResponse['strategies']>
-
-const VOLUME_PATTERN_NAMES: Record<string, string> = Object.fromEntries(
-  VOLUME_PATTERN_DEFINITIONS.map(pattern => [pattern.id, pattern.name]),
-)
 
 const GROUPS: { direction: TaiwanSignalDirection; label: string; className: string }[] = [
   { direction: 'bullish', label: '偏多', className: 'border-bull/30 bg-bull/10 text-bull' },
@@ -31,15 +29,11 @@ const GROUPS: { direction: TaiwanSignalDirection; label: string; className: stri
   { direction: 'neutral', label: '中性', className: 'border-border bg-base text-foreground' },
 ]
 
-function signalName(signal: TaiwanCurrentSignal) {
-  return signal.name ?? VOLUME_PATTERN_NAMES[signal.id] ?? cnSignal(signal.id)
-}
-
 function DateTag({ value }: { value: string | null }) {
   return <span className="text-[11px] font-normal text-muted">資料日期 {value ?? '--'}</span>
 }
 
-function SignalGroups({ signals }: { signals: TaiwanCurrentSignal[] }) {
+function SignalGroups({ signals, stats }: { signals: TaiwanCurrentSignal[]; stats?: TaiwanSignalStatsResponse }) {
   return (
     <div className="space-y-2">
       {GROUPS.map(group => {
@@ -49,8 +43,11 @@ function SignalGroups({ signals }: { signals: TaiwanCurrentSignal[] }) {
           <div key={group.direction} className="flex flex-wrap items-center gap-1.5" data-testid={`current-signals-${group.direction}`}>
             <span className="w-8 shrink-0 text-[11px] text-muted">{group.label}</span>
             {items.map(signal => (
-              <span key={signal.id} className={cn('rounded-full border px-2 py-0.5 text-xs', group.className)}>
-                {signalName(signal)}
+              <span key={signal.id} className="inline-flex items-center gap-1">
+                <span className={cn('rounded-full border px-2 py-0.5 text-xs', group.className)}>
+                  {signalName(signal)}
+                </span>
+                <SignalStatSummary stat={stats?.signals.find(stat => stat.id === signal.id)} />
               </span>
             ))}
           </div>
@@ -60,7 +57,7 @@ function SignalGroups({ signals }: { signals: TaiwanCurrentSignal[] }) {
   )
 }
 
-function SignalsBlock({ section }: { section: SignalsSection }) {
+function SignalsBlock({ section, stats }: { section: SignalsSection; stats?: TaiwanSignalStatsResponse }) {
   let body
   if (section.status === 'unpublished') {
     body = <p className="text-xs text-muted">尚無已發佈的盤後指標資料。</p>
@@ -70,7 +67,7 @@ function SignalsBlock({ section }: { section: SignalsSection }) {
     body = (
       <div className="space-y-2">
         {section.triggered.length > 0 ? (
-          <SignalGroups signals={section.triggered} />
+          <SignalGroups signals={section.triggered} stats={stats} />
         ) : (
           <p className="text-xs text-muted" data-testid="current-signals-none">這個交易日沒有成立的訊號。</p>
         )}
@@ -149,8 +146,9 @@ function StrategiesBlock({ section }: { section: StrategiesSection }) {
   )
 }
 
-export function TaiwanCurrentSignals({ symbol, response, isLoading, isError, isFetching, onRetry }: Props) {
+export function TaiwanCurrentSignals({ symbol, response, isLoading, isError, isFetching, onRetry, stats }: Props) {
   const current = response?.symbol === symbol ? response : undefined
+  const currentStats = stats?.response?.symbol === symbol ? stats.response : undefined
   return (
     <section aria-labelledby="taiwan-current-signals-heading" className="space-y-3 rounded-2xl border border-border bg-surface p-4">
       <div>
@@ -181,10 +179,13 @@ export function TaiwanCurrentSignals({ symbol, response, isLoading, isError, isF
       ) : !current.applicable || current.signals == null || current.strategies == null ? (
         <p className="text-xs text-muted">指數沒有個股訊號與策略入選。</p>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <SignalsBlock section={current.signals} />
-          <StrategiesBlock section={current.strategies} />
-        </div>
+        <>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <SignalsBlock section={current.signals} stats={currentStats} />
+            <StrategiesBlock section={current.strategies} />
+          </div>
+          {stats && <TaiwanSignalStats symbol={symbol} query={stats} />}
+        </>
       )}
     </section>
   )

@@ -87,6 +87,22 @@
   10. 近 20 日漲跌與 240 日同一函式：回看日 K 交易日曆的第 20 個交易日，回看收盤以公司行動換到目前尺度；不用 enriched 的 `momentum_20d`（以列數往回）。
   11. 投信 20 日強度 = 投信 20 日買賣超 ÷ 同期成交量 × 100，窗口與不完整規則同外資；中小型股多為 0、同值多，畫面附說明。
   12. 本益比在產業內混有上市與上櫃、估值日期不同時，該列標「期別混雜」。
+- 1-6 細節（2026-10-30，使用者核可）：
+  1. 統計對象：1-1 的全部候選（內建 `signal_*` 含漲跌停 4 個、`vp_*`、啟用中的 `csg_*`），另在服務內計算「252 日新高」（前復權收盤 ≥ 含當日在內最近 252 列收盤的最高值，未滿 252 列為未判定）與「外資連 5 買」（日 K 交易日曆上連續 5 個交易日 `foreign_net` > 0；該日沒有法人分區為未判定，有分區但沒有這檔的列視為未買超；歷史受法人回補上限約 250 個交易日限制）。
+  2. 月營收年增 ≥ 20%：只顯示最新已存月份是否成立，標「歷史統計不提供」，不算勝率（6G／PD1）；讀月營收快照，不另發請求。
+  3. 只算個股自身歷史，不做全市場合併。
+  4. 去重：交叉型（均線、MACD 的黃金／死亡交叉與 MA5／10／20 突破、跌破）每次成立都算；其餘都是狀態型，只算由不成立轉為成立的第一天，且距上一個計入事件不足 20 個交易日（以日 K 交易日曆計）不計。分類只在 `signal_stats.py` 定義一份。
+  5. 去重後持有期間仍可能重疊，不另處理，畫面註明。
+  6. 「上漲比例」= 報酬 > 0 的比例；基準有覆蓋時另給「贏大盤比例」= 超額 > 0 的比例。
+  7. 樣本門檻 5，逐期間判斷，只數已結算（期滿且有報酬）的事件；不足顯示「樣本不足」。基準涵蓋的已結算事件不足 5 次時顯示「基準不足」。
+  8. 基準只用 TWSE 發行量加權股價報酬指數（上櫃股也用，畫面註明）；沒有覆蓋顯示「基準不足」，不得改用 t00 價格指數。
+  9. 個股窗口為 T+1 開盤到 T+k 收盤（同 `compute_outcomes`）；基準窗口為 T 收盤到 T+k 收盤，畫面註明差一個隔夜。
+  10. 開盤漲停買不到沿用 `not_filled_limit_up` 排除，顯示排除數；缺資料日、除權息未涵蓋等另計排除數。
+  11. 新端點 `GET /api/taiwan/stocks/{symbol}/signal-stats`，API 層只做參數與錯誤對應；500 固定訊息「訊號統計讀取失敗」，不含路徑；400／404 同月營收端點。
+  12. 畫面：「目前觸發的訊號」每個標籤旁一行 60 日摘要（上漲比例、樣本數）；下方列目前成立訊號的 20／60 日完整統計（事件數、已結算數、平均與中位報酬、上漲比例、平均超額與贏大盤比例或「基準不足」、排除數），其餘訊號收合；註明 T+1 開盤進場、前復權含息、不扣成本。
+  13. ETF 比照個股計算（沒有月營收條件）；指數頁不顯示、不發請求。
+  14. 每個資料日期只算一次：記憶體快取鍵含 enriched generation 與最新分區、日 K 最新日與檔案時間、公司行動檔時間、法人最新日、報酬指數最新分區、自訂訊號定義、月營收快照簽章；鎖外計算、完成後替換；全市場交易日曆與公司行動另以日 K 與公司行動的簽章共用。同日第二次請求不讀任何分區。
+  15. 期間 20、60 日；`compute_outcomes` 的期間改為參數，預設不變。
 
 ## 分期與完成條件
 
@@ -133,7 +149,7 @@
 - 1-4：一般業樣本有值；金融保險等類別沒有這個欄位時為 None，不是 0；`TaiwanReferenceData` 顯示；`docs/taiwan-data-sources.md` 的財報欄位清單同步。
 - 1-5：不增加任何請求；表存在、缺表、標題改變三種樣本各有測試，缺表時明確記錄而不是存 0；沿用回應日期戳記檢查。歷史日期的 MI_INDEX 是否都有這張表未查明，要回補屬 PD2。
 - 1-6
-  1. 口徑沿用 `strategy_pick_performance`：次日開盤進場、前復權含息、不扣成本（[strategy_pick_performance.py:563-571](../../backend/app/services/strategy_pick_performance.py#L563-L571)）；60 日期間須新增（目前只有 1、5、10、20 日，[:33](../../backend/app/services/strategy_pick_performance.py#L33)）。
+  1. 口徑沿用 `strategy_pick_performance`：次日開盤進場、前復權含息、不扣成本（[strategy_pick_performance.py:567-575](../../backend/app/services/strategy_pick_performance.py#L567-L575)）；60 日期間須新增（目前只有 1、5、10、20 日，[:33](../../backend/app/services/strategy_pick_performance.py#L33)）。
   2. 事件要定義去重：`signal_*` 是逐日狀態，例如 60 日新高可能連續多日成立。
   3. 固定樣本的數值斷言涵蓋訊號日與進場日錯開一個交易日、漲停買不到、缺資料日。
   4. 樣本數一起顯示；去重後少於 5 次時顯示「樣本不足」而不是數字（5 為提案值，開工前定案並記在本頁）。
@@ -169,7 +185,7 @@
 
 | 期別 | 狀態 | 備註 |
 |---|---|---|
-| 第一期 | 進行中 | 採甲案；1-1 已提交（`3ee31ed`；`/api/taiwan/stocks/{symbol}/current-signals`、服務 `backend/app/taiwan/current_signals.py`、個股頁「目前觸發的訊號」區塊；策略快取疊加即時結果移到 `backend/app/services/strategy_realtime.py`，選股頁與本區塊共用）；1-4 已提交（`fee4470`）；1-5 已提交（`4e711e1`；存檔 `data/taiwan/return_index/`、讀取函式 `read_return_index_series`，見 `docs/taiwan-data-sources.md`「發行量加權股價報酬指數（含息）」）；1-2 已提交（`c1da208`；`/api/taiwan/stocks/{symbol}/positioning`、服務 `backend/app/taiwan/positioning.py`、個股頁「體質與估值定位」區塊；含 B201 最小修正）；1-3 已實作、待提交（同一端點的 `industry` 區塊、「體質與估值定位」卡內「同產業排名」段，含同業前 3 名與「加入比較」） |
+| 第一期 | 進行中 | 採甲案；1-1 已提交（`3ee31ed`；`/api/taiwan/stocks/{symbol}/current-signals`、服務 `backend/app/taiwan/current_signals.py`、個股頁「目前觸發的訊號」區塊；策略快取疊加即時結果移到 `backend/app/services/strategy_realtime.py`，選股頁與本區塊共用）；1-4 已提交（`fee4470`）；1-5 已提交（`4e711e1`；存檔 `data/taiwan/return_index/`、讀取函式 `read_return_index_series`，見 `docs/taiwan-data-sources.md`「發行量加權股價報酬指數（含息）」）；1-2 已提交（`c1da208`；`/api/taiwan/stocks/{symbol}/positioning`、服務 `backend/app/taiwan/positioning.py`、個股頁「體質與估值定位」區塊；含 B201 最小修正）；1-3 已提交（`436aa7e`；同一端點的 `industry` 區塊、「體質與估值定位」卡內「同產業排名」段，含同業前 3 名與「加入比較」）；1-6 已實作、待提交（`/api/taiwan/stocks/{symbol}/signal-stats`、服務 `backend/app/taiwan/signal_stats.py`、「目前觸發的訊號」區塊內每個標籤旁的 60 日摘要與「技術訊號歷史統計」表；`compute_outcomes` 新增 `horizons` 參數，預設維持 1、5、10、20 日，策略選股績效回應不變） |
 | 第二期 | 進行中 | PD1、PD2 已定案（2026-10-29）；第 3 項財報每季快照採方案 A，已提交（`9080c62`；存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/quarterly-financials`、個股頁「季度財報」區塊）；月營收快照比照方案 A，已提交（`7a99828`；存檔、盤後刷新、`/api/taiwan/stocks/{symbol}/monthly-revenue`、個股頁「月營收走勢」區塊）；C 案第三方回補待使用者確認 FinMind 條款 |
 | 第三期 | 待 PD2 | — |
 

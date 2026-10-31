@@ -209,7 +209,10 @@ def _priced_bars(
 
 
 def _signal_windows(
-    signal_dates: Iterable[date], calendar: PriceCalendar, adjustment: AdjustmentState
+    signal_dates: Iterable[date],
+    calendar: PriceCalendar,
+    adjustment: AdjustmentState,
+    horizons: tuple[int, ...] = HORIZONS,
 ) -> pl.DataFrame:
     """Per signal date: the entry session and, per horizon, the exit session and its data checks."""
     stored = calendar.stored_dates
@@ -220,7 +223,7 @@ def _signal_windows(
         "_entry_covered": pl.Boolean,
         **{f"_entry_known_{key}": pl.Boolean for key in (*_EXCHANGES, "")},
     }
-    for k in HORIZONS:
+    for k in horizons:
         schema |= {
             f"exit_date_{k}": pl.Date,
             f"_gap_{k}": pl.Boolean,
@@ -241,7 +244,7 @@ def _signal_windows(
                 for key in (*_EXCHANGES, "")
             },
         }
-        for k in HORIZONS:
+        for k in horizons:
             end = start + k
             exit_date = stored[end - 1] if end <= len(stored) else None
             row[f"exit_date_{k}"] = exit_date
@@ -374,6 +377,7 @@ def compute_outcomes(
     adjustment_state: AdjustmentState,
     calendar: PriceCalendar,
     limit_profile: pl.DataFrame,
+    horizons: tuple[int, ...] = HORIZONS,
 ) -> pl.DataFrame:
     """One row per pick: its input columns plus status, limit check, excluded_reason and per-horizon results.
 
@@ -387,7 +391,7 @@ def compute_outcomes(
     )
     priced = _priced_bars(bars, events, adjustment, calendar.prices_through)
 
-    windows = _signal_windows(frame.get_column("signal_date").unique().to_list(), calendar, adjustment)
+    windows = _signal_windows(frame.get_column("signal_date").unique().to_list(), calendar, adjustment, horizons)
     frame = frame.join(windows, on="signal_date", how="left")
     entry_bars = priced.select(
         "symbol",
@@ -436,7 +440,7 @@ def compute_outcomes(
         .when(~_by_exchange("_entry_known_")).then(pl.lit(DATA_INCOMPLETE))
         .when(pl.col("_entry_open").is_null()).then(pl.lit(NOT_FILLED_NO_TRADE))
         .when(hit_limit).then(pl.lit(NOT_FILLED_LIMIT_UP))
-        .when(pl.col(f"exit_date_{HORIZONS[-1]}").is_not_null()).then(pl.lit(COMPLETED))
+        .when(pl.col(f"exit_date_{horizons[-1]}").is_not_null()).then(pl.lit(COMPLETED))
         .otherwise(pl.lit(TRACKING))
         .alias("status"),
         pl.when(checked).then(pl.lit(LIMIT_CHECKED)).otherwise(pl.lit(LIMIT_UNKNOWN)).alias("limit_check"),
@@ -444,7 +448,7 @@ def compute_outcomes(
 
     sessions = _session_table(calendar)
     status = pl.col("status")
-    for k in HORIZONS:
+    for k in horizons:
         exit_col = f"exit_date_{k}"
         frame = _join_exit_bars(frame, priced, k)
         frame = _join_sessions(frame, sessions, exit_col, f"_x{k}_")
@@ -478,7 +482,7 @@ def compute_outcomes(
         )
 
     frame = _absent_since(frame, bars, calendar)
-    frame = frame.with_columns(pl.any_horizontal([pl.col(f"stale_{k}") for k in HORIZONS]).alias("stale_exit"))
+    frame = frame.with_columns(pl.any_horizontal([pl.col(f"stale_{k}") for k in horizons]).alias("stale_exit"))
     return frame.sort("_row").select([c for c in frame.columns if not c.startswith("_")])
 
 

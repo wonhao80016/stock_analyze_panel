@@ -1032,6 +1032,71 @@ export interface TaiwanCurrentSignalsResponse {
   } | null
 }
 
+// Returns are decimals (0.01 = 1%); ratios and returns stay null until completed_count reaches min_samples.
+export interface TaiwanSignalHorizonStats {
+  horizon: number
+  event_count: number
+  completed_count: number
+  pending_count: number
+  not_filled_limit_up: number
+  not_filled_no_trade: number
+  data_excluded_count: number
+  sufficient: boolean
+  mean_return: number | null
+  median_return: number | null
+  up_ratio: number | null
+  benchmark_count: number
+  benchmark_sufficient: boolean
+  excess_mean: number | null
+  beat_ratio: number | null
+}
+
+export interface TaiwanSignalStat {
+  id: string
+  source: 'builtin' | 'volume_pattern' | 'custom' | 'computed'
+  direction: TaiwanSignalDirection
+  /** Set for custom and computed signals; the others are named by lib/signals.ts. */
+  name: string | null
+  event_kind: 'cross' | 'state'
+  evaluated: boolean
+  current: boolean | null
+  first_event_date: string | null
+  last_event_date: string | null
+  horizons: TaiwanSignalHorizonStats[]
+}
+
+export interface TaiwanSignalStatsResponse {
+  symbol: string
+  exchange: string
+  applicable: boolean
+  not_applicable_reason: 'index' | null
+  status: 'ok' | 'unpublished' | null
+  as_of: string | null
+  history_from: string | null
+  prices_through: string | null
+  institutional_from: string | null
+  adjustment_status: string | null
+  adjustment_reason: string | null
+  method: {
+    horizons: number[]
+    min_samples: number
+    state_gap_sessions: number
+    new_high_sessions: number
+    foreign_streak_sessions: number
+  } | null
+  benchmark: { index_name: string; covered_from: string | null; covered_through: string | null } | null
+  signals: TaiwanSignalStat[]
+  // yoy_pct is in percent (25 means 25%).
+  revenue: {
+    status: 'ok' | 'no_data'
+    holds: boolean | null
+    period: string | null
+    yoy_pct: number | null
+    threshold_pct: number
+    history_stats: false
+  } | null
+}
+
 export type TaiwanPositioningMetricId =
   | 'pe' | 'pb' | 'dividend_yield' | 'roe' | 'operating_margin' | 'revenue_yoy'
   | 'return_60d' | 'return_240d' | 'foreign_flow_20d'
@@ -2585,6 +2650,9 @@ export const api = {
 
   taiwanPositioning: (symbol: string) =>
     request<TaiwanPositioningResponse>(`/api/taiwan/stocks/${encodeURIComponent(symbol)}/positioning`),
+
+  taiwanSignalStats: (symbol: string) =>
+    request<TaiwanSignalStatsResponse>(`/api/taiwan/stocks/${encodeURIComponent(symbol)}/signal-stats`),
 
   taiwanInstitutionalHistory: (symbol: string, days = 60) =>
     request<TaiwanInstitutionalHistoryResponse>(

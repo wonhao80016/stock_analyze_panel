@@ -106,7 +106,7 @@ class TaiwanCurrentSignalsResponse(BaseModel):
     strategies: StrategySelectionsSection | None = None
 
 
-def _candidates(data_dir: Any) -> list[CurrentSignal]:
+def signal_candidates(data_dir: Any) -> list[CurrentSignal]:
     items = [
         CurrentSignal(id=c, source="builtin", direction=signal_direction(c)) for c in BUILTIN_SIGNAL_COLUMNS
     ]
@@ -135,7 +135,7 @@ def read_signals(symbol: str, data_dir: Any) -> CurrentSignalsSection:
 
     A null flag (e.g. a volume pattern whose window holds an untraded session) is not listed.
     """
-    candidates = _candidates(data_dir)
+    candidates = signal_candidates(data_dir)
     latest = read_latest_enriched(
         list(_PARTITION_COLUMNS), [symbol], optional_columns=tuple(c.id for c in candidates)
     )

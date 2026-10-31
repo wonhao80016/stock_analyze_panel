@@ -86,6 +86,7 @@ function useDetailPublicationRefresh(symbol: string) {
     void qc.invalidateQueries({ queryKey: QK.taiwanStockDetail(symbol).slice(0, 2) })
     void qc.invalidateQueries({ queryKey: QK.taiwanCurrentSignals(symbol) })
     void qc.invalidateQueries({ queryKey: QK.taiwanPositioning(symbol) })
+    void qc.invalidateQueries({ queryKey: QK.taiwanSignalStats(symbol) })
   }, [qc, symbol, datasetDates])
 }
 
@@ -244,6 +245,13 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
   const currentSignalsQuery = useQuery({
     queryKey: QK.taiwanCurrentSignals(symbol),
     queryFn: () => api.taiwanCurrentSignals(symbol),
+    staleTime: 5 * 60_000,
+    enabled: !isIndex,
+  })
+
+  const signalStatsQuery = useQuery({
+    queryKey: QK.taiwanSignalStats(symbol),
+    queryFn: () => api.taiwanSignalStats(symbol),
     staleTime: 5 * 60_000,
     enabled: !isIndex,
   })
@@ -962,6 +970,13 @@ export function TaiwanStockDetail({ embeddedSymbol, onCreateRule }: TaiwanStockD
             isError={currentSignalsQuery.isError}
             isFetching={currentSignalsQuery.isFetching}
             onRetry={() => currentSignalsQuery.refetch()}
+            stats={{
+              response: signalStatsQuery.data,
+              isLoading: signalStatsQuery.isLoading,
+              isError: signalStatsQuery.isError,
+              isFetching: signalStatsQuery.isFetching,
+              onRetry: () => signalStatsQuery.refetch(),
+            }}
           />
           )}
 

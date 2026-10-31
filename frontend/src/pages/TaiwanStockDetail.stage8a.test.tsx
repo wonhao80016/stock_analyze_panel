@@ -32,6 +32,7 @@ vi.mock('@/lib/api', async importOriginal => ({
     taiwanDataStatus: vi.fn(),
     taiwanCurrentSignals: vi.fn().mockResolvedValue(null),
     taiwanPositioning: vi.fn().mockResolvedValue(null),
+    taiwanSignalStats: vi.fn().mockResolvedValue(null),
   },
 }))
 
@@ -143,6 +144,35 @@ describe('positioning is asked for ordinary stocks only', () => {
   })
 })
 
+describe('signal statistics are asked for listings only', () => {
+  it('asks for an ETF', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...detail('closed'),
+      identity: { symbol: '2330.TWSE', code: '2330', name: '台積電', exchange: 'TWSE', instrument_type: 'etf', is_supported: true },
+    } as any)
+    vi.mocked(api.taiwanDataStatus).mockResolvedValue(dataStatus('2026-10-20') as any)
+    renderDetail()
+    await screen.findByRole('heading', { name: '台積電' })
+
+    await vi.waitFor(() => expect(api.taiwanSignalStats).toHaveBeenCalledWith('2330.TWSE'))
+  })
+
+  it('does not ask for an index', async () => {
+    vi.mocked(api.taiwanStockDetail).mockResolvedValue({
+      ...detail('closed'),
+      symbol: 't00.TWSE',
+      identity: { symbol: 't00.TWSE', code: 't00', name: '發行量加權股價指數', exchange: 'TWSE', instrument_type: 'index', is_supported: true },
+    } as any)
+    vi.mocked(api.taiwanDataStatus).mockResolvedValue(dataStatus('2026-10-20') as any)
+    renderDetail('t00.TWSE')
+    await screen.findByRole('heading', { name: '發行量加權股價指數' })
+    await act(async () => {})
+
+    expect(api.taiwanSignalStats).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('signal-stats')).toBeNull()
+  })
+})
+
 describe('B064 detail refresh after the post-close publication', () => {
   async function afterClose(nextAsOf: string) {
     vi.useFakeTimers({ shouldAdvanceTime: true })
@@ -175,6 +205,18 @@ describe('B064 detail refresh after the post-close publication', () => {
     await afterClose('2026-10-21')
 
     await vi.waitFor(() => expect(api.taiwanPositioning).toHaveBeenCalledTimes(2))
+  })
+
+  it('reloads the signal statistics when a dataset date moves', async () => {
+    await afterClose('2026-10-21')
+
+    await vi.waitFor(() => expect(api.taiwanSignalStats).toHaveBeenCalledTimes(2))
+  })
+
+  it('keeps the signal statistics when nothing new was published', async () => {
+    await afterClose('2026-10-20')
+
+    expect(api.taiwanSignalStats).toHaveBeenCalledTimes(1)
   })
 
   it('stays quiet when nothing new was published', async () => {
