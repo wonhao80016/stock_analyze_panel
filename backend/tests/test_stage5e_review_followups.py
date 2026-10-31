@@ -77,14 +77,22 @@ def test_a_partition_that_failed_to_read_is_read_again_next_time(tmp_path, monke
     assert second["date"].to_list() == [DAYS[-1]]
 
 
-def test_an_empty_fundamentals_list_is_asked_for_again(monkeypatch):
+def test_an_empty_fundamentals_list_is_asked_for_again_after_the_failure_window(monkeypatch):
     server = _Server(httpx.Response(200, json=[]), httpx.Response(200, json=[REVENUE_ROW]))
     _install(monkeypatch, server)
-    from app.taiwan.fundamentals import TaiwanOfficialFundamentals
+    from app.taiwan import fundamentals
 
-    provider = TaiwanOfficialFundamentals()
+    now = [1000.0]
+    monkeypatch.setattr(fundamentals, "monotonic", lambda: now[0])
+    provider = fundamentals.TaiwanOfficialFundamentals()
     with pytest.raises(LookupError):
         provider.monthly_revenue("2330.TWSE", "TWSE")
+    now[0] += fundamentals.FAILURE_CACHE_SECONDS - 1
+    with pytest.raises(LookupError):
+        provider.monthly_revenue("2330.TWSE", "TWSE")
+    assert len(server.requests) == 1
+
+    now[0] += 2
     got = provider.monthly_revenue("2330.TWSE", "TWSE")
 
     assert got.values["revenue"] == 1_000_000

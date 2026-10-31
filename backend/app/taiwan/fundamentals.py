@@ -150,10 +150,10 @@ def _official_client() -> httpx.Client:
 class TaiwanOfficialFundamentals:
     """Official TWSE/TPEx fundamentals feeding the Taiwan contract model.
 
-    Each market-wide list is downloaded at most once per Taipei date per instance, so a list the
-    exchange republishes later that day is not seen until the next date. Transport errors and HTTP
-    5xx are retried (get_with_retry); a list that still fails is not asked for again for
-    FAILURE_CACHE_SECONDS within the same Taipei date.
+    Each non-empty market-wide list is downloaded at most once per Taipei date per instance, so a
+    list the exchange republishes later that day is not seen until the next date. Transport errors
+    and HTTP 5xx are retried (get_with_retry); a list that still fails or comes back empty is not
+    asked for again for FAILURE_CACHE_SECONDS within the same Taipei date.
     """
 
     TWSE = "https://openapi.twse.com.tw/v1"
@@ -168,6 +168,7 @@ class TaiwanOfficialFundamentals:
         self._share_capital_store = share_capital_store
         self._rows_cache: dict[tuple[str, date], tuple[list[dict[str, Any]], datetime]] = {}
         self._failure_cache: dict[tuple[str, date], tuple[float, Exception]] = {}
+        self._empty_cache: dict[tuple[str, date], tuple[float, datetime]] = {}
         self._rows_cache_lock = threading.Lock()
 
     def monthly_revenue(self, symbol: str, exchange: str, *, security_type: str = "stock") -> FundamentalRecord:
@@ -364,10 +365,13 @@ class TaiwanOfficialFundamentals:
         with self._rows_cache_lock:
             cached = self._rows_cache.get(key)
             failure = self._failure_cache.get(key)
+            empty = self._empty_cache.get(key)
         if cached is not None:
             return url, cached[0], cached[1]
         if failure is not None and monotonic() - failure[0] < FAILURE_CACHE_SECONDS:
             raise failure[1].with_traceback(None)
+        if empty is not None and monotonic() - empty[0] < FAILURE_CACHE_SECONDS:
+            return url, [], empty[1]
         try:
             response = get_with_retry(self.client, url)
             retrieved = datetime.now(TAIPEI)
@@ -380,10 +384,12 @@ class TaiwanOfficialFundamentals:
             raise
         with self._rows_cache_lock:
             self._failure_cache.pop(key, None)
-        if not rows:
-            # Not cached, so an empty answer is asked for again on the next call instead of all day.
-            return url, rows, retrieved
-        with self._rows_cache_lock:
+            if not rows:
+                for stale in [k for k in self._empty_cache if k[1] != key[1]]:
+                    del self._empty_cache[stale]
+                self._empty_cache[key] = (monotonic(), retrieved)
+                return url, rows, retrieved
+            self._empty_cache.pop(key, None)
             for stale in [k for k in self._rows_cache if k[1] != key[1]]:
                 del self._rows_cache[stale]
             self._rows_cache[key] = (rows, retrieved)

@@ -199,7 +199,7 @@
 
 ## 已知文件漂移（只記錄，本次不修）
 
-1. [taiwan-data-sources.md:771-777](../taiwan-data-sources.md#L771-L777) 仍寫 `TaiwanFundamentalStore` 是 point-in-time 介面、`research_context.py` 是它的消費者；這個 class 已在 `2e87ed3` 刪除，HEAD 的 `backend/`、`frontend/` 搜尋 0 筆。
+1. ~~taiwan-data-sources.md 仍寫 `TaiwanFundamentalStore` 是 point-in-time 介面~~：已改寫（[taiwan-data-sources.md:922-945](../taiwan-data-sources.md#L922-L945)），改為說明沒有 point-in-time 基本面層、各快照僅供顯示，以及 `research_context.py` 個股基本面固定回 `unavailable`。
 2. [稽核 README:308](../audit-2026-10-22/README.md#L308) 說資訊列財務欄位仍走 A 股 financial、比較頁的 `TaiwanFundamentalStore` 沒有寫入端；HEAD 資訊列已沒有財務欄位，store 也已刪除。屬階段 7 當時的紀錄。
 3. [稽核 README:309](../audit-2026-10-22/README.md#L309) 說 `SIGNAL_FIELDS` 含不存在的 `signal_broken_board_recovery`；HEAD 已沒有這個字串（[stock-table.ts:20-34](../../frontend/src/lib/stock-table.ts#L20-L34)），但跌停與 MA5／MA10 訊號仍缺。
 4. [watchlist_enrichment.py:19](../../backend/app/taiwan/watchlist_enrichment.py#L19) 的模組說明寫漲停與連板相關的 `signal_*` 維持 None，但同檔 [:54-61](../../backend/app/taiwan/watchlist_enrichment.py#L54-L61) 實際讀了 13 個訊號欄位（含漲停、跌停）與連板數（程式內說明與程式不符）。

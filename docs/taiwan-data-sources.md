@@ -921,15 +921,25 @@ screener, turnover history, or backtests.
 
 # Taiwan fundamentals point-in-time rule
 
-`TaiwanFundamentalStore` (`app/taiwan/fundamentals.py`) is the point-in-time
-seam. `latest_as_of` returns the newest revision whose `available_at` is set and
-strictly earlier than `query_at`, so a record with `available_at=None` is never
-returned and a later revision cannot replace an earlier one before its own
-availability time. `app/taiwan/research_context.py` is its consumer.
+No point-in-time fundamentals store exists. The former `TaiwanFundamentalStore`
+and the verified-factor layer on top of it (fixed EPS / ROE / PE / PB /
+dividend-yield factors, their status taxonomy and coverage report) were removed;
+nothing outside their own tests read them.
 
-The verified-factor layer that once sat on top of this store — a fixed EPS / ROE
-/ PE / PB / dividend-yield factor table, the
-missing / data_insufficient / unsupported / malformed status taxonomy, and the
-per-status coverage report — was removed. It had no caller outside its own test,
-and no screener, API or job ever read it. Only the point-in-time rule above
-survives.
+Every fundamentals record carries `available_at=None` because no verified
+availability time exists, and the rule is that such a record never enters a
+backtest, a historical screen or any as-of query:
+
+- `app/taiwan/fundamentals.py` (`TaiwanOfficialFundamentals`) fetches the current
+  official snapshot for display;
+- `app/taiwan/quarterly_financials_store.py` and
+  `app/taiwan/monthly_revenue_store.py` archive quarterly financials and monthly
+  revenue as `historical_reference` for display, trends and the market / industry
+  positioning on the stock page only; signal statistics read the newest revenue
+  month as a current condition and compute no statistics over it;
+- `app/taiwan/research_context.py` reports the stock fundamentals section as
+  `unavailable` instead of reading any of the above.
+
+A point-in-time seam would need a verified per-record availability time first;
+until then win rates, bucket returns and other backtest-style statistics over
+fundamentals, revenue or valuation stay closed.
