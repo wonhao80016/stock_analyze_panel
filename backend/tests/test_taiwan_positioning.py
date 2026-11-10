@@ -19,6 +19,7 @@ from app.taiwan.positioning import (
     TaiwanPositioningService,
     decimal_to_percent,
     dimension_grade,
+    institutional_flow_table,
     metric_grade,
     metric_score,
     mid_rank_percentile,
@@ -137,6 +138,22 @@ def test_loss_pe_is_not_ranked_and_a_malformed_value_does_not_fail_the_list():
     pb = {r["symbol"]: r for r in tables["pb"].rows.iter_rows(named=True)}
     assert pb["2303.TWSE"]["reason"] == "no_value" and pb["2454.TWSE"]["compared"] == 6
     assert dates == {"TWSE": "2026-10-29", "TPEX": "2026-10-28"}
+
+
+def test_a_blank_twse_yield_ranks_as_zero_like_the_tpex_zero():
+    universe = {"1225.TWSE", "2330.TWSE", "2303.TWSE", "2454.TWSE", "8044.TPEX"}
+    renamed = {k: v for k, v in _twse("2454").items() if k != "DividendYield"}
+    tables, _ = valuation_tables(
+        {"TWSE": [_twse("1225", dy=""), _twse("2330", dy="2"), _twse("2303", dy="abc"), renamed],
+         "TPEX": [_tpex("8044", dy="0.00")]},
+        universe,
+    )
+    dy = {r["symbol"]: r for r in tables["dividend_yield"].rows.iter_rows(named=True)}
+    assert dy["1225.TWSE"]["value"] == 0.0 and dy["1225.TWSE"]["reason"] is None
+    assert dy["1225.TWSE"]["percentile"] == dy["8044.TPEX"]["percentile"] == pytest.approx(100 / 3)
+    assert dy["2303.TWSE"]["reason"] == "no_value", "malformed text is still missing, not zero"
+    assert dy["2454.TWSE"]["reason"] == "no_value", "an absent yield field is missing, not zero"
+    assert dy["2330.TWSE"]["compared"] == 3
 
 
 def test_one_failed_valuation_list_makes_valuation_unavailable():
@@ -350,7 +367,7 @@ def test_one_stock_is_ranked_on_every_metric_with_its_own_dates(market):
     assert m["pe"]["percentile"] == pytest.approx(75.0) and m["pe"]["score"] == pytest.approx(25.0)
     assert m["pe"]["grade"] == "pricey" and m["pe"]["as_of"] == "2026-10-29" and m["pe"]["unit"] == "times"
     assert m["pb"]["percentile"] == pytest.approx(87.5) and m["pb"]["grade"] == "expensive"
-    assert m["dividend_yield"]["compared"] == 3 and m["dividend_yield"]["percentile"] == pytest.approx(50.0)
+    assert m["dividend_yield"]["compared"] == 4 and m["dividend_yield"]["percentile"] == pytest.approx(62.5)
     assert m["roe"]["value"] == pytest.approx(20.0) and m["roe"]["period"] == "2026Q2"
     assert m["roe"]["basis"] == "ytd_annualized" and m["roe"]["compared"] == 3
     assert m["operating_margin"]["value"] == pytest.approx(40.0) and m["operating_margin"]["compared"] == 2
@@ -360,10 +377,10 @@ def test_one_stock_is_ranked_on_every_metric_with_its_own_dates(market):
     assert m["return_240d"]["value"] == pytest.approx(100.0) and m["return_240d"]["compared"] == 3
     assert m["return_240d"]["as_of"] == LAST_SESSION.isoformat()
     assert m["foreign_flow_20d"]["value"] == pytest.approx(10.0), "2000 shares over 20000 shares"
-    assert m["foreign_flow_20d"]["compared"] == 3, "2881 lacks one session of flows"
+    assert m["foreign_flow_20d"]["compared"] == 4, "2881 lacking one session of flows is still ranked"
 
     valuation = response.dimensions[0]
-    assert valuation.id == "valuation" and valuation.score == pytest.approx((25.0 + 12.5 + 50.0) / 3)
+    assert valuation.id == "valuation" and valuation.score == pytest.approx((25.0 + 12.5 + 62.5) / 3)
     assert (valuation.grade, valuation.tier, valuation.segments) == ("pricey", 1, 2)
 
 
@@ -371,12 +388,12 @@ def test_not_ranked_reasons_for_other_stocks(market):
     service = _service(market, _Lists())
     financial = _metrics(service.get("2881.TWSE"))
     assert financial["pe"]["status"] == "not_ranked" and financial["pe"]["reason"] == "loss_or_not_applicable"
-    assert financial["dividend_yield"]["reason"] == "no_value" and financial["dividend_yield"]["value"] is None
+    assert financial["dividend_yield"]["status"] == "ranked" and financial["dividend_yield"]["value"] == 0.0
     assert financial["operating_margin"]["reason"] == "not_general_industry"
     assert financial["roe"]["status"] == "ranked"
     assert financial["revenue_yoy"]["reason"] == "no_value" and financial["revenue_yoy"]["compared"] == 2
     assert financial["return_60d"]["reason"] == "insufficient_history"
-    assert financial["foreign_flow_20d"]["reason"] == "incomplete_window"
+    assert financial["foreign_flow_20d"]["value"] == pytest.approx(47.5)
 
     otc = _metrics(service.get("8069.TPEX"))
     assert otc["pe"]["reason"] == "loss_or_not_applicable", "0.00 is a placeholder, not a ratio"
@@ -390,12 +407,30 @@ def test_not_ranked_reasons_for_other_stocks(market):
     assert _metrics(other)["return_240d"]["value"] == pytest.approx(-10.0)
 
 
+def test_a_session_missing_from_the_flow_list_counts_as_zero_but_a_short_listing_is_not_ranked(market):
+    listed = SESSIONS[-5:]
+    market.daily.write_batch(pl.DataFrame([
+        {"symbol": "6669.TWSE", "date": d, "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
+         "volume": 1000.0, "amount": 10000.0, "quote_ts": None} for d in listed
+    ]))
+    market.institutional.write_batch(pl.DataFrame([
+        {"symbol": "6669.TWSE", "date": d, "trade_date": d, "foreign_net": 100, "investment_trust_net": 0,
+         "dealer_net": 0, "status": "official", "source": "synthetic"} for d in listed
+    ]))
+    table = institutional_flow_table({"2330.TWSE", "2881.TWSE", "6669.TWSE"}, market.daily, market.institutional,
+                                     "foreign_net")
+    rows = {r["symbol"]: r for r in table.rows.iter_rows(named=True)}
+    assert rows["2881.TWSE"]["value"] == pytest.approx(47.5), "19 sessions of 500 shares over 20000 shares"
+    assert rows["2881.TWSE"]["reason"] is None and rows["2881.TWSE"]["compared"] == 2
+    assert rows["6669.TWSE"]["reason"] == "incomplete_window", "listed for 5 of the 20 sessions"
+
+
 def test_a_loss_pe_is_left_out_of_the_valuation_average(market):
     valuation = _service(market, _Lists()).get("8069.TPEX").dimensions[0]
     pe, pb, dy = valuation.metrics
     assert pe.reason == "loss_or_not_applicable" and pe.score is None
-    assert pb.score == pytest.approx(100 - 62.5) and dy.score == pytest.approx(100 / 6)
-    assert valuation.score == pytest.approx((37.5 + 100 / 6) / 2), "a loss PE is not averaged in as 0"
+    assert pb.score == pytest.approx(100 - 62.5) and dy.score == pytest.approx(25.0)
+    assert valuation.score == pytest.approx((37.5 + 25.0) / 2), "a loss PE is not averaged in as 0"
     assert (valuation.grade, valuation.tier) == ("pricey", 1)
 
 
@@ -661,11 +696,12 @@ def test_industry_ranks_use_competition_ranks_with_ascending_mid_rank_percentile
     assert (ret["rank"], ret["compared"]) == (3, 5), "tied with 2454 behind 5274 and 2303"
     assert ret["percentile"] == pytest.approx(40.0) and ret["as_of"] == LAST_SESSION.isoformat()
     foreign = m["foreign_flow_20d"]
-    assert (foreign["rank"], foreign["compared"]) == (1, 5) and foreign["percentile"] == pytest.approx(80.0)
+    assert (foreign["rank"], foreign["compared"]) == (1, 4) and foreign["percentile"] == pytest.approx(75.0)
     assert foreign["value"] == pytest.approx(10.0), "2000 shares over 20000 shares"
     other = _industry_metrics(industry_market.service.get("2454.TWSE"))
     assert other["return_20d"]["rank"] == 3 and other["foreign_flow_20d"]["rank"] == 1
-    assert _industry_metrics(industry_market.service.get("2303.TWSE"))["foreign_flow_20d"]["rank"] == 3
+    gap = _industry_metrics(industry_market.service.get("2303.TWSE"))["foreign_flow_20d"]
+    assert gap["reason"] == "incomplete_window", "no daily bar on two sessions leaves the volume short"
 
 
 def test_industry_pe_ranks_the_cheapest_first_and_leaves_out_loss_pe(industry_market):
@@ -685,10 +721,10 @@ def test_trust_strength_zeros_tie_at_a_shared_rank(industry_market):
     trust = {s: _industry_metrics(industry_market.service.get(s))["trust_flow_20d"]
              for s in ("2330.TWSE", "2303.TWSE", "2454.TWSE", "6488.TPEX", "5274.TPEX")}
     assert trust["5274.TPEX"]["value"] == pytest.approx(2.0) and trust["5274.TPEX"]["rank"] == 1
-    assert trust["5274.TPEX"]["percentile"] == pytest.approx(90.0)
-    for symbol in ("2330.TWSE", "2303.TWSE", "2454.TWSE", "6488.TPEX"):
-        assert trust[symbol]["value"] == 0.0 and trust[symbol]["rank"] == 2 and trust[symbol]["compared"] == 5
-        assert trust[symbol]["percentile"] == pytest.approx(40.0), "a zero is a ranked value, not missing"
+    assert trust["5274.TPEX"]["percentile"] == pytest.approx(87.5)
+    for symbol in ("2330.TWSE", "2454.TWSE", "6488.TPEX"):
+        assert trust[symbol]["value"] == 0.0 and trust[symbol]["rank"] == 2 and trust[symbol]["compared"] == 4
+        assert trust[symbol]["percentile"] == pytest.approx(37.5), "a zero is a ranked value, not missing"
 
 
 def test_twenty_day_return_counts_trading_sessions_and_adjusts_for_corporate_actions(industry_market):

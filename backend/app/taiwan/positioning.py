@@ -298,7 +298,10 @@ def valuation_tables(
                 row_dates.append(as_of)
             pe = valuation_number(_field(row, "PEratio", "PriceEarningRatio"))
             pb = valuation_number(_field(row, "PBratio", "PriceBookRatio"))
-            dy = valuation_number(_field(row, "DividendYield", "YieldRatio"))
+            raw_dy = _field(row, "DividendYield", "YieldRatio")
+            # TWSE leaves the yield blank for a stock that paid no dividend, where TPEx publishes 0.00.
+            has_dy = "DividendYield" in row or "YieldRatio" in row
+            dy = 0.0 if raw_dy == "" and has_dy else valuation_number(raw_dy)
             base = {"symbol": symbol, "as_of": as_of, "period": None}
             pe_ok = pe is not None and pe > 0
             records["pe"].append({**base, "value": pe if pe_ok else None,
@@ -415,7 +418,8 @@ def institutional_flow_table(
     universe: set[str], daily: TaiwanDailyStore, institutional: TaiwanInstitutionalStore, net_column: str
 ) -> MetricTable:
     """*net_column* net buy / volume over the 20 daily-store sessions ending on the newest flow date, in percent.
-    A missing flow partition makes the metric unavailable; a stock lacking any session is not ranked.
+    A missing flow partition makes the metric unavailable; a stock without a daily bar in every session is not
+    ranked, and a session the flow list omits for a traded stock counts as zero net.
     """
     end = institutional.latest_date()
     if end is None:
@@ -429,22 +433,22 @@ def institutional_flow_table(
         institutional.read_range(symbols, window[0], end)
         .filter(pl.col("date").is_in(window))
         .group_by("symbol")
-        .agg(pl.col(net_column).sum().alias("net"), pl.col(net_column).count().alias("days"))
+        .agg(pl.col(net_column).sum().alias("net"))
     )
     volume = (
         daily.read_dates(window, symbols)
         .group_by("symbol")
-        .agg(pl.col("volume").sum().alias("volume"))
+        .agg(pl.col("volume").sum().alias("volume"), pl.len().alias("sessions"))
     )
     frame = volume.join(flows, on="symbol", how="full", coalesce=True)
     rows = []
-    for symbol, total, net, days in frame.select("symbol", "volume", "net", "days").iter_rows():
-        if days is None or days < CHIP_WINDOW_SESSIONS:
+    for symbol, total, sessions, net in frame.select("symbol", "volume", "sessions", "net").iter_rows():
+        if sessions is None or sessions < CHIP_WINDOW_SESSIONS:
             value, reason = None, "incomplete_window"
         elif total is None or total <= 0:
             value, reason = None, "no_value"
         else:
-            value, reason = decimal_to_percent(net / total), None
+            value, reason = decimal_to_percent((net or 0) / total), None
         rows.append({"symbol": symbol, "value": value, "reason": reason, "as_of": end.isoformat(), "period": None})
     return _table(rows)
 
