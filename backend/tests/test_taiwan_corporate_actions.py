@@ -1,7 +1,8 @@
 """The corporate-action table holds the exchanges' official reference prices.
 
 Fixtures are official responses saved on 2026-09-30, unchanged except
-twt49u_2026_excerpt.json, which keeps the 2026 TWT49U header and seven of its rows.
+twt49u_2026_excerpt.json, which keeps the 2026 TWT49U header and seven of its rows;
+tpex_pvchgrslt_2019_2026.json was saved on 2026-11-10.
 The *_empty.json fixtures are the exchanges' answers to ranges without events; the
 20260926_20260927 pair was saved on 2026-10-01.
 """
@@ -45,6 +46,7 @@ from app.taiwan.enrichment.corporate_actions import (
     TWSE_NO_DATA_STAT,
     TpexCapitalReductionAdapter,
     TpexExRightsAdapter,
+    TpexParValueChangeAdapter,
     TwseCapitalReductionAdapter,
     TwseEtfSplitAdapter,
     TwseExRightsAdapter,
@@ -153,6 +155,19 @@ def test_tpex_reductions_are_read_by_column_title():
     assert (a.kind, a.pre_close, a.ref_price, a.limit_up, a.limit_down, a.open_ref) == (
         REDUCTION, 10.65, 35.5, 39.05, 31.95, 35.5
     )
+
+
+def test_tpex_par_value_changes_resume_at_the_official_reference_price():
+    actions = _parse(TpexParValueChangeAdapter(), "tpex_pvchgrslt_2019_2026.json", date(2019, 1, 1), date(2026, 11, 10))
+
+    assert len(actions) == 14
+    a = _by_key(actions)[("6763.TPEX", date(2024, 9, 9))]
+    assert (a.kind, a.pre_close, a.ref_price, a.limit_up, a.limit_down, a.open_ref) == (
+        PAR_CHANGE, 491.0, 49.1, 54.0, 44.2, 49.1
+    )
+    assert a.ex_factor == pytest.approx(10.0)
+    assert a.meta.source_url.startswith("https://www.tpex.org.tw/www/zh-tw/bulletin/pvChgRslt?")
+    assert _by_key(actions)[("8937.TPEX", date(2026, 4, 13))].ex_factor == pytest.approx(145.5 / 36.38)
 
 
 def test_official_event_dates_normalize_from_every_roc_form():
@@ -415,6 +430,7 @@ _SOURCE_OF = {
     "twtcau_2024_2026.json": "twse:twtcau",
     "tpex_exdailyq_202609.json": "tpex:exdailyq",
     "tpex_revivt_2024_2026.json": "tpex:revivt",
+    "tpex_pvchgrslt_2019_2026.json": "tpex:pvchgrslt",
 }
 _ANSWERED_EMPTY = {"twse:twt49u", "tpex:exdailyq"}
 
@@ -464,13 +480,14 @@ def test_a_backfill_asks_each_table_once_per_year_and_stores_every_priced_event(
 
     stats = svc.refresh_range(Y2024, Y2026_END)
 
-    assert stats["requests"] == 18 and len(exchange.urls) == 18
+    assert stats["requests"] == 21 and len(exchange.urls) == 21
     assert sum("TWT49U" in u for u in exchange.urls) == 3
     assert stats["failed"] == []
-    assert stats["inserted"] == 44 + 7 + 11 + 34
+    assert stats["inserted"] == 44 + 7 + 11 + 34 + 9
     df = store.read()
     assert df.group_by("source").len().sort("source").rows() == [
-        ("tpex:revivt", 34), ("twse:twtauu", 44), ("twse:twtb8u", 7), ("twse:twtcau", 11),
+        ("tpex:pvchgrslt", 9), ("tpex:revivt", 34), ("twse:twtauu", 44), ("twse:twtb8u", 7),
+        ("twse:twtcau", 11),
     ]
     assert df.filter((pl.col("symbol") == "0050.TWSE") & (pl.col("date") == date(2025, 6, 18)))["ref_price"].to_list() == [47.16]
 
@@ -524,16 +541,16 @@ def test_a_publish_skips_the_tables_already_fetched_through_its_target(tmp_path)
     first = svc.refresh_publish_window(date(2026, 9, 21), date(2026, 9, 29))
     again = svc.refresh_publish_window(date(2026, 9, 21), date(2026, 9, 29))
 
-    assert (first["requests"], first["skipped"]) == (6, [])
-    assert (again["requests"], len(again["skipped"])) == (0, 6)
-    assert len(exchange.urls) == 6
+    assert (first["requests"], first["skipped"]) == (7, [])
+    assert (again["requests"], len(again["skipped"])) == (0, 7)
+    assert len(exchange.urls) == 7
     state = json.loads(store.fetch_state_path.read_text(encoding="utf-8"))
     assert sorted(state) == sorted(a.SOURCE for a in default_adapters())
     assert {(s["covered_from"], s["covered_through"]) for s in state.values()} == {("2026-09-11", "2026-09-29")}
 
     later = svc.refresh_publish_window(date(2026, 9, 22), date(2026, 9, 30))
 
-    assert later["requests"] == 6
+    assert later["requests"] == 7
     assert {s["covered_through"] for s in store.fetch_state().values()} == {"2026-09-30"}
     assert {s["covered_from"] for s in store.fetch_state().values()} == {"2026-09-11"}
 
@@ -558,7 +575,7 @@ def test_the_twse_no_data_answer_is_recorded_as_fetched(tmp_path):
     first = _covered_service(store, exchange).refresh_publish_window(date(2026, 9, 21), date(2026, 9, 29))
     again = _covered_service(store, exchange).refresh_publish_window(date(2026, 9, 21), date(2026, 9, 29))
 
-    assert first["failed"] == [] and first["requests"] == 6
+    assert first["failed"] == [] and first["requests"] == 7
     state = store.fetch_state()
     assert {(state[s]["covered_from"], state[s]["covered_through"]) for s in _TWSE_NO_DATA} == {("2026-09-11", "2026-09-29")}
     assert again["requests"] == 0 and set(_TWSE_NO_DATA) <= set(again["skipped"])
@@ -578,7 +595,7 @@ def test_a_backfill_covers_its_tables_only_through_today(tmp_path):
     )
 
     assert covered["requests"] == 0
-    assert beyond["requests"] == 6
+    assert beyond["requests"] == 7
 
 
 def test_an_unreadable_fetch_state_fetches_every_table(tmp_path, caplog):
@@ -589,9 +606,9 @@ def test_an_unreadable_fetch_state_fetches_every_table(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="app.taiwan.corporate_actions"):
         stats = _covered_service(store, _Exchange()).refresh_publish_window(date(2026, 9, 21), date(2026, 9, 29))
 
-    assert stats["requests"] == 6
+    assert stats["requests"] == 7
     assert "fetch state unreadable" in caplog.text
-    assert len(store.fetch_state()) == 6
+    assert len(store.fetch_state()) == 7
 
 
 def test_year_segments_split_at_new_year():

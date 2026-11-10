@@ -351,6 +351,21 @@ class TpexCapitalReductionAdapter(_TpexAdapter):
     LABEL_COLUMN = "減資原因"
 
 
+class TpexParValueChangeAdapter(_TpexAdapter):
+    BASE_URL = "https://www.tpex.org.tw/www/zh-tw/bulletin/pvChgRslt"
+    SOURCE = "tpex:pvchgrslt"
+    KIND = PAR_CHANGE
+    COLUMNS: ClassVar[dict[str, str]] = {
+        "date": "恢復買賣日期",
+        "code": "證券代號",
+        "pre_close": "最後交易日之收盤價格",
+        "ref_price": "恢復買賣開始參考價",
+        "limit_up": "漲停價格",
+        "limit_down": "跌停價格",
+        "open_ref": "開始交易基準價",
+    }
+
+
 def default_adapters() -> list[_CorporateActionAdapter]:
     return [
         TwseExRightsAdapter(),
@@ -359,4 +374,5 @@ def default_adapters() -> list[_CorporateActionAdapter]:
         TwseEtfSplitAdapter(),
         TpexExRightsAdapter(),
         TpexCapitalReductionAdapter(),
+        TpexParValueChangeAdapter(),
     ]
