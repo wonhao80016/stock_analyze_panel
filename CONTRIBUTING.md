@@ -122,7 +122,7 @@
 - 台股沒有公開的歷史股本，不得用目前股本降級補算歷史換手率，並遵守以下規則：
   - 分母是已發行普通股減去私募股（`TaiwanShareCapitalStore.as_instruments()`，來源為 `data/taiwan/share_capital.parquet`；沒有私募股欄位的列用已發行股數）。這不是自由流通股，欄位說明不得寫成流通股。
   - 換手率＝當日成交股數 × 100 ÷ 分母，單位是百分數。ETF、TDR 沒有分母，換手率為空值，不得補零或改用其他股數。
-  - 換手率只在該交易日自己的盤後發佈時，用當時的股本計算；之後的重新發佈沿用已發佈的值。不回推更早的交易日，也不用目前股本補算歷史。
+  - 換手率的分母取該交易日自己盤後發佈時的股本，並按交易日保存（`data/taiwan/share_capital_sessions/date=YYYY-MM-DD/part.parquet`，由 `publish_enriched` 在嘗試刷新股本之後寫入最新交易日；刷新失敗時保存當時已有的股本）。之後的重新發佈用該日保存的分母配日K store 目前存放的原始成交量（未經 `volume_factor` 調整）重算；沒有保存分母的舊日期沿用已發佈的值。不回推更早的交易日，也不用目前股本補算歷史。
   - 已發佈指標的定義改變時，必須提高 `backend/app/indicators/pipeline.py` 的 `INDICATOR_DEFINITION_VERSION`。版本與發佈紀錄不同時，下一次發佈會全量重寫一次 enriched，已發佈的換手率必須保留。
 
 ## 4. 數據源插件化要求

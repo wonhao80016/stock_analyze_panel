@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -14,8 +15,9 @@ import pytest
 
 from app.jobs import daily_pipeline
 from app.taiwan.corporate_actions import TaiwanCorporateActionRefreshService
-from app.taiwan.daily_update import TaiwanDailyUpdateService
+from app.taiwan.daily_update import TaiwanDailyUpdateService, resolve_target_latest_trading_date
 from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
+from app.taiwan.realtime.calendar import TAIPEI_TZ
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.universe.service import SecurityMasterRefreshResult
 
@@ -89,6 +91,19 @@ def test_both_jobs_run_weekdays_only(jobs):
     for jid in ("taiwan_daily_update", "taiwan_margin_update"):
         fields = {f.name: str(f) for f in jobs[jid].trigger.fields}
         assert fields["day_of_week"] == "mon-fri"
+
+
+@pytest.mark.parametrize("jid", ["taiwan_daily_update", "taiwan_margin_update"])
+def test_a_run_late_by_its_whole_grace_still_updates_the_missed_session(jobs, jid):
+    """A run delayed past Taipei midnight, up to the end of its grace, still targets the missed day."""
+    job = jobs[jid]
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    missed = datetime(2026, 11, 5, int(fields["hour"]), int(fields["minute"]), tzinfo=TAIPEI_TZ)
+    latest_start = missed + timedelta(seconds=job.misfire_grace_time)
+    weekdays = SimpleNamespace(is_trading_day=lambda d: d.weekday() < 5)
+
+    assert latest_start > datetime(2026, 11, 6, tzinfo=TAIPEI_TZ)
+    assert resolve_target_latest_trading_date(weekdays, as_of_dt=latest_start) == missed.date()
 
 
 def _stub_services(svc, monkeypatch, calls):

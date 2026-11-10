@@ -27,6 +27,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
+
 from pydantic import BaseModel, Field
 
 from app.taiwan.corporate_actions import TaiwanCorporateActionRefreshService
@@ -370,7 +371,8 @@ def publish_enriched(
     notes: list[str] | None = None,
     since: date | None = None,
 ) -> bool:
-    """Refresh issued shares and corporate-action reference prices, then republish the enriched table.
+    """Refresh issued shares, save them as the newest stored session's turnover denominators and
+    refresh corporate-action reference prices, then republish the enriched table.
 
     Returns whether a publish ran. With only_if_behind it runs only when a recent
     day's enriched partition is missing or older than its bars, the last full
@@ -399,6 +401,13 @@ def publish_enriched(
     except Exception as e:
         logger.warning("Taiwan share capital refresh failed: %s", e)
     window = TaiwanEnrichedRefreshService(daily_store=daily_store).recent_window()
+    # Only the newest stored session may take the current count: once a later day is stored,
+    # this session's saved denominators must stay as they were on its own publish.
+    if window is not None:
+        try:
+            TaiwanShareCapitalStore().save_session_denominators(window[1])
+        except Exception as e:
+            logger.warning("Taiwan share capital for %s not saved: %s", window[1].isoformat(), e)
     note = _refresh_corporate_actions(window, corporate_actions)
     if note and notes is not None:
         notes.append(note)

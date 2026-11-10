@@ -93,6 +93,10 @@ def refresh_strategy_cache(label: str) -> None:
 
 BENCHMARK_REFRESH_DAYS = 60
 
+# Ends before the next day's 16:00 post-close cutoff, so a late after-close run, even one past
+# Taipei midnight, still resolves the missed session as its target trading day.
+TAIWAN_UPDATE_MISFIRE_GRACE_SECONDS = 18 * 3600
+
 
 def refresh_benchmark_index(label: str) -> date | None:
     """Refetch recent TAIEX bars, bypassing the current-month cache period.
@@ -240,7 +244,7 @@ def start_scheduler() -> AsyncIOScheduler:
             "refresh_institutional": True,
             "refresh_margin": False,
         },
-        misfire_grace_time=3600,
+        misfire_grace_time=TAIWAN_UPDATE_MISFIRE_GRACE_SECONDS,
         coalesce=True,
         max_instances=1,
         replace_existing=True,
@@ -266,7 +270,7 @@ def start_scheduler() -> AsyncIOScheduler:
             "refresh_institutional": True,
             "refresh_margin": True,
         },
-        misfire_grace_time=3600,
+        misfire_grace_time=TAIWAN_UPDATE_MISFIRE_GRACE_SECONDS,
         coalesce=True,
         max_instances=1,
         replace_existing=True,

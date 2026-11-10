@@ -8,9 +8,10 @@ past date would silently rewrite history.
 
 This store does not reopen that decision. It supplies the *current* count only,
 which is what a same-day screen needs — today's share count against today's
-volume involves no look-ahead. Historical turnover stays fail-closed through
-``share_capital.apply_historical_float_shares``, which nulls the denominator for
-any Taiwan row that is not today.
+volume involves no look-ahead. ``share_capital.apply_historical_float_shares``
+nulls the denominator for any Taiwan row that is not today; an earlier session
+gets one only from the denominators the daily publish saved for that session
+(``save_session_denominators``), never from the current count.
 
 The denominator is issued shares minus the privately placed shares the same
 reports list (TWSE ``私募股數``, TPEx ``PrivateStock.shares``), which cannot trade
@@ -22,8 +23,8 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Sequence
-from datetime import datetime
+from collections.abc import Iterable, Sequence
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,8 @@ SCHEMA = {
 # Null when the report lacks the field; files written before it existed lack the column.
 PRIVATE_SHARES = "private_shares"
 STORED_SCHEMA = {**SCHEMA, PRIVATE_SHARES: pl.Int64}
+SESSION_DIR = "share_capital_sessions"
+SESSION_SCHEMA = {"symbol": pl.Utf8, "float_shares": pl.Float64}
 
 # Keyed by path and mtime, so a fresh store instance reuses an unchanged file's frame.
 _load_cache: dict[str, tuple[float, pl.DataFrame]] = {}
@@ -116,7 +119,8 @@ def _tdr_symbols(symbols: list[str]) -> set[str]:
 class TaiwanShareCapitalStore:
     """Current issued-share counts, refreshed from the two official endpoints.
 
-    Layout: <settings.data_dir>/taiwan/share_capital.parquet
+    Layout: <settings.data_dir>/taiwan/share_capital.parquet, plus the denominators saved per
+    session in <settings.data_dir>/taiwan/share_capital_sessions/date=YYYY-MM-DD/part.parquet
     """
 
     def __init__(self, data_dir: Path | None = None, client: httpx.Client | None = None) -> None:
@@ -125,6 +129,7 @@ class TaiwanShareCapitalStore:
 
             data_dir = taiwan_data_root()
         self.path = Path(data_dir) / "share_capital.parquet"
+        self.sessions_dir = Path(data_dir) / SESSION_DIR
         self._client = client
 
     @property
@@ -155,7 +160,7 @@ class TaiwanShareCapitalStore:
             raw_date = next((row.get(k) for k in date_keys if row.get(k)), None)
             try:
                 report_date = parse_taiwan_date(str(raw_date)).isoformat() if raw_date else ""
-            except Exception:  # noqa: BLE001
+            except Exception:
                 report_date = ""
             private = next((_share_count(row[k]) for k in private_keys if k in row), None)
             out.append({
@@ -209,7 +214,7 @@ class TaiwanShareCapitalStore:
                     raise ValueError(f"{suffix} returned no usable share counts")
                 logger.info("taiwan share capital: %s returned %d rows", suffix, len(fetched))
                 rows.extend(fetched)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.warning("taiwan share capital fetch failed for %s: %s", suffix, e)
                 failed.append(suffix)
 
@@ -247,7 +252,7 @@ class TaiwanShareCapitalStore:
                 return cached[1]
         try:
             df = pl.read_parquet(self.path)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("taiwan share capital read failed: %s", e)
             return pl.DataFrame(schema=SCHEMA)
         if mtime is not None:
@@ -267,6 +272,37 @@ class TaiwanShareCapitalStore:
             return denominators
         tdrs = _tdr_symbols(denominators["symbol"].to_list())
         return denominators.filter(~pl.col("symbol").is_in(list(tdrs)))
+
+    def _session_path(self, session: date) -> Path:
+        return self.sessions_dir / f"date={session.isoformat()}" / "part.parquet"
+
+    def save_session_denominators(self, session: date) -> int:
+        """Save the as_instruments() denominators as those of *session*, replacing any saved before.
+
+        Returns rows saved; without any denominator nothing is saved and an earlier copy stays.
+        """
+        frame = self.as_instruments().filter(pl.col("float_shares").is_not_null())
+        if frame.is_empty():
+            return 0
+        write_atomically(self._session_path(session), frame.select(list(SESSION_SCHEMA)).write_parquet)
+        return frame.height
+
+    def session_denominators(self, sessions: Iterable[date]) -> pl.DataFrame:
+        """symbol, date and float_shares saved for each of *sessions*; a session without a readable copy adds none."""
+        frames = []
+        for session in sorted(set(sessions)):
+            path = self._session_path(session)
+            if not path.exists():
+                continue
+            try:
+                saved = pl.read_parquet(path, columns=list(SESSION_SCHEMA)).cast(SESSION_SCHEMA)
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                logger.warning("taiwan share capital for %s unreadable: %s", session.isoformat(), exc)
+                continue
+            frames.append(saved.with_columns(pl.lit(session, dtype=pl.Date).alias("date")))
+        if not frames:
+            return pl.DataFrame(schema={"symbol": pl.Utf8, "float_shares": pl.Float64, "date": pl.Date})
+        return pl.concat(frames)
 
 
 def turnover_denominators(frame: pl.DataFrame) -> pl.DataFrame:

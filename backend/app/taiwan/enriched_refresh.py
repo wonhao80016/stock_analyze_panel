@@ -55,6 +55,7 @@ from app.taiwan.market_rules import ListingSessions, PriceLimitModel
 from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.volume_patterns import add_volume_patterns
+from app.volume_units import turnover_rate_pct_expr
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ NO_LIMIT_RULE = "none"
 OPEN_WINDOW = "open"
 LOGGED_SYMBOLS = 10
 PUBLISHED_TURNOVER = "_published_turnover_rate"
+SESSION_TURNOVER = "_session_turnover_rate"
 
 
 class TaiwanEnrichedRefreshService:
@@ -112,8 +114,10 @@ class TaiwanEnrichedRefreshService:
         run's output, the window widens to every stored day: partitions outside it would keep the
         old scale, values, limits or columns, and only a full publication can commit.
 
-        Turnover needs the share count of its own day, which only the newest session has, so
-        every earlier day keeps the turnover_rate it was published with.
+        Turnover needs the share count of its own day. The newest session uses the current count;
+        an earlier day divides its current stored volume by the denominators saved for it
+        (TaiwanShareCapitalStore.session_denominators), and a day without them keeps the
+        turnover_rate it was published with.
         """
         available = self.daily_store.available_dates()
         if not available:
@@ -176,7 +180,7 @@ class TaiwanEnrichedRefreshService:
         enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if enriched.is_empty():
             return 0
-        enriched = self._with_published_turnover(enriched, newest=max(available))
+        enriched = self._with_session_turnover(enriched, raw, newest=max(available))
 
         if full:
             published_rules = {**limit_rules, **dict.fromkeys(unlisted, NO_LIMIT_RULE)}
@@ -202,16 +206,47 @@ class TaiwanEnrichedRefreshService:
         )
         return written
 
-    def _with_published_turnover(self, enriched: pl.DataFrame, newest: date) -> pl.DataFrame:
-        """*enriched* with each row dated before *newest* taking the turnover_rate its partition holds."""
+    def _with_session_turnover(
+        self, enriched: pl.DataFrame, raw: pl.DataFrame, newest: date
+    ) -> pl.DataFrame:
+        """*enriched* with the turnover_rate of each row dated before *newest* from its own session.
+
+        A day with saved denominators divides the stored volume of *raw*, the daily bars before any
+        volume_factor restatement, by them; any other day takes the turnover_rate its partition holds.
+        """
         days = enriched.filter(pl.col("date") < newest)["date"].unique().sort().to_list()
-        published = self._published_turnover(days)
-        if published.is_empty():
+        denominators = self.share_capital.session_denominators(days)
+        saved_days = set(denominators["date"].to_list())
+        published = self._published_turnover([d for d in days if d not in saved_days])
+        if not published.is_empty():
+            enriched = (
+                enriched.join(published, on=["symbol", "date"], how="left", maintain_order="left")
+                .with_columns(pl.coalesce("turnover_rate", PUBLISHED_TURNOVER).alias("turnover_rate"))
+                .drop(PUBLISHED_TURNOVER)
+            )
+        if not saved_days:
             return enriched
+        session = (
+            raw.select("symbol", pl.col("date").cast(pl.Date), "volume")
+            .join(denominators, on=["symbol", "date"], how="inner")
+            .select(
+                "symbol",
+                "date",
+                pl.when(pl.col("float_shares") > 0)
+                .then(turnover_rate_pct_expr())
+                .cast(pl.Float64)
+                .alias(SESSION_TURNOVER),
+            )
+        )
         return (
-            enriched.join(published, on=["symbol", "date"], how="left", maintain_order="left")
-            .with_columns(pl.coalesce("turnover_rate", PUBLISHED_TURNOVER).alias("turnover_rate"))
-            .drop(PUBLISHED_TURNOVER)
+            enriched.join(session, on=["symbol", "date"], how="left", maintain_order="left")
+            .with_columns(
+                pl.when(pl.col("date").is_in(sorted(saved_days)))
+                .then(pl.col(SESSION_TURNOVER))
+                .otherwise(pl.col("turnover_rate"))
+                .alias("turnover_rate")
+            )
+            .drop(SESSION_TURNOVER)
         )
 
     def _published_turnover(self, days: list[date]) -> pl.DataFrame:
