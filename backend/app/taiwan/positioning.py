@@ -54,8 +54,10 @@ Reason = Literal[
     "loss_or_not_applicable", "not_general_industry", "insufficient_history", "incomplete_window",
     "non_positive_equity", "no_value", "not_archived", "dataset_unavailable", "insufficient_peers",
 ]
-IndustryMetricId = Literal["return_20d", "foreign_flow_20d", "trust_flow_20d", "pe"]
-INDUSTRY_METRICS: tuple[IndustryMetricId, ...] = ("return_20d", "foreign_flow_20d", "trust_flow_20d", "pe")
+IndustryMetricId = Literal["return_20d", "foreign_flow_20d", "trust_flow_20d", "pe", "pb", "dividend_yield"]
+INDUSTRY_METRICS: tuple[IndustryMetricId, ...] = (
+    "return_20d", "foreign_flow_20d", "trust_flow_20d", "pe", "pb", "dividend_yield",
+)
 
 DIMENSIONS: tuple[tuple[DimensionId, tuple[MetricId, ...]], ...] = (
     ("valuation", ("pe", "pb", "dividend_yield")),
@@ -154,8 +156,8 @@ class PositioningDimension(BaseModel):
 
 
 class IndustryRankMetric(BaseModel):
-    """``rank`` 1 is the best end (lowest PE, highest otherwise); tied values share the best rank.
-    ``percentile`` points the same way as ``rank``: for PE it is 100 minus the ascending mid-rank percentile.
+    """``rank`` 1 is the best end (lowest PE and P/B, highest otherwise); tied values share the best rank.
+    ``percentile`` points the same way as ``rank``: for PE and P/B it is 100 minus the ascending one.
     """
 
     id: IndustryMetricId

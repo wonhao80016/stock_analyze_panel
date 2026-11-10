@@ -86,7 +86,13 @@ const INDUSTRY_METRIC_LABELS: Record<TaiwanIndustryMetricId, string> = {
   foreign_flow_20d: '外資 20 日買超強度',
   trust_flow_20d: '投信 20 日買超強度',
   pe: '本益比',
+  pb: '股價淨值比',
+  dividend_yield: '殖利率',
 }
+
+const VALUATION_INDUSTRY_METRICS = new Set<TaiwanIndustryMetricId>(['pe', 'pb', 'dividend_yield'])
+
+const SIGNED_INDUSTRY_METRICS = new Set<TaiwanIndustryMetricId>(['return_20d', 'foreign_flow_20d', 'trust_flow_20d'])
 
 const SIGNED_METRICS = new Set<TaiwanPositioningMetricId>([
   'roe', 'operating_margin', 'revenue_yoy', 'return_60d', 'return_240d', 'foreign_flow_20d',
@@ -174,7 +180,27 @@ function ValueText({ metric }: { metric: TaiwanPositioningMetric }) {
   return <SignedNumber value={metric.value} unit={metric.unit} signed={SIGNED_METRICS.has(metric.id)} />
 }
 
-function MetricRow({ metric }: { metric: TaiwanPositioningMetric }) {
+// Rank only: for PE and P/B the industry percentile runs best-first, opposite to the ascending market one.
+function IndustryRankLine({ metric, industry }: { metric: TaiwanPositioningMetric; industry?: TaiwanIndustryRanking | null }) {
+  if (!industry?.applicable) return null
+  const rank = industry.metrics.find(m => m.id === metric.id)
+  if (!rank || !VALUATION_INDUSTRY_METRICS.has(rank.id)) return null
+  let text: string
+  if (rank.status === 'ranked' && rank.rank != null && rank.compared != null) {
+    text = `同業第 ${rank.rank} / ${rank.compared} 名（${industry.industry ?? '--'}）`
+  } else if (rank.reason === 'insufficient_peers') {
+    text = `同業不足（${rank.compared ?? 0} 檔）`
+  } else {
+    text = `同業${rank.status === 'unavailable' ? '無法計算' : '不排名'}：${REASON_LABELS[rank.reason ?? 'no_value']}`
+  }
+  return (
+    <p className="text-[11px] text-muted" data-testid={`positioning-industry-rank-${metric.id}`}>
+      {text}
+    </p>
+  )
+}
+
+function MetricRow({ metric, industry }: { metric: TaiwanPositioningMetric; industry?: TaiwanIndustryRanking | null }) {
   const compared = metric.compared != null ? `${metric.compared.toLocaleString('zh-TW')} 檔比較` : null
   return (
     <li className="space-y-1 border-b border-border/50 py-2 last:border-0" data-testid={`positioning-metric-${metric.id}`}>
@@ -204,11 +230,12 @@ function MetricRow({ metric }: { metric: TaiwanPositioningMetric }) {
           {compared && metric.status === 'not_ranked' ? `（${compared}）` : ''}
         </p>
       )}
+      <IndustryRankLine metric={metric} industry={industry} />
     </li>
   )
 }
 
-function DimensionBlock({ dimension }: { dimension: TaiwanPositioningDimension }) {
+function DimensionBlock({ dimension, industry }: { dimension: TaiwanPositioningDimension; industry?: TaiwanIndustryRanking | null }) {
   return (
     <div className="rounded-xl border border-border/80 bg-base p-3" data-testid={`positioning-dimension-${dimension.id}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -226,8 +253,13 @@ function DimensionBlock({ dimension }: { dimension: TaiwanPositioningDimension }
         )}
       </div>
       <ul className="mt-1">
-        {dimension.metrics.map(metric => <MetricRow key={metric.id} metric={metric} />)}
+        {dimension.metrics.map(metric => <MetricRow key={metric.id} metric={metric} industry={industry} />)}
       </ul>
+      {dimension.id === 'valuation' && industry?.applicable && (
+        <p className="mt-1 text-[11px] leading-5 text-muted" data-testid="positioning-industry-valuation-note">
+          第 1 名為同業中最便宜：本益比、淨值比最低，殖利率最高。
+        </p>
+      )}
     </div>
   )
 }
@@ -258,7 +290,7 @@ function IndustryRankRow({ metric }: { metric: TaiwanIndustryRankMetric }) {
         )}
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2 text-[11px] text-muted">
-        <SignedNumber value={metric.value} unit={metric.unit} signed={metric.id !== 'pe'} />
+        <SignedNumber value={metric.value} unit={metric.unit} signed={SIGNED_INDUSTRY_METRICS.has(metric.id)} />
         {metric.status === 'ranked' && metric.rank != null && metric.compared != null ? (
           <>
             <span className="font-semibold text-foreground" data-testid={`industry-rank-${metric.id}`}>
@@ -299,7 +331,9 @@ function IndustryBlock({ symbol, industry }: { symbol: string; industry: TaiwanI
         </span>
       </div>
       <ul className="mt-1">
-        {industry.metrics.map(metric => <IndustryRankRow key={metric.id} metric={metric} />)}
+        {industry.metrics
+          .filter(metric => !VALUATION_INDUSTRY_METRICS.has(metric.id))
+          .map(metric => <IndustryRankRow key={metric.id} metric={metric} />)}
       </ul>
       {industry.peers.length > 0 && (
         <div className="mt-2 space-y-1" data-testid="industry-peers">
@@ -327,7 +361,8 @@ function IndustryBlock({ symbol, industry }: { symbol: string; industry: TaiwanI
         </div>
       )}
       <p className="mt-2 text-[11px] leading-5 text-muted">
-        第 1 名為最好：本益比最低、其他指標最高；百分位與名次同向，越高越前面；同值共用名次。可排名的同業少於 3 檔時不給名次。
+        第 1 名為數值最高；百分位與名次同向，越高越前面；同值共用名次。可排名的同業少於 3 檔時不給名次。
+        本益比、淨值比與殖利率的同業名次列在上方估值構面。
         許多中小型股 20 日投信買賣超為 0，會有大量同值共用名次。
       </p>
     </div>
@@ -346,7 +381,9 @@ function Body({ response }: { response: TaiwanPositioningResponse }) {
     <div className="space-y-3">
       <ValuationDates response={response} />
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        {response.dimensions.map(dimension => <DimensionBlock key={dimension.id} dimension={dimension} />)}
+        {response.dimensions.map(dimension => (
+          <DimensionBlock key={dimension.id} dimension={dimension} industry={response.industry} />
+        ))}
       </div>
       <p className="text-[11px] leading-5 text-muted">
         百分位越高代表在全市場越前面；本益比、股價淨值比反向計分（越便宜分數越高）。構面分數是可排名指標的平均，

@@ -91,6 +91,8 @@ function industry(overrides: Partial<TaiwanIndustryRanking> = {}): TaiwanIndustr
       rankMetric({ id: 'foreign_flow_20d', value: -1.2, rank: 20, percentile: 22 }),
       rankMetric({ id: 'trust_flow_20d', status: 'not_ranked', reason: 'insufficient_peers', value: 0, rank: null, percentile: null, compared: 2 }),
       rankMetric({ id: 'pe', value: 20, unit: 'times', lower_is_better: true, rank: 1, compared: 18, percentile: 97.2 }),
+      rankMetric({ id: 'pb', value: 5, unit: 'times', lower_is_better: true, rank: 12, compared: 20, percentile: 42.5 }),
+      rankMetric({ id: 'dividend_yield', value: 2.36, rank: 4, compared: 21, percentile: 83.3 }),
     ],
     peers_metric: 'return_20d',
     peers: [
@@ -239,7 +241,7 @@ describe('TaiwanPositioning', () => {
 
 describe('TaiwanPositioning industry ranking', () => {
   it('shows rank over the ranked peers with the percentile beside it', () => {
-    const metrics = industry().metrics.map(m => (m.id === 'pe' ? { ...m, period_mixed: true } : m))
+    const metrics = industry().metrics.map(m => (m.id === 'foreign_flow_20d' ? { ...m, period_mixed: true } : m))
     renderCard({ response: response({ industry: industry({ metrics }) }) })
     const block = screen.getByTestId('positioning-industry')
     expect(within(block).getByText('同產業排名')).toBeInTheDocument()
@@ -248,13 +250,65 @@ describe('TaiwanPositioning industry ranking', () => {
     const ret = screen.getByTestId('industry-metric-return_20d')
     expect(within(ret).getByText('百分位 90.0')).toBeInTheDocument()
     expect(within(ret).getByText('+12.50%')).toHaveClass('text-bull')
-    expect(screen.getByTestId('industry-rank-pe')).toHaveTextContent('第 1 / 18 名')
-    const pe = screen.getByTestId('industry-metric-pe')
-    expect(within(pe).getByText('百分位 97.2')).toBeInTheDocument()
-    expect(within(pe).getByText('20.00 倍')).toBeInTheDocument()
-    expect(within(pe).getByText('期別混雜')).toBeInTheDocument()
+    const foreign = screen.getByTestId('industry-metric-foreign_flow_20d')
+    expect(within(foreign).getByText('-1.20%')).toHaveClass('text-bear')
+    expect(within(foreign).getByText('期別混雜')).toBeInTheDocument()
     expect(within(ret).queryByText('期別混雜')).toBeNull()
     expect(block).toHaveTextContent('投信買賣超為 0')
+  })
+
+  it('leaves the valuation metrics out of the industry section', () => {
+    renderCard()
+    const block = screen.getByTestId('positioning-industry')
+    for (const id of ['pe', 'pb', 'dividend_yield']) {
+      expect(screen.queryByTestId(`industry-metric-${id}`)).toBeNull()
+    }
+    const rows = within(block).getAllByRole('listitem').map(li => li.getAttribute('data-testid'))
+    expect(rows.filter(id => id?.startsWith('industry-metric-'))).toEqual([
+      'industry-metric-return_20d', 'industry-metric-foreign_flow_20d', 'industry-metric-trust_flow_20d',
+    ])
+    expect(block).not.toHaveTextContent('本益比最低')
+  })
+
+  it('shows the industry rank under each valuation row without an industry percentile', () => {
+    renderCard()
+    expect(screen.getByTestId('positioning-industry-rank-pe')).toHaveTextContent('同業第 1 / 18 名（半導體業）')
+    expect(screen.getByTestId('positioning-industry-rank-pb')).toHaveTextContent('同業第 12 / 20 名（半導體業）')
+    expect(screen.getByTestId('positioning-industry-rank-dividend_yield')).toHaveTextContent('同業第 4 / 21 名（半導體業）')
+    const pe = screen.getByTestId('positioning-metric-pe')
+    expect(within(pe).getByText('百分位 75.0')).toBeInTheDocument()
+    expect(within(pe).queryByText('百分位 97.2')).toBeNull()
+    expect(screen.getByTestId('positioning-industry-valuation-note')).toHaveTextContent('第 1 名為同業中最便宜：本益比、淨值比最低，殖利率最高')
+    expect(screen.queryByTestId('positioning-industry-rank-roe')).toBeNull()
+  })
+
+  it('shows too few peers on a valuation row', () => {
+    const metrics = industry().metrics.map(m => m.id === 'pb'
+      ? { ...m, status: 'not_ranked' as const, reason: 'insufficient_peers' as const, rank: null, percentile: null, compared: 2 }
+      : m)
+    renderCard({ response: response({ industry: industry({ metrics }) }) })
+    expect(screen.getByTestId('positioning-industry-rank-pb')).toHaveTextContent('同業不足（2 檔）')
+    expect(screen.getByTestId('positioning-industry-rank-pe')).toHaveTextContent('同業第 1 / 18 名')
+  })
+
+  it('shows other not-ranked reasons on a valuation row', () => {
+    const metrics = industry().metrics.map(m => m.id === 'pe'
+      ? { ...m, status: 'not_ranked' as const, reason: 'loss_or_not_applicable' as const, value: null, rank: null, percentile: null }
+      : m)
+    renderCard({ response: response({ industry: industry({ metrics }) }) })
+    expect(screen.getByTestId('positioning-industry-rank-pe')).toHaveTextContent('同業不排名：虧損或不適用')
+  })
+
+  it.each([
+    ['an unclassified stock', industry({ applicable: false, not_applicable_reason: 'unclassified', industry: null, members: null, metrics: [], peers: [] })],
+    ['no industry section', null],
+  ] as const)('shows no industry rank on valuation rows for %s', (_label, section) => {
+    renderCard({ response: response({ industry: section }) })
+    for (const id of ['pe', 'pb', 'dividend_yield']) {
+      expect(screen.queryByTestId(`positioning-industry-rank-${id}`)).toBeNull()
+    }
+    expect(screen.queryByTestId('positioning-industry-valuation-note')).toBeNull()
+    expect(screen.getByTestId('positioning-metric-pe')).toHaveTextContent('百分位 75.0')
   })
 
   it('shows too few peers instead of a rank', () => {
@@ -264,11 +318,11 @@ describe('TaiwanPositioning industry ranking', () => {
   })
 
   it('shows other not-ranked reasons', () => {
-    const metrics = industry().metrics.map(m => m.id === 'pe'
-      ? { ...m, status: 'not_ranked' as const, reason: 'loss_or_not_applicable' as const, value: null, rank: null, percentile: null }
+    const metrics = industry().metrics.map(m => m.id === 'foreign_flow_20d'
+      ? { ...m, status: 'not_ranked' as const, reason: 'incomplete_window' as const, value: null, rank: null, percentile: null }
       : m)
     renderCard({ response: response({ industry: industry({ metrics }) }) })
-    expect(screen.getByTestId('industry-reason-pe')).toHaveTextContent('不排名：虧損或不適用')
+    expect(screen.getByTestId('industry-reason-foreign_flow_20d')).toHaveTextContent('不排名：期間內法人資料不完整')
   })
 
   it('explains an unclassified stock', () => {

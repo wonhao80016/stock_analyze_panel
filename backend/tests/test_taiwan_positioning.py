@@ -623,9 +623,15 @@ class _IndustryLists(_Lists):
         if request.url.path.endswith("BWIBBU_ALL"):
             pes = {"2330": "20", "2303": "10", "2454": "30", "1101": "8", "1102": "12", "2603": "5",
                    "1234": "15", "4444": "15"}
-            return httpx.Response(200, json=[_twse(code, pe=pe) for code, pe in pes.items()])
+            pbs = {"2330": "5", "2303": "1.5", "2454": "3"}
+            yields = {"2330": "2", "2303": "4", "2454": "1"}
+            return httpx.Response(200, json=[
+                _twse(code, pe=pe, pb=pbs.get(code, "1"), dy=yields.get(code, "1")) for code, pe in pes.items()
+            ])
         if request.url.path.endswith("tpex_mainboard_peratio_analysis"):
-            return httpx.Response(200, json=[_tpex("6488", pe="15"), _tpex("5274", pe="－")])
+            return httpx.Response(200, json=[
+                _tpex("6488", pe="15", pb="－", dy="abc"), _tpex("5274", pe="－", pb="-0.5", dy="0.00"),
+            ])
         raise AssertionError(f"unexpected request {request.url}")
 
 
@@ -689,7 +695,9 @@ def test_industry_ranks_use_competition_ranks_with_ascending_mid_rank_percentile
     response = industry_market.service.get("2330.TWSE")
     industry = response.industry
     assert industry.applicable and industry.industry == SEMICONDUCTOR and industry.members == 5
-    assert [metric.id for metric in industry.metrics] == ["return_20d", "foreign_flow_20d", "trust_flow_20d", "pe"]
+    assert [metric.id for metric in industry.metrics] == [
+        "return_20d", "foreign_flow_20d", "trust_flow_20d", "pe", "pb", "dividend_yield",
+    ]
     m = _industry_metrics(response)
     ret = m["return_20d"]
     assert ret["status"] == "ranked" and ret["value"] == pytest.approx(10.0)
@@ -715,6 +723,32 @@ def test_industry_pe_ranks_the_cheapest_first_and_leaves_out_loss_pe(industry_ma
     loss = _industry_metrics(industry_market.service.get("5274.TPEX"))["pe"]
     assert loss["status"] == "not_ranked" and loss["reason"] == "loss_or_not_applicable" and loss["compared"] == 4
     assert _industry_metrics(industry_market.service.get("1101.TWSE"))["pe"]["period_mixed"] is False
+
+
+def test_industry_pb_ranks_the_lowest_first_and_yield_the_highest_first(industry_market):
+    ranks = {s: _industry_metrics(industry_market.service.get(s))
+             for s in ("2330.TWSE", "2303.TWSE", "2454.TWSE", "6488.TPEX", "5274.TPEX", "1101.TWSE")}
+    pb = {s: m["pb"] for s, m in ranks.items()}
+    assert pb["2303.TWSE"]["lower_is_better"] is True and pb["2303.TWSE"]["unit"] == "times"
+    assert {s: pb[s]["rank"] for s in ("2303.TWSE", "2454.TWSE", "2330.TWSE")} == {
+        "2303.TWSE": 1, "2454.TWSE": 2, "2330.TWSE": 3,
+    }, "P/B 1.5 < 3 < 5"
+    assert pb["2303.TWSE"]["compared"] == 3 and pb["2303.TWSE"]["percentile"] == pytest.approx(100 - 50 / 3)
+    for symbol in ("6488.TPEX", "5274.TPEX"):
+        assert pb[symbol]["status"] == "not_ranked" and pb[symbol]["reason"] == "no_value", "missing or negative"
+        assert pb[symbol]["rank"] is None and pb[symbol]["value"] is None and pb[symbol]["compared"] == 3
+    dy = {s: m["dividend_yield"] for s, m in ranks.items()}
+    assert dy["2303.TWSE"]["lower_is_better"] is False and dy["2303.TWSE"]["unit"] == "percent"
+    assert {s: dy[s]["rank"] for s in ("2303.TWSE", "2330.TWSE", "2454.TWSE", "5274.TPEX")} == {
+        "2303.TWSE": 1, "2330.TWSE": 2, "2454.TWSE": 3, "5274.TPEX": 4,
+    }, "yield 4 > 2 > 1 > 0"
+    assert dy["2303.TWSE"]["percentile"] == pytest.approx(87.5) and dy["2303.TWSE"]["compared"] == 4
+    assert dy["5274.TPEX"]["value"] == 0.0, "a zero yield is ranked, not missing"
+    assert dy["6488.TPEX"]["status"] == "not_ranked" and dy["6488.TPEX"]["reason"] == "no_value"
+    for metric in ("pb", "dividend_yield"):
+        cement = ranks["1101.TWSE"][metric]
+        assert (cement["status"], cement["reason"], cement["compared"]) == ("not_ranked", "insufficient_peers", 2)
+        assert cement["rank"] is None and cement["value"] == pytest.approx(1.0)
 
 
 def test_trust_strength_zeros_tie_at_a_shared_rank(industry_market):
@@ -802,5 +836,7 @@ def test_api_returns_the_industry_section(market, monkeypatch, client):
     monkeypatch.setattr("app.api.taiwan.get_taiwan_positioning_service", lambda: _service(market, _Lists()))
     industry = client.get(URL.format("2330.TWSE")).json()["industry"]
     assert industry["applicable"] is True and industry["industry"] == SEMICONDUCTOR
-    assert [m["id"] for m in industry["metrics"]] == ["return_20d", "foreign_flow_20d", "trust_flow_20d", "pe"]
+    assert [m["id"] for m in industry["metrics"]] == [
+        "return_20d", "foreign_flow_20d", "trust_flow_20d", "pe", "pb", "dividend_yield",
+    ]
     assert industry["peers_metric"] == "return_20d"

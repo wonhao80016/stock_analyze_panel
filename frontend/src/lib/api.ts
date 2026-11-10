@@ -1146,9 +1146,10 @@ export interface TaiwanPositioningResponse {
   industry: TaiwanIndustryRanking | null
 }
 
-export type TaiwanIndustryMetricId = 'return_20d' | 'foreign_flow_20d' | 'trust_flow_20d' | 'pe'
+export type TaiwanIndustryMetricId =
+  'return_20d' | 'foreign_flow_20d' | 'trust_flow_20d' | 'pe' | 'pb' | 'dividend_yield'
 
-// rank 1 is the best end (lowest PE, highest otherwise) and ties share it; percentile points the same way as rank.
+// rank 1 is the best end (lowest PE and P/B, highest otherwise) and ties share it; percentile points the same way as rank.
 export interface TaiwanIndustryRankMetric {
   id: TaiwanIndustryMetricId
   status: 'ranked' | 'not_ranked' | 'unavailable'
