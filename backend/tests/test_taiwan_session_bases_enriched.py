@@ -255,17 +255,20 @@ def test_without_an_official_base_the_change_and_the_limit_flags_are_unknown(tmp
     assert out["ref_base_missing"].sum() == 1
 
 
+def _events(symbol: str, day: date, pre_close: float, ref: float, up: float, down: float) -> pl.DataFrame:
+    """One ex-dividend event in corporate_action_schema form."""
+    given = {"symbol": symbol, "date": day, "kind": EXDIV, "pre_close": pre_close,
+             "ref_price": ref, "limit_up": up, "limit_down": down}
+    return pl.DataFrame([given]).select([
+        pl.col(name).cast(dtype) if name in given else pl.lit(None, dtype=dtype).alias(name)
+        for name, dtype in corporate_action_schema().items()
+    ])
+
+
 def test_a_corporate_action_reference_price_outranks_the_official_base(tmp_path, april_2025):
     sessions, raw = april_2025
     store = _store(tmp_path, [_base_row("1435.TWSE", GAP_1435, 33.65, 37.00, 30.30)])
-    events = pl.DataFrame(
-        [{"symbol": "1435.TWSE", "date": GAP_1435, "kind": EXDIV, "pre_close": 37.35,
-          "ref_price": 33.00, "limit_up": 36.30, "limit_down": 29.70}],
-    ).select([
-        pl.col(name).cast(dtype) if name in ("symbol", "date", "kind", "pre_close", "ref_price", "limit_up", "limit_down")
-        else pl.lit(None, dtype=dtype).alias(name)
-        for name, dtype in corporate_action_schema().items()
-    ])
+    events = _events("1435.TWSE", GAP_1435, 37.35, 33.00, 36.30, 29.70)
 
     row = _row(_enriched(raw, sessions, store, events=events), "1435.TWSE", GAP_1435)
 
@@ -488,3 +491,76 @@ def test_an_unknown_change_never_passes_a_matrix_strategy_threshold(unknown_base
     gap = panel["date"].to_list().index(GAP_1435)
     assert not (change[gap] > -1.0)
     assert change[gap + 1] == pytest.approx(32.00 / 31.50 - 1, rel=1e-6)
+
+
+@pytest.fixture
+def july_2025_8905():
+    """8905.TPEX traded on 2025-07-09 at 30.80, went ex-dividend on the untraded 2025-07-10 (TPEx
+    reference 29.80, limits 32.75 / 26.85) and closed at 30.75 on 2025-07-11; dailyQuotes(2025-07-10)
+    prints the next-session base 30.05 and limits 33.05 / 27.05."""
+    sessions = _sessions(date(2025, 6, 2), date(2025, 7, 11))
+    rows = [_bar("8905.TPEX", d, 30.80) for d in sessions if d <= date(2025, 7, 9)]
+    rows += [_bar("8905.TPEX", date(2025, 7, 10), None), _bar("8905.TPEX", date(2025, 7, 11), 30.75)]
+    events = _events("8905.TPEX", date(2025, 7, 10), 30.80, 29.80, 32.75, 26.85)
+    return sessions, _frame(rows + _bars_2330(sessions)), events
+
+
+def test_an_event_carried_from_an_untraded_session_yields_to_the_official_base(tmp_path, july_2025_8905):
+    sessions, raw, events = july_2025_8905
+    store = _store(tmp_path, [_base_row("8905.TPEX", date(2025, 7, 10), 30.05, 33.05, 27.05)])
+
+    row = _row(_enriched(raw, sessions, store, events=events), "8905.TPEX", date(2025, 7, 11))
+
+    assert (row["ref_prev_close"], row["ref_limit_up"], row["ref_limit_down"]) == (30.05, 33.05, 27.05)
+    assert row["ref_base_missing"] is False
+    assert row["change_pct"] == pytest.approx(30.75 / 30.05 - 1)
+
+
+def test_an_event_carried_from_an_untraded_session_stays_without_an_official_base(tmp_path, july_2025_8905):
+    sessions, raw, events = july_2025_8905
+
+    row = _row(_enriched(raw, sessions, _store(tmp_path, []), events=events), "8905.TPEX", date(2025, 7, 11))
+
+    assert (row["ref_prev_close"], row["ref_limit_up"], row["ref_limit_down"]) == (29.80, 32.75, 26.85)
+    assert row["ref_base_missing"] is False
+    assert row["change_pct"] == pytest.approx(30.75 / 29.80 - 1)
+
+
+def test_a_first_bar_after_the_calendar_start_is_not_a_gap(tmp_path, april_2025):
+    sessions, raw = april_2025
+    listed = sessions[20]
+    rows = [_bar("6789.TWSE", d, 50.0) for d in sessions if d >= listed]
+    raw = pl.concat([raw, _frame(rows)])
+
+    out = _enriched(raw, sessions, _store(tmp_path, []), limits=_limits(["1435.TWSE", "2330.TWSE", "6789.TWSE"]))
+
+    first = _row(out, "6789.TWSE", listed)
+    assert first["ref_base_missing"] is False
+    assert {name: first[name] for name in LIMIT_FLAGS} == dict.fromkeys(LIMIT_FLAGS, False)
+    assert out.filter(pl.col("symbol") == "6789.TWSE")["ref_base_missing"].sum() == 0
+
+
+def _limit_run(tmp_path, official: bool) -> pl.DataFrame:
+    """Synthetic limit-up run of 3105.TWSE: 10.00, 11.00, untraded, 12.10, 13.30 (ticks of 0.05)."""
+    sessions = _sessions(date(2025, 2, 3), date(2025, 3, 7))
+    d1, d2, d3, d4 = sessions[-4:]
+    rows = [_bar("3105.TWSE", d, 10.0) for d in sessions[:-4]]
+    rows += [_bar("3105.TWSE", d1, 11.0), _bar("3105.TWSE", d2, None),
+             _bar("3105.TWSE", d3, 12.10), _bar("3105.TWSE", d4, 13.30)]
+    store = _store(tmp_path, [_base_row("3105.TWSE", d3, 11.00, 12.10, 9.90)] if official else [])
+    out = _enriched(_frame(rows + _bars_2330(sessions)), sessions, store)
+    return out.filter(pl.col("symbol") == "3105.TWSE").sort("date").tail(3)
+
+
+def test_a_known_base_gap_session_at_limit_up_continues_the_streak(tmp_path):
+    run = _limit_run(tmp_path, official=True)
+
+    assert run["signal_limit_up"].to_list() == [True, True, True]
+    assert run["consecutive_limit_ups"].to_list() == [1, 2, 3]
+
+
+def test_an_unknown_base_session_breaks_the_streak(tmp_path):
+    run = _limit_run(tmp_path, official=False)
+
+    assert run["signal_limit_up"].to_list() == [True, None, True]
+    assert run["consecutive_limit_ups"].to_list() == [1, 0, 1]

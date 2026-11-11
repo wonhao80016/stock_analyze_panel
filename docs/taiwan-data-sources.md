@@ -339,8 +339,10 @@ and adjustment factors from them.
   one-day change use the same reference price.
 - A session whose previous stored bar is older than the previous market session (the
   symbol did not trade that session, or was halted and has no row) has its base set by
-  the exchange, not by the last traded close. Without an event on it, the publish takes
-  the official base from `app.taiwan.session_bases`: TWSE symbols use TWT84U of the
+  the exchange, not by the last traded close. Without an event dated on it, the publish
+  takes the official base from `app.taiwan.session_bases` (an event dated on an
+  untraded session before it supplies the base only when no official base is stored):
+  TWSE symbols use TWT84U of the
   session itself (`rwd/zh/variation/TWT84U`), TPEx symbols use the next-session
   reference and limits of the previous session's dailyQuotes. Both are stored under
   `data/taiwan/session_bases/{twse,tpex}/date=<source date>/part.parquet`; each publish
@@ -350,7 +352,8 @@ and adjustment factors from them.
   `ref_limit_up` and `ref_limit_down`. When no official base is stored, enriched sets
   `ref_base_missing` to true and leaves `ref_*`, `prev_close`, `change_pct`,
   `change_amount`, `amplitude` and the four limit signals null; the backtest refuses
-  fills on such a session. The no-limit initial-listing window and a symbol's first
+  fills on such a session and the consecutive limit counts restart after it. The
+  no-limit initial-listing window and a symbol's first
   bar keep the previous close. Live intraday rows do not apply these bases.
 - Forward adjustment: enriched `open/high/low/close` are divided by the product of
   the factors of all later events, so the newest bar equals the raw price and `raw_*`

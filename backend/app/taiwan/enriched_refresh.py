@@ -644,13 +644,10 @@ def compute_taiwan_enriched(
     (with_official_bases); without it, as for live rows, such a session keeps the last traded
     close as its base and ref_base_missing is false throughout.
     """
-    raw = attach_reference_prices(
-        filter_halt_days(raw),
-        events.filter(pl.col("date") <= end),
-        with_limits=True,
-    )
+    events = events.filter(pl.col("date") <= end)
+    raw = attach_reference_prices(filter_halt_days(raw), events, with_limits=True)
     if session_bases is not None:
-        raw = with_official_bases(raw, trading_days, limits, session_bases)
+        raw = with_official_bases(raw, trading_days, limits, session_bases, events)
     else:
         raw = raw.with_columns(pl.lit(False).alias(REF_BASE_MISSING))
     enriched = compute_enriched(
@@ -669,15 +666,18 @@ def with_official_bases(
     trading_days: Iterable[date],
     limits: pl.DataFrame,
     store: TaiwanSessionBaseStore,
+    events: pl.DataFrame,
 ) -> pl.DataFrame:
-    """*bars* (attach_reference_prices output) with the official base on each session after an untraded one.
+    """*bars* (attach_reference_prices output on *events*) with the official base on each session
+    after an untraded one.
 
     Such a session's previous bar is older than its previous session in *trading_days*, and the
-    exchange, not the last traded close, sets its base. A session with a corporate-action
-    reference price, a symbol's first bar and a session inside the no-limit initial-listing window
-    of *limits* keep their ref_* columns. Any other such session takes the official ref_price,
-    limit_up and limit_down of *store*; without an official ref_price its ref_* columns stay null
-    and ref_base_missing is true. ref_base_missing is false on every other row.
+    exchange, not the last traded close, sets its base. A session with the reference price of an
+    event dated on it, a symbol's first bar and a session inside the no-limit initial-listing
+    window of *limits* keep their ref_* columns. Any other such session takes the official
+    ref_price, limit_up and limit_down of *store*. Without an official ref_price, a session whose
+    reference comes from an event dated on an earlier untraded session keeps it; otherwise its
+    ref_* columns stay null and ref_base_missing is true. ref_base_missing is false on every other row.
     """
     calendar = sorted(set(trading_days))
     previous_session = pl.DataFrame(
@@ -690,23 +690,29 @@ def with_official_bases(
     in_ipo_window = PriceLimitModel.polars_in_ipo_window(
         pl.col("date"), pl.col("_ipo_start"), pl.col("_ipo_end")
     )
+    own_events = events.select("symbol", "date").unique().with_columns(pl.lit(True).alias("_own_event"))
+    carried_event = pl.col(REF_PREV_CLOSE).is_not_null() & pl.col("_own_event").is_null()
     framed = (
         bars.sort(["symbol", "date"])
         .with_columns(pl.col("date").shift(1).over("symbol").alias("_previous_bar"))
         .join(previous_session, on="date", how="left", maintain_order="left")
         .join(windows, on="symbol", how="left", maintain_order="left")
+        .join(own_events, on=["symbol", "date"], how="left", maintain_order="left")
         .with_columns(
             (
                 (pl.col("_previous_bar") < pl.col("_previous_session"))
-                & pl.col(REF_PREV_CLOSE).is_null()
+                & (pl.col(REF_PREV_CLOSE).is_null() | carried_event)
                 & ~in_ipo_window
-            ).fill_null(False).alias("_after_untraded")
+            ).fill_null(False).alias("_after_untraded"),
+            carried_event.alias("_carried_event"),
         )
-        .drop("_previous_bar", "_previous_session", "_ipo_start", "_ipo_end")
+        .drop("_previous_bar", "_previous_session", "_ipo_start", "_ipo_end", "_own_event")
     )
     gaps = framed.filter(pl.col("_after_untraded"))
     if gaps.is_empty():
-        return framed.drop("_after_untraded").with_columns(pl.lit(False).alias(REF_BASE_MISSING))
+        return framed.drop("_after_untraded", "_carried_event").with_columns(
+            pl.lit(False).alias(REF_BASE_MISSING)
+        )
     official = official_bases_of(
         gaps.select("symbol", pl.col("date").alias("trade_date")), store=store, sessions=calendar
     ).select(
@@ -724,9 +730,9 @@ def with_official_bases(
             pl.when(known).then(pl.col("_official_ref")).otherwise(pl.col(REF_PREV_CLOSE)).alias(REF_PREV_CLOSE),
             pl.when(known).then(pl.col("_official_up")).otherwise(pl.col(REF_LIMIT_UP)).alias(REF_LIMIT_UP),
             pl.when(known).then(pl.col("_official_down")).otherwise(pl.col(REF_LIMIT_DOWN)).alias(REF_LIMIT_DOWN),
-            (after_untraded & ~known).alias(REF_BASE_MISSING),
+            (after_untraded & ~known & ~pl.col("_carried_event")).alias(REF_BASE_MISSING),
         )
-        .drop("_after_untraded", "_official_ref", "_official_up", "_official_down")
+        .drop("_after_untraded", "_carried_event", "_official_ref", "_official_up", "_official_down")
     )
 
 

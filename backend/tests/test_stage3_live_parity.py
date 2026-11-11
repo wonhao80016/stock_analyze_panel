@@ -433,6 +433,7 @@ def test_the_publish_writes_what_the_composed_pipeline_computes(stores):
                 service.daily_store.available_dates(),
                 service._limit_profile(sorted(sessions.first_sessions), sessions),
                 service.session_bases,
+                events,
             )
             composed = compute_enriched(
                 raw,

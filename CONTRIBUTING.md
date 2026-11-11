@@ -110,6 +110,10 @@
   交易日 dailyQuotes 的次日值（`app/taiwan/session_bases.py`）。當日漲跌幅的分母是
   `ref_prev_close * close / raw_close`，其餘交易日為前一日收盤。前一交易日無收盤而官方資料缺漏時，
   `ref_base_missing` 為真，`change_pct` 與漲跌停訊號為 null，不得退回更早的收盤價或補成 False。
+  事件日期落在無成交日、參考價順延到下一個有成交日時，有官方基準就用官方基準，沒有才沿用事件參考價；
+  事件日期就是當日的，仍以事件參考價優先。
+- 連續漲跌停數（`consecutive_limit_ups`、`consecutive_limit_downs`）按有 K 線的交易日計算：無成交日沒有列，
+  不會中斷；`ref_base_missing` 的交易日是否觸及漲跌停未知，連續數歸零，下一個漲跌停日從 1 重新起算。
 
 ### 3.3 日期、交易日和時區
 
