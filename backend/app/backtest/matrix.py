@@ -63,7 +63,7 @@ _RAW_PRICE_BOUND_KEYS = (
     "float_cap_min", "float_cap_max",
 )
 _MATRIX_CACHE_VERSION = 3
-_DIRECT_MATRIX_LOADER_VERSION = 11
+_DIRECT_MATRIX_LOADER_VERSION = 12
 _MATRIX_AXIS_INDEX_VERSION = 1
 # Newest axis index files kept next to the matrix disk cache.
 _MATRIX_AXIS_INDEX_KEEP = 16
@@ -71,6 +71,8 @@ _PUBLISHED_LIMIT_SIGNALS = (
     ("signal_limit_up", "limit_up_locked"),
     ("signal_limit_down", "limit_down_locked"),
 )
+# True on a Taiwan row whose official limit base is unknown; partitions written before it lack it.
+BASE_MISSING_COLUMN = "ref_base_missing"
 LIMIT_RULE_NOT_IN_SECURITY_MASTER = "security_master_missing"
 LIMIT_RULE_UNCONFIRMED = "price_limit_unknown"
 LIMIT_RULE_LISTING_DATE_UNKNOWN = "listing_date_unknown"
@@ -338,6 +340,9 @@ def build_market_data_matrix(
     volume = float_matrix("volume", 0.0 if "volume" in panel.columns else 1.0, 0.0)
     limit_up_locked = _bool_matrix(panel, "signal_limit_up", shape, time_id, asset_id)
     limit_down_locked = _bool_matrix(panel, "signal_limit_down", shape, time_id, asset_id)
+    base_missing = _bool_matrix(panel, BASE_MISSING_COLUMN, shape, time_id, asset_id)
+    limit_up_locked |= base_missing
+    limit_down_locked |= base_missing
     tradable = _tradable_matrix(open_, high, low, close, volume)
 
     core_columns = {
@@ -351,6 +356,7 @@ def build_market_data_matrix(
         "volume",
         "signal_limit_up",
         "signal_limit_down",
+        BASE_MISSING_COLUMN,
     }
     # Absolute price bounds and vwap_bias read raw_close, so it is kept whenever the panel has it.
     wanted_fields = set(field_columns or ()) - core_columns
@@ -1092,6 +1098,11 @@ def _scan_matrix_values(
     read_published_limits = (
         published_limit_assets is not None and bool(published_limit_assets.any())
     )
+    if read_published_limits and BASE_MISSING_COLUMN not in dataset.schema.names:
+        # The dataset takes its schema from one partition, which may predate the column.
+        dataset = dataset.replace_schema(
+            dataset.schema.append(pa.field(BASE_MISSING_COLUMN, pa.bool_()))
+        )
     scan_columns = [
         "symbol",
         "date",
@@ -1102,7 +1113,7 @@ def _scan_matrix_values(
         "volume",
         *parquet_fields,
         *(
-            [column for column, _target in _PUBLISHED_LIMIT_SIGNALS]
+            [*(column for column, _target in _PUBLISHED_LIMIT_SIGNALS), BASE_MISSING_COLUMN]
             if read_published_limits
             else []
         ),
@@ -1139,8 +1150,11 @@ def _scan_matrix_values(
             target[time_ids, asset_ids] = values
         if read_published_limits:
             published = published_limit_assets[asset_ids]
+            base_missing = _arrow_true_mask(_batch_column(batch, BASE_MISSING_COLUMN))
             for column, target_name in _PUBLISHED_LIMIT_SIGNALS:
-                flags = _published_limit_flags(_batch_column(batch, column), published, column)
+                flags = _published_limit_flags(
+                    _batch_column(batch, column), published, column, base_missing
+                )
                 arrays[target_name][time_ids[published], asset_ids[published]] = flags
 
 
@@ -1173,15 +1187,22 @@ def _published_limit_assets(dataset: pads.Dataset, symbols: Sequence[str]) -> np
     return published
 
 
-def _published_limit_flags(values: pa.Array, published: np.ndarray, column: str) -> np.ndarray:
+def _arrow_true_mask(values: pa.Array) -> np.ndarray:
+    flags = pc.fill_null(pc.cast(values, pa.bool_()), False)
+    return np.asarray(flags.to_numpy(zero_copy_only=False), dtype=bool)
+
+
+def _published_limit_flags(
+    values: pa.Array, published: np.ndarray, column: str, base_missing: np.ndarray,
+) -> np.ndarray:
+    """Locks of the *published* rows; a row whose limit base is unknown is locked both ways."""
     if values.null_count:
         nulls = np.asarray(values.is_null().to_numpy(zero_copy_only=False), dtype=bool)
-        if (nulls & published).any():
+        if (nulls & published & ~base_missing).any():
             raise ValueError(
                 f"Taiwan matrix parquet has rows without {column}; republish the enriched data"
             )
-    flags = pc.fill_null(pc.cast(values, pa.bool_()), False)
-    return np.asarray(flags.to_numpy(zero_copy_only=False), dtype=np.uint8)[published]
+    return (_arrow_true_mask(values) | base_missing)[published].astype(np.uint8)
 
 
 def _populate_matrix_derived_arrays(

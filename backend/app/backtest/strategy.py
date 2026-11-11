@@ -26,6 +26,7 @@ from app.backtest.engine import (
 )
 from app.backtest.fundamentals import FUNDAMENTAL_FACTOR_NAMES
 from app.backtest.matrix import (
+    BASE_MISSING_COLUMN,
     MarketDataMatrix,
     MatrixCacheProfile,
     MatrixPipelineConfig,
@@ -1686,7 +1687,11 @@ class StrategyBacktestService:
             scoring_coverage = _panel_field_coverage(panel.filter(entry_mask), scoring_fields)
 
             sim_range = self._date_range_mask(panel, config.start, sim_end)
-            sim_columns = [column for column in feature_plan.matrix_columns if column in panel.columns]
+            sim_columns = [
+                column
+                for column in feature_plan.matrix_columns | {BASE_MISSING_COLUMN}
+                if column in panel.columns
+            ]
             sim_panel = panel.filter(sim_range).select(sorted(sim_columns))
             sim_entry_mask = entry_mask.filter(sim_range)
             sim_exit_mask = exit_mask.filter(sim_range)

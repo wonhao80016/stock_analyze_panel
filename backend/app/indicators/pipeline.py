@@ -936,6 +936,9 @@ def compute_limit_signals(
     )
     if "ref_prev_close" in df.columns:
         prev_raw_close = pl.coalesce(pl.col("ref_prev_close"), prev_raw_close)
+    # On these rows the exchange's base is not an earlier close, so no fallback base applies.
+    if "ref_base_missing" in df.columns:
+        prev_raw_close = pl.when(pl.col("ref_base_missing").fill_null(False)).then(None).otherwise(prev_raw_close)
     df = df.with_columns(prev_raw_close.alias("_prev_raw_close"))
 
     from app.taiwan.market_rules import PriceLimitModel

@@ -659,3 +659,238 @@ def test_a_stock_without_a_listing_date_is_excluded_with_its_own_reason(master):
         {"symbol": "7798.TPEX", "reason": "listing_date_unknown"},
         {"symbol": "7799.TWSE", "reason": "listing_date_unknown"},
     ]
+
+
+# A session whose official limit base is unknown can be neither bought nor sold.
+
+_PUBLISHED_FLAG_COLUMNS = (
+    "signal_limit_up",
+    "signal_limit_down",
+    "signal_broken_limit_up",
+    "signal_limit_down_recovery",
+)
+
+
+def _base_unknown_on(frame: pl.DataFrame, day: date) -> pl.DataFrame:
+    """*frame* as the publish writes a session without an official base: null limit flags."""
+    unknown = pl.col("date") == day
+    return frame.with_columns(
+        unknown.alias("ref_base_missing"),
+        *(
+            pl.when(unknown).then(None).otherwise(pl.col(name)).alias(name)
+            for name in _PUBLISHED_FLAG_COLUMNS
+        ),
+    )
+
+
+def _base_unknown_frame(symbol: str, days: list[date], open_: float = 101.5) -> pl.DataFrame:
+    """Session 2 has no official base and opens at *open_*, off its close 103 that is neither limit."""
+    frame = _publish(_bars(symbol, days, [(100.0, 100.0), (101.0, 101.0), (103.0, 103.0), (104.0, 104.0)]))
+    extreme = ("open", "low", "raw_low") if open_ < 103.0 else ("open", "high", "raw_high")
+    frame = frame.with_columns(
+        pl.when(pl.col("date") == days[2]).then(open_).otherwise(pl.col(name)).alias(name)
+        for name in extreme
+    )
+    return _base_unknown_on(frame, days[2])
+
+
+def _market(tmp_path, frame: pl.DataFrame, loader: str):
+    if loader == "panel":
+        return build_market_data_matrix(frame, field_columns=FIELDS)
+    return _load(tmp_path, frame, use_cache=loader == "cached")
+
+
+LOADERS = ["parquet", "cached", "panel"]
+
+
+@pytest.mark.parametrize("loader", LOADERS)
+def test_a_session_without_an_official_base_is_locked_both_ways(tmp_path, master, loader):
+    symbol = "2330.TWSE"
+    master[symbol] = _instrument(symbol)
+    days = _sessions(date(2026, 9, 14), 4)
+
+    market = _market(tmp_path, _base_unknown_frame(symbol, days), loader)
+
+    assert market.limit_up_locked[:, 0].tolist() == [0, 0, 1, 0]
+    assert market.limit_down_locked[:, 0].tolist() == [0, 0, 1, 0]
+
+
+@pytest.mark.parametrize("loader", LOADERS)
+@pytest.mark.parametrize("fill", list(FILL_MODES))
+def test_a_session_without_an_official_base_cannot_be_bought(tmp_path, master, loader, fill):
+    symbol = "2330.TWSE"
+    master[symbol] = _instrument(symbol)
+    days = _sessions(date(2026, 9, 14), 4)
+    market = _market(tmp_path, _base_unknown_frame(symbol, days), loader)
+    delay = FILL_MODES[fill]
+    entry = np.zeros(market.shape, dtype=np.uint8)
+    entry[2 - delay, 0] = 1
+    matrix = build_market_matrix_from_signals(
+        market, make_signal_matrix(market.shape, entry=entry), entry_delay_bars=delay,
+    )
+
+    result = BacktestEngine(repo=None).simulate_market_matrix(matrix, _matcher(fill, 1_000_000))
+
+    assert result.trades == []
+    assert result.stats["execution"]["buy_limit_up"] == 1
+
+
+@pytest.mark.parametrize("loader", LOADERS)
+@pytest.mark.parametrize("fill", list(FILL_MODES))
+def test_a_held_position_sells_on_the_next_session_with_a_known_base(tmp_path, master, loader, fill):
+    symbol = "2330.TWSE"
+    master[symbol] = _instrument(symbol)
+    days = _sessions(date(2026, 9, 14), 4)
+    market = _market(tmp_path, _base_unknown_frame(symbol, days, open_=104.5), loader)
+    delay = FILL_MODES[fill]
+    entry = np.zeros(market.shape, dtype=np.uint8)
+    exit_ = np.zeros(market.shape, dtype=np.uint8)
+    entry[1 - delay, 0] = 1
+    exit_[2 - delay, 0] = 1
+    matrix = build_market_matrix_from_signals(
+        market,
+        make_signal_matrix(market.shape, entry=entry, exit=exit_),
+        entry_delay_bars=delay,
+        exit_delay_bars=delay,
+    )
+
+    result = BacktestEngine(repo=None).simulate_market_matrix(matrix, _matcher(fill, 1_000_000))
+
+    assert result.stats["execution"]["sell_limit_down"] == 1
+    assert [trade.entry_date for trade in result.trades] == [days[1].isoformat()]
+    assert [trade.exit_date for trade in result.trades] == [days[3].isoformat()]
+
+
+@pytest.mark.parametrize("use_cache", [False, True])
+def test_partitions_written_before_the_base_flag_existed_lock_as_published(tmp_path, master, use_cache):
+    """Older partitions lack ref_base_missing; their locks stay the published ones."""
+    symbol = "2454.TWSE"
+    master[symbol] = _instrument(symbol)
+    days = _sessions(date(2026, 8, 31), 4)
+    published = _publish(_bars(symbol, days, [(3925, 3925), (4315, 4315), (4300, 4300), (4500, 4500)]))
+    root = tmp_path / "enriched"
+    _write_partitions(root, published.filter(pl.col("date") < days[3]))
+    _write_partitions(root, _base_unknown_on(published.filter(pl.col("date") == days[3]), days[3]))
+
+    market = load_market_data_matrix_from_parquet(
+        root,
+        days[0],
+        days[-1],
+        field_columns=FIELDS,
+        cache_root=(tmp_path / "cache") if use_cache else None,
+    )
+
+    assert market.limit_up_locked[:, 0].tolist() == [0, 1, 0, 1]
+    assert market.limit_down_locked[:, 0].tolist() == [0, 0, 0, 1]
+
+
+def test_matrix_cache_built_before_base_unknown_locks_is_rebuilt(tmp_path, master, monkeypatch):
+    symbol = "2330.TWSE"
+    master[symbol] = _instrument(symbol)
+    days = _sessions(date(2026, 9, 14), 4)
+    root = tmp_path / "enriched"
+    _write_partitions(root, _base_unknown_frame(symbol, days))
+    cache = tmp_path / "cache"
+
+    def load():
+        return load_market_data_matrix_from_parquet(
+            root, days[0], days[-1], field_columns=FIELDS, cache_root=cache,
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(matrix_module, "_DIRECT_MATRIX_LOADER_VERSION", 11)
+        stale = load()
+        stale_path = Path(stale.cache_path)
+        del stale
+    manifest = json.loads((stale_path / "manifest.json").read_text("utf-8"))
+    for name in ("limit_up_locked", "limit_down_locked"):
+        spec = manifest["arrays"][name]
+        old_locks = np.memmap(
+            stale_path / "matrix.bin",
+            dtype=np.dtype(spec["dtype"]),
+            mode="r+",
+            offset=int(spec["offset"]),
+            shape=tuple(spec["shape"]),
+        )
+        old_locks[:] = 0
+        old_locks.flush()
+        del old_locks
+
+    market = load()
+
+    assert market.cache_status == "built"
+    assert market.limit_up_locked[:, 0].tolist() == [0, 0, 1, 0]
+    assert market.limit_down_locked[:, 0].tolist() == [0, 0, 1, 0]
+
+
+def _limit_inputs(base_missing: list[bool] | None) -> pl.DataFrame:
+    """2330 closes 10% up on its second session, which is the limit up from the previous close."""
+    frame = pl.DataFrame({
+        "symbol": ["2330.TWSE"] * 2,
+        "date": _sessions(date(2026, 9, 14), 2),
+        "close": [100.0, 110.0],
+        "raw_close": [100.0, 110.0],
+        "raw_high": [100.0, 110.0],
+        "raw_low": [100.0, 110.0],
+        "signal_limit_up": [False, None],
+        "signal_limit_down": [False, None],
+    }, schema_overrides={"signal_limit_up": pl.Boolean, "signal_limit_down": pl.Boolean})
+    if base_missing is None:
+        return frame
+    return frame.with_columns(pl.Series("ref_base_missing", base_missing, dtype=pl.Boolean))
+
+
+@pytest.mark.parametrize(
+    ("base_missing", "expected"),
+    [(None, [None, True]), ([False, False], [None, True]), ([False, True], [None, None])],
+)
+def test_limit_signals_without_an_official_base_stay_null(master, base_missing, expected):
+    from app.indicators.pipeline import compute_limit_signals
+
+    master["2330.TWSE"] = _instrument("2330.TWSE")
+    frame = _limit_inputs(base_missing).drop("signal_limit_up", "signal_limit_down")
+
+    out = compute_limit_signals(
+        frame, pl.DataFrame({"symbol": ["2330.TWSE"]}), needed={"signal_limit_up", "signal_limit_down"},
+    ).sort("date")
+
+    assert out["signal_limit_up"].to_list() == expected
+    assert out["signal_limit_down"].to_list() == [None if value is None else False for value in expected]
+
+
+@pytest.mark.parametrize(
+    ("base_missing", "expected"),
+    [(None, [False, True]), ([False, False], [False, True]), ([False, True], [False, None])],
+)
+def test_recomputed_publish_flags_without_an_official_base_stay_null(master, base_missing, expected):
+    from app.backtest.engine import _with_taiwan_limit_flags
+
+    master["2330.TWSE"] = _instrument("2330.TWSE")
+
+    out = _with_taiwan_limit_flags(_limit_inputs(base_missing), ["signal_limit_up", "signal_limit_down"])
+
+    assert out.sort("date")["signal_limit_up"].to_list() == expected
+
+
+@pytest.mark.parametrize("base_missing", [None, [False, False, False], [False, True, False]])
+def test_a_polars_backtest_keeps_the_base_flag_until_the_matrix(master, base_missing):
+    master["2330.TWSE"] = _instrument("2330.TWSE")
+    panel = _unknown_universe_panel().filter(pl.col("symbol") == "2330.TWSE")
+    if base_missing is not None:
+        panel = panel.with_columns(pl.Series("ref_base_missing", base_missing, dtype=pl.Boolean))
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(_strategy()))
+    days = _sessions(date(2026, 9, 1), 3)
+
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test",
+        symbols=None,
+        start=days[0],
+        end=days[-1],
+        matching="close_t",
+    ))
+
+    assert result.error is None
+    expected = [int(value) for value in (base_missing or [False] * 3)]
+    assert engine.sim_matrix.limit_up_locked[:, 0].tolist() == expected
+    assert engine.sim_matrix.limit_down_locked[:, 0].tolist() == expected

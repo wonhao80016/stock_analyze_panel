@@ -21,6 +21,7 @@ import polars as pl
 import pyarrow as pa
 
 from app.backtest.matrix import (
+    BASE_MISSING_COLUMN,
     MarketDataMatrix,
     MarketMatrix,
     MatrixCacheProfile,
@@ -36,7 +37,9 @@ from app.volume_units import TAIWAN_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
-_REFERENCE_LIMIT_COLUMNS = frozenset({"ref_prev_close", "ref_limit_up", "ref_limit_down"})
+_REFERENCE_LIMIT_COLUMNS = frozenset(
+    {"ref_prev_close", "ref_limit_up", "ref_limit_down", BASE_MISSING_COLUMN}
+)
 # The Taiwan publish writes these on every enriched row; rows written without it lack them.
 _PUBLISHED_LIMIT_FLAGS = frozenset(
     {"signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"}
@@ -93,6 +96,13 @@ def _with_taiwan_limit_flags(df: pl.DataFrame, flags: list[str]) -> pl.DataFrame
         how="left",
         maintain_order="left",
     )
+    if BASE_MISSING_COLUMN in df.columns:
+        # The publish's rule bases these rows on an earlier close, which is not the exchange's base.
+        unknown = pl.col(BASE_MISSING_COLUMN).fill_null(False)
+        df = df.with_columns(
+            pl.when(unknown).then(None).otherwise(pl.col(f"_computed_{flag}")).alias(f"_computed_{flag}")
+            for flag in computed
+        )
     return _published_or_computed(df, computed, "", "_computed_")
 
 
@@ -255,10 +265,13 @@ def _at_locked_limit(
     """Whether a fill at adjusted *price* sits on the session's limit price while it is locked.
 
     A session locked at a limit closes on that limit price, so the raw close is the limit price.
+    Both locks set mark a session whose limit base is unknown, where no price is fillable.
     """
     flags = matrix.limit_up_locked if direction == "up" else matrix.limit_down_locked
     if not flags[time_id, asset_id]:
         return False
+    if matrix.limit_up_locked[time_id, asset_id] and matrix.limit_down_locked[time_id, asset_id]:
+        return True
     scale = float(matrix.raw_scale[time_id, asset_id])
     limit = float(matrix.close[time_id, asset_id]) * scale
     traded = float(price) * scale
@@ -1151,10 +1164,12 @@ class BacktestEngine:
 
         enriched_glob = str(self.repo.store.data_dir / ENRICHED_DIR_NAME / "**" / "*.parquet")
 
-        published_flags = sorted(_PUBLISHED_LIMIT_FLAGS.intersection(columns or ()))
+        boolean_columns = sorted(
+            (_PUBLISHED_LIMIT_FLAGS | {BASE_MISSING_COLUMN}).intersection(columns or ())
+        )
         lf = scan_enriched_parquet(
             enriched_glob,
-            schema={**ENRICHED_STORAGE_SCHEMA, **dict.fromkeys(published_flags, pl.Boolean)},
+            schema={**ENRICHED_STORAGE_SCHEMA, **dict.fromkeys(boolean_columns, pl.Boolean)},
         )
         if symbols is not None:
             lf = lf.filter(pl.col("symbol").is_in(symbols))
