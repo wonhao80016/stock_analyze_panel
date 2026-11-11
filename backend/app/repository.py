@@ -76,7 +76,8 @@ def taiwan_limit_signals(frame: pl.DataFrame) -> pl.DataFrame:
     """*frame* with the Taiwan publish's limit flags and streaks on its Taiwan rows; needs prev_close.
 
     The publish's own rule (add_taiwan_limit_signals on limit_profile): a row whose limit is unknown
-    gets False, as published. Rows of other symbols are returned unchanged, in another order.
+    gets False and a ref_base_missing row null, as published. Rows of other symbols are returned
+    unchanged, in another order.
     """
     taiwan = pl.col("symbol").str.ends_with(TAIWAN_SUFFIXES[0]) | pl.col("symbol").str.ends_with(
         TAIWAN_SUFFIXES[1]

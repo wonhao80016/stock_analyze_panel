@@ -825,7 +825,9 @@ def get_daily_batch(request: Request, body: dict):
 
     frames: list[pl.DataFrame] = []
     if stock_symbols:
-        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=[*cols, "raw_close", "ref_prev_close"])
+        df_stock = repo.get_daily_batch(
+            stock_symbols, start, end, columns=[*cols, "raw_close", "ref_prev_close", "ref_base_missing"]
+        )
         if not df_stock.is_empty():
             frames.append(df_stock)
     for sym in index_symbols:

@@ -168,5 +168,5 @@ def test_rsi_without_losses_or_without_changes(closes, expected):
     assert _matrix(frame, "rsi_6")[6:].tolist() == [expected] * 4
 
 
-def test_the_definition_version_moves_past_the_stage_4_conventions():
-    assert pipeline.INDICATOR_DEFINITION_VERSION == 3
+def test_the_definition_version_moves_past_the_official_session_bases():
+    assert pipeline.INDICATOR_DEFINITION_VERSION == 4

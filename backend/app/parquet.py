@@ -37,6 +37,7 @@ ENRICHED_STORAGE_SCHEMA: dict[str, pl.DataType] = {
     "ref_prev_close": pl.Float64,
     "ref_limit_up": pl.Float64,
     "ref_limit_down": pl.Float64,
+    "ref_base_missing": pl.Boolean,
 }
 
 

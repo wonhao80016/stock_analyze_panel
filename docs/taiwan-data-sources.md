@@ -337,6 +337,21 @@ and adjustment factors from them.
   `ref_prev_close * close / raw_close` as its base. Limit signals always use raw prices
   and official limits on event sessions. Modules that read the daily store for the
   one-day change use the same reference price.
+- A session whose previous stored bar is older than the previous market session (the
+  symbol did not trade that session, or was halted and has no row) has its base set by
+  the exchange, not by the last traded close. Without an event on it, the publish takes
+  the official base from `app.taiwan.session_bases`: TWSE symbols use TWT84U of the
+  session itself (`rwd/zh/variation/TWT84U`), TPEx symbols use the next-session
+  reference and limits of the previous session's dailyQuotes. Both are stored under
+  `data/taiwan/session_bases/{twse,tpex}/date=<source date>/part.parquet`; each publish
+  fetches the recent window first (a failure only adds a note) and
+  `uv run python -m app.taiwan.session_bases --since 2024-01-01 --source all --delay 3`
+  backfills history. Enriched stores the official figures in `ref_prev_close`,
+  `ref_limit_up` and `ref_limit_down`. When no official base is stored, enriched sets
+  `ref_base_missing` to true and leaves `ref_*`, `prev_close`, `change_pct`,
+  `change_amount`, `amplitude` and the four limit signals null; the backtest refuses
+  fills on such a session. The no-limit initial-listing window and a symbol's first
+  bar keep the previous close. Live intraday rows do not apply these bases.
 - Forward adjustment: enriched `open/high/low/close` are divided by the product of
   the factors of all later events, so the newest bar equals the raw price and `raw_*`
   keep traded prices. The factor is `pre_close / ref_price` for dividends and
@@ -357,7 +372,9 @@ and adjustment factors from them.
   adopts the current rules as its baseline without a rebuild, so a rule change that
   happened before that first run needs `python -m app.taiwan.enriched_refresh --full`.
   Corrections of an event's official `ref_limit_up/down` are not part of the record and
-  do not trigger a rebuild. The record is saved before the publication is committed,
+  do not trigger a rebuild; neither do official session bases stored after a session
+  was published, so a backfill reaches older partitions only with
+  `python -m app.taiwan.enriched_refresh --full`. The record is saved before the publication is committed,
   so a record that cannot be saved leaves the publication incomplete. While a
   publication is incomplete, daily bars are served from the memory cache and the
   screener service answers 503 instead of an empty result; the next scheduled run or

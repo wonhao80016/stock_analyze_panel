@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 # Bump whenever a published indicator's definition changes: the Taiwan enriched publish
 # records it and rewrites every partition once when the recorded version differs.
-INDICATOR_DEFINITION_VERSION = 3
+INDICATOR_DEFINITION_VERSION = 4
 
 
 # ── 自定义信号缓存 ─────────────────────────────────────
@@ -85,10 +85,12 @@ ENRICHED_STORAGE_COLS = [
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
     "consecutive_limit_downs",
     "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
-    # Raw-scale exchange reference price and limits on corporate-action sessions (Taiwan only), null otherwise.
+    # Raw-scale official base and limits on event sessions and after untraded ones (Taiwan only), else null.
     "ref_prev_close",
     "ref_limit_up",
     "ref_limit_down",
+    # True on a Taiwan session after an untraded one whose official base is unknown.
+    "ref_base_missing",
 ]
 
 
@@ -479,16 +481,19 @@ def _reference_prev_close(df: pl.DataFrame, prev_close: pl.Expr) -> pl.Expr:
     """The previous close, replaced by the exchange reference price where a row carries one.
 
     ref_prev_close is on the raw scale; close / raw_close moves it onto the scale of close,
-    so the base stays right once close is forward-adjusted.
+    so the base stays right once close is forward-adjusted. A ref_base_missing row has no base.
     """
-    if "ref_prev_close" not in df.columns or "raw_close" not in df.columns:
-        return prev_close
-    on_close_scale = (
-        pl.when(pl.col("raw_close") > 0)
-        .then(pl.col("ref_prev_close") * (pl.col("close") / pl.col("raw_close")))
-        .otherwise(None)
-    )
-    return pl.coalesce(on_close_scale, prev_close)
+    base = prev_close
+    if "ref_prev_close" in df.columns and "raw_close" in df.columns:
+        on_close_scale = (
+            pl.when(pl.col("raw_close") > 0)
+            .then(pl.col("ref_prev_close") * (pl.col("close") / pl.col("raw_close")))
+            .otherwise(None)
+        )
+        base = pl.coalesce(on_close_scale, prev_close)
+    if "ref_base_missing" in df.columns:
+        base = pl.when(pl.col("ref_base_missing").fill_null(False)).then(None).otherwise(base)
+    return base
 
 
 def compute_indicators(

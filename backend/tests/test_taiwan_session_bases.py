@@ -29,6 +29,7 @@ from app.taiwan.session_bases import (
     TaiwanSessionBaseStore,
     TpexSessionBaseAdapter,
     TwseSessionBaseAdapter,
+    official_bases_of,
     official_session_bases,
 )
 
@@ -269,6 +270,37 @@ def test_an_unreadable_file_reads_as_missing(tmp_path):
     out = official_session_bases(["1435.TWSE"], [TWSE_DAY], store=store, sessions=[])
 
     assert out["ref_price"].to_list() == [None]
+
+
+def test_an_unreadable_file_leaves_the_other_dates_readable(tmp_path):
+    store = TaiwanSessionBaseStore(tmp_path)
+    store.write(TWSE, TWSE_DAY, _twse())
+    broken = store.path(TWSE, date(2025, 4, 9))
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"not parquet")
+
+    out = official_session_bases(["1435.TWSE"], [TWSE_DAY, date(2025, 4, 9)], store=store, sessions=[])
+
+    assert out["ref_price"].to_list() == [33.65, None]
+
+
+def test_bases_of_pairs_match_the_grid_lookup(tmp_path):
+    store = TaiwanSessionBaseStore(tmp_path)
+    store.write(TWSE, TWSE_DAY, _twse())
+    store.write(TPEX, TPEX_DAY, _tpex())
+    sessions = [TPEX_DAY, date(2024, 10, 4)]
+    pairs = pl.DataFrame(
+        {"symbol": ["6488.TPEX", "1435.TWSE", "1435.TWSE"], "trade_date": [date(2024, 10, 4), TWSE_DAY, TWSE_DAY]}
+    )
+
+    out = official_bases_of(pairs, store=store, sessions=sessions)
+
+    grid = official_session_bases(["6488.TPEX", "1435.TWSE"], [date(2024, 10, 4), TWSE_DAY], store=store, sessions=sessions)
+    assert out.rows() == grid.join(pairs.unique(), on=["symbol", "trade_date"]).sort(["symbol", "trade_date"]).rows()
+    assert [row[:4] for row in out.rows()] == [
+        ("1435.TWSE", TWSE_DAY, 33.65, 37.00),
+        ("6488.TPEX", date(2024, 10, 4), 452.50, 497.50),
+    ]
 
 
 def test_daily_quotes_written_before_the_cutoff_on_their_day_are_provisional(tmp_path):

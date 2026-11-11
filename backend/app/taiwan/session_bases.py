@@ -151,18 +151,26 @@ class TaiwanSessionBaseStore:
     def read(self, source: str, dates: Iterable[date], symbols: Iterable[str] | None = None) -> pl.DataFrame:
         """Stored rows of *source* for *dates*; absent and unreadable files are skipped."""
         wanted = None if symbols is None else sorted(set(symbols))
-        frames: list[pl.DataFrame] = []
-        for d in sorted(set(dates)):
-            path = self.path(source, d)
-            if not path.exists():
-                continue
-            try:
-                lf = pl.scan_parquet(path)
-                if wanted is not None:
-                    lf = lf.filter(pl.col("symbol").is_in(wanted))
-                frames.append(_conform(lf.collect()))
-            except Exception as exc:
-                logger.warning("Session base file %s unreadable, its bases are missing: %s", path, exc)
+        paths = [path for path in (self.path(source, d) for d in sorted(set(dates))) if path.exists()]
+
+        def scan(sources: list[Path]) -> pl.DataFrame:
+            lf = pl.scan_parquet(sources)
+            if wanted is not None:
+                lf = lf.filter(pl.col("symbol").is_in(wanted))
+            return _conform(lf.collect())
+
+        if not paths:
+            return pl.DataFrame(schema=session_base_schema())
+        try:
+            return scan(paths)
+        except Exception:
+            # A bad file fails the whole scan, so the files are read one by one to skip only it.
+            frames: list[pl.DataFrame] = []
+            for path in paths:
+                try:
+                    frames.append(scan([path]))
+                except Exception as exc:
+                    logger.warning("Session base file %s unreadable, its bases are missing: %s", path, exc)
         if not frames:
             return pl.DataFrame(schema=session_base_schema())
         return pl.concat(frames)
@@ -375,7 +383,6 @@ def official_session_bases(
     figure stays null. Columns: symbol, trade_date, ref_price, limit_up, limit_down; one row per
     pair, sorted by symbol and trade_date.
     """
-    store = store or TaiwanSessionBaseStore()
     wanted_symbols = sorted(set(symbols))
     wanted_dates = sorted(set(trade_dates))
     if not wanted_symbols or not wanted_dates:
@@ -383,25 +390,41 @@ def official_session_bases(
     grid = pl.DataFrame({"symbol": wanted_symbols}, schema={"symbol": pl.String}).join(
         pl.DataFrame({"trade_date": wanted_dates}, schema={"trade_date": pl.Date}), how="cross"
     )
+    return official_bases_of(grid, store=store, sessions=sessions)
+
+
+def official_bases_of(
+    pairs: pl.DataFrame,
+    *,
+    store: TaiwanSessionBaseStore | None = None,
+    sessions: Iterable[date] | None = None,
+) -> pl.DataFrame:
+    """official_session_bases of the distinct (symbol, trade_date) rows of *pairs* only."""
+    store = store or TaiwanSessionBaseStore()
+    pairs = pairs.select(pl.col("symbol").cast(pl.String), pl.col("trade_date").cast(pl.Date)).unique()
+    if pairs.is_empty():
+        return pl.DataFrame(schema=_bases_schema())
     found: list[pl.DataFrame] = []
-    twse_symbols = [s for s in wanted_symbols if s.endswith(".TWSE")]
-    if twse_symbols:
-        rows = store.read(TWSE, wanted_dates, twse_symbols)
+    twse = pairs.filter(pl.col("symbol").str.ends_with(".TWSE"))
+    if not twse.is_empty():
+        rows = store.read(TWSE, twse["trade_date"].unique().to_list(), twse["symbol"].unique().to_list())
         found.append(rows.select("symbol", pl.col("source_date").alias("trade_date"), *BASE_COLUMNS))
-    tpex_symbols = [s for s in wanted_symbols if s.endswith(".TPEX")]
-    if tpex_symbols:
+    tpex = pairs.filter(pl.col("symbol").str.ends_with(".TPEX"))
+    if not tpex.is_empty():
         calendar = sorted(set(sessions if sessions is not None else TaiwanDailyStore().available_dates()))
-        source_for = _previous_sessions(calendar, wanted_dates)
+        source_for = _previous_sessions(calendar, tpex["trade_date"].unique().to_list())
         if source_for:
             aligned = pl.DataFrame(
                 {"trade_date": list(source_for), "source_date": list(source_for.values())},
                 schema={"trade_date": pl.Date, "source_date": pl.Date},
             )
-            rows = store.read(TPEX, source_for.values(), tpex_symbols)
+            rows = store.read(TPEX, source_for.values(), tpex["symbol"].unique().to_list())
             found.append(rows.join(aligned, on="source_date").select("symbol", "trade_date", *BASE_COLUMNS))
     if not found:
-        return grid.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in BASE_COLUMNS])
-    return grid.join(pl.concat(found), on=["symbol", "trade_date"], how="left").sort(["symbol", "trade_date"])
+        return pairs.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in BASE_COLUMNS]).sort(
+            ["symbol", "trade_date"]
+        )
+    return pairs.join(pl.concat(found), on=["symbol", "trade_date"], how="left").sort(["symbol", "trade_date"])
 
 
 class ListedCodes:

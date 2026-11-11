@@ -105,9 +105,11 @@
 - 台股的復權因子來自公司行動表（`app/taiwan/corporate_actions.py`），經 `adjustment_factors`
   或 provider 的 `get_adj_factors` 取得，含現金股利；成交量只在分割、面額變更、減資這類股數型
   事件隨因子調整，除權息不調整。
-- 台股 enriched 的 `ref_prev_close`、`ref_limit_up`、`ref_limit_down` 是事件交易日的官方參考價與
-  漲跌停價（原始價尺度，其餘交易日為空值）；當日漲跌幅的分母是 `ref_prev_close * close / raw_close`，
-  沒有事件時為前一日收盤。
+- 台股 enriched 的 `ref_prev_close`、`ref_limit_up`、`ref_limit_down` 是事件交易日，或前一交易日一般盤
+  無收盤時的官方參考價與漲跌停價（原始價尺度，其餘交易日為空值）；後者上市取 TWT84U 當日值，上櫃取前一
+  交易日 dailyQuotes 的次日值（`app/taiwan/session_bases.py`）。當日漲跌幅的分母是
+  `ref_prev_close * close / raw_close`，其餘交易日為前一日收盤。前一交易日無收盤而官方資料缺漏時，
+  `ref_base_missing` 為真，`change_pct` 與漲跌停訊號為 null，不得退回更早的收盤價或補成 False。
 
 ### 3.3 日期、交易日和時區
 

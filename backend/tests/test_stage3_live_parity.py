@@ -40,7 +40,7 @@ from app.taiwan.corporate_actions import (
     corporate_action_schema,
 )
 from app.taiwan.daily_store import TaiwanDailyStore, listing_sessions
-from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
+from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService, with_official_bases
 from app.taiwan.enrichment.corporate_actions import EXDIV, PAR_CHANGE, REDUCTION
 from app.taiwan.providers.taiwan_values import TAIPEI
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
@@ -427,6 +427,12 @@ def test_the_publish_writes_what_the_composed_pipeline_computes(stores):
                 filter_halt_days(service.daily_store.scan_range(None, None, TODAY)),
                 events,
                 with_limits=True,
+            )
+            raw = with_official_bases(
+                raw,
+                service.daily_store.available_dates(),
+                service._limit_profile(sorted(sessions.first_sessions), sessions),
+                service.session_bases,
             )
             composed = compute_enriched(
                 raw,

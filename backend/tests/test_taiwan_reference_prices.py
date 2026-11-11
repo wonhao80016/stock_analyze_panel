@@ -564,7 +564,9 @@ def test_the_mini_candle_batch_carries_the_reference_price_on_an_event_session()
 
     out = kline.get_daily_batch(_batch_request(raw, asked), {"symbols": ["2379.TWSE", "2330.TWSE"], "days": 12})["data"]
 
-    assert asked == [["symbol", "date", "open", "high", "low", "close", "volume", "raw_close", "ref_prev_close"]]
+    assert asked == [[
+        "symbol", "date", "open", "high", "low", "close", "volume", "raw_close", "ref_prev_close", "ref_base_missing"
+    ]]
     realtek = {str(r["date"]): r for r in out["2379.TWSE"]}
     assert realtek[str(EVENT)]["prev_close"] == 704.0
     assert realtek[str(SESSIONS[-1])]["prev_close"] == 692.0

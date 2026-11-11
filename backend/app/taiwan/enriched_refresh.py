@@ -45,6 +45,7 @@ from app.indicators.pipeline import (
 from app.taiwan.corporate_actions import (
     REF_LIMIT_DOWN,
     REF_LIMIT_UP,
+    REF_PREV_CLOSE,
     TaiwanCorporateActionStore,
     adjustment_factors,
     attach_reference_prices,
@@ -53,6 +54,7 @@ from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TaiwanDailyStore, l
 from app.taiwan.enriched_reader import _enriched_root
 from app.taiwan.market_rules import ListingSessions, PriceLimitModel
 from app.taiwan.providers.taiwan_values import TAIPEI
+from app.taiwan.session_bases import TaiwanSessionBaseStore, official_bases_of
 from app.taiwan.share_capital_store import TaiwanShareCapitalStore
 from app.taiwan.volume_patterns import add_volume_patterns
 from app.volume_units import turnover_rate_pct_expr
@@ -67,6 +69,7 @@ OPEN_WINDOW = "open"
 LOGGED_SYMBOLS = 10
 PUBLISHED_TURNOVER = "_published_turnover_rate"
 SESSION_TURNOVER = "_session_turnover_rate"
+REF_BASE_MISSING = "ref_base_missing"
 
 
 class TaiwanEnrichedRefreshService:
@@ -78,11 +81,13 @@ class TaiwanEnrichedRefreshService:
         enriched_root: Path | None = None,
         share_capital: TaiwanShareCapitalStore | None = None,
         corporate_actions: TaiwanCorporateActionStore | None = None,
+        session_bases: TaiwanSessionBaseStore | None = None,
     ) -> None:
         self.daily_store = daily_store or TaiwanDailyStore()
         self._root = enriched_root or _enriched_root()
         self.share_capital = share_capital or TaiwanShareCapitalStore()
         self.corporate_actions = corporate_actions or TaiwanCorporateActionStore()
+        self.session_bases = session_bases or TaiwanSessionBaseStore()
 
     @staticmethod
     def _write_partition(partition_dir: Path, df: pl.DataFrame) -> int:
@@ -167,6 +172,7 @@ class TaiwanEnrichedRefreshService:
             limits=limits,
             instruments=instruments,
             today=max(available),
+            session_bases=self.session_bases,
         )
         if enriched.is_empty():
             return 0
@@ -562,13 +568,16 @@ class TaiwanEnrichedRefreshService:
             pl.when(official).then(pl.col(REF_LIMIT_DOWN)).otherwise(limit_down).alias("_limit_down"),
         ])
         usable = official | (limit_pct.is_not_null() & (ref > 0))
+        unknown = _base_unknown(out)
+        flags = {
+            "signal_limit_up": usable & (close >= pl.col("_limit_up")),
+            "signal_limit_down": usable & (close <= pl.col("_limit_down")),
+            "signal_broken_limit_up": usable & (high >= pl.col("_limit_up")) & (close < pl.col("_limit_up")),
+            "signal_limit_down_recovery": usable & limit_down_recovery(low, close, pl.col("_limit_down"), ref),
+        }
         return out.with_columns([
-            (usable & (close >= pl.col("_limit_up"))).fill_null(False).alias("signal_limit_up"),
-            (usable & (close <= pl.col("_limit_down"))).fill_null(False).alias("signal_limit_down"),
-            (usable & (high >= pl.col("_limit_up")) & (close < pl.col("_limit_up")))
-            .fill_null(False).alias("signal_broken_limit_up"),
-            (usable & limit_down_recovery(low, close, pl.col("_limit_down"), ref))
-            .fill_null(False).alias("signal_limit_down_recovery"),
+            pl.when(unknown).then(None).otherwise(flag.fill_null(False)).alias(name)
+            for name, flag in flags.items()
         ]).drop(["limit_pct", "is_etf_tick", "ipo_start", "ipo_end", "_limit_up", "_limit_down"])
 
     def refresh_recent(self, days: int = 5) -> int:
@@ -621,6 +630,7 @@ def compute_taiwan_enriched(
     instruments: pl.DataFrame,
     *,
     today: date,
+    session_bases: TaiwanSessionBaseStore | None = None,
 ) -> pl.DataFrame:
     """Every enriched row the publish writes for the raw daily bars *raw* dated on or before *end*.
 
@@ -630,12 +640,19 @@ def compute_taiwan_enriched(
     schema never depends on the share-capital file. Only rows dated *today*, the newest stored
     session rather than the wall-clock date, get it: the current count never reaches an earlier
     session, and a republish on a holiday or after midnight keeps the newest one.
+    With *session_bases* a session after an untraded one takes its official base
+    (with_official_bases); without it, as for live rows, such a session keeps the last traded
+    close as its base and ref_base_missing is false throughout.
     """
     raw = attach_reference_prices(
         filter_halt_days(raw),
         events.filter(pl.col("date") <= end),
         with_limits=True,
     )
+    if session_bases is not None:
+        raw = with_official_bases(raw, trading_days, limits, session_bases)
+    else:
+        raw = raw.with_columns(pl.lit(False).alias(REF_BASE_MISSING))
     enriched = compute_enriched(
         raw, factors=adjustment_factors(events, end), instruments=instruments, today=today
     )
@@ -645,6 +662,72 @@ def compute_taiwan_enriched(
         enriched = enriched.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
     enriched = add_taiwan_limit_signals(enriched, limits)
     return add_volume_patterns(enriched, trading_days)
+
+
+def with_official_bases(
+    bars: pl.DataFrame,
+    trading_days: Iterable[date],
+    limits: pl.DataFrame,
+    store: TaiwanSessionBaseStore,
+) -> pl.DataFrame:
+    """*bars* (attach_reference_prices output) with the official base on each session after an untraded one.
+
+    Such a session's previous bar is older than its previous session in *trading_days*, and the
+    exchange, not the last traded close, sets its base. A session with a corporate-action
+    reference price, a symbol's first bar and a session inside the no-limit initial-listing window
+    of *limits* keep their ref_* columns. Any other such session takes the official ref_price,
+    limit_up and limit_down of *store*; without an official ref_price its ref_* columns stay null
+    and ref_base_missing is true. ref_base_missing is false on every other row.
+    """
+    calendar = sorted(set(trading_days))
+    previous_session = pl.DataFrame(
+        {"date": calendar, "_previous_session": [None, *calendar[:-1]]},
+        schema={"date": pl.Date, "_previous_session": pl.Date},
+    )
+    windows = limits.select(
+        "symbol", pl.col("ipo_start").alias("_ipo_start"), pl.col("ipo_end").alias("_ipo_end")
+    )
+    in_ipo_window = PriceLimitModel.polars_in_ipo_window(
+        pl.col("date"), pl.col("_ipo_start"), pl.col("_ipo_end")
+    )
+    framed = (
+        bars.sort(["symbol", "date"])
+        .with_columns(pl.col("date").shift(1).over("symbol").alias("_previous_bar"))
+        .join(previous_session, on="date", how="left", maintain_order="left")
+        .join(windows, on="symbol", how="left", maintain_order="left")
+        .with_columns(
+            (
+                (pl.col("_previous_bar") < pl.col("_previous_session"))
+                & pl.col(REF_PREV_CLOSE).is_null()
+                & ~in_ipo_window
+            ).fill_null(False).alias("_after_untraded")
+        )
+        .drop("_previous_bar", "_previous_session", "_ipo_start", "_ipo_end")
+    )
+    gaps = framed.filter(pl.col("_after_untraded"))
+    if gaps.is_empty():
+        return framed.drop("_after_untraded").with_columns(pl.lit(False).alias(REF_BASE_MISSING))
+    official = official_bases_of(
+        gaps.select("symbol", pl.col("date").alias("trade_date")), store=store, sessions=calendar
+    ).select(
+        "symbol",
+        pl.col("trade_date").alias("date"),
+        pl.col("ref_price").alias("_official_ref"),
+        pl.col("limit_up").alias("_official_up"),
+        pl.col("limit_down").alias("_official_down"),
+    )
+    after_untraded = pl.col("_after_untraded")
+    known = after_untraded & pl.col("_official_ref").is_not_null()
+    return (
+        framed.join(official, on=["symbol", "date"], how="left", maintain_order="left")
+        .with_columns(
+            pl.when(known).then(pl.col("_official_ref")).otherwise(pl.col(REF_PREV_CLOSE)).alias(REF_PREV_CLOSE),
+            pl.when(known).then(pl.col("_official_up")).otherwise(pl.col(REF_LIMIT_UP)).alias(REF_LIMIT_UP),
+            pl.when(known).then(pl.col("_official_down")).otherwise(pl.col(REF_LIMIT_DOWN)).alias(REF_LIMIT_DOWN),
+            (after_untraded & ~known).alias(REF_BASE_MISSING),
+        )
+        .drop("_after_untraded", "_official_ref", "_official_up", "_official_down")
+    )
 
 
 def _read_published_turnover(paths: list[Path]) -> pl.DataFrame:
@@ -702,10 +785,10 @@ def add_taiwan_limit_signals(enriched: pl.DataFrame, profile: pl.DataFrame) -> p
     The shared pipeline skips these because it wants an A-share instrument
     table for the limit prices; Taiwan carries its own rules instead. Limits and
     ticks are raw-scale prices, so the comparison uses raw_close / raw_high / raw_low
-    and the previous close moved onto the raw scale; a corporate-action session
-    uses the limits the exchange published. The limit streaks are counted from these signals.
+    and the previous close moved onto the raw scale; a session carrying official limits
+    (ref_limit_up / ref_limit_down) uses them. The limit streaks are counted from these signals.
     A session inside an initial listing's no-limit window of *profile* (a limit_profile frame)
-    has no limit board.
+    has no limit board, and a ref_base_missing session gets null flags.
     """
     cols = ["signal_limit_up", "signal_limit_down", "signal_broken_limit_up", "signal_limit_down_recovery"]
     enriched = enriched.with_columns([
@@ -713,11 +796,16 @@ def add_taiwan_limit_signals(enriched: pl.DataFrame, profile: pl.DataFrame) -> p
         for c in (REF_LIMIT_UP, REF_LIMIT_DOWN) if c not in enriched.columns
     ])
     if profile.is_empty():
-        out = enriched.with_columns([pl.lit(False).alias(c) for c in cols])
+        unknown = _base_unknown(enriched)
+        out = enriched.with_columns([pl.when(unknown).then(None).otherwise(False).alias(c) for c in cols])
     else:
         out = TaiwanEnrichedRefreshService._limit_signals(enriched.join(profile, on="symbol", how="left"))
     out = with_limit_streak(out, "signal_limit_up", "consecutive_limit_ups")
     return with_limit_streak(out, "signal_limit_down", "consecutive_limit_downs")
+
+
+def _base_unknown(frame: pl.DataFrame) -> pl.Expr:
+    return pl.col(REF_BASE_MISSING).fill_null(False) if REF_BASE_MISSING in frame.columns else pl.lit(False)
 
 
 def published_factor_through(data_dir: Path | None = None) -> date | None:
