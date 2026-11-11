@@ -41,6 +41,7 @@ from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_institutional_refresh import TaiwanMarketInstitutionalRefreshService
 from app.taiwan.realtime.calendar import TAIPEI_TZ, TaiwanTradingCalendar, taipei_now
+from app.taiwan.session_bases import TaiwanSessionBaseRefreshService
 from app.taiwan.universe import TaiwanSecurityMaster, get_security_master
 from app.taiwan.universe.service import SecurityMasterUnavailableError
 
@@ -363,24 +364,63 @@ def _refresh_corporate_actions(
     return note
 
 
+def _refresh_session_bases(
+    window: tuple[date, date] | None,
+    service: TaiwanSessionBaseRefreshService | None,
+    daily_store: TaiwanDailyStore | None,
+) -> str | None:
+    """Fetch the official session bases of the sessions about to be published; returns a failure note.
+
+    Starts one stored session before the window, whose dailyQuotes holds the TPEx bases of the
+    window's first session. Final stored files are skipped, so only missing or provisional
+    days are requested.
+    """
+    if window is None:
+        return None
+    try:
+        store = daily_store or TaiwanDailyStore()
+        since = max((d for d in store.available_dates() if d < window[0]), default=window[0])
+        res = (service or TaiwanSessionBaseRefreshService(daily_store=store)).refresh(since, window[1])
+    except Exception as e:
+        logger.exception("Session base refresh failed: %s", e)
+        return f"Official session bases not refreshed: {e}"
+    logger.info(
+        "Session bases %s..%s: %s requests, %s written, %s skipped",
+        since, window[1], res.get("requests"), res.get("written"), res.get("skipped"),
+    )
+    failed = res.get("failed") or []
+    if not failed:
+        return None
+    note = "Official session bases not stored: " + ", ".join(
+        f"{f['source']} {f['date']}" for f in failed
+    )
+    stopped = res.get("stopped_at")
+    if stopped:
+        note += f" (stopped: {stopped['reason']}, {res.get('not_attempted', 0)} requests not attempted)"
+    logger.warning("%s", note)
+    return note
+
+
 def publish_enriched(
     daily_store: TaiwanDailyStore | None = None,
     *,
     only_if_behind: bool = False,
     corporate_actions: TaiwanCorporateActionRefreshService | None = None,
+    session_bases: TaiwanSessionBaseRefreshService | None = None,
     notes: list[str] | None = None,
     since: date | None = None,
 ) -> bool:
-    """Refresh issued shares, save them as the newest stored session's turnover denominators and
-    refresh corporate-action reference prices, then republish the enriched table.
+    """Refresh issued shares, save them as the newest stored session's turnover denominators,
+    refresh corporate-action reference prices and the official session bases of the recent
+    window, then republish the enriched table.
 
     Returns whether a publish ran. With only_if_behind it runs only when a recent
     day's enriched partition is missing or older than its bars, the last full
     publication never committed, or the table was published under other indicator
     definitions. A *since* before the recent window extends the republish back
-    to that day, for bars written into older days. A failed reference-price
-    fetch never stops the publish, and a failed publish never raises; both are logged and,
-    when *notes* is given, appended to it.
+    to that day, for bars written into older days, but fetches no older session bases.
+    A failed reference-price or session-base fetch never stops the publish, and a
+    failed publish never raises; both are logged and, when *notes* is given, appended to it.
     """
     from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
     from app.taiwan.share_capital_store import TaiwanShareCapitalStore
@@ -408,9 +448,12 @@ def publish_enriched(
             TaiwanShareCapitalStore().save_session_denominators(window[1])
         except Exception as e:
             logger.warning("Taiwan share capital for %s not saved: %s", window[1].isoformat(), e)
-    note = _refresh_corporate_actions(window, corporate_actions)
-    if note and notes is not None:
-        notes.append(note)
+    for note in (
+        _refresh_corporate_actions(window, corporate_actions),
+        _refresh_session_bases(window, session_bases, daily_store),
+    ):
+        if note and notes is not None:
+            notes.append(note)
     try:
         if since is not None and window is not None and since < window[0]:
             TaiwanEnrichedRefreshService(daily_store=daily_store).refresh(
@@ -440,6 +483,7 @@ class TaiwanDailyUpdateService:
         market_inst_service: TaiwanMarketInstitutionalRefreshService | None = None,
         corporate_action_service: TaiwanCorporateActionRefreshService | None = None,
         security_master: TaiwanSecurityMaster | None = None,
+        session_base_service: TaiwanSessionBaseRefreshService | None = None,
     ) -> None:
         self.calendar = calendar or TaiwanTradingCalendar()
         # The default master follows the default root; injected stores refresh only a passed master.
@@ -462,6 +506,9 @@ class TaiwanDailyUpdateService:
             calendar=self.calendar, daily_store=self.daily_store
         )
         self.corporate_action_service = corporate_action_service or TaiwanCorporateActionRefreshService()
+        self.session_base_service = session_base_service or TaiwanSessionBaseRefreshService(
+            daily_store=self.daily_store
+        )
 
     def _calc_dataset_status(self, as_of: date | None, target: date) -> tuple[DatasetFreshnessStatus, int]:
         if as_of is None:
@@ -919,6 +966,7 @@ class TaiwanDailyUpdateService:
             publish_enriched(
                 self.daily_store,
                 corporate_actions=self.corporate_action_service,
+                session_bases=self.session_base_service,
                 notes=notes,
                 since=written_since,
             )

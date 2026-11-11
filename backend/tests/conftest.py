@@ -296,6 +296,23 @@ def _scheduled_runs_skip_the_monthly_revenue_archive(monkeypatch):
     monkeypatch.setattr(daily_pipeline, "refresh_monthly_revenue", lambda label: None)
 
 
+class _OfflineSessionBases:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def refresh(self, since, until, *args, **kwargs) -> dict:
+        return {"requests": 0, "written": 0, "skipped": 0, "failed": [], "stopped_at": None}
+
+
+@pytest.fixture(autouse=True)
+def _publishes_fetch_no_session_bases(monkeypatch):
+    """A publish without an injected service would otherwise retry TWT84U and dailyQuotes
+    against the network guard, 3 seconds apart."""
+    from app.taiwan import daily_update
+
+    monkeypatch.setattr(daily_update, "TaiwanSessionBaseRefreshService", _OfflineSessionBases)
+
+
 # --- Network isolation ----------------------------------------------------------------------
 
 _network_allowed = False
