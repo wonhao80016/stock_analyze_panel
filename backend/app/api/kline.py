@@ -462,18 +462,14 @@ def _read_taiwan_local_daily(symbol: str, start: date, end: date):
 
 
 def _with_reference_prices(symbol: str, local):
-    """Local Taiwan bars with the exchange reference price on corporate-action sessions."""
+    """Local Taiwan bars with the reference prices and official bases the enriched publish gives them."""
     if not symbol.endswith(TAIWAN_SUFFIXES) or not {"symbol", "date"} <= set(local.columns):
         return local
-    from app.indicators.pipeline import filter_halt_days
-    from app.taiwan.corporate_actions import (
-        TaiwanCorporateActionStore,
-        attach_reference_prices,
-        read_events_or_empty,
-    )
+    from app.taiwan.corporate_actions import TaiwanCorporateActionStore, read_events_or_empty
+    from app.taiwan.enriched_refresh import with_published_bases
 
     events = read_events_or_empty(TaiwanCorporateActionStore(), end=local["date"].max(), symbols=[symbol])
-    return attach_reference_prices(filter_halt_days(local), events)
+    return with_published_bases(local, events)
 
 
 def _taiwan_local_factors(symbol: str, local):

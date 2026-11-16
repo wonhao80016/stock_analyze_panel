@@ -9,6 +9,10 @@ stands in for the event's reference price, provided the store holds the previous
 a stand-in above SPLIT_FACTOR takes the publish's official_ratio; any other par-value change
 uses pre_close / reference and can differ from the published row by the tick rounding of the
 reference price.
+A session after one its symbol has no stored regular close for gets the official base instead, as
+the publish does (with_official_bases): a stored session the base read at preparation; today the
+stored TPEx dailyQuotes base, else the quoted previous close, which MIS sets to that base. Without
+one, ref_base_missing is true.
 Intraday the volume ratio, and every signal reading it, is scaled to a full session by the time
 elapsed at the quote. A row without a quoted amount gets close * board-lot volume so far, flagged
 in AMOUNT_ESTIMATED, which keeps it out of VWAP and ratios to full-session amounts.
@@ -26,12 +30,14 @@ from pathlib import Path
 
 import polars as pl
 
+from app.indicators.pipeline import filter_halt_days
 from app.strategy.scoring import AMOUNT_ESTIMATED
 from app.taiwan.corporate_actions import corporate_action_schema
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TAIWAN_DAILY_COLUMNS, TaiwanDailyStore
 from app.taiwan.enriched_refresh import FACTOR_SET_FILE, compute_taiwan_enriched, limit_profile
 from app.taiwan.enrichment.corporate_actions import EXDIV, PAR_CHANGE, REDUCTION
-from app.taiwan.market_rules import ListingSessions
+from app.taiwan.market_rules import ListingSessions, PriceLimitModel
+from app.taiwan.session_bases import BASE_COLUMNS, TPEX, TaiwanSessionBaseStore, official_bases_of
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +76,10 @@ class _History:
     events: pl.DataFrame
     instruments: pl.DataFrame
     exchanges: dict[date, frozenset[str]]
+    # Stored official bases of the session after the newest stored one: symbol and BASE_COLUMNS.
+    bases: pl.DataFrame
+    # official_bases_of the stored sessions with_official_bases looks up, read once per history.
+    past_bases: pl.DataFrame
 
 
 def _signature(path: Path) -> tuple[int, int] | None:
@@ -153,9 +163,13 @@ def _quoted_events(
     A symbol of *exchanges* qualifies when its quoted previous close differs from its last stored
     close and no listed event falls after that session. The kind is unknown: a factor below 1 is
     taken for a capital reduction and above SPLIT_FACTOR for a par-value change, both restating
-    volume; anything else for a dividend.
+    volume; anything else for a dividend. A symbol stored on the previous session without a
+    regular close never qualifies: the exchange set its quoted previous close as the base of an
+    untraded session. One without a stored row there, a halt, still does.
     """
     schema = corporate_action_schema()
+    before = [d for d in history.trading_days if d < today]
+    previous = before[-1] if before else None
     listed = dict(
         events.filter(pl.col("date") <= today)
         .group_by("symbol")
@@ -177,6 +191,8 @@ def _quoted_events(
         if traded.is_empty():
             continue
         last_session, last_close = traded["date"][-1], traded["close"][-1]
+        if last_session != previous and (stored["date"] == previous).any():
+            continue
         if abs(reference - last_close) < SAME_PRICE_TOLERANCE:
             continue
         if listed.get(symbol) is not None and listed[symbol] > last_session:
@@ -199,6 +215,70 @@ def _quoted_events(
             }
         )
     return pl.DataFrame(rows, schema=schema)
+
+
+def _gap_session_bases(
+    raw: pl.DataFrame, trading_days: tuple[date, ...], store: TaiwanSessionBaseStore
+) -> pl.DataFrame:
+    """official_bases_of each session of *raw* whose symbol's previous traded bar is older than the
+    previous of *trading_days*: the sessions with_official_bases gives the official base."""
+    previous = pl.DataFrame(
+        {"date": list(trading_days), "_previous_session": [None, *trading_days[:-1]]},
+        schema={"date": pl.Date, "_previous_session": pl.Date},
+    )
+    gaps = (
+        filter_halt_days(raw)
+        .sort(["symbol", "date"])
+        .with_columns(pl.col("date").shift(1).over("symbol").alias("_previous_bar"))
+        .join(previous, on="date", how="left")
+        .filter(pl.col("_previous_bar") < pl.col("_previous_session"))
+        .select("symbol", pl.col("date").alias("trade_date"))
+    )
+    return official_bases_of(gaps, store=store, sessions=trading_days)
+
+
+def _official_bases(
+    history: _History,
+    live: pl.DataFrame,
+    today: date,
+    exchanges: frozenset[str],
+    limits: pl.DataFrame,
+) -> pl.DataFrame:
+    """The official bases of the *live* symbols, in official_bases_of columns.
+
+    Their stored sessions take the bases read at preparation. Today's base, for the symbols of
+    *exchanges* only, is the stored one first, being the one the publish reads; the quoted previous
+    close, which MIS sets to the same base, stands in without it, with the statutory limits of
+    *limits* (a limit_profile frame) on it.
+    """
+    stored = history.bases
+    if not history.trading_days or history.trading_days[-1] >= today:
+        stored = stored.clear()
+    current = live.filter(
+        pl.col("symbol").is_in([s for s in live["symbol"].to_list() if _exchange(s) in exchanges])
+    ).select("symbol", "prev_close").join(
+        limits.select("symbol", "limit_pct", "is_etf_tick"), on="symbol", how="left"
+    )
+    quoted_up, quoted_down = PriceLimitModel.polars_limit_prices(
+        pl.col("prev_close"), pl.col("limit_pct"), pl.col("is_etf_tick").fill_null(False)
+    )
+    quoted = pl.col("prev_close") > 0
+    known = pl.col("ref_price").is_not_null()
+    todays = current.join(stored, on="symbol", how="left").select(
+        "symbol",
+        pl.lit(today, dtype=pl.Date).alias("trade_date"),
+        pl.when(known)
+        .then(pl.col("ref_price"))
+        .when(quoted)
+        .then(pl.col("prev_close"))
+        .alias("ref_price"),
+        pl.when(known).then(pl.col("limit_up")).when(quoted).then(quoted_up).alias("limit_up"),
+        pl.when(known).then(pl.col("limit_down")).when(quoted).then(quoted_down).alias("limit_down"),
+    )
+    past = history.past_bases.filter(
+        pl.col("symbol").is_in(live["symbol"].to_list()) & (pl.col("trade_date") < today)
+    )
+    return pl.concat([past, todays], how="vertical_relaxed")
 
 
 class TaiwanLiveEnriched:
@@ -294,6 +374,10 @@ class TaiwanLiveEnriched:
         trading_days: tuple[date, ...] = ()
         first_sessions: dict[str, date] = {}
         exchanges: dict[date, frozenset[str]] = {}
+        session_bases = TaiwanSessionBaseStore(self._taiwan_dir / "session_bases")
+        past_bases = official_bases_of(
+            pl.DataFrame(schema={"symbol": pl.String, "trade_date": pl.Date}), store=session_bases
+        )
         if daily_dir.is_dir():
             store = TaiwanDailyStore(daily_dir)
             trading_days = tuple(store.available_dates())
@@ -307,11 +391,17 @@ class TaiwanLiveEnriched:
                 recent = raw.filter(pl.col("date") >= trading_days[-RECENT_SESSIONS:][0])
                 for (day,), frame in recent.partition_by("date", as_dict=True).items():
                     exchanges[day] = frozenset(_exchange(s) for s in frame["symbol"].unique())
+                past_bases = _gap_session_bases(raw, trading_days, session_bases)
         events = read_events_or_empty(
             TaiwanCorporateActionStore(self._taiwan_dir / "corporate_actions")
         )
         instruments = TaiwanShareCapitalStore(self._taiwan_dir).as_instruments()
-        return _History(key, bars, trading_days, first_sessions, events, instruments, exchanges)
+        # dailyQuotes(D) holds the TPEx bases of the session after D. TWT84U(D) is fetched only
+        # once session D is stored, so no stored TWSE base can belong to the session after it.
+        bases = session_bases.read(TPEX, trading_days[-1:]).select("symbol", *BASE_COLUMNS)
+        return _History(
+            key, bars, trading_days, first_sessions, events, instruments, exchanges, bases, past_bases
+        )
 
     def rows(self, bars: pl.DataFrame) -> pl.DataFrame | None:
         """Today's enriched rows of the Taiwan *bars*, all dated today; None without a current history.
@@ -380,14 +470,22 @@ class TaiwanLiveEnriched:
             self._behind_logged = today
             logger.warning(
                 "taiwan daily store is behind the session before %s for %s; quoted reference "
-                "prices are not applied, so live rows of a corporate-action day stay unadjusted",
+                "prices and official bases are not applied, so live rows of a corporate-action "
+                "day or after an untraded session keep the last stored close as their base",
                 today,
                 ", ".join(sorted(missing)),
             )
         quoted = _quoted_events(history, live, events, today, exchanges)
         events = pl.concat([events, quoted], how="vertical_relaxed")
         enriched = compute_taiwan_enriched(
-            raw, events, today, calendar, limits, history.instruments, today=today
+            raw,
+            events,
+            today,
+            calendar,
+            limits,
+            history.instruments,
+            today=today,
+            session_bases=_official_bases(history, live, today, exchanges, limits),
         )
         if enriched.is_empty():
             return enriched

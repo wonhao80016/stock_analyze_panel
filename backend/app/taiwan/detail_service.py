@@ -469,21 +469,18 @@ class TaiwanStockDetailService:
         """Bars on the enriched publish's scale: the events dated up to the latest stored session.
 
         Adds raw_close and prev_close, which is the exchange reference price on a
-        corporate-action session.
+        corporate-action session and the official base after an untraded one; null when that is unknown.
         """
-        from app.indicators.pipeline import compute_indicators, filter_halt_days
-        from app.taiwan.corporate_actions import (
-            attach_reference_prices,
-            forward_adjusted,
-            read_events_or_empty,
-        )
+        from app.indicators.pipeline import compute_indicators
+        from app.taiwan.corporate_actions import forward_adjusted, read_events_or_empty
+        from app.taiwan.enriched_refresh import with_published_bases
 
         through = df["date"].max()
         stored = self.daily_store.latest_date()
         if isinstance(stored, date) and stored > through:
             through = stored
         events = read_events_or_empty(self.corporate_actions, end=through, symbols=[symbol_str])
-        bars = attach_reference_prices(filter_halt_days(df), events)
+        bars = with_published_bases(df, events, daily_store=self.daily_store)
         bars = bars.with_columns(bars["close"].alias("raw_close"))
         return compute_indicators(forward_adjusted(bars, events, through), needed={"prev_close"})
 

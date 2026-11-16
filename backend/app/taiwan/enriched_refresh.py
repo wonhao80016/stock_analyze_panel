@@ -630,7 +630,7 @@ def compute_taiwan_enriched(
     instruments: pl.DataFrame,
     *,
     today: date,
-    session_bases: TaiwanSessionBaseStore | None = None,
+    session_bases: TaiwanSessionBaseStore | pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Every enriched row the publish writes for the raw daily bars *raw* dated on or before *end*.
 
@@ -640,8 +640,8 @@ def compute_taiwan_enriched(
     schema never depends on the share-capital file. Only rows dated *today*, the newest stored
     session rather than the wall-clock date, get it: the current count never reaches an earlier
     session, and a republish on a holiday or after midnight keeps the newest one.
-    With *session_bases* a session after an untraded one takes its official base
-    (with_official_bases); without it, as for live rows, such a session keeps the last traded
+    With *session_bases*, a store or a frame of official bases, a session after an untraded one
+    takes its official base (with_official_bases); without it such a session keeps the last traded
     close as its base and ref_base_missing is false throughout.
     """
     events = events.filter(pl.col("date") <= end)
@@ -665,7 +665,7 @@ def with_official_bases(
     bars: pl.DataFrame,
     trading_days: Iterable[date],
     limits: pl.DataFrame,
-    store: TaiwanSessionBaseStore,
+    store: TaiwanSessionBaseStore | pl.DataFrame,
     events: pl.DataFrame,
 ) -> pl.DataFrame:
     """*bars* (attach_reference_prices output on *events*) with the official base on each session
@@ -678,6 +678,8 @@ def with_official_bases(
     ref_price, limit_up and limit_down of *store*. Without an official ref_price, a session whose
     reference comes from an event dated on an earlier untraded session keeps it; otherwise its
     ref_* columns stay null and ref_base_missing is true. ref_base_missing is false on every other row.
+    A frame with official_bases_of columns, one row per pair, may stand in for *store*; a session
+    whose pair it lacks is then left as if its previous session had traded.
     """
     calendar = sorted(set(trading_days))
     previous_session = pl.DataFrame(
@@ -708,14 +710,25 @@ def with_official_bases(
         )
         .drop("_previous_bar", "_previous_session", "_ipo_start", "_ipo_end", "_own_event")
     )
+    if isinstance(store, pl.DataFrame):
+        covered = store.select("symbol", pl.col("trade_date").alias("date"), pl.lit(True).alias("_covered"))
+        framed = (
+            framed.join(covered, on=["symbol", "date"], how="left", maintain_order="left")
+            .with_columns((pl.col("_after_untraded") & pl.col("_covered").fill_null(False)).alias("_after_untraded"))
+            .drop("_covered")
+        )
     gaps = framed.filter(pl.col("_after_untraded"))
     if gaps.is_empty():
         return framed.drop("_after_untraded", "_carried_event").with_columns(
             pl.lit(False).alias(REF_BASE_MISSING)
         )
-    official = official_bases_of(
-        gaps.select("symbol", pl.col("date").alias("trade_date")), store=store, sessions=calendar
-    ).select(
+    if isinstance(store, pl.DataFrame):
+        official = store
+    else:
+        official = official_bases_of(
+            gaps.select("symbol", pl.col("date").alias("trade_date")), store=store, sessions=calendar
+        )
+    official = official.select(
         "symbol",
         pl.col("trade_date").alias("date"),
         pl.col("ref_price").alias("_official_ref"),
@@ -734,6 +747,22 @@ def with_official_bases(
         )
         .drop("_after_untraded", "_carried_event", "_official_ref", "_official_up", "_official_down")
     )
+
+
+def with_published_bases(
+    bars: pl.DataFrame,
+    events: pl.DataFrame,
+    *,
+    daily_store: TaiwanDailyStore | None = None,
+    session_bases: TaiwanSessionBaseStore | None = None,
+) -> pl.DataFrame:
+    """The traded stored *bars* with the reference prices the publish gives them: those of *events*,
+    then with_official_bases on the calendar of *daily_store* (default: the default store)."""
+    bars = attach_reference_prices(filter_halt_days(bars), events, with_limits=True)
+    sessions = listing_sessions(daily_store)
+    limits = limit_profile(bars["symbol"].unique().to_list(), sessions)
+    store = session_bases or TaiwanSessionBaseStore()
+    return with_official_bases(bars, sessions.trading_dates, limits, store, events)
 
 
 def _read_published_turnover(paths: list[Path]) -> pl.DataFrame:
