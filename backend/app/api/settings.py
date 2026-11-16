@@ -126,17 +126,23 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         normalize_codex_command,
         normalize_codex_model,
         normalize_codex_reasoning_effort,
+        validate_codex_model,
     )
 
     if req.provider != "codex_cli" and _moves_saved_key_to_new_url(req):
         raise HTTPException(status_code=400, detail=_NEW_URL_NEEDS_KEY)
+    if req.provider == "codex_cli":
+        try:
+            codex_model = validate_codex_model(normalize_codex_model(req.model))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     updates: dict = {}
     if req.provider:
         updates["ai_provider"] = req.provider
         settings.ai_provider = req.provider
     if req.provider == "codex_cli":
-        updates["ai_codex_model"] = normalize_codex_model(req.model)
+        updates["ai_codex_model"] = codex_model
         try:
             codex_command = normalize_codex_command(req.codex_command)
         except ValueError as exc:
@@ -415,7 +421,7 @@ def save_plugin_key(req: PluginKeyIn) -> dict:
     """
     from app.data_providers import custom as custom_sources
 
-    name = req.plugin.strip().lower()
+    name = _checked_plugin_name(req.plugin.strip())
     key = req.api_key.strip()
     if not key:
         return {"ok": False, "error": "key empty"}
@@ -438,6 +444,7 @@ def clear_plugin_key(name: str) -> dict:
     """清除插件的界面配置 Key(secrets.json);.env 里的同名变量仍然生效。"""
     from app.data_providers import custom as custom_sources
 
+    name = _checked_plugin_name(name)
     manifest = custom_sources.plugin_manifest(name)
     if manifest is None or not custom_sources.is_builtin(name):
         raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
@@ -469,6 +476,7 @@ def install_plugin(name: str) -> dict:
     客户端需设较长超时。
     """
     from app.data_providers import custom as custom_sources
+    name = _checked_plugin_name(name)
     if not custom_sources.is_builtin(name):
         raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
     ok, message = custom_sources.install_plugin(name)
@@ -488,6 +496,7 @@ def uninstall_plugin(name: str) -> dict:
     """
     from app.data_providers import custom as custom_sources
     from app.services import preferences
+    name = _checked_plugin_name(name)
     if not custom_sources.is_builtin(name):
         raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
     ok, message = custom_sources.uninstall_plugin(name)
@@ -551,12 +560,22 @@ def update_data_source(name: str, req: CustomSourceIn) -> dict:
     return _write_data_source(req, existing[0])
 
 
+def _checked_plugin_name(raw: str) -> str:
+    """Lowercased plugin name; rejected before it reaches the plugin loader."""
+    from app.data_providers.custom.loader import _NAME_RE
+
+    name = raw.lower()
+    if not _NAME_RE.fullmatch(name):
+        raise HTTPException(status_code=400, detail=f"插件名稱「{raw}」只能使用小寫字母、數字與底線")
+    return name
+
+
 def _checked_source_name(raw: str | None) -> str:
     """Lowercased source name; rejected before any path is built from it."""
     from app.data_providers.custom.loader import _NAME_RE
 
     name = (raw or "").lower()
-    if not _NAME_RE.match(name):
+    if not _NAME_RE.fullmatch(name):
         raise HTTPException(status_code=400, detail=f"資料來源名稱「{raw}」只能使用小寫字母、數字與底線")
     return name
 

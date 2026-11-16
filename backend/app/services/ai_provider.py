@@ -189,6 +189,17 @@ def normalize_codex_model(model: str) -> str:
     return aliases.get(value.lower(), value)
 
 
+# Leading "-" parses as an option; a .cmd shim lets cmd.exe reinterpret & | ^ % " and spaces.
+_CODEX_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*")
+
+
+def validate_codex_model(model: str) -> str:
+    """Return *model* unchanged, or raise ValueError when it is unsafe as a Codex CLI argument."""
+    if model and not _CODEX_MODEL_RE.fullmatch(model):
+        raise ValueError("Codex 模型名稱只能使用英文字母、數字與 . _ : / -, 且須以英文字母或數字開頭")
+    return model
+
+
 def normalize_codex_reasoning_effort(effort: str | None) -> str:
     value = (effort or "").strip().lower()
     return value if value in CODEX_SUPPORTED_REASONING_EFFORTS else ""
@@ -576,6 +587,11 @@ async def _run_codex_cli(
     max_tokens: int | None,
     timeout: float,
 ) -> str:
+    model = current_ai_model().strip()
+    try:
+        validate_codex_model(model)
+    except ValueError as exc:
+        raise RuntimeError(f"{exc}; 請在設定頁修正 Codex 模型") from exc
     prompt = _codex_prompt(messages, max_tokens=max_tokens)
     run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-run-", dir=str(temp_root())))
     try:
@@ -599,7 +615,6 @@ async def _run_codex_cli(
             "--output-last-message",
             str(output_path),
         ]
-        model = current_ai_model().strip()
         if model:
             args.extend(["--model", model])
         args.extend(["--cd", str(workspace_path), "-"])

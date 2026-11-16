@@ -121,17 +121,23 @@ def list_plugins() -> list[dict]:
 
 
 def plugin_manifest(name: str) -> dict | None:
-    """读取指定插件的 plugin.yaml 清单。"""
-    plugin_dir = plugins_dir() / (name or "")
-    manifest_path = plugin_dir / "plugin.yaml"
+    """Read a plugin's plugin.yaml; None for a name outside _NAME_RE, before any path is built.
+
+    Rejecting first keeps traversal and UNC names (SMB credential leak on Windows) off the filesystem.
+    """
+    if not _NAME_RE.fullmatch(name or ""):
+        return None
+    manifest_path = plugins_dir() / name / "plugin.yaml"
     if not manifest_path.exists():
         return None
     return yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
 
 
 def plugin_dir_of(name: str) -> Path:
-    """返回插件目录路径。"""
-    return plugins_dir() / (name or "")
+    """Return the plugin directory; raises ValueError for a name outside _NAME_RE."""
+    if not _NAME_RE.fullmatch(name or ""):
+        raise ValueError(f"invalid plugin name: {name!r}")
+    return plugins_dir() / name
 
 
 def probe_plugin_key(name: str, api_key: str) -> tuple[bool, str]:
@@ -340,7 +346,7 @@ def validate_config(config: dict) -> list[str]:
 
 def failed_config_dict(name: str) -> dict | None:
     """The on-disk config of a source that failed to load, with its errors under load_error."""
-    if is_builtin(name) or not _NAME_RE.match(name or ""):
+    if is_builtin(name) or not _NAME_RE.fullmatch(name or ""):
         return None
     failures = [item for item in _LOAD_ERRORS if Path(item["path"]).stem == name]
     if not failures:
@@ -412,7 +418,7 @@ def save_config(name: str, config: dict) -> Path:
     """把一份配置 dict 写成 data/data_sources/{name}.yaml, 返回写入路径。"""
     if is_builtin(name):
         raise ValueError(f"'{name}' 是内置插件, 不可编辑")
-    if not _NAME_RE.match(name or ""):
+    if not _NAME_RE.fullmatch(name or ""):
         raise ValueError(f"invalid data source name: {name!r} (only lowercase a-z 0-9 _ allowed)")
     base = data_sources_dir()
     base.mkdir(parents=True, exist_ok=True)
@@ -428,7 +434,7 @@ def delete_config(name: str) -> bool:
     """删除 data/data_sources/{name}.yaml。返回是否真的删除了。"""
     if is_builtin(name):
         raise ValueError(f"'{name}' 是内置插件, 不可删除")
-    if not _NAME_RE.match(name or ""):
+    if not _NAME_RE.fullmatch(name or ""):
         raise ValueError(f"invalid data source name: {name!r}")
     base = data_sources_dir().resolve()
     path = (base / f"{name}.yaml").resolve()
@@ -592,7 +598,7 @@ def _load_builtin_plugins(providers: dict | None = None) -> None:
 def _register_one_plugin(manifest: dict, providers: dict) -> None:
     """注册单个插件: 委托自检 → 可用则动态 import entry 注册进 *providers*。"""
     name = manifest.get("name")
-    if not name or not _NAME_RE.match(name):
+    if not name or not _NAME_RE.fullmatch(name):
         logger.warning("插件清单缺少合法 name: %r", name)
         return
     # hidden: 已加载但对 UI 隐藏 (功能未完成/暂不开放), 不注册不展示
