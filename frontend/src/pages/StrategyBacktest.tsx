@@ -576,9 +576,9 @@ export function StrategyBacktest() {
             </div>
 
             <div className="grid grid-cols-2 gap-2">
-              <label className="block text-[11px] text-secondary">初始資金<input aria-label="初始資金" type="number" min="1" step="10000" value={initialCapital} onChange={event => setInitialCapital(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} /></label>
+              <label className="block text-[11px] text-secondary">初始資金<input aria-label="初始資金" type="number" min="1" step="1" value={initialCapital} onChange={event => setInitialCapital(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} /></label>
               <label className="block text-[11px] text-secondary">最大持倉數<input aria-label="最大持倉數" type="number" min="1" step="1" value={maxPositions} onChange={event => setMaxPositions(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} /></label>
-              <label className="block text-[11px] text-secondary">佣金折扣<input aria-label="佣金折扣" type="number" min="0" max="1" step="0.05" value={commissionDiscount} onChange={event => setCommissionDiscount(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} /></label>
+              <label className="block text-[11px] text-secondary">佣金折扣<input aria-label="佣金折扣" type="number" min="0" max="1" step="0.01" value={commissionDiscount} onChange={event => setCommissionDiscount(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} /></label>
               <label className="block text-[11px] text-secondary">最低手續費<input aria-label="最低手續費" type="number" min="0" step="1" value={minimumCommission} onChange={event => setMinimumCommission(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} /></label>
             </div>
             {positionBudget != null && (

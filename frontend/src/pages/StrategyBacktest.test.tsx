@@ -142,6 +142,22 @@ afterEach(() => {
 })
 
 describe('策略回測工作區', () => {
+  it('預設參數與常見的初始資金、佣金折扣都通過瀏覽器的欄位檢查', async () => {
+    mockStrategies()
+    renderPage('/backtest?strategy_id=momentum&symbol=2330.TWSE')
+    await waitUntilReady()
+    const form = screen.getByRole('button', { name: '執行回測' }).closest('form')!
+
+    expect(screen.getByLabelText('初始資金')).toBeValid()
+    expect(form.checkValidity()).toBe(true)
+
+    fireEvent.change(screen.getByLabelText('初始資金'), { target: { value: '1234567' } })
+    fireEvent.change(screen.getByLabelText('佣金折扣'), { target: { value: '0.28' } })
+    expect(screen.getByLabelText('初始資金')).toBeValid()
+    expect(screen.getByLabelText('佣金折扣')).toBeValid()
+    expect(form.checkValidity()).toBe(true)
+  })
+
   it('從 URL 預填策略、標的與資產類型', async () => {
     mockStrategies()
     renderPage('/backtest?strategy_id=momentum&symbol=0050.TWSE&asset_type=etf')
