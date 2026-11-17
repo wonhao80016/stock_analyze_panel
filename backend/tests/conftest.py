@@ -297,8 +297,10 @@ def _scheduled_runs_skip_the_monthly_revenue_archive(monkeypatch):
 
 
 class _OfflineSessionBases:
-    def __init__(self, *args, **kwargs) -> None:
-        pass
+    def __init__(self, *args, store=None, **kwargs) -> None:
+        from app.taiwan.session_bases import TaiwanSessionBaseStore
+
+        self.store = store or TaiwanSessionBaseStore()
 
     def refresh(self, since, until, *args, **kwargs) -> dict:
         return {"requests": 0, "written": 0, "skipped": 0, "failed": [], "stopped_at": None}

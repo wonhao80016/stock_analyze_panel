@@ -105,13 +105,27 @@
 - 台股的復權因子來自公司行動表（`app/taiwan/corporate_actions.py`），經 `adjustment_factors`
   或 provider 的 `get_adj_factors` 取得，含現金股利；成交量只在分割、面額變更、減資這類股數型
   事件隨因子調整，除權息不調整。
+- 官方表漏列的公司行動由官方基準推得（`infer_actions`，`kind=inferred`、`source=inferred:session_base`、
+  `status=derived`）：有成交交易日的官方基準（見下一條）與前一個有一般盤收盤日的收盤、前一交易日最後揭示
+  買價與賣價、該收盤日以來最近一次的官方基準（沿用基準）都相差超過 `MIN_BASE_DEPARTURE`（0.5%），且前一
+  有成交日之後到當日沒有官方事件時，記為當日事件；`pre_close` 是前收，`ref_price`、漲跌停價取官方值，
+  `ex_factor = pre_close / ref_price`。代號的第一根 K 線、缺任一官方漲跌停價（無漲跌幅限制、新上市無漲跌幅
+  期間）不推得。推得事件在 `_KIND_PRIORITY` 排最後，同日有官方事件時一律用官方，日後補到同日官方事件也只計
+  一個因子。因子與成交量按 `presumed_kind`：小於 1 視為減資、大於 `SPLIT_FACTOR`（1.5）視為面額變更（取官方
+  換股比），兩者調整成交量，其餘視為除息不調整；盤中的報價推斷用同一函式。每日發佈在抓完官方基準之後、
+  發佈之前對發佈窗口推得並寫入，失敗只記 note；寫入改變因子集合，該次發佈會全量重寫。歷史用
+  `python -m app.taiwan.corporate_actions --infer --since 2024-01-02`，先加 `--dry-run` 只列不寫。已知限制：
+  官方事件日期落在推得事件之前的無成交日（例如停牌期間），又在推得之後才入庫時，兩者都會計入因子。
 - 台股 enriched 的 `ref_prev_close`、`ref_limit_up`、`ref_limit_down` 是事件交易日，或前一交易日一般盤
   無收盤時的官方參考價與漲跌停價（原始價尺度，其餘交易日為空值）；後者上市取 TWT84U 當日值，上櫃取前一
   交易日 dailyQuotes 的次日值（`app/taiwan/session_bases.py`）。當日漲跌幅的分母是
   `ref_prev_close * close / raw_close`，其餘交易日為前一日收盤。前一交易日無收盤而官方資料缺漏時，
   `ref_base_missing` 為真，`change_pct` 與漲跌停訊號為 null，不得退回更早的收盤價或補成 False。
   事件日期落在無成交日、參考價順延到下一個有成交日時，有官方基準就用官方基準，沒有才沿用事件參考價；
-  事件日期就是當日的，仍以事件參考價優先。
+  事件日期就是當日的，仍以事件參考價優先。上櫃股不在前一交易日已存的 dailyQuotes 中（停牌後恢復交易）時，
+  當日基準改取當日 dailyQuotes 的收盤減漲跌（`prev_change`），漲跌停價由基準按法定幅度計算；漲跌欄不是
+  單純的帶號數字時仍為缺值。2026-11 以前存的檔案沒有漲跌欄，要用
+  `python -m app.taiwan.session_bases --since 2024-01-01 --resumptions` 重抓需要的日期（`--dry-run` 只列日期）。
 - 盤中列（`app/taiwan/live_enriched.py`）用同一口徑：前一交易日有存檔列但無一般盤收盤時，報價昨收（MIS `y`，
   即官方基準）不當成公司行動，當日基準依序取已存的上櫃 dailyQuotes 次日參考價（含漲跌停價）、報價昨收
   （漲跌停按法定幅度由基準計算）；兩者皆無時 `ref_base_missing` 為真。上市的 TWT84U 當日表要等該日 K 線

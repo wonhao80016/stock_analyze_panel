@@ -401,6 +401,27 @@ def _refresh_session_bases(
     return note
 
 
+def _infer_corporate_actions(
+    window: tuple[date, date] | None,
+    service: TaiwanCorporateActionRefreshService | None,
+    session_bases: TaiwanSessionBaseRefreshService | None,
+    daily_store: TaiwanDailyStore | None,
+) -> str | None:
+    """Store the events the session bases of the window imply and no table lists; returns a failure note."""
+    if window is None:
+        return None
+    try:
+        (service or TaiwanCorporateActionRefreshService()).infer_range(
+            *window,
+            daily_store=daily_store,
+            session_bases=session_bases.store if session_bases is not None else None,
+        )
+    except Exception as e:
+        logger.exception("Corporate action inference failed: %s", e)
+        return f"Corporate actions not inferred from the session bases: {e}"
+    return None
+
+
 def publish_enriched(
     daily_store: TaiwanDailyStore | None = None,
     *,
@@ -412,15 +433,15 @@ def publish_enriched(
 ) -> bool:
     """Refresh issued shares, save them as the newest stored session's turnover denominators,
     refresh corporate-action reference prices and the official session bases of the recent
-    window, then republish the enriched table.
+    window, store the events those bases imply and no table lists, then republish the enriched table.
 
     Returns whether a publish ran. With only_if_behind it runs only when a recent
     day's enriched partition is missing or older than its bars, the last full
     publication never committed, or the table was published under other indicator
     definitions. A *since* before the recent window extends the republish back
     to that day, for bars written into older days, but fetches no older session bases.
-    A failed reference-price or session-base fetch never stops the publish, and a
-    failed publish never raises; both are logged and, when *notes* is given, appended to it.
+    A failed reference-price or session-base fetch or event inference never stops the publish,
+    and a failed publish never raises; all are logged and, when *notes* is given, appended to it.
     """
     from app.taiwan.enriched_refresh import TaiwanEnrichedRefreshService
     from app.taiwan.share_capital_store import TaiwanShareCapitalStore
@@ -451,6 +472,7 @@ def publish_enriched(
     for note in (
         _refresh_corporate_actions(window, corporate_actions),
         _refresh_session_bases(window, session_bases, daily_store),
+        _infer_corporate_actions(window, corporate_actions, session_bases, daily_store),
     ):
         if note and notes is not None:
             notes.append(note)

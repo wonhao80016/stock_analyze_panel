@@ -12,22 +12,26 @@ the source date, are kept.
 
 TWT84U(D) holds the bases of session D itself; dailyQuotes(D) holds those of the first session
 after D. official_session_bases aligns dailyQuotes on the daily store's sessions, so a day the
-market closed unexpectedly is passed over. prev_close, last_bid and last_ask belong to the session
-before the one the bases apply to.
+market closed unexpectedly is passed over. prev_close, last_bid, last_ask and prev_change belong to
+the session before the one the bases apply to; prev_change, the official change against that
+session's base, comes from dailyQuotes only and is null where its cell is no plain signed number.
+Files stored before prev_change existed read it as null.
 
 A dailyQuotes file written before daily_final_cutoff() on its own day is provisional (as in
 is_provisional_mtime) and the next refresh fetches it again.
 
 Backfill CLI: python -m app.taiwan.session_bases --since 2024-01-01 --source all --delay 3
+Resumption refetch CLI: python -m app.taiwan.session_bases --since 2024-01-01 --resumptions [--dry-run]
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import unicodedata
 from bisect import bisect_left
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, ClassVar
@@ -58,6 +62,8 @@ NO_LIMIT_DOWN = 0.01
 BASE_COLUMNS = ("ref_price", "limit_up", "limit_down")
 RETRIEVED_AT_TYPE = pl.Datetime("us", "Asia/Taipei")
 
+_SIGNED_NUMBER = re.compile(r"[+-]?\d+(?:\.\d+)?")
+
 
 def session_base_schema() -> dict[str, pl.DataType]:
     return {
@@ -69,18 +75,22 @@ def session_base_schema() -> dict[str, pl.DataType]:
         "prev_close": pl.Float64,
         "last_bid": pl.Float64,
         "last_ask": pl.Float64,
+        "prev_change": pl.Float64,
         "source": pl.String,
         "source_url": pl.String,
         "retrieved_at": RETRIEVED_AT_TYPE,
     }
 
 
-def _bases_schema() -> dict[str, pl.DataType]:
-    return {"symbol": pl.String, "trade_date": pl.Date, **{c: pl.Float64 for c in BASE_COLUMNS}}
+def _bases_schema(columns: Sequence[str] = BASE_COLUMNS) -> dict[str, pl.DataType]:
+    return {"symbol": pl.String, "trade_date": pl.Date, **{c: pl.Float64 for c in columns}}
 
 
 def _conform(df: pl.DataFrame) -> pl.DataFrame:
-    return df.select([pl.col(name).cast(dtype) for name, dtype in session_base_schema().items()])
+    return df.select([
+        pl.col(name).cast(dtype) if name in df.columns else pl.lit(None, dtype=dtype).alias(name)
+        for name, dtype in session_base_schema().items()
+    ])
 
 
 def _compact(raw: Any) -> str:
@@ -99,6 +109,12 @@ def _price(raw: Any, column: str, source: str) -> float | None:
     if value < 0:
         raise ValueError(f"{source} {column} is negative: {raw!r}")
     return value if value > 0 else None
+
+
+def _change(raw: Any) -> float | None:
+    """An official signed change; a cell holding anything but a plain signed number is None."""
+    text = _compact(raw).replace(",", "")
+    return float(text) if _SIGNED_NUMBER.fullmatch(text) else None
 
 
 def _unique_index(names: list[str], title: str, positions: Iterable[int], source: str) -> int:
@@ -154,7 +170,10 @@ class TaiwanSessionBaseStore:
         paths = [path for path in (self.path(source, d) for d in sorted(set(dates))) if path.exists()]
 
         def scan(sources: list[Path]) -> pl.DataFrame:
-            lf = pl.scan_parquet(sources)
+            if len(sources) > 1:
+                lf = pl.scan_parquet(sources, schema=session_base_schema(), missing_columns="insert")
+            else:
+                lf = pl.scan_parquet(sources)
             if wanted is not None:
                 lf = lf.filter(pl.col("symbol").is_in(wanted))
             return _conform(lf.collect())
@@ -254,7 +273,11 @@ class _SessionBaseAdapter:
                 raise ValueError(f"{self.SOURCE} row without a security code: {row!r}")
             records.append({
                 "code": code,
-                **{key: _price(row[i], key, self.SOURCE) for key, i in index.items() if key != "code"},
+                **{
+                    key: _change(row[i]) if key == "prev_change" else _price(row[i], key, self.SOURCE)
+                    for key, i in index.items()
+                    if key != "code"
+                },
             })
         return records
 
@@ -325,6 +348,7 @@ class TpexSessionBaseAdapter(_SessionBaseAdapter):
         "limit_up": "次日漲停價",
         "limit_down": "次日跌停價",
     }
+    CHANGE_COLUMN = "漲跌"
 
     def build_url(self, source_date: date) -> str:
         roc = f"{source_date.year - 1911}/{source_date.month:02d}/{source_date.day:02d}"
@@ -348,6 +372,8 @@ class TpexSessionBaseAdapter(_SessionBaseAdapter):
             if not isinstance(rows, list) or isinstance(total, bool) or not isinstance(total, int) or total != len(rows):
                 raise ValueError(f"{self.SOURCE} table {table.get('title')!r} disagrees with its totalCount {total!r}")
             index = {k: _unique_index(names, t, range(len(names)), self.SOURCE) for k, t in self.COLUMNS.items()}
+            if self.CHANGE_COLUMN in names:
+                index["prev_change"] = _unique_index(names, self.CHANGE_COLUMN, range(len(names)), self.SOURCE)
             records.extend(self._parse_rows(rows, fields, index))
         if not quote_tables:
             raise ValueError(f"{self.SOURCE} response has no table with the next-session reference columns")
@@ -379,9 +405,11 @@ def official_session_bases(
 
     A .TWSE symbol takes TWT84U(trade_date). A .TPEX symbol takes dailyQuotes of the session
     before trade_date in *sessions*, so a trade_date outside *sessions* or first among them gets
-    nulls. *sessions* defaults to TaiwanDailyStore().available_dates(). A pair without an official
-    figure stays null. Columns: symbol, trade_date, ref_price, limit_up, limit_down; one row per
-    pair, sorted by symbol and trade_date.
+    nulls. One that stored dailyQuotes leaves out, as after a halt, gets the close less the
+    prev_change of dailyQuotes(trade_date) as ref_price and null limits. *sessions* defaults to
+    TaiwanDailyStore().available_dates(). A pair without an official figure stays null. Columns:
+    symbol, trade_date, ref_price, limit_up, limit_down; one row per pair, sorted by symbol and
+    trade_date.
     """
     wanted_symbols = sorted(set(symbols))
     wanted_dates = sorted(set(trade_dates))
@@ -398,17 +426,21 @@ def official_bases_of(
     *,
     store: TaiwanSessionBaseStore | None = None,
     sessions: Iterable[date] | None = None,
+    columns: Sequence[str] = BASE_COLUMNS,
 ) -> pl.DataFrame:
-    """official_session_bases of the distinct (symbol, trade_date) rows of *pairs* only."""
+    """official_session_bases of the distinct (symbol, trade_date) rows of *pairs* only.
+
+    *columns* may add prev_close, last_bid and last_ask, the figures of the session before trade_date.
+    """
     store = store or TaiwanSessionBaseStore()
     pairs = pairs.select(pl.col("symbol").cast(pl.String), pl.col("trade_date").cast(pl.Date)).unique()
     if pairs.is_empty():
-        return pl.DataFrame(schema=_bases_schema())
+        return pl.DataFrame(schema=_bases_schema(columns))
     found: list[pl.DataFrame] = []
     twse = pairs.filter(pl.col("symbol").str.ends_with(".TWSE"))
     if not twse.is_empty():
         rows = store.read(TWSE, twse["trade_date"].unique().to_list(), twse["symbol"].unique().to_list())
-        found.append(rows.select("symbol", pl.col("source_date").alias("trade_date"), *BASE_COLUMNS))
+        found.append(rows.select("symbol", pl.col("source_date").alias("trade_date"), *columns))
     tpex = pairs.filter(pl.col("symbol").str.ends_with(".TPEX"))
     if not tpex.is_empty():
         calendar = sorted(set(sessions if sessions is not None else TaiwanDailyStore().available_dates()))
@@ -419,12 +451,43 @@ def official_bases_of(
                 schema={"trade_date": pl.Date, "source_date": pl.Date},
             )
             rows = store.read(TPEX, source_for.values(), tpex["symbol"].unique().to_list())
-            found.append(rows.join(aligned, on="source_date").select("symbol", "trade_date", *BASE_COLUMNS))
+            listed = rows.join(aligned, on="source_date").select("symbol", "trade_date", *columns)
+            stored = [d for d in set(source_for.values()) if store.path(TPEX, d).exists()]
+            left_out = (
+                tpex.join(aligned.filter(pl.col("source_date").is_in(stored)), on="trade_date")
+                .join(listed, on=["symbol", "trade_date"], how="anti")
+                .select("symbol", "trade_date")
+            )
+            found.append(listed)
+            if not left_out.is_empty():
+                found.append(_resumption_bases(store, left_out, columns))
     if not found:
-        return pairs.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in BASE_COLUMNS]).sort(
+        return pairs.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in columns]).sort(
             ["symbol", "trade_date"]
         )
     return pairs.join(pl.concat(found), on=["symbol", "trade_date"], how="left").sort(["symbol", "trade_date"])
+
+
+def _resumption_bases(store: TaiwanSessionBaseStore, pairs: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:
+    """Bases of TPEx *pairs* from dailyQuotes of their own trade_date: the close less the official change.
+
+    The change is taken against the session's base, so the difference is that base. The limits and
+    the figures of the session before stay null.
+    """
+    own = store.read(TPEX, pairs["trade_date"].unique().to_list(), pairs["symbol"].unique().to_list())
+    base = (pl.col("prev_close") - pl.col("prev_change")).round(2)
+    return (
+        own.rename({"source_date": "trade_date"})
+        .join(pairs, on=["symbol", "trade_date"], how="semi")
+        .select(
+            "symbol",
+            "trade_date",
+            *[
+                (pl.when(base > 0).then(base) if c == "ref_price" else pl.lit(None, dtype=pl.Float64)).alias(c)
+                for c in columns
+            ],
+        )
+    )
 
 
 class ListedCodes:
@@ -477,14 +540,59 @@ class TaiwanSessionBaseRefreshService:
         self._codes = codes or ListedCodes(self._daily_store)
         self._sleep = sleep
 
+    @property
+    def store(self) -> TaiwanSessionBaseStore:
+        return self._store
+
+    def resumption_dates(self, since: date, until: date) -> list[date]:
+        """Stored sessions in [since, until] whose own dailyQuotes a TPEx resumption base still needs.
+
+        On such a session a .TPEX symbol traded again that the stored dailyQuotes of the session
+        before leaves out, and its own stored dailyQuotes lists it without a prev_change. A first
+        bar does not count: no consumer takes a base for it.
+        """
+        sessions = self._daily_store.available_dates()
+        previous = {
+            d: p
+            for d, p in _previous_sessions(sessions, [d for d in sessions if since <= d <= until]).items()
+            if self._store.path(TPEX, p).exists() and self._store.path(TPEX, d).exists()
+        }
+        if not previous:
+            return []
+        aligned = pl.DataFrame(
+            {"trade_date": list(previous), "_prior": list(previous.values())},
+            schema={"trade_date": pl.Date, "_prior": pl.Date},
+        )
+        traded = (
+            self._daily_store.scan_range(None, None, max(previous))
+            .filter(
+                pl.col("symbol").str.ends_with(".TPEX")
+                & (pl.col("close") > 0)
+                & ~((pl.col("open") == 0) & (pl.col("high") == 0)).fill_null(False)
+            )
+            .sort(["symbol", "date"])
+            .filter(pl.col("date").shift(1).over("symbol").is_not_null())
+            .select("symbol", pl.col("date").alias("trade_date"))
+        )
+        prior = self._store.read(TPEX, previous.values()).select("symbol", pl.col("source_date").alias("_prior"))
+        own = self._store.read(TPEX, previous).select("symbol", pl.col("source_date").alias("trade_date"), "prev_change")
+        needed = (
+            traded.join(aligned, on="trade_date")
+            .join(prior, on=["symbol", "_prior"], how="anti")
+            .join(own, on=["symbol", "trade_date"])
+            .filter(pl.col("prev_change").is_null())
+        )
+        return sorted(needed["trade_date"].unique().to_list())
+
     def refresh(
         self,
         since: date,
         until: date,
         sources: Sequence[str] = SOURCES,
         delay: float = DEFAULT_DELAY_SEC,
+        force: Collection[date] = (),
     ) -> dict[str, Any]:
-        """Fetch every stored session in [since, until] whose file is missing or provisional, *delay* apart.
+        """Fetch every stored session in [since, until] whose file is missing, provisional or in *force*, *delay* apart.
 
         A throttled request, or MAX_CONSECUTIVE_FAILURES failures in a row from one source, stops
         the run; stopped_at names that request and not_attempted counts the requests after it.
@@ -511,7 +619,7 @@ class TaiwanSessionBaseRefreshService:
         }
         consecutive = dict.fromkeys((a.STORE_KEY for a in adapters), 0)
         for position, (d, adapter) in enumerate(planned):
-            if self._store.is_final(adapter.STORE_KEY, d):
+            if d not in force and self._store.is_final(adapter.STORE_KEY, d):
                 stats["skipped"] += 1
                 continue
             if stats["requests"]:
@@ -559,15 +667,31 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--until", help="Last source date YYYY-MM-DD (defaults to today)")
     parser.add_argument("--source", choices=(*SOURCES, "all"), default="all")
     parser.add_argument("--delay", type=float, default=DEFAULT_DELAY_SEC, help="Seconds between requests")
+    parser.add_argument(
+        "--resumptions", action="store_true", help="Also refetch the TPEx files resumption bases need (resumption_dates)"
+    )
+    parser.add_argument("--dry-run", action="store_true", help="With --resumptions, list those dates without fetching")
     args = parser.parse_args(argv)
     if args.delay < 0:
         parser.error("--delay must not be negative")
+    if args.dry_run and not args.resumptions:
+        parser.error("--dry-run needs --resumptions")
+    if args.resumptions and args.source == TWSE:
+        parser.error("--resumptions refetches TPEx files only")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     since = date.fromisoformat(args.since)
     until = date.fromisoformat(args.until) if args.until else _taipei_today()
-    sources = SOURCES if args.source == "all" else (args.source,)
-    stats = TaiwanSessionBaseRefreshService().refresh(since, until, sources=sources, delay=args.delay)
+    service = TaiwanSessionBaseRefreshService()
+    if args.resumptions:
+        dates = service.resumption_dates(since, until)
+        if args.dry_run:
+            print(json.dumps({"requests": len(dates), "dates": [str(d) for d in dates]}, indent=2))
+            return
+        stats = service.refresh(since, until, sources=(TPEX,), delay=args.delay, force=dates)
+    else:
+        sources = SOURCES if args.source == "all" else (args.source,)
+        stats = service.refresh(since, until, sources=sources, delay=args.delay)
     print(json.dumps(stats, indent=2, ensure_ascii=False))
     if stats["failed"] or stats["stopped_at"]:
         raise SystemExit(1)
