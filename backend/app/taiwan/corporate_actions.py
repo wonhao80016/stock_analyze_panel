@@ -18,7 +18,12 @@ Consumers take the reference price of the session that follows an event: a bar
 whose previous bar is dated before the event and whose own date is on or after it.
 An event on a day the symbol did not trade therefore sets the base of its next session.
 
+Events the tables leave out are inferred from the official session bases (infer_actions):
+kind INFERRED, source INFERRED_SOURCE, status INFERRED_STATUS. Any official event of the
+same session outranks one, and its factor follows presumed_kind like the intraday stand-ins.
+
 Backfill CLI: python -m app.taiwan.corporate_actions --since 2024-01-01
+Inference CLI: python -m app.taiwan.corporate_actions --infer --since 2024-01-02 [--dry-run]
 """
 from __future__ import annotations
 
@@ -29,7 +34,7 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -40,6 +45,7 @@ from app.taiwan import institutional_margin_refresh
 from app.taiwan.enrichment.corporate_actions import (
     ETF_SPLIT,
     EXDIV,
+    INFERRED,
     PAR_CHANGE,
     REDUCTION,
     CorporateAction,
@@ -63,15 +69,23 @@ VALUE_COLUMNS = ("pre_close", "ref_price", "limit_up", "limit_down", "open_ref",
 # so the resumption price already carries the dividend. TPEx states no such rule; the
 # same order is assumed there. The reduction tables' ex-rights reference column is not
 # read: TWTAUU's formula uses it only for a loss-offset reduction paired with a cash
-# capital increase, and it is blank in every 2024-2026 row.
-_KIND_PRIORITY = {REDUCTION: 0, PAR_CHANGE: 1, ETF_SPLIT: 2, EXDIV: 3}
+# capital increase, and it is blank in every 2024-2026 row. An inferred event ranks last,
+# so it applies only to a session no table lists an event for.
+_KIND_PRIORITY = {REDUCTION: 0, PAR_CHANGE: 1, ETF_SPLIT: 2, EXDIV: 3, INFERRED: 4}
 
 # Kinds that change the share count, so volume before them is restated in new shares.
 SHARE_COUNT_KINDS = frozenset({ETF_SPLIT, PAR_CHANGE, REDUCTION})
+# Above this pre_close / reference an event of unknown kind is taken for a split rather than a dividend.
+SPLIT_FACTOR = 1.5
 # TWTB8U and TWTCAU publish pre_close / ratio rounded to 0.01 but not the ratio itself.
 _RATIO_KINDS = frozenset({ETF_SPLIT, PAR_CHANGE})
 _REF_PRICE_STEP = 0.01
 _RATIO_MAX_DENOMINATOR = 20
+
+INFERRED_SOURCE = "inferred:session_base"
+INFERRED_STATUS = "derived"
+# Without an event the official base is the previous close, a last quote or the carried base.
+MIN_BASE_DEPARTURE = 0.005
 
 FACTOR_SCHEMA: dict[str, pl.DataType] = {
     "symbol": pl.String,
@@ -368,6 +382,15 @@ def official_ratio(pre_close: float, ref_price: float) -> float:
     return pre_close / ref_price
 
 
+def presumed_kind(factor: float) -> str:
+    """The kind an event of unknown kind is taken for, from its pre_close / ref_price.
+
+    Below 1 a capital reduction and above SPLIT_FACTOR a par-value change, both restating
+    volume; anything else a dividend.
+    """
+    return REDUCTION if factor < 1.0 else PAR_CHANGE if factor > SPLIT_FACTOR else EXDIV
+
+
 def adjustment_factors(events: pl.DataFrame, through: date) -> pl.DataFrame:
     """Forward-adjustment factors, one per symbol and event session, in pipeline._apply_adj_factor form.
 
@@ -376,7 +399,7 @@ def adjustment_factors(events: pl.DataFrame, through: date) -> pl.DataFrame:
     changes, pre_close / ref_price for dividends and reductions. volume_factor multiplies
     every earlier volume: ex_factor for share-count kinds, 1 for dividends. For a reduction
     that also returns cash the price factor carries the refund, so the restated volume is
-    approximate.
+    approximate. An INFERRED event counts as its presumed_kind.
     """
     if events.is_empty():
         return pl.DataFrame(schema=FACTOR_SCHEMA)
@@ -395,12 +418,13 @@ def adjustment_factors(events: pl.DataFrame, through: date) -> pl.DataFrame:
     rows = []
     for row in picked.iter_rows(named=True):
         pre, ref = row["pre_close"], row["ref_price"]
-        factor = official_ratio(pre, ref) if row["kind"] in _RATIO_KINDS else pre / ref
+        kind = presumed_kind(pre / ref) if row["kind"] == INFERRED else row["kind"]
+        factor = official_ratio(pre, ref) if kind in _RATIO_KINDS else pre / ref
         rows.append({
             "symbol": row["symbol"],
             "trade_date": row["date"],
             "ex_factor": factor,
-            "volume_factor": factor if row["kind"] in SHARE_COUNT_KINDS else 1.0,
+            "volume_factor": factor if kind in SHARE_COUNT_KINDS else 1.0,
         })
     return pl.DataFrame(rows, schema=FACTOR_SCHEMA).sort(["symbol", "trade_date"])
 
@@ -468,6 +492,130 @@ def pending_factors(
             _pending_factor_cache.clear()
         _pending_factor_cache[key] = result
     return result
+
+
+def _inference_targets(daily: pl.DataFrame, start: date, end: date) -> pl.DataFrame:
+    """Traded bars dated in [start, end] after an earlier traded bar, with its _prev_date and _prev_close."""
+    from app.indicators.pipeline import filter_halt_days
+
+    return (
+        filter_halt_days(daily)
+        .filter(pl.col("close") > 0)
+        .select("symbol", "date", "close")
+        .sort(["symbol", "date"])
+        .with_columns(
+            pl.col("date").shift(1).over("symbol").alias("_prev_date"),
+            pl.col("close").shift(1).over("symbol").alias("_prev_close"),
+        )
+        .filter(pl.col("_prev_date").is_not_null() & pl.col("date").is_between(start, end))
+        .drop("close")
+    )
+
+
+def inference_lookups(daily: pl.DataFrame, sessions: Iterable[date], start: date, end: date) -> pl.DataFrame:
+    """The (symbol, trade_date) pairs whose official bases infer_actions needs.
+
+    Each traded session of *daily* in [start, end] after an earlier traded one, and every session
+    of *sessions* from that earlier one on, where the carried base is looked for.
+    """
+    calendar = sorted(set(sessions))
+    index = pl.DataFrame(
+        {"trade_date": calendar, "_i": list(range(len(calendar)))}, schema={"trade_date": pl.Date, "_i": pl.Int64}
+    )
+    return (
+        _inference_targets(daily, start, end)
+        .join(index.rename({"trade_date": "_prev_date", "_i": "_from"}), on="_prev_date")
+        .join(index.rename({"trade_date": "date", "_i": "_to"}), on="date")
+        .select("symbol", pl.int_ranges("_from", pl.col("_to") + 1).alias("_i"))
+        .explode("_i")
+        .join(index, on="_i")
+        .select("symbol", "trade_date")
+        .unique()
+        .sort(["symbol", "trade_date"])
+    )
+
+
+def infer_actions(
+    daily: pl.DataFrame,
+    bases: pl.DataFrame,
+    events: pl.DataFrame,
+    start: date,
+    end: date,
+    *,
+    retrieved_at: datetime | None = None,
+) -> pl.DataFrame:
+    """Events no table lists, inferred for the traded sessions of the raw bars *daily* in [start, end].
+
+    *bases* holds official_bases_of rows with last_bid and last_ask for the inference_lookups
+    pairs. A session is inferred when its official base departs by more than MIN_BASE_DEPARTURE
+    from each of the previous traded close, the last bid and ask of the session before it and the
+    latest base since that close, and no event other than an inferred one falls after the previous
+    traded session and on or before it. A symbol's first bar and a session without both official
+    limits (no-limit securities, the initial-listing window) are never inferred. Returns
+    corporate_action_schema rows of kind INFERRED: pre_close is the previous traded close, ref_price
+    and open_ref the official base, limit_up and limit_down the official limits.
+    """
+    targets = _inference_targets(daily, start, end)
+    if targets.is_empty() or bases.is_empty():
+        return pl.DataFrame(schema=corporate_action_schema())
+    carried = (
+        bases.filter(pl.col("ref_price").is_not_null())
+        .select("symbol", pl.col("trade_date").alias("_base_date"), pl.col("ref_price").alias("_carried"))
+        .sort(["symbol", "_base_date"])
+    )
+    listed = (
+        events.filter(pl.col("kind") != INFERRED)
+        .select("symbol", pl.col("date").alias("_event_date"))
+        .unique()
+        .sort(["symbol", "_event_date"])
+    )
+    official = bases.select(
+        "symbol", pl.col("trade_date").alias("date"), "ref_price", "limit_up", "limit_down", "last_bid", "last_ask"
+    )
+
+    def departure(reference: str) -> pl.Expr:
+        return (pl.col("ref_price") / pl.col(reference) - 1).abs()
+
+    found = (
+        targets.join(official, on=["symbol", "date"])
+        .filter(pl.all_horizontal([pl.col(c).is_not_null() for c in ("ref_price", "limit_up", "limit_down")]))
+        .sort(["symbol", "date"])
+        .join_asof(
+            carried, left_on="date", right_on="_base_date", by="symbol",
+            strategy="backward", allow_exact_matches=False, check_sortedness=False,
+        )
+        .join_asof(
+            listed, left_on="date", right_on="_event_date", by="symbol",
+            strategy="backward", check_sortedness=False,
+        )
+        .filter(
+            pl.min_horizontal(
+                departure("_prev_close"),
+                departure("last_bid"),
+                departure("last_ask"),
+                pl.when(pl.col("_base_date") >= pl.col("_prev_date")).then(departure("_carried")),
+            ) > MIN_BASE_DEPARTURE,
+            ~(pl.col("_event_date") > pl.col("_prev_date")).fill_null(False),
+        )
+    )
+    return _conform(found.select(
+        "symbol",
+        "date",
+        pl.lit(INFERRED).alias("kind"),
+        pl.col("_prev_close").alias("pre_close"),
+        "ref_price",
+        "limit_up",
+        "limit_down",
+        pl.col("ref_price").alias("open_ref"),
+        (pl.col("_prev_close") / pl.col("ref_price")).alias("ex_factor"),
+        pl.lit(None, dtype=pl.String).alias("official_label"),
+        pl.col("symbol").str.extract(r"\.(TWSE|TPEX)$", 1).str.to_lowercase().alias("provider"),
+        pl.lit(INFERRED_SOURCE).alias("source"),
+        pl.lit(None, dtype=pl.String).alias("source_url"),
+        pl.lit(retrieved_at or datetime.now(TAIPEI)).cast(RETRIEVED_AT_TYPE).alias("retrieved_at"),
+        pl.col("date").alias("trade_date"),
+        pl.lit(INFERRED_STATUS).alias("status"),
+    ))
 
 
 def year_segments(start: date, end: date) -> list[tuple[date, date]]:
@@ -556,6 +704,63 @@ class TaiwanCorporateActionRefreshService:
         """LOOKBACK_DAYS before the first session a publish rewrites, through its target session."""
         return self.refresh_range(first_published - timedelta(days=LOOKBACK_DAYS), target, skip_covered=True)
 
+    def infer_range(
+        self,
+        start: date,
+        end: date,
+        *,
+        daily_store: Any = None,
+        session_bases: Any = None,
+        write: bool = True,
+    ) -> dict[str, Any]:
+        """Infer the events of the sessions in [start, end] (infer_actions); they are stored only with *write*.
+
+        *daily_store* and *session_bases* default to the default TaiwanDailyStore and
+        TaiwanSessionBaseStore. Each session's previous traded bar is looked for in the whole history.
+        """
+        from app.taiwan.daily_store import TaiwanDailyStore
+        from app.taiwan.session_bases import BASE_COLUMNS, TaiwanSessionBaseStore, official_bases_of
+
+        if end < start:
+            raise ValueError(f"end {end} is before start {start}")
+        daily_store = daily_store or TaiwanDailyStore()
+        sessions = daily_store.available_dates()
+        daily = daily_store.scan_range(None, None, end)
+        bases = official_bases_of(
+            inference_lookups(daily, sessions, start, end),
+            store=session_bases or TaiwanSessionBaseStore(),
+            sessions=sessions,
+            columns=(*BASE_COLUMNS, "last_bid", "last_ask"),
+        )
+        inferred = infer_actions(daily, bases, self._store.read(end=end), start, end)
+        factors = adjustment_factors(inferred, end).rename({"trade_date": "date"})
+        listing = inferred.join(factors, on=["symbol", "date"], how="left", suffix="_applied").sort(["date", "symbol"])
+        stats: dict[str, Any] = {
+            "start": str(start),
+            "end": str(end),
+            "inferred": [
+                {
+                    "symbol": row["symbol"],
+                    "date": str(row["date"]),
+                    "presumed_kind": presumed_kind(row["pre_close"] / row["ref_price"]),
+                    "pre_close": row["pre_close"],
+                    "ref_price": row["ref_price"],
+                    "ex_factor": row["ex_factor_applied"],
+                    "volume_factor": row["volume_factor"],
+                }
+                for row in listing.iter_rows(named=True)
+            ],
+            "stored": write,
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+        }
+        if stats["inferred"]:
+            logger.info("Inferred corporate actions %s..%s: %s", start, end, stats["inferred"])
+        if write and not inferred.is_empty():
+            stats.update(self._store.upsert(inferred))
+        return stats
+
 
 def _taipei_today() -> date:
     from app.taiwan.realtime.calendar import taipei_today
@@ -563,17 +768,27 @@ def _taipei_today() -> date:
     return taipei_today()
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Backfill the Taiwan corporate-action reference prices")
     parser.add_argument("--since", required=True, help="First event date YYYY-MM-DD")
     parser.add_argument("--until", help="Last event date YYYY-MM-DD (defaults to today)")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--infer", action="store_true", help="Infer the unlisted events from the stored session bases instead"
+    )
+    parser.add_argument("--dry-run", action="store_true", help="With --infer, list the events without storing them")
+    args = parser.parse_args(argv)
+    if args.dry_run and not args.infer:
+        parser.error("--dry-run needs --infer")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     since = date.fromisoformat(args.since)
     until = date.fromisoformat(args.until) if args.until else _taipei_today()
+    if args.infer:
+        stats = TaiwanCorporateActionRefreshService().infer_range(since, until, write=not args.dry_run)
+        print(json.dumps(stats, indent=2, ensure_ascii=False))
+        return
     stats = TaiwanCorporateActionRefreshService().refresh_range(since, until)
     print(json.dumps(stats, indent=2, ensure_ascii=False))
     if stats.get("failed"):

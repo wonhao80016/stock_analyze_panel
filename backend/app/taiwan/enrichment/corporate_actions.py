@@ -43,6 +43,8 @@ EXDIV = "exdiv"
 REDUCTION = "reduction"
 PAR_CHANGE = "par_change"
 ETF_SPLIT = "etf_split"
+# Not an official table: inferred from a session base no listed event explains.
+INFERRED = "inferred"
 
 ACCEPTED_PRICE_UNITS = frozenset({"元"})
 TWSE_NO_DATA_STAT = "很抱歉，沒有符合條件的資料!"  # noqa: RUF001

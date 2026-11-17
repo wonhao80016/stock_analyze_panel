@@ -6,7 +6,7 @@ compute_taiwan_enriched. Like the published newest row it is on today's traded p
 corporate action on today needs no conversion. The exchange lists today's corporate actions only
 after the session, so until then a quoted previous close that differs from the stored close
 stands in for the event's reference price, provided the store holds the previous session. Only
-a stand-in above SPLIT_FACTOR takes the publish's official_ratio; any other par-value change
+a stand-in presumed_kind takes for a par-value change gets the publish's official_ratio; any other
 uses pre_close / reference and can differ from the published row by the tick rounding of the
 reference price.
 A session after one its symbol has no stored regular close for gets the official base instead, as
@@ -32,10 +32,9 @@ import polars as pl
 
 from app.indicators.pipeline import filter_halt_days
 from app.strategy.scoring import AMOUNT_ESTIMATED
-from app.taiwan.corporate_actions import corporate_action_schema
+from app.taiwan.corporate_actions import corporate_action_schema, presumed_kind
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TAIWAN_DAILY_COLUMNS, TaiwanDailyStore
 from app.taiwan.enriched_refresh import FACTOR_SET_FILE, compute_taiwan_enriched, limit_profile
-from app.taiwan.enrichment.corporate_actions import EXDIV, PAR_CHANGE, REDUCTION
 from app.taiwan.market_rules import ListingSessions, PriceLimitModel
 from app.taiwan.session_bases import BASE_COLUMNS, TPEX, TaiwanSessionBaseStore, official_bases_of
 
@@ -46,8 +45,6 @@ LIVE_HISTORY_SESSIONS = 1200
 PREPARE_RETRY_SECONDS = 60.0
 # Half the smallest Taiwan tick: a quoted previous close this close to the stored one is that close.
 SAME_PRICE_TOLERANCE = 0.005
-# Above this pre_close / reference a quoted event is taken for a split rather than a dividend.
-SPLIT_FACTOR = 1.5
 # Sessions whose exchanges are recorded, enough to find the previous session after a holiday.
 RECENT_SESSIONS = 5
 
@@ -161,9 +158,8 @@ def _quoted_events(
     """Today's corporate actions the table does not list yet, from the quoted previous closes.
 
     A symbol of *exchanges* qualifies when its quoted previous close differs from its last stored
-    close and no listed event falls after that session. The kind is unknown: a factor below 1 is
-    taken for a capital reduction and above SPLIT_FACTOR for a par-value change, both restating
-    volume; anything else for a dividend. A symbol stored on the previous session without a
+    close and no listed event falls after that session. The kind is unknown and taken from
+    presumed_kind. A symbol stored on the previous session without a
     regular close never qualifies: the exchange set its quoted previous close as the base of an
     untraded session. One without a stored row there, a halt, still does.
     """
@@ -198,13 +194,12 @@ def _quoted_events(
         if listed.get(symbol) is not None and listed[symbol] > last_session:
             continue
         factor = last_close / reference
-        kind = REDUCTION if factor < 1.0 else PAR_CHANGE if factor > SPLIT_FACTOR else EXDIV
         rows.append(
             {
                 **dict.fromkeys(schema),
                 "symbol": symbol,
                 "date": today,
-                "kind": kind,
+                "kind": presumed_kind(factor),
                 "pre_close": last_close,
                 "ref_price": reference,
                 "open_ref": reference,

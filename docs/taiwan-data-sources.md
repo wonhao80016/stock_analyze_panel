@@ -302,8 +302,8 @@ listed above; `app.taiwan.corporate_actions` stores them and derives reference p
 and adjustment factors from them.
 
 - Each row is one `(symbol, date, kind)`, where `kind` is `exdiv`, `reduction`,
-  `par_change` or `etf_split` and `date` is the session the official reference price
-  applies to. It keeps `pre_close`, `ref_price`, `limit_up`, `limit_down`,
+  `par_change`, `etf_split` or `inferred` (see below) and `date` is the session the
+  official reference price applies to. It keeps `pre_close`, `ref_price`, `limit_up`, `limit_down`,
   `open_ref`, `ex_factor` and `official_label` in TWD where they are prices, plus
   `provider`, `source`, `source_url`, `retrieved_at` (Asia/Taipei), `trade_date` and
   `status`. The stored `ex_factor` of a split is the unrounded price ratio; consumers
@@ -348,13 +348,42 @@ and adjustment factors from them.
   `data/taiwan/session_bases/{twse,tpex}/date=<source date>/part.parquet`; each publish
   fetches the recent window first (a failure only adds a note) and
   `uv run python -m app.taiwan.session_bases --since 2024-01-01 --source all --delay 3`
-  backfills history. Enriched stores the official figures in `ref_prev_close`,
+  backfills history. A TPEx symbol that the stored dailyQuotes of the previous session
+  leaves out (it resumes after a halt) takes the close less the change (`prev_change`,
+  the `漲跌` column) of dailyQuotes of the session itself as its base, with the limits
+  computed from it; a change cell that is not a plain signed number leaves the base
+  missing. Files stored before `prev_change` existed read it as null; `--resumptions`
+  refetches the files these bases need (`--dry-run` lists their dates; 41 requests for
+  2024-01-02 to 2026-11-16 at the time of writing). Enriched stores the official figures in `ref_prev_close`,
   `ref_limit_up` and `ref_limit_down`. When no official base is stored, enriched sets
   `ref_base_missing` to true and leaves `ref_*`, `prev_close`, `change_pct`,
   `change_amount`, `amplitude` and the four limit signals null; the backtest refuses
   fills on such a session and the consecutive limit counts restart after it. The
   no-limit initial-listing window and a symbol's first
   bar keep the previous close. Live intraday rows do not apply these bases.
+- Inferred events: without a corporate action the official base of a traded session is
+  the close of the previous session with a regular close, the last bid or ask of the
+  session before, or the base carried from the latest session since that close; a
+  scan of the stored bases from 2024-01-02 found no exception. `infer_actions` records
+  a session whose base departs from all of them by more than 0.5%
+  (`MIN_BASE_DEPARTURE`) and that no official event of the symbol falls after the
+  previous traded session and on or before, as kind `inferred`, source
+  `inferred:session_base`, status `derived`: `pre_close` is the previous traded close,
+  `ref_price` and `open_ref` the official base, the limits the official limits and
+  `ex_factor` is `pre_close / ref_price`. A symbol's first bar and a session without
+  both official limits (no-limit securities, the initial-listing window) are skipped.
+  The kind ranks last, so an official event of the same session, stored before or
+  after, is the only one applied. Factors and volume follow `presumed_kind`, the rule
+  the intraday quoted stand-ins use: below 1 a reduction and above 1.5 a par value
+  change (official ratio), both restating volume, otherwise a dividend. Each publish
+  infers the window after fetching the session bases and before republishing; a
+  failure only adds a note, and a new event changes the factor set, so that publish
+  rewrites every partition. History: `python -m app.taiwan.corporate_actions --infer
+  --since 2024-01-02` (`--dry-run` lists without storing). Up to 2026-11-17 it finds
+  8101.TWSE on 2024-11-19 (loss-offset reduction during a halt, 1.90 to 9.50, not in
+  TWTAUU; factor 0.2) and 910322.TWSE on 2024-06-12 (dividend, 19.55 to 18.30, not in
+  TWT49U; factor 1.068). Limitation: an official event dated on an untraded session
+  before the inferred one and stored only after the inference is applied as well.
 - Forward adjustment: enriched `open/high/low/close` are divided by the product of
   the factors of all later events, so the newest bar equals the raw price and `raw_*`
   keep traded prices. The factor is `pre_close / ref_price` for dividends and
