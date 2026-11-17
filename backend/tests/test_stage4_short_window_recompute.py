@@ -23,7 +23,9 @@ from app.indicators.pipeline import INDICATOR_COLUMNS
 from app.repository import DataStore, KlineRepository
 from app.services.screener import ScreenerService
 from app.strategy.scoring import recursive_warmup_bars
+from app.taiwan import enriched_refresh
 from app.taiwan.enriched_refresh import add_taiwan_limit_signals
+from app.taiwan.market_rules import ListingSessions
 
 pytestmark = pytest.mark.usefixtures("deny_network")
 
@@ -252,6 +254,8 @@ def test_the_local_daily_k_fallback_matches_the_full_history(monkeypatch):
     from app.taiwan import daily_store
 
     monkeypatch.setattr(daily_store, "TaiwanDailyStore", _LocalStore)
+    calendar = ListingSessions(tuple(DAYS), {symbol: DAYS[0] for symbol in LISTED})
+    monkeypatch.setattr(enriched_refresh, "listing_sessions", lambda _store=None: calendar)
     repo = MagicMock()
     repo.resolve_asset_type.return_value = "stock"
     repo.get_daily_asset.return_value = pl.DataFrame()

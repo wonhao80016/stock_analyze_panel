@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 # Bump whenever a published indicator's definition changes: the Taiwan enriched publish
 # records it and rewrites every partition once when the recorded version differs.
-INDICATOR_DEFINITION_VERSION = 4
+INDICATOR_DEFINITION_VERSION = 5
 
 
 # ── 自定义信号缓存 ─────────────────────────────────────
@@ -725,6 +725,11 @@ LIMIT_SIGNAL_OUTPUTS: frozenset[str] = frozenset({
     "turnover_rate",
 })
 
+# Written after compute_signals, and the Taiwan publish restates them after compute_enriched.
+LATE_SIGNAL_INPUTS: frozenset[str] = frozenset(
+    {"turnover_rate", "consecutive_limit_ups", "consecutive_limit_downs"}
+)
+
 INDICATOR_COLUMNS: frozenset[str] = frozenset(
     col for col in _ALL_INDICATOR_COLS if not col.startswith("_")
 )
@@ -798,19 +803,39 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
         "signal_ma5_breakdown": cross_below(pl.col("close"), pl.col("ma5"), pl.col("close")).alias("signal_ma5_breakdown"),
         "signal_ma10_breakout": cross_above(pl.col("close"), pl.col("ma10"), pl.col("close")).alias("signal_ma10_breakout"),
         "signal_ma10_breakdown": cross_below(pl.col("close"), pl.col("ma10"), pl.col("close")).alias("signal_ma10_breakdown"),
-        "signal_n_day_high": (pl.col("close") >= pl.col("high_60d")).alias("signal_n_day_high"),
-        "signal_n_day_low": (pl.col("close") <= pl.col("low_60d")).alias("signal_n_day_low"),
-        "signal_boll_breakout_upper": (pl.col("close") > pl.col("boll_upper")).alias("signal_boll_breakout_upper"),
-        "signal_boll_breakdown_lower": (pl.col("close") < pl.col("boll_lower")).alias("signal_boll_breakdown_lower"),
+        "signal_n_day_high": (cross_side(pl.col("close"), pl.col("high_60d"), pl.col("close")) >= 0).alias("signal_n_day_high"),
+        "signal_n_day_low": (cross_side(pl.col("close"), pl.col("low_60d"), pl.col("close")) <= 0).alias("signal_n_day_low"),
+        "signal_boll_breakout_upper": (cross_side(pl.col("close"), pl.col("boll_upper"), pl.col("close")) == 1).alias("signal_boll_breakout_upper"),
+        "signal_boll_breakdown_lower": (cross_side(pl.col("close"), pl.col("boll_lower"), pl.col("close")) == -1).alias("signal_boll_breakdown_lower"),
         "signal_volume_surge": (pl.col("vol_ratio_5d") >= 2.0).alias("signal_volume_surge"),
     }
     if want:
         df = df.with_columns([expressions[name] for name in SIGNAL_DEPENDENCIES if name in want])
 
     # 自定义信号（用户配置的字段+运算符+值组合，编译为布尔列）
-    df = inject_custom_signals(df, _get_custom_signal_exprs(), needed=needed)
+    df = inject_custom_signals(df, _custom_signals_by_stage(late=False), needed=needed)
 
     return df
+
+
+def _custom_signals_by_stage(*, late: bool) -> dict[str, pl.Expr]:
+    """The custom signals that read a LATE_SIGNAL_INPUTS column (*late*), or those reading none."""
+    from app.strategy import custom_signals
+
+    exprs = _get_custom_signal_exprs()
+    dependencies = custom_signals.expression_dependencies(exprs)
+    return {
+        name: expr for name, expr in exprs.items()
+        if dependencies[name].isdisjoint(LATE_SIGNAL_INPUTS) != late
+    }
+
+
+def inject_late_custom_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
+    """Inject the custom signals compute_signals leaves out: those reading LATE_SIGNAL_INPUTS.
+
+    Every path running compute_signals calls it once, after its last write of those columns.
+    """
+    return inject_custom_signals(df, _custom_signals_by_stage(late=True), needed=needed)
 
 
 def with_limit_streak(df: pl.DataFrame, signal: str, streak: str) -> pl.DataFrame:
@@ -1056,15 +1081,20 @@ def compute_all(
     df: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     today: date | None = None,
+    *,
+    late_custom_signals: bool = True,
 ) -> pl.DataFrame:
     """从 OHLCV 计算全套指标 + 信号。一站式调用。
 
     输入: symbol, date, open, high, low, close, volume, amount, raw_close
+    late_custom_signals=False leaves inject_late_custom_signals to a caller that restates its inputs.
     """
     df = compute_indicators(df)
     df = compute_signals(df)
     if instruments is not None and not instruments.is_empty():
         df = compute_limit_signals(df, instruments, today=today)
+    if late_custom_signals:
+        df = inject_late_custom_signals(df)
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -1101,6 +1131,8 @@ def compute_enriched(
     factors: pl.DataFrame | None = None,
     instruments: pl.DataFrame | None = None,
     today: date | None = None,
+    *,
+    late_custom_signals: bool = True,
 ) -> pl.DataFrame:
     """对原始日 K 应用前复权 + 全量计算指标 + 信号, 产出完整 enriched (含全部指标列)。
 
@@ -1132,7 +1164,7 @@ def compute_enriched(
     df = raw.sort(["symbol", "date"])
 
     # 全量计算指标 + 信号
-    df = compute_all(df, instruments=instruments, today=today)
+    df = compute_all(df, instruments=instruments, today=today, late_custom_signals=late_custom_signals)
 
     return df
 

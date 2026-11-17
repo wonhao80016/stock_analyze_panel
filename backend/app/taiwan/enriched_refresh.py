@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime
 from pathlib import Path
 
@@ -39,6 +39,7 @@ from app.indicators.pipeline import (
     INDICATOR_DEFINITION_VERSION,
     compute_enriched,
     filter_halt_days,
+    inject_late_custom_signals,
     limit_down_recovery,
     with_limit_streak,
 )
@@ -164,6 +165,7 @@ class TaiwanEnrichedRefreshService:
             logger.warning(
                 "taiwan enriched refresh: no share capital on disk, turnover_rate will be null"
             )
+        newest = max(available)
         enriched = compute_taiwan_enriched(
             raw,
             events,
@@ -171,8 +173,11 @@ class TaiwanEnrichedRefreshService:
             trading_days=available,
             limits=limits,
             instruments=instruments,
-            today=max(available),
+            today=newest,
             session_bases=self.session_bases,
+            restate_turnover=lambda frame: with_session_turnover(
+                frame, raw, newest=newest, share_capital=self.share_capital, enriched_root=self._root
+            ),
         )
         if enriched.is_empty():
             return 0
@@ -186,7 +191,6 @@ class TaiwanEnrichedRefreshService:
         enriched = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end))
         if enriched.is_empty():
             return 0
-        enriched = self._with_session_turnover(enriched, raw, newest=max(available))
 
         if full:
             published_rules = {**limit_rules, **dict.fromkeys(unlisted, NO_LIMIT_RULE)}
@@ -211,70 +215,6 @@ class TaiwanEnrichedRefreshService:
             written, start.isoformat(), end.isoformat(), " (every partition)" if full else "",
         )
         return written
-
-    def _with_session_turnover(
-        self, enriched: pl.DataFrame, raw: pl.DataFrame, newest: date
-    ) -> pl.DataFrame:
-        """*enriched* with the turnover_rate of each row dated before *newest* from its own session.
-
-        A day with saved denominators divides the stored volume of *raw*, the daily bars before any
-        volume_factor restatement, by them; any other day takes the turnover_rate its partition holds.
-        """
-        days = enriched.filter(pl.col("date") < newest)["date"].unique().sort().to_list()
-        denominators = self.share_capital.session_denominators(days)
-        saved_days = set(denominators["date"].to_list())
-        published = self._published_turnover([d for d in days if d not in saved_days])
-        if not published.is_empty():
-            enriched = (
-                enriched.join(published, on=["symbol", "date"], how="left", maintain_order="left")
-                .with_columns(pl.coalesce("turnover_rate", PUBLISHED_TURNOVER).alias("turnover_rate"))
-                .drop(PUBLISHED_TURNOVER)
-            )
-        if not saved_days:
-            return enriched
-        session = (
-            raw.select("symbol", pl.col("date").cast(pl.Date), "volume")
-            .join(denominators, on=["symbol", "date"], how="inner")
-            .select(
-                "symbol",
-                "date",
-                pl.when(pl.col("float_shares") > 0)
-                .then(turnover_rate_pct_expr())
-                .cast(pl.Float64)
-                .alias(SESSION_TURNOVER),
-            )
-        )
-        return (
-            enriched.join(session, on=["symbol", "date"], how="left", maintain_order="left")
-            .with_columns(
-                pl.when(pl.col("date").is_in(sorted(saved_days)))
-                .then(pl.col(SESSION_TURNOVER))
-                .otherwise(pl.col("turnover_rate"))
-                .alias("turnover_rate")
-            )
-            .drop(SESSION_TURNOVER)
-        )
-
-    def _published_turnover(self, days: list[date]) -> pl.DataFrame:
-        """Finite turnover_rate published for *days*, by symbol and date; an unreadable partition adds none."""
-        paths = [self._root / f"date={d.isoformat()}" / "part.parquet" for d in days]
-        paths = [path for path in paths if path.exists()]
-        if not paths:
-            return pl.DataFrame()
-        try:
-            return _read_published_turnover(paths)
-        except (OSError, pl.exceptions.PolarsError):
-            frames = []
-            for path in paths:
-                try:
-                    frames.append(_read_published_turnover([path]))
-                except (OSError, pl.exceptions.PolarsError) as exc:
-                    logger.warning(
-                        "taiwan enriched partition %s unreadable, its turnover_rate is not kept: %s",
-                        path.parent.name,
-                        exc,
-                    )
-            return pl.concat(frames) if frames else pl.DataFrame()
 
     def _publish_partitions(self, enriched: pl.DataFrame, publication: EnrichedPublication) -> int:
         written = 0
@@ -631,6 +571,7 @@ def compute_taiwan_enriched(
     *,
     today: date,
     session_bases: TaiwanSessionBaseStore | pl.DataFrame | None = None,
+    restate_turnover: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
 ) -> pl.DataFrame:
     """Every enriched row the publish writes for the raw daily bars *raw* dated on or before *end*.
 
@@ -643,6 +584,8 @@ def compute_taiwan_enriched(
     With *session_bases*, a store or a frame of official bases, a session after an untraded one
     takes its official base (with_official_bases); without it such a session keeps the last traded
     close as its base and ref_base_missing is false throughout.
+    *restate_turnover* gives the rows before *today* their own session's turnover_rate
+    (with_session_turnover); custom signals reading the limit streaks or turnover see the final values.
     """
     events = events.filter(pl.col("date") <= end)
     raw = attach_reference_prices(filter_halt_days(raw), events, with_limits=True)
@@ -651,13 +594,20 @@ def compute_taiwan_enriched(
     else:
         raw = raw.with_columns(pl.lit(False).alias(REF_BASE_MISSING))
     enriched = compute_enriched(
-        raw, factors=adjustment_factors(events, end), instruments=instruments, today=today
+        raw,
+        factors=adjustment_factors(events, end),
+        instruments=instruments,
+        today=today,
+        late_custom_signals=False,
     )
     if enriched.is_empty():
         return enriched
     if "turnover_rate" not in enriched.columns:
         enriched = enriched.with_columns(pl.lit(None, dtype=pl.Float64).alias("turnover_rate"))
     enriched = add_taiwan_limit_signals(enriched, limits)
+    if restate_turnover is not None:
+        enriched = restate_turnover(enriched)
+    enriched = inject_late_custom_signals(enriched)
     return add_volume_patterns(enriched, trading_days)
 
 
@@ -683,7 +633,7 @@ def with_official_bases(
     """
     calendar = sorted(set(trading_days))
     previous_session = pl.DataFrame(
-        {"date": calendar, "_previous_session": [None, *calendar[:-1]]},
+        {"date": calendar, "_previous_session": [None, *calendar[:-1]] if calendar else []},
         schema={"date": pl.Date, "_previous_session": pl.Date},
     )
     windows = limits.select(
@@ -763,6 +713,78 @@ def with_published_bases(
     limits = limit_profile(bars["symbol"].unique().to_list(), sessions)
     store = session_bases or TaiwanSessionBaseStore()
     return with_official_bases(bars, sessions.trading_dates, limits, store, events)
+
+
+def with_session_turnover(
+    enriched: pl.DataFrame,
+    raw: pl.DataFrame,
+    *,
+    newest: date,
+    share_capital: TaiwanShareCapitalStore,
+    enriched_root: Path,
+) -> pl.DataFrame:
+    """*enriched* with the turnover_rate of each row dated before *newest* from its own session.
+
+    A day with denominators saved in *share_capital* divides the stored volume of *raw*, the daily
+    bars before any volume_factor restatement, by them; any other day takes the turnover_rate its
+    partition under *enriched_root* holds.
+    """
+    days = enriched.filter(pl.col("date") < newest)["date"].unique().sort().to_list()
+    denominators = share_capital.session_denominators(days)
+    saved_days = set(denominators["date"].to_list())
+    published = _published_turnover(enriched_root, [d for d in days if d not in saved_days])
+    if not published.is_empty():
+        enriched = (
+            enriched.join(published, on=["symbol", "date"], how="left", maintain_order="left")
+            .with_columns(pl.coalesce("turnover_rate", PUBLISHED_TURNOVER).alias("turnover_rate"))
+            .drop(PUBLISHED_TURNOVER)
+        )
+    if not saved_days:
+        return enriched
+    session = (
+        raw.select("symbol", pl.col("date").cast(pl.Date), "volume")
+        .join(denominators, on=["symbol", "date"], how="inner")
+        .select(
+            "symbol",
+            "date",
+            pl.when(pl.col("float_shares") > 0)
+            .then(turnover_rate_pct_expr())
+            .cast(pl.Float64)
+            .alias(SESSION_TURNOVER),
+        )
+    )
+    return (
+        enriched.join(session, on=["symbol", "date"], how="left", maintain_order="left")
+        .with_columns(
+            pl.when(pl.col("date").is_in(sorted(saved_days)))
+            .then(pl.col(SESSION_TURNOVER))
+            .otherwise(pl.col("turnover_rate"))
+            .alias("turnover_rate")
+        )
+        .drop(SESSION_TURNOVER)
+    )
+
+
+def _published_turnover(root: Path, days: list[date]) -> pl.DataFrame:
+    """Finite turnover_rate published under *root* for *days*, by symbol and date; an unreadable partition adds none."""
+    paths = [root / f"date={d.isoformat()}" / "part.parquet" for d in days]
+    paths = [path for path in paths if path.exists()]
+    if not paths:
+        return pl.DataFrame()
+    try:
+        return _read_published_turnover(paths)
+    except (OSError, pl.exceptions.PolarsError):
+        frames = []
+        for path in paths:
+            try:
+                frames.append(_read_published_turnover([path]))
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                logger.warning(
+                    "taiwan enriched partition %s unreadable, its turnover_rate is not kept: %s",
+                    path.parent.name,
+                    exc,
+                )
+        return pl.concat(frames) if frames else pl.DataFrame()
 
 
 def _read_published_turnover(paths: list[Path]) -> pl.DataFrame:

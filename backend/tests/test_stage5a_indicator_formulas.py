@@ -169,4 +169,4 @@ def test_rsi_without_losses_or_without_changes(closes, expected):
 
 
 def test_the_definition_version_moves_past_the_official_session_bases():
-    assert pipeline.INDICATOR_DEFINITION_VERSION == 4
+    assert pipeline.INDICATOR_DEFINITION_VERSION == 5

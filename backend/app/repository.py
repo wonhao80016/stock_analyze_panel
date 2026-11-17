@@ -108,7 +108,12 @@ def read_enriched_window(
     leave its warm-up; *limit_signals* adds the limit flags of those rows, by default the Taiwan
     publish's (taiwan_limit_signals).
     """
-    from app.indicators.pipeline import INDICATOR_COLUMNS, compute_indicators, compute_signals
+    from app.indicators.pipeline import (
+        INDICATOR_COLUMNS,
+        compute_indicators,
+        compute_signals,
+        inject_late_custom_signals,
+    )
 
     stored = _stored_partitions(data_dir / dirname, end)
     first = 0 if start is None else bisect.bisect_left([day for day, _ in stored], start)
@@ -141,8 +146,9 @@ def read_enriched_window(
         .collect()
         .sort(["symbol", "date"])
     )
+    # The merge below keeps the stored turnover and streaks, so late custom signals read those.
     computed = (limit_signals or taiwan_limit_signals)(
-        compute_signals(compute_indicators(computed))
+        inject_late_custom_signals(compute_signals(compute_indicators(computed)))
     )
     derived = [c for c in computed.columns if c not in ENRICHED_STORAGE_SCHEMA]
     merged = published.join(
@@ -1124,7 +1130,13 @@ class KlineRepository:
 
     def _compute_enriched_range(self, df: pl.DataFrame) -> pl.DataFrame:
         """对14列enriched数据即时计算完整指标+信号。输入应含足够预热行数。"""
-        from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals, filter_halt_days
+        from app.indicators.pipeline import (
+            compute_indicators,
+            compute_limit_signals,
+            compute_signals,
+            filter_halt_days,
+            inject_late_custom_signals,
+        )
         if df.is_empty() or df.height < 2:
             return df
         # 兜底过滤历史脏数据中的停牌日 (close 可能被填充为前收盘价)
@@ -1136,18 +1148,20 @@ class KlineRepository:
             df = compute_signals(df)
             instruments = self.get_instruments()
             df = compute_limit_signals(df, instruments)
+            df = inject_late_custom_signals(df)
         except Exception as e:  # noqa: BLE001
             logger.warning("on-demand compute failed: %s", e)
         return df
 
     def _compute_index_enriched_range(self, df: pl.DataFrame) -> pl.DataFrame:
         """指数只计算通用技术指标和通用信号，跳过涨跌停/股本/市值逻辑。"""
-        from app.indicators.pipeline import compute_indicators, compute_signals
+        from app.indicators.pipeline import compute_indicators, compute_signals, inject_late_custom_signals
         if df.is_empty() or df.height < 2:
             return df
         try:
             df = compute_indicators(df)
             df = compute_signals(df)
+            df = inject_late_custom_signals(df)
         except Exception as e:  # noqa: BLE001
             logger.warning("index on-demand compute failed: %s", e)
         return df

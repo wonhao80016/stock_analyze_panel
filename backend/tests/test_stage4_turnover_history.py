@@ -178,6 +178,9 @@ class _NoReferencePrices:
     def refresh_publish_window(self, first: date, last: date) -> dict:
         return {}
 
+    def infer_range(self, *_args, **_kwargs) -> dict:
+        return {}
+
 
 def _read(root) -> dict[date, pl.DataFrame]:
     return {
