@@ -10,3 +10,4 @@
 - 保持實現簡單、改動範圍最小，不處理無關問題。
 - 不覆蓋工作區已有修改，不虛構測試或審查結果。
 - 以實際驗證結果作為完成標準。
+- AI 在本倉庫建立的 commit，message 結尾加上 `Co-Authored-By` 署名列：Claude 用 `Co-Authored-By: Claude <模型名稱> <noreply@anthropic.com>`，其他 AI 用其平台提供的署名列，沒有則不加。這是倉庫擁有者明確要求的例外，優先於全域規則中「commit 不加署名」一項；commit 前仍須先取得同意。
