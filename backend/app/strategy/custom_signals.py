@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 
@@ -191,7 +192,7 @@ def _parse_right(right: str) -> tuple[str, object]:
         (AI 生成偶尔漏写 field: 前缀; 白名单字段名不可能是数字, 无歧义)
     """
     if isinstance(right, (int, float)):
-        return ("const", float(right))
+        return ("const", _finite(float(right), right))
     if not isinstance(right, str):
         raise ValueError(f"非法右值: {right!r}")
     if right.startswith("field:"):
@@ -201,13 +202,22 @@ def _parse_right(right: str) -> tuple[str, object]:
         return ("field", col)
     # 纯数字
     try:
-        return ("const", float(right))
+        value = float(right)
     except ValueError:
         pass
+    else:
+        return ("const", _finite(value, right))
     # 裸字段名 — 兜底容错, 仍受白名单约束
     if right in ALLOWED_FIELDS:
         return ("field", right)
     raise ValueError(f"非法右值（应为 field:xxx 或数字）: {right!r}")
+
+
+def _finite(value: float, right: object) -> float:
+    """*value*, unless it is NaN or ±inf: Polars orders NaN above every number, so `< nan` always holds."""
+    if not math.isfinite(value):
+        raise ValueError(f"右值必须是有限数字, 不接受 NaN 或无穷大: {right!r}")
+    return value
 
 
 def validate(sig: dict) -> None:

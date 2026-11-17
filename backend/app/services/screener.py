@@ -388,7 +388,11 @@ class ScreenerService:
 
     def _compute_enriched_full(self, df_target: pl.DataFrame, target_date: date) -> pl.DataFrame:
         """The enriched rows of target_date: published rows as stored, the others recomputed."""
-        from app.indicators.pipeline import compute_indicators, compute_signals
+        from app.indicators.pipeline import (
+            compute_indicators,
+            compute_signals,
+            inject_late_custom_signals,
+        )
 
         instruments = self.repo.get_instruments_asset(self.asset_type)
         limit_signals = self._limit_signals(instruments)
@@ -410,7 +414,7 @@ class ScreenerService:
             df_result = compute_signals(compute_indicators(df_target))
             if limit_signals is not None:
                 df_result = limit_signals(df_result)
-            df_result = df_result.filter(pl.col("date") == target_date)
+            df_result = inject_late_custom_signals(df_result).filter(pl.col("date") == target_date)
 
         # JOIN instruments (name, total_shares, float_shares)
         if not instruments.is_empty():

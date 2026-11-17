@@ -396,8 +396,8 @@ def test_the_version_4_release_rewrites_a_version_3_table_and_keeps_its_turnover
     market.service(SECOND_DAY).refresh_recent(days=5)
 
     after = _read(market.root)
-    assert pipeline.INDICATOR_DEFINITION_VERSION == 4
-    assert _record(market)["indicator_version"] == 4
+    assert pipeline.INDICATOR_DEFINITION_VERSION == 5
+    assert _record(market)["indicator_version"] == 5
     assert all("ref_base_missing" in frame.columns for frame in after.values())
     assert _row(after[GAP_1435], "1435.TWSE", GAP_1435)["change_pct"] == pytest.approx(31.50 / 33.65 - 1)
     kept = dict(after[FIRST_DAY].select("symbol", "turnover_rate").iter_rows())

@@ -939,6 +939,7 @@ class BacktestEngine:
             compute_indicators,
             compute_limit_signals,
             compute_signals,
+            inject_late_custom_signals,
         )
 
         matrix_native = feature_plan.execution_backend == "matrix_native"
@@ -1017,6 +1018,8 @@ class BacktestEngine:
                 )
         elif unpublished:
             df = _with_taiwan_limit_flags(df, unpublished)
+        if not matrix_native:
+            df = inject_late_custom_signals(df, needed=set(feature_plan.signal_columns))
         if "name" in feature_plan.instrument_columns and "name" not in df.columns:
             df = df.join(
                 _security_master_names(df["symbol"].unique().to_list()), on="symbol", how="left"

@@ -34,9 +34,16 @@ from app.indicators.pipeline import filter_halt_days
 from app.strategy.scoring import AMOUNT_ESTIMATED
 from app.taiwan.corporate_actions import corporate_action_schema, presumed_kind
 from app.taiwan.daily_store import REPAIR_WINDOW_PARTITIONS, TAIWAN_DAILY_COLUMNS, TaiwanDailyStore
-from app.taiwan.enriched_refresh import FACTOR_SET_FILE, compute_taiwan_enriched, limit_profile
+from app.taiwan.enriched_reader import ENRICHED_DIR_NAME
+from app.taiwan.enriched_refresh import (
+    FACTOR_SET_FILE,
+    compute_taiwan_enriched,
+    limit_profile,
+    with_session_turnover,
+)
 from app.taiwan.market_rules import ListingSessions, PriceLimitModel
 from app.taiwan.session_bases import BASE_COLUMNS, TPEX, TaiwanSessionBaseStore, official_bases_of
+from app.taiwan.share_capital_store import SESSION_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +69,7 @@ BAR_SCHEMA: dict[str, pl.DataType] = {
 LIVE_SCHEMA: dict[str, pl.DataType] = {**BAR_SCHEMA, "prev_close": pl.Float64}
 QUOTE_TS_AT = list(LIVE_SCHEMA).index("quote_ts")
 VOLUME_TIME_FACTOR = "volume_time_factor"
+STORED_TURNOVER = "_stored_turnover_rate"
 
 
 @dataclass(frozen=True)
@@ -77,6 +85,8 @@ class _History:
     bases: pl.DataFrame
     # official_bases_of the stored sessions with_official_bases looks up, read once per history.
     past_bases: pl.DataFrame
+    # symbol, date and the turnover_rate the publish gives each stored session (with_session_turnover).
+    turnover: pl.DataFrame
 
 
 def _signature(path: Path) -> tuple[int, int] | None:
@@ -299,9 +309,12 @@ class TaiwanLiveEnriched:
         return self._data_dir / "taiwan"
 
     def _key(self) -> tuple:
-        """Signatures of the recent stored sessions, factor record, master, share capital and events."""
+        """Signatures of the recent stored sessions, factor record, master, share capital and events,
+        and of the recent published partitions and saved turnover denominators."""
         return (
             _recent_partitions(self._taiwan_dir / "daily"),
+            _recent_partitions(self._data_dir / ENRICHED_DIR_NAME),
+            _recent_partitions(self._taiwan_dir / SESSION_DIR),
             _signature(self._data_dir / FACTOR_SET_FILE),
             _signature(self._taiwan_dir / "security_master.parquet"),
             _signature(self._taiwan_dir / "share_capital.parquet"),
@@ -373,6 +386,8 @@ class TaiwanLiveEnriched:
         past_bases = official_bases_of(
             pl.DataFrame(schema={"symbol": pl.String, "trade_date": pl.Date}), store=session_bases
         )
+        share_capital = TaiwanShareCapitalStore(self._taiwan_dir)
+        turnover = pl.DataFrame(schema={"symbol": pl.Utf8, "date": pl.Date, "turnover_rate": pl.Float64})
         if daily_dir.is_dir():
             store = TaiwanDailyStore(daily_dir)
             trading_days = tuple(store.available_dates())
@@ -387,15 +402,33 @@ class TaiwanLiveEnriched:
                 for (day,), frame in recent.partition_by("date", as_dict=True).items():
                     exchanges[day] = frozenset(_exchange(s) for s in frame["symbol"].unique())
                 past_bases = _gap_session_bases(raw, trading_days, session_bases)
+                turnover = with_session_turnover(
+                    filter_halt_days(raw).select(
+                        "symbol", "date", pl.lit(None, dtype=pl.Float64).alias("turnover_rate")
+                    ),
+                    raw,
+                    newest=date.max,
+                    share_capital=share_capital,
+                    enriched_root=self._data_dir / ENRICHED_DIR_NAME,
+                )
         events = read_events_or_empty(
             TaiwanCorporateActionStore(self._taiwan_dir / "corporate_actions")
         )
-        instruments = TaiwanShareCapitalStore(self._taiwan_dir).as_instruments()
+        instruments = share_capital.as_instruments()
         # dailyQuotes(D) holds the TPEx bases of the session after D. TWT84U(D) is fetched only
         # once session D is stored, so no stored TWSE base can belong to the session after it.
         bases = session_bases.read(TPEX, trading_days[-1:]).select("symbol", *BASE_COLUMNS)
         return _History(
-            key, bars, trading_days, first_sessions, events, instruments, exchanges, bases, past_bases
+            key,
+            bars,
+            trading_days,
+            first_sessions,
+            events,
+            instruments,
+            exchanges,
+            bases,
+            past_bases,
+            turnover,
         )
 
     def rows(self, bars: pl.DataFrame) -> pl.DataFrame | None:
@@ -481,6 +514,7 @@ class TaiwanLiveEnriched:
             history.instruments,
             today=today,
             session_bases=_official_bases(history, live, today, exchanges, limits),
+            restate_turnover=lambda frame: _with_stored_turnover(frame, history.turnover, today),
         )
         if enriched.is_empty():
             return enriched
@@ -496,6 +530,25 @@ class TaiwanLiveEnriched:
             pl.coalesce(pl.col("amount"), estimate).alias("amount"),
         )
         return add_limit_distance_columns(out)
+
+
+def _with_stored_turnover(enriched: pl.DataFrame, stored: pl.DataFrame, today: date) -> pl.DataFrame:
+    """*enriched* with the turnover_rate of *stored* on every row dated before *today*."""
+    return (
+        enriched.join(
+            stored.rename({"turnover_rate": STORED_TURNOVER}),
+            on=["symbol", "date"],
+            how="left",
+            maintain_order="left",
+        )
+        .with_columns(
+            pl.when(pl.col("date") < today)
+            .then(pl.col(STORED_TURNOVER))
+            .otherwise(pl.col("turnover_rate"))
+            .alias("turnover_rate")
+        )
+        .drop(STORED_TURNOVER)
+    )
 
 
 def _scale_volume_ratio(enriched: pl.DataFrame, live: pl.DataFrame, today: date) -> pl.DataFrame:
