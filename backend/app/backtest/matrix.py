@@ -28,6 +28,7 @@ from app.backtest.minute_trigger import build_minute_exit_reference
 from app.backtest.numba_runtime import run_numba_parallel
 from app.indicators.pipeline import (
     CROSS_TOLERANCE,
+    _reference_prev_close,
     ema_values,
     kd_values,
     macd_values,
@@ -63,7 +64,7 @@ _RAW_PRICE_BOUND_KEYS = (
     "float_cap_min", "float_cap_max",
 )
 _MATRIX_CACHE_VERSION = 3
-_DIRECT_MATRIX_LOADER_VERSION = 12
+_DIRECT_MATRIX_LOADER_VERSION = 13
 _MATRIX_AXIS_INDEX_VERSION = 1
 # Newest axis index files kept next to the matrix disk cache.
 _MATRIX_AXIS_INDEX_KEEP = 16
@@ -73,6 +74,8 @@ _PUBLISHED_LIMIT_SIGNALS = (
 )
 # True on a Taiwan row whose official limit base is unknown; partitions written before it lack it.
 BASE_MISSING_COLUMN = "ref_base_missing"
+# Enriched columns that move a bar's previous-close base onto the official reference price.
+_REFERENCE_BASE_FIELDS = ("ref_prev_close", BASE_MISSING_COLUMN)
 LIMIT_RULE_NOT_IN_SECURITY_MASTER = "security_master_missing"
 LIMIT_RULE_UNCONFIRMED = "price_limit_unknown"
 LIMIT_RULE_LISTING_DATE_UNKNOWN = "listing_date_unknown"
@@ -493,6 +496,9 @@ def load_market_data_matrix_from_parquet(
     if "raw_close" in dataset.schema.names:
         requested_fields = frozenset(requested_fields | {"raw_close"})
         build_fields = frozenset(build_fields | {"raw_close"})
+    reference_fields = {name for name in _REFERENCE_BASE_FIELDS if name in dataset.schema.names}
+    requested_fields = frozenset(requested_fields | reference_fields)
+    build_fields = frozenset(build_fields | reference_fields)
 
     if cache_root is None:
         return _build_market_data_matrix_from_dataset(
@@ -658,7 +664,10 @@ def _resolve_matrix_storage_fields(
         for name in wanted_fields
         if name != "price_limit_pct"
         and name in available
-        and _arrow_numeric(dataset.schema.field(name).type)
+        and (
+            _arrow_numeric(dataset.schema.field(name).type)
+            or name == BASE_MISSING_COLUMN
+        )
     )
     instrument_columns = set(instruments.columns) if instruments is not None else set()
     matrix_fields = set(parquet_fields)
@@ -1103,7 +1112,7 @@ def _scan_matrix_values(
         dataset = dataset.replace_schema(
             dataset.schema.append(pa.field(BASE_MISSING_COLUMN, pa.bool_()))
         )
-    scan_columns = [
+    scan_columns = list(dict.fromkeys([
         "symbol",
         "date",
         "open",
@@ -1117,7 +1126,7 @@ def _scan_matrix_values(
             if read_published_limits
             else []
         ),
-    ]
+    ]))
     scanner = dataset.scanner(
         columns=scan_columns,
         filter=filter_expr,
@@ -3796,19 +3805,55 @@ def _window_has_missing(values: np.ndarray, present: np.ndarray, window: int) ->
     return np.isfinite(share) & (share > 0)
 
 
+def _reference_previous_close(market: MarketDataMatrix) -> np.ndarray:
+    """Previous close of each bar on the base app.indicators.pipeline._reference_prev_close sets."""
+    close_valid = np.isfinite(market.close)
+    previous = valid_shift(market.close, 1, close_valid)
+    reference = market.fields.get("ref_prev_close")
+    base_missing = market.fields.get(BASE_MISSING_COLUMN)
+    flagged = np.zeros(market.shape, dtype=bool)
+    if reference is not None:
+        flagged |= np.isfinite(reference)
+    if base_missing is not None:
+        flagged |= base_missing > 0.5
+    flagged &= close_valid
+    if not flagged.any():
+        return previous
+    rows, assets = np.nonzero(flagged)
+    columns = {"close": market.close[rows, assets], "_previous": previous[rows, assets]}
+    raw_close = market.fields.get("raw_close")
+    if reference is not None and raw_close is not None:
+        columns["ref_prev_close"] = reference[rows, assets]
+        columns["raw_close"] = raw_close[rows, assets]
+    if base_missing is not None:
+        columns[BASE_MISSING_COLUMN] = base_missing[rows, assets] > 0.5
+    frame = pl.DataFrame(columns).fill_nan(None)
+    base = frame.select(
+        _reference_prev_close(frame, pl.col("_previous")).cast(pl.Float32)
+    ).to_series().to_numpy()
+    out = np.array(previous, dtype=np.float32, copy=True)
+    out[rows, assets] = base
+    return out
+
+
+def _close_to_close_return(market: MarketDataMatrix) -> np.ndarray:
+    """Daily return the scoring factors use (app.strategy.scoring._daily_change_expr)."""
+    return _valid_return_over_bars(market.close, np.isfinite(market.close), 1)
+
+
 def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     close_valid = np.isfinite(market.close)
     if name == "prev_close":
-        return valid_shift(market.close, 1, close_valid)
+        return _reference_previous_close(market)
     if name == "change_pct":
-        return _valid_return_over_bars(market.close, close_valid, 1)
+        return _return_from(market.close, _reference_previous_close(market))
     if name == "change_amount":
-        previous = valid_shift(market.close, 1, close_valid)
+        previous = _reference_previous_close(market)
         out = np.full(market.shape, np.nan, dtype=np.float32)
         np.subtract(market.close, previous, out=out, where=np.isfinite(previous))
         return out
     if name == "amplitude":
-        previous = valid_shift(market.close, 1, close_valid)
+        previous = _reference_previous_close(market)
         out = np.full(market.shape, np.nan, dtype=np.float32)
         np.divide(
             market.high - market.low,
@@ -3961,17 +4006,17 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
     if name == "distance_from_low_60d":
         return _matrix_relative(market.close, matrix_feature(market, "low_60d"))
     if name == "max_ret_20d":
-        daily = matrix_feature(market, "change_pct")
+        daily = _close_to_close_return(market)
         return valid_rolling_max(daily, np.isfinite(daily), 20)
     if name == "ret_skew_20d":
-        return _matrix_rolling_skew(matrix_feature(market, "change_pct"), 20)
+        return _matrix_rolling_skew(_close_to_close_return(market), 20)
     if name == "up_days_20d":
-        daily = matrix_feature(market, "change_pct")
+        daily = _close_to_close_return(market)
         up = np.where(daily > 0, np.float32(1.0), np.float32(0.0)).astype(np.float32)
         up[~np.isfinite(daily)] = np.nan
         return valid_rolling_sum(up, np.isfinite(up), 20)
     if name == "amihud_20d":
-        daily = matrix_feature(market, "change_pct")
+        daily = _close_to_close_return(market)
         amount = _traded_amount(market)
         amount_yi = amount / np.float32(1e8)
         illiquidity = _matrix_ratio(np.abs(daily), amount_yi)
@@ -3991,7 +4036,7 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
         deviation[_window_has_missing(previous, close_valid, 60)] = np.nan
         return deviation
     if name == "vol_price_corr_20d":
-        daily = matrix_feature(market, "change_pct")
+        daily = _close_to_close_return(market)
         return _matrix_rolling_corr(daily, market.volume, close_valid, 20)
     if name == "vwap_bias":
         amount = _traded_amount(market)
@@ -4197,7 +4242,10 @@ def _valid_return_over_bars(
     valid_mask: np.ndarray,
     bars: int,
 ) -> np.ndarray:
-    previous = valid_shift(values, bars, valid_mask)
+    return _return_from(values, valid_shift(values, bars, valid_mask))
+
+
+def _return_from(values: np.ndarray, previous: np.ndarray) -> np.ndarray:
     out = np.full(values.shape, np.nan, dtype=np.float32)
     np.divide(values, previous, out=out, where=np.isfinite(previous) & (previous != 0))
     out -= np.float32(1.0)

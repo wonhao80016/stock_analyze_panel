@@ -937,7 +937,8 @@ class MonitorRuleEngine:
         # 策略结果缓存仅用于股票策略页 /cached 回显; ETF 策略页走实时单跑, 不写入。
         # 写到 evaluate 提供的临时容器 (_building_strategy_results), 算完后整体替换,
         # 避免并发读到半填充状态。
-        if at == "stock":
+        # Only a whole-market rule stands in for the post-close cache; a scoped one would shrink it.
+        if at == "stock" and rule.get("scope") == "all":
             try:
                 self._building_strategy_results[sid] = {
                     "total": result.total,

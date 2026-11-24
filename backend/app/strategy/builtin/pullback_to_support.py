@@ -22,7 +22,7 @@ META = {
         {"id": "use_ma20_proximity", "label": "啟用MA20附近過濾", "type": "bool", "default": True},
         {
             "id": "ma_proximity",
-            "label": "均線偏離度",
+            "label": "均線偏離度(小數, 0.02 = 2%)",
             "type": "float",
             "default": 0.02,
             "min": 0.01,
