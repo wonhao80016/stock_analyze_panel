@@ -614,7 +614,7 @@ def compute_and_cache_all(
 
     if results or failures:
         try:
-            strategy_cache.write_cache(data_dir, str(as_of), results, failures)
+            strategy_cache.write_cache(data_dir, str(as_of), results, failures, asset_type=asset_type)
         except Exception:
             logger.exception("write strategy cache failed for %s", as_of)
 

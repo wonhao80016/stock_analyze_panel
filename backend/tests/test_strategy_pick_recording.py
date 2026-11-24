@@ -308,9 +308,10 @@ def builtin_engine():
 def _stub_run_all(engine, monkeypatch, seen: dict):
     def run_all(context, *, params_map=None, overrides_map=None, strategy_ids=None, skip_failed=False,
                 failures=None):
-        seen["ids"] = list(strategy_ids)
-        seen["context"] = context
-        seen["overrides_map"] = overrides_map
+        if context.asset_type == "stock":
+            seen["ids"] = list(strategy_ids)
+            seen["context"] = context
+            seen["overrides_map"] = overrides_map
         return {
             sid: StrategyResult(
                 as_of=context.as_of,

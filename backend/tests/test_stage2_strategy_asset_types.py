@@ -1,7 +1,11 @@
-"""A strategy's asset_types limit the symbols it may pick, not only whether it runs."""
+"""A strategy's asset_types and the run's asset type limit the symbols it may pick.
+
+A stock run picks only stocks and an ETF run only ETFs, even for a strategy supporting both.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import types
 from datetime import date, timedelta
@@ -11,9 +15,11 @@ import numpy as np
 import polars as pl
 import pytest
 
+from app.api.screener import compute_and_cache_all
 from app.backtest.matrix import build_market_data_matrix, make_signal_matrix
 from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
 from app.services import screener as screener_module
+from app.services import strategy_cache
 from app.services.screener import ScreenerService
 from app.strategy import monitor_rules
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
@@ -120,9 +126,9 @@ def _history(symbols=ALL_SYMBOLS) -> pl.DataFrame:
     return pl.DataFrame(rows).sort(["symbol", "date"])
 
 
-def _context(history: pl.DataFrame, **kwargs) -> StrategyDataContext:
+def _context(history: pl.DataFrame, asset_type: str = "stock", **kwargs) -> StrategyDataContext:
     return StrategyDataContext(
-        asset_type="stock",
+        asset_type=asset_type,
         timeframe="1d",
         as_of=AS_OF,
         current=history.filter(pl.col("date") == AS_OF),
@@ -201,12 +207,21 @@ def test_pool_cannot_reintroduce_an_unsupported_asset_type(tmp_path, backend):
 
 
 @pytest.mark.parametrize("backend", ["polars_expr", "matrix_native"])
-def test_stock_and_etf_strategy_still_picks_etfs(tmp_path, backend):
+def test_stock_run_of_a_stock_and_etf_strategy_skips_etfs(tmp_path, backend):
     engine = _custom_engine(tmp_path, backend, ["stock", "etf"])
 
     result = engine.run("every_symbol", _context(_history(), symbol_asset_types=TYPES))
 
-    assert _picked(result) == STOCK_PICKS | set(ETFS)
+    assert _picked(result) == STOCK_PICKS
+
+
+@pytest.mark.parametrize("backend", ["polars_expr", "matrix_native"])
+def test_etf_run_of_a_stock_and_etf_strategy_picks_only_etfs(tmp_path, backend):
+    engine = _custom_engine(tmp_path, backend, ["stock", "etf"])
+
+    result = engine.run("every_symbol", _context(_history(), "etf", symbol_asset_types=TYPES))
+
+    assert _picked(result) == set(ETFS)
 
 
 @pytest.mark.parametrize("backend", ["polars_expr", "matrix_native"])
@@ -334,6 +349,66 @@ def test_screener_context_takes_asset_types_from_the_security_master(tmp_path, m
 
     assert dict(context.symbol_asset_types) == TYPES
     assert _picked(result) == STOCK_PICKS
+
+
+@pytest.mark.parametrize("asset_type, picks", [("stock", STOCK_PICKS), ("etf", set(ETFS))])
+def test_screener_run_of_a_stock_and_etf_strategy_keeps_to_its_asset_type(
+    tmp_path, master, asset_type, picks
+):
+    engine = _custom_engine(tmp_path, "polars_expr", ["stock", "etf"])
+    current = _history().filter(pl.col("date") == AS_OF)
+    service = ScreenerService(_FakeRepo(tmp_path, current), asset_type=asset_type)
+
+    context = service.build_strategy_context(engine, AS_OF, ["every_symbol"])
+    result = engine.run("every_symbol", context)
+
+    assert _picked(result) == picks
+
+
+def _cached_symbols(data_dir: Path, filename: str) -> dict[str, set[str]]:
+    payload = json.loads((data_dir / "user_data" / filename).read_text(encoding="utf-8"))
+    return {
+        sid: {row["symbol"] for row in result["rows"]} for sid, result in payload["results"].items()
+    }
+
+
+def test_post_close_caches_keep_stock_and_etf_picks_apart(tmp_path, master):
+    engine = _custom_engine(tmp_path, "polars_expr", ["stock", "etf"])
+    repo = _FakeRepo(tmp_path, _history().filter(pl.col("date") == AS_OF))
+
+    compute_and_cache_all(repo, engine, as_of=AS_OF)
+    compute_and_cache_all(repo, engine, asset_type="etf", as_of=AS_OF)
+
+    assert _cached_symbols(tmp_path, "strategy_cache.json") == {"every_symbol": STOCK_PICKS}
+    assert _cached_symbols(tmp_path, "strategy_cache_etf.json") == {"every_symbol": set(ETFS)}
+    etf_rows = strategy_cache.read_cache(tmp_path, "etf")["results"]["every_symbol"]["rows"]
+    assert {row["symbol"] for row in etf_rows} == set(ETFS)
+
+
+def test_stock_cache_written_with_etf_picks_reads_without_them(tmp_path, master):
+    rows = [{"symbol": symbol, "score": 1.0} for symbol in (STOCKS[0], ETFS[0], ETFS[1])]
+    path = tmp_path / "user_data" / "strategy_cache.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "as_of": str(AS_OF),
+                "results": {"every_symbol": {"total": 3, "as_of": str(AS_OF), "rows": rows}},
+                "today_ever_matched": {"every_symbol": sorted(row["symbol"] for row in rows)},
+                "today_ever_rows": {"every_symbol": {row["symbol"]: row for row in rows}},
+                "updated_at": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cached = strategy_cache.read_cache(tmp_path)
+
+    assert cached["results"]["every_symbol"] == {"total": 1, "as_of": str(AS_OF), "rows": [rows[0]]}
+    assert cached["today_ever_rows"] == {"every_symbol": {STOCKS[0]: rows[0]}}
+    assert cached["today_ever_matched"] == {"every_symbol": [STOCKS[0]]}
+    assert cached["updated_at"] == 1 and "failures" not in cached
+    assert strategy_cache.read_cache(tmp_path, "etf") is None
 
 
 def test_screener_context_leaves_non_taiwan_data_unfiltered(tmp_path, monkeypatch):
@@ -493,12 +568,15 @@ def _monitor(
     backend: str,
     history: pl.DataFrame,
     notify_events=("pool_entry", "buy_signal"),
+    asset_types=("stock",),
+    asset_type="stock",
 ):
     monkeypatch.setattr("app.strategy.monitor.cn_today", lambda: AS_OF)
-    engine = _custom_engine(tmp_path, backend, ["stock"])
+    engine = _custom_engine(tmp_path, backend, list(asset_types))
     monitor = MonitorRuleEngine()
     monitor.set_strategy_engine(engine)
     monitor.set_history_loader(lambda target, bars: history.filter(pl.col("date") <= target))
+    monitor.set_history_loader_etf(lambda target, bars: history.filter(pl.col("date") <= target))
     monitor.set_rules(
         [
             monitor_rules.normalize(
@@ -506,7 +584,7 @@ def _monitor(
                     "id": "every_symbol_rule",
                     "name": "every symbol",
                     "type": "strategy",
-                    "asset_type": "stock",
+                    "asset_type": asset_type,
                     "scope": "all",
                     "symbols": [],
                     "strategy_id": "every_symbol",
@@ -537,6 +615,36 @@ def test_realtime_monitor_of_a_stock_only_strategy_never_fires_on_an_etf(
     rows = monitor.latest_strategy_results()["every_symbol"]["rows"]
     assert {row["symbol"] for row in rows} == STOCK_PICKS
     assert {event["symbol"] for event in events} == {TDR}
+
+
+@pytest.mark.parametrize("backend", ["polars_expr", "matrix_native"])
+def test_realtime_stock_monitor_of_a_stock_and_etf_strategy_never_picks_an_etf(
+    tmp_path, monkeypatch, master, backend
+):
+    history = _history((*STOCKS, TDR, *ETFS))
+    monitor = _monitor(tmp_path, monkeypatch, backend, history, asset_types=("stock", "etf"))
+
+    assert monitor.evaluate(_quotes(history, STOCKS)) == []
+    events = monitor.evaluate(_quotes(history, (*STOCKS, TDR, *ETFS)))
+
+    rows = monitor.latest_strategy_results()["every_symbol"]["rows"]
+    assert {row["symbol"] for row in rows} == STOCK_PICKS
+    assert {event["symbol"] for event in events} == {TDR}
+
+
+@pytest.mark.parametrize("backend", ["polars_expr", "matrix_native"])
+def test_realtime_etf_monitor_of_a_stock_and_etf_strategy_picks_only_etfs(
+    tmp_path, monkeypatch, master, backend
+):
+    history = _history((*STOCKS, TDR, *ETFS))
+    monitor = _monitor(
+        tmp_path, monkeypatch, backend, history, asset_types=("stock", "etf"), asset_type="etf"
+    )
+
+    monitor.evaluate(_quotes(history, (*STOCKS, ETFS[0])), asset_type="etf")
+    events = monitor.evaluate(_quotes(history, (*STOCKS, TDR, *ETFS)), asset_type="etf")
+
+    assert {event["symbol"] for event in events} == set(ETFS[1:])
 
 
 @pytest.mark.parametrize("backend", ["polars_expr", "matrix_native"])
@@ -672,7 +780,13 @@ def _strategy_def(backend: str, asset_types: list[str]) -> StrategyDef:
     )
 
 
-def _backtest(monkeypatch, backend: str, asset_types: list[str], symbols=(*STOCKS, TDR, *ETFS)):
+def _backtest(
+    monkeypatch,
+    backend: str,
+    asset_types: list[str],
+    symbols=(*STOCKS, TDR, *ETFS),
+    asset_type: str = "stock",
+):
     instruments = {symbol: _instrument(symbol, kind) for symbol, kind in TYPES.items()}
     monkeypatch.setattr("app.taiwan.universe.get_security_master", lambda: _Master(instruments))
     panel = _history(symbols).filter(pl.col("date") >= DAYS[-3])
@@ -696,6 +810,7 @@ def _backtest(monkeypatch, backend: str, asset_types: list[str], symbols=(*STOCK
             start=DAYS[-3],
             end=DAYS[-1],
             matching="close_t",
+            asset_type=asset_type,
         )
     )
     return result, engine
@@ -720,18 +835,22 @@ def test_backtest_execution_universe_excludes_etfs_for_a_stock_only_strategy(mon
     assert result.stats["excluded_symbols"] == []
 
 
+@pytest.mark.parametrize("asset_type, entered", [("stock", STOCK_PICKS), ("etf", set(ETFS))])
 @pytest.mark.parametrize("backend", ["polars_expr", "matrix_native"])
-def test_backtest_stock_and_etf_strategy_still_trades_etfs(monkeypatch, backend):
-    result, engine = _backtest(monkeypatch, backend, ["stock", "etf"])
+def test_backtest_of_a_stock_and_etf_strategy_trades_only_its_asset_type(
+    monkeypatch, backend, asset_type, entered
+):
+    result, engine = _backtest(monkeypatch, backend, ["stock", "etf"], asset_type=asset_type)
 
     assert result.error is None
-    assert _entered(engine) == STOCK_PICKS | set(ETFS)
+    assert _entered(engine) == entered
 
 
 def test_backtest_of_only_etfs_with_a_stock_only_strategy_has_nothing_to_trade(monkeypatch):
     result, engine = _backtest(monkeypatch, "polars_expr", ["stock"], symbols=ETFS)
 
     assert (
-        result.error == "策略僅支援 stock, 以下標的類型不符: 00915.TWSE, 00982A.TWSE, 00985A.TWSE"
+        result.error
+        == "回測僅含 stock 類型標的, 以下標的類型不符: 00915.TWSE, 00982A.TWSE, 00985A.TWSE"
     )
     assert engine.sim_matrix is None

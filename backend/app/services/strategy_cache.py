@@ -10,7 +10,8 @@ Cache layout:
     "updated_at": 1705324800000  # Unix ms
   }
 
-File path: data/user_data/strategy_cache.json
+File path: data/user_data/strategy_cache.json for stock runs, strategy_cache_etf.json for ETF runs.
+Stock reads drop ETF rows, which caches written before stock runs excluded ETFs still hold.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ def _json_default(obj: Any) -> Any:
 
 logger = logging.getLogger(__name__)
 
-_CACHE_FILENAME = "strategy_cache.json"
+_CACHE_FILENAMES = {"stock": "strategy_cache.json", "etf": "strategy_cache_etf.json"}
 
 # 读写同一 JSON 文件的进程内锁: write_cache 的 read-modify-write 与并发 read_cache
 # 无锁会丢更新/读到半写文件。read_cache 与 write_cache 共用此锁; write 内部复用
@@ -43,8 +44,8 @@ _CACHE_FILENAME = "strategy_cache.json"
 _file_lock = threading.Lock()
 
 
-def _cache_path(data_dir: Path) -> Path:
-    return data_dir / "user_data" / _CACHE_FILENAME
+def _cache_path(data_dir: Path, asset_type: str = "stock") -> Path:
+    return data_dir / "user_data" / _CACHE_FILENAMES[asset_type]
 
 
 def _enriched_parquet_path(data_dir: Path, as_of: str) -> Path:
@@ -61,7 +62,7 @@ def _get_enriched_mtime(data_dir: Path, as_of: str) -> float | None:
         return None
 
 
-def read_cache(data_dir: Path) -> dict | None:
+def read_cache(data_dir: Path, asset_type: str = "stock") -> dict | None:
     """读取策略缓存文件。返回 None 表示无缓存或读取失败。
 
     说明: 原先有 enriched mtime 过期校验 (数据文件变化 → 判过期返回 None),
@@ -71,20 +72,72 @@ def read_cache(data_dir: Path) -> dict | None:
     端点叠加监控引擎的内存实时结果 (latest_strategy_results) 来保证。
     """
     with _file_lock:
-        return _read_cache_unlocked(data_dir)
+        cached = _read_cache_unlocked(_cache_path(data_dir, asset_type))
+    if cached is None or asset_type != "stock":
+        return cached
+    return _without_etf_rows(cached)
 
 
 def clear_cache(data_dir: Path) -> None:
     """删除策略结果缓存；策略代码 reload 后避免继续展示旧公式结果。"""
-    path = _cache_path(data_dir)
     with _file_lock:
-        path.unlink(missing_ok=True)
-        path.with_name(path.name + ".tmp").unlink(missing_ok=True)
+        for asset_type in _CACHE_FILENAMES:
+            path = _cache_path(data_dir, asset_type)
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + ".tmp").unlink(missing_ok=True)
 
 
-def _read_cache_unlocked(data_dir: Path) -> dict | None:
+def _without_etf_rows(cached: dict) -> dict:
+    """*cached* without rows of symbols the security master types as ETFs.
+
+    Returned unchanged when the master cannot be read, so the cache stays readable.
+    """
+    from app.services.screener import taiwan_etf_symbols
+
+    try:
+        etfs = taiwan_etf_symbols()
+    except Exception as e:
+        logger.warning("策略缓存未能排除 ETF (证券主档不可用): %s", e)
+        return cached
+
+    filtered = dict(cached)
+    results = cached.get("results")
+    if isinstance(results, dict):
+        filtered["results"] = {
+            sid: _result_without(result, etfs) if isinstance(result, dict) else result
+            for sid, result in results.items()
+        }
+    ever_rows = cached.get("today_ever_rows")
+    if isinstance(ever_rows, dict):
+        filtered["today_ever_rows"] = {
+            sid: {symbol: row for symbol, row in rows_by_symbol.items() if symbol not in etfs}
+            if isinstance(rows_by_symbol, dict) else rows_by_symbol
+            for sid, rows_by_symbol in ever_rows.items()
+        }
+    ever_matched = cached.get("today_ever_matched")
+    if isinstance(ever_matched, dict):
+        filtered["today_ever_matched"] = {
+            sid: [symbol for symbol in matched if symbol not in etfs]
+            if isinstance(matched, list) else matched
+            for sid, matched in ever_matched.items()
+        }
+    return filtered
+
+
+def _result_without(result: dict, symbols: frozenset[str]) -> dict:
+    rows = result.get("rows") or []
+    kept = [row for row in rows if not (isinstance(row, dict) and row.get("symbol") in symbols)]
+    if len(kept) == len(rows):
+        return result
+    trimmed = {**result, "rows": kept}
+    total = result.get("total")
+    if isinstance(total, int):
+        trimmed["total"] = max(total - (len(rows) - len(kept)), len(kept))
+    return trimmed
+
+
+def _read_cache_unlocked(path: Path) -> dict | None:
     """实际读取逻辑 (不持锁)。供 read_cache 与 write_cache 复用, 避免重入死锁。"""
-    path = _cache_path(data_dir)
     if not path.exists():
         return None
     try:
@@ -114,15 +167,16 @@ def write_cache(
     as_of: str,
     results: dict[str, Any],
     failures: dict[str, dict[str, str]] | None = None,
+    asset_type: str = "stock",
 ) -> None:
-    """Write strategy results to the cache file and update today's ever-matched sets.
+    """Write strategy results to the *asset_type* cache file and update today's ever-matched sets.
 
     - A date change resets today_ever_matched and today_ever_rows
     - Within a day, earlier matched symbols are kept (union) and updated with the latest rows
     - A strategy in ``failures`` loses any earlier result of the day; one in ``results``
       loses any earlier failure.
     """
-    path = _cache_path(data_dir)
+    path = _cache_path(data_dir, asset_type)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # 整个 read-modify-write 持锁: 避免并发 write 丢更新, 也避免与 read_cache 撕裂
@@ -139,7 +193,7 @@ def _write_cache_locked(
 ) -> None:
     """持 _file_lock 后的实际写入逻辑 (read-merge-write + 原子替换)。"""
     # 读取旧缓存 (已持锁, 走不重入的 _read_cache_unlocked)
-    old = _read_cache_unlocked(data_dir)
+    old = _read_cache_unlocked(path)
     old_as_of = old.get("as_of") if old else None
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 

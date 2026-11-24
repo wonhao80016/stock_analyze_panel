@@ -190,10 +190,11 @@ def test_strategy_refresh_resolves_the_signal_day_once_and_records_it(tmp_path):
     latest_date, compute, record = _refresh_strategies(tmp_path, label="margin")
 
     assert latest_date.call_count == 1
-    assert compute.call_count == 1
-    kwargs = compute.call_args.kwargs
+    assert compute.call_count == 2
+    kwargs, etf_kwargs = (call.kwargs for call in compute.call_args_list)
     assert kwargs["as_of"] == SIGNAL_DAY
     assert isinstance(kwargs["run_report"], RunReport)
+    assert etf_kwargs == {"asset_type": "etf", "as_of": SIGNAL_DAY}
     record.assert_called_once_with(tmp_path, SIGNAL_DAY, RESULTS, kwargs["run_report"], "margin", None)
 
 
@@ -237,7 +238,19 @@ def test_ttl_history_cache_is_cleared_before_the_computation(tmp_path):
         _refresh_strategies(tmp_path, compute=compute)
     finally:
         screener._history_cache.clear()
-    assert seen == [0]
+    assert seen[0] == 0
+
+
+def test_etf_refresh_failure_leaves_the_stock_picks_recorded(tmp_path):
+    def compute(repo, engine, **kwargs):
+        if kwargs.get("asset_type") == "etf":
+            raise RuntimeError("etf boom")
+        return kwargs["as_of"], RESULTS
+
+    _, compute_mock, record = _refresh_strategies(tmp_path, compute=compute)
+
+    assert compute_mock.call_count == 2
+    assert record.call_count == 1
 
 
 def test_record_failure_leaves_the_strategy_cache_written(tmp_path):

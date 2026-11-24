@@ -247,6 +247,20 @@ def test_api_serves_an_etf_like_a_stock(data_dir, monkeypatch, client):
     assert [i["id"] for i in payload["signals"]["triggered"]] == ["vp_step_up"]
 
 
+def test_api_reads_an_etfs_selections_from_the_etf_cache_only(data_dir, monkeypatch, client):
+    etf = "0050.TWSE"
+    strategy_cache.write_cache(data_dir, "2026-10-28", {"stock_run": _picks([etf], "2026-10-28")})
+    strategy_cache.write_cache(
+        data_dir, "2026-10-28", {"etf_run": _picks([etf], "2026-10-28")}, asset_type="etf"
+    )
+    _serve(monkeypatch, _state(data_dir, {"live": _picks([etf], "2026-10-29")}), _Master("etf"))
+
+    strategies = client.get(URL.format(etf)).json()["strategies"]
+
+    assert strategies["status"] == "ok" and strategies["as_of"] == "2026-10-28"
+    assert [s["strategy_id"] for s in strategies["selections"]] == ["etf_run"]
+
+
 def test_api_marks_an_index_not_applicable_without_reading(data_dir, monkeypatch, client):
     def unreadable(*_args, **_kwargs):
         raise AssertionError("an index must not read the enriched table")
