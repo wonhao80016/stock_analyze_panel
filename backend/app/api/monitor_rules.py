@@ -6,9 +6,10 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.strategy import monitor_rules
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_signals
@@ -149,8 +150,10 @@ class RuleModel(BaseModel):
     strategy_id: str | None = None
     direction: str = "entry"  # entry | exit | both | (sector: up|down)
     notify_events: list[str] | None = None
+    # Deprecated: scores are min-max normalized per day, so a stored range is only kept or removed.
     score_min: float | None = None
     score_max: float | None = None
+    max_rank: Annotated[int, Field(strict=True, ge=1)] | None = None
     conditions: list[ConditionModel] = []
     logic: str = "and"        # and | or
     trigger_mode: str = "edge"  # edge=未命中转命中才触发 | level=命中期间每 cooldown 重播
@@ -356,6 +359,12 @@ def save_rule(req: RuleModel, request: Request):
     existing = monitor_rules.load_one(_data_dir(request), rule["id"])
     if existing and existing.get("created_at"):
         rule["created_at"] = existing["created_at"]
+    for key in ("score_min", "score_max"):
+        if rule.get(key) is not None and rule.get(key) != (existing or {}).get(key):
+            raise HTTPException(
+                status_code=400,
+                detail="評分範圍是當天候選內的相對分數, 已停用; 請改用「排名前 N 名」",
+            )
     try:
         monitor_rules.validate(rule)
     except ValueError as e:

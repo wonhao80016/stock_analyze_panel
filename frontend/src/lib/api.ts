@@ -596,8 +596,11 @@ export interface MonitorRule {
   strategy_id?: string | null
   direction: 'entry' | 'exit' | 'both' | 'up' | 'down'
   notify_events?: StrategyNotifyEvent[]
+  /** Deprecated: relative to the day's candidates; the backend only keeps or removes a stored range. */
   score_min?: number | null
   score_max?: number | null
+  /** Alert only on symbols ranked 1..max_rank in the day's whole-market strategy ranking. */
+  max_rank?: number | null
   conditions: MonitorCondition[]
   logic: 'and' | 'or'
   /** edge=未命中轉命中才觸發(建議) | level=命中期間每 cooldown 重播 */

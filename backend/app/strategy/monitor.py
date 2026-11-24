@@ -6,6 +6,7 @@ MonitorRuleEngine 是通用规则引擎,覆盖 signal/price/market/strategy 四�
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import logging
 import math
 import threading
@@ -146,6 +147,21 @@ def _conditions_signature(conditions: Any) -> tuple[Any, ...]:
     )
 
 
+def _top_ranked_symbols(rows: list[dict], max_rank: int) -> set[str]:
+    """Symbols in the first max_rank rows of the engine's ranking, the order the screener lists.
+
+    Rank is the row position, so ties keep the engine's symbol tie-break. A row without a finite
+    score never qualifies, so an unscored strategy matches nothing.
+    """
+    selected: set[str] = set()
+    for row in rows[:max_rank]:
+        score = row.get("score")
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+            continue
+        selected.add(str(row.get("symbol", "")))
+    return selected
+
+
 _OP_WORDS = {
     ">": "大於", ">=": "大於等於", "<": "小於", "<=": "小於等於", "==": "等於", "!=": "不等於",
 }
@@ -188,6 +204,8 @@ class MonitorRuleEngine:
         # ETF 版历史窗口加载器 (asset_type=etf 的规则用)。为 None 时 ETF filter_history 策略跳过。
         self._history_loader_etf: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
         self._active_matrix_snapshots: dict[str, Any] = {}
+        # Set only while evaluate() runs, so no run outlives its round's quotes.
+        self._round_strategy_runs: dict[tuple[str, str, str], Any] | None = None
         # 本轮 evaluate() 产出的策略选股结果: strategy_id → {rows, total, as_of}
         # 供策略页实时回显复用 (/api/screener/cached 端点直接读取, 避免重跑)。
         # 注意: 始终是「完整」的 dict —— evaluate 重算时先写到 _building_strategy_results,
@@ -265,6 +283,7 @@ class MonitorRuleEngine:
             rule.get("strategy_id"),
             rule.get("score_min"),
             rule.get("score_max"),
+            rule.get("max_rank"),
             rule.get("asset_type", "stock"),
             rule.get("scope", "symbols"),
             tuple(sorted(str(symbol) for symbol in rule.get("symbols", []))),
@@ -457,6 +476,7 @@ class MonitorRuleEngine:
             self._building_strategy_results = {}
             self._latest_strategy_result_ids.clear()
 
+        self._round_strategy_runs = {}
         matrix_rules: list[dict] = []
         params_map: dict[str, dict] = {}
         overrides_map: dict[str, dict] = {}
@@ -545,6 +565,7 @@ class MonitorRuleEngine:
 
         # 一次性提交本轮结果 (原子替换): /cached 读方要么拿到上一轮完整结果,
         # 要么拿到本轮完整结果, 不会读到空中间态。
+        self._round_strategy_runs = None
         self._latest_strategy_results = self._building_strategy_results
         self._active_matrix_snapshots.pop(asset_type, None)
 
@@ -714,7 +735,12 @@ class MonitorRuleEngine:
         rtype = rule.get("type", "signal")
         if rtype == "strategy":
             # 策略类型: 跑策略选股, 同时产出所选的信号和结果池变更事件
-            hit_rows = self._match_strategy(scoped, rule, now)
+            # A rank threshold ranks the whole market like the screener page; the scope only limits alerts.
+            if rule.get("max_rank") is not None and rule.get("scope") != "all":
+                alert_symbols = set(scoped["symbol"].cast(pl.Utf8).to_list())
+                hit_rows = self._match_strategy(df, rule, now, alert_symbols=alert_symbols)
+            else:
+                hit_rows = self._match_strategy(scoped, rule, now)
         else:
             # signal / price / market: 通用条件匹配
             if rule.get("trigger_mode", "edge") == "edge":
@@ -811,8 +837,102 @@ class MonitorRuleEngine:
             return df.head(0)
         return df
 
+    def _run_strategy(
+        self, sid: str, s: Any, at: str, df: pl.DataFrame, rule: dict, overrides: dict,
+    ) -> Any:
+        """Run one strategy on df for the realtime monitor; None when it cannot run this round."""
+        # 声明 filter_history 的策略 (如反包) 需要多日历史窗口才能判定形态。
+        # 旧实现因"实时监控不支持 history loader"直接跳过 → 反包等策略盘中永不触发。
+        # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
+        # loader 为 None (未装配) 时退回跳过, 保持旧行为, 不破坏无历史场景。
+        from app.services.screener import taiwan_symbol_asset_types
+        from app.strategy.engine import StrategyDataContext
+
+        symbol_asset_types = taiwan_symbol_asset_types(at, df)
+        current_context = StrategyDataContext(
+            asset_type=at,
+            timeframe="1d",
+            as_of=cn_today(),
+            current=df,
+            symbol_asset_types=symbol_asset_types,
+        )
+        if getattr(s, "execution_backend", "polars_expr") == "composite":
+            # 叠加策略首版不支持实时监控: 各子策略需独立预热实时矩阵, 热路径成本为 N 倍,
+            # 违反"实时热路径不得随历史数据量线性增长"约束。fail-closed 跳过本轮,
+            # /cached 端点回退到盘后 strategy_cache.json 的批量结果。
+            logger.debug("叠加策略 %s 暂不支持实时监控, 跳过", sid)
+            return None
+        if getattr(s, "execution_backend", "polars_expr") == "matrix_native":
+            matrix = self._active_matrix_snapshots.get(at)
+            if matrix is None:
+                logger.debug("策略 %s 缺少本轮实时矩阵快照, 跳过", sid)
+                return None
+            current_context = StrategyDataContext(
+                asset_type=at,
+                timeframe="1d",
+                as_of=cn_today(),
+                current=df,
+                market=matrix,
+                symbol_asset_types=symbol_asset_types,
+            )
+        required_history_bars = 1
+        history_resolver = getattr(self._strategy_engine, "required_history_bars", None)
+        if callable(history_resolver):
+            required_history_bars = history_resolver(
+                [sid],
+                overrides_map={sid: overrides},
+            )
+        if getattr(s, "execution_backend", "polars_expr") not in {"composite", "matrix_native"} and (
+            s.filter_history_fn or required_history_bars > 1
+        ):
+            history_loader = self._history_loader_for(rule)
+            if history_loader is None:
+                logger.debug("策略 %s 需要历史数据但未注入 history_loader (asset_type=%s), 跳过实时监控",
+                             sid, rule.get("asset_type", "stock"))
+                return None
+            try:
+                today = cn_today()
+                lookback = max(1, getattr(s, "lookback_days", 1), required_history_bars)
+                hist_df = history_loader(today, lookback + HISTORY_WARMUP_SESSIONS)
+                if hist_df is None or hist_df.is_empty():
+                    logger.debug("策略 %s 历史数据为空, 跳过本轮实时监控", sid)
+                    return None
+                # 历史窗口可能与今日已落盘数据重叠: 排掉 hist_df 中 date==today 的行,
+                # 今日行情始终以实时 df 为准 (盘中逐轮更新, 最接近收盘真相)。
+                # 否则 today 行重复会污染 filter_history 的 .over("symbol") 窗口判定。
+                if "date" in hist_df.columns:
+                    hist_df = hist_df.filter(pl.col("date") != today)
+                # 拼接历史窗口 + 今日实时行情 (filter_history 用 .over("symbol") 窗口, 多日天然可用)
+                current_context = StrategyDataContext(
+                    asset_type=at,
+                    timeframe="1d",
+                    as_of=today,
+                    current=df,
+                    history=pl.concat(
+                        [hist_df, df], how="diagonal_relaxed"
+                    ),
+                    symbol_asset_types=symbol_asset_types,
+                )
+            except Exception as e:
+                logger.warning("策略 %s 加载历史窗口失败, 跳过: %s", sid, e)
+                return None
+        try:
+            return self._strategy_engine.run(
+                sid,
+                current_context,
+                pool=(df["symbol"].cast(pl.Utf8).to_list()
+                      if getattr(s, "execution_backend", "polars_expr") == "matrix_native"
+                      else None),
+                overrides=overrides,
+                params=dict(overrides.get("params") or {}),
+            )
+        except Exception as e:
+            logger.warning("策略 %s 选股执行失败: %s", sid, e)
+            return None
+
     def _match_strategy(
         self, df: pl.DataFrame, rule: dict, now: float,
+        alert_symbols: set[str] | None = None,
     ) -> list[tuple[str, str, Any, Any, Any, list[str]]]:
         """策略类型评估: 一次执行同时产出交易信号和结果池变更事件。
 
@@ -820,6 +940,7 @@ class MonitorRuleEngine:
         event_type: buy_signal | sell_signal | pool_entry | pool_exit
         同类事件超过 5 只时合并为一条批量事件 (symbol="_batch")
         Cooldown is keyed per (rule_id, symbol, event_type) and applied before merging into a batch.
+        alert_symbols, when given, limits every event to those symbols while the strategy runs on df.
         """
         if self._strategy_engine is None:
             return []
@@ -843,93 +964,19 @@ class MonitorRuleEngine:
             except Exception:
                 pass
 
-        # 声明 filter_history 的策略 (如反包) 需要多日历史窗口才能判定形态。
-        # 旧实现因"实时监控不支持 history loader"直接跳过 → 反包等策略盘中永不触发。
-        # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
-        # loader 为 None (未装配) 时退回跳过, 保持旧行为, 不破坏无历史场景。
-        from app.services.screener import taiwan_symbol_asset_types
-        from app.strategy.engine import StrategyDataContext
-
-        symbol_asset_types = taiwan_symbol_asset_types(at, df)
-        current_context = StrategyDataContext(
-            asset_type=at,
-            timeframe="1d",
-            as_of=cn_today(),
-            current=df,
-            symbol_asset_types=symbol_asset_types,
-        )
-        if getattr(s, "execution_backend", "polars_expr") == "composite":
-            # 叠加策略首版不支持实时监控: 各子策略需独立预热实时矩阵, 热路径成本为 N 倍,
-            # 违反"实时热路径不得随历史数据量线性增长"约束。fail-closed 跳过本轮,
-            # /cached 端点回退到盘后 strategy_cache.json 的批量结果。
-            logger.debug("叠加策略 %s 暂不支持实时监控, 跳过", sid)
-            return []
-        if getattr(s, "execution_backend", "polars_expr") == "matrix_native":
-            matrix = self._active_matrix_snapshots.get(at)
-            if matrix is None:
-                logger.debug("策略 %s 缺少本轮实时矩阵快照, 跳过", sid)
-                return []
-            current_context = StrategyDataContext(
-                asset_type=at,
-                timeframe="1d",
-                as_of=cn_today(),
-                current=df,
-                market=matrix,
-                symbol_asset_types=symbol_asset_types,
-            )
-        required_history_bars = 1
-        history_resolver = getattr(self._strategy_engine, "required_history_bars", None)
-        if callable(history_resolver):
-            required_history_bars = history_resolver(
-                [sid],
-                overrides_map={sid: overrides},
-            )
-        if getattr(s, "execution_backend", "polars_expr") not in {"composite", "matrix_native"} and (
-            s.filter_history_fn or required_history_bars > 1
+        # Whole-market runs of one strategy are shared by every rule in the round.
+        run_key = None
+        if self._round_strategy_runs is not None and (
+            alert_symbols is not None or rule.get("scope") == "all"
         ):
-            history_loader = self._history_loader_for(rule)
-            if history_loader is None:
-                logger.debug("策略 %s 需要历史数据但未注入 history_loader (asset_type=%s), 跳过实时监控",
-                             sid, rule.get("asset_type", "stock"))
-                return []
-            try:
-                today = cn_today()
-                lookback = max(1, getattr(s, "lookback_days", 1), required_history_bars)
-                hist_df = history_loader(today, lookback + HISTORY_WARMUP_SESSIONS)
-                if hist_df is None or hist_df.is_empty():
-                    logger.debug("策略 %s 历史数据为空, 跳过本轮实时监控", sid)
-                    return []
-                # 历史窗口可能与今日已落盘数据重叠: 排掉 hist_df 中 date==today 的行,
-                # 今日行情始终以实时 df 为准 (盘中逐轮更新, 最接近收盘真相)。
-                # 否则 today 行重复会污染 filter_history 的 .over("symbol") 窗口判定。
-                if "date" in hist_df.columns:
-                    hist_df = hist_df.filter(pl.col("date") != today)
-                # 拼接历史窗口 + 今日实时行情 (filter_history 用 .over("symbol") 窗口, 多日天然可用)
-                current_context = StrategyDataContext(
-                    asset_type=at,
-                    timeframe="1d",
-                    as_of=today,
-                    current=df,
-                    history=pl.concat(
-                        [hist_df, df], how="diagonal_relaxed"
-                    ),
-                    symbol_asset_types=symbol_asset_types,
-                )
-            except Exception as e:
-                logger.warning("策略 %s 加载历史窗口失败, 跳过: %s", sid, e)
-                return []
-        try:
-            result = self._strategy_engine.run(
-                sid,
-                current_context,
-                pool=(df["symbol"].cast(pl.Utf8).to_list()
-                      if getattr(s, "execution_backend", "polars_expr") == "matrix_native"
-                      else None),
-                overrides=overrides,
-                params=dict(overrides.get("params") or {}),
-            )
-        except Exception as e:
-            logger.warning("策略 %s 选股执行失败: %s", sid, e)
+            run_key = (sid, at, json.dumps(overrides, sort_keys=True, default=str))
+        if run_key is not None and run_key in self._round_strategy_runs:
+            result = self._round_strategy_runs[run_key]
+        else:
+            result = self._run_strategy(sid, s, at, df, rule, overrides)
+            if run_key is not None:
+                self._round_strategy_runs[run_key] = result
+        if result is None:
             return []
 
         # 记录本轮完整选股结果 (供策略页实时回显: /cached 端点直接读取, 不落盘)。
@@ -953,11 +1000,14 @@ class MonitorRuleEngine:
             except Exception:  # noqa: BLE001
                 pass
 
+        max_rank = rule.get("max_rank")
         score_min = rule.get("score_min")
         score_max = rule.get("score_max")
         score_filter_enabled = score_min is not None or score_max is not None
         eligible_symbols: set[str] = set()
-        if score_filter_enabled:
+        if max_rank is not None:
+            eligible_symbols = _top_ranked_symbols(result.rows, max_rank)
+        elif score_filter_enabled:
             for row in result.rows:
                 symbol = str(row.get("symbol", ""))
                 score = row.get("score", result.scores.get(symbol))
@@ -972,6 +1022,14 @@ class MonitorRuleEngine:
                 eligible_symbols.add(symbol)
         else:
             eligible_symbols = {str(row["symbol"]) for row in result.rows}
+        exit_signal_hits = result.exit_signal_hits
+        if alert_symbols is not None:
+            eligible_symbols &= alert_symbols
+            exit_signal_hits = [
+                hit for hit in exit_signal_hits
+                if str(hit.get("symbol", "")) in alert_symbols
+            ]
+        pool_filtered = max_rank is not None or score_filter_enabled or alert_symbols is not None
 
         current_pool = eligible_symbols
         prev_pool = self._strategy_pools.get(pool_key)
@@ -987,7 +1045,7 @@ class MonitorRuleEngine:
             pass
 
         entry_signal_hits = result.entry_signal_hits
-        if score_filter_enabled:
+        if pool_filtered:
             entry_signal_hits = [
                 hit for hit in entry_signal_hits
                 if str(hit.get("symbol", "")) in eligible_symbols
@@ -997,7 +1055,7 @@ class MonitorRuleEngine:
                 pool_key, "buy_signal", result.as_of, entry_signal_hits,
             ),
             "sell_signal": self._new_strategy_signals(
-                pool_key, "sell_signal", result.as_of, result.exit_signal_hits,
+                pool_key, "sell_signal", result.as_of, exit_signal_hits,
             ),
             "pool_entry": set() if prev_pool is None else current_pool - prev_pool,
             "pool_exit": set() if prev_pool is None else prev_pool - current_pool,
@@ -1011,7 +1069,7 @@ class MonitorRuleEngine:
             },
             "sell_signal": {
                 str(hit["symbol"]): list(hit.get("signals") or [])
-                for hit in result.exit_signal_hits
+                for hit in exit_signal_hits
             },
         }
         action_labels = {
