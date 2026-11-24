@@ -89,22 +89,44 @@ def test_tradable_matches_legacy_suspension_rules():
     assert tradable == {"A": 1, "B": 0, "C": 1, "D": 0}
 
 
-def test_open_t_plus_one_keeps_legacy_next_asset_bar_semantics():
+def test_open_t_plus_one_drops_an_entry_whose_next_session_has_no_bar_but_defers_an_exit():
     panel = pl.DataFrame([
-        _row("A", 0, 10, signal_entry=True),
+        _row("A", 0, 10, signal_entry=True, signal_exit=True),
         _row("B", 1, 20),
         _row("A", 2, 12),
     ])
     matrix = build_market_matrix(
         panel,
         panel["signal_entry"],
-        None,
+        panel["signal_exit"],
         entry_delay_bars=1,
+        exit_delay_bars=1,
         entry_signal_ids=["signal_entry"],
+        exit_signal_ids=["signal_exit"],
     )
 
-    assert matrix.entry[:, 0].tolist() == [0, 0, 1]
-    assert matrix.entry_signal_time[2, 0] == 0
+    assert matrix.entry[:, 0].tolist() == [0, 0, 0]
+    assert matrix.exit[:, 0].tolist() == [0, 0, 1]
+    assert matrix.exit_signal_time[2, 0] == 0
+
+
+def test_open_t_plus_one_entry_follows_the_session_calendar_not_the_panel_dates():
+    panel = pl.DataFrame([
+        _row("A", 0, 10, signal_entry=True),
+        _row("A", 2, 12),
+        _row("A", 3, 12, signal_entry=True),
+        _row("A", 4, 13),
+    ])
+    calendar = [date(2024, 1, 1) + timedelta(days=day) for day in range(5)]
+
+    panel_only = build_market_matrix(panel, panel["signal_entry"], None, entry_delay_bars=1)
+    with_calendar = build_market_matrix(
+        panel, panel["signal_entry"], None, entry_delay_bars=1, session_dates=calendar,
+    )
+
+    assert panel_only.entry[:, 0].tolist() == [0, 1, 0, 1]
+    assert with_calendar.session_ids.tolist() == [0, 2, 3, 4]
+    assert with_calendar.entry[:, 0].tolist() == [0, 0, 0, 1]
 
 
 def _trade_summary(trades) -> list[tuple]:

@@ -36,6 +36,7 @@ from app.backtest.matrix import (
     asset_mask_without,
     build_market_matrix,
     build_market_matrix_from_signals,
+    partition_session_dates,
     rolling_mean,
     slice_market_data_matrix,
     slice_signal_matrix,
@@ -73,6 +74,7 @@ from app.strategy.scoring import (
     scoring_warmup_bars,
 )
 from app.taiwan.benchmarks import TAIEX
+from app.taiwan.enriched_reader import ENRICHED_DIR_NAME
 from app.taiwan.share_capital_store import (
     MIN_SESSION_COVERAGE,
     coverage_eligible,
@@ -1650,13 +1652,14 @@ class StrategyBacktestService:
 
             candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
             candidate_mask = basic_mask & candidate_filter_mask & ~panel.get_column("symbol").is_in(sorted(excluded))
+            entry_candidate_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
+            # Scores rank a session's entry candidates, as the matrix pipeline scores its entries.
             try:
-                panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
+                panel = self._apply_score(panel, s, overrides, universe_mask=entry_candidate_mask)
             except ValueError as e:
                 return _err(f"评分计算失败: {e}")
             formal_candidate_mask = candidate_mask & formal_range
-            entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
-            entry_mask = entry_mask & formal_range
+            entry_mask = entry_candidate_mask & formal_range
             if config.regime_filter:
                 date_values = panel.get_column("date").unique().sort().to_list()
                 date_labels = tuple(str(value)[:10] for value in date_values)
@@ -1709,6 +1712,7 @@ class StrategyBacktestService:
             }
 
             t_matrix = time.perf_counter()
+            data_dir = getattr(getattr(self.engine.repo, "store", None), "data_dir", None)
             market_matrix = build_market_matrix(
                 sim_panel,
                 sim_entry_mask,
@@ -1718,6 +1722,10 @@ class StrategyBacktestService:
                 entry_signal_ids=entry_signals,
                 exit_signal_ids=exit_signals,
                 minute_exit_trigger=matcher_config.exit_fill == "signal_next_minute",
+                session_dates=(
+                    partition_session_dates(Path(data_dir) / ENRICHED_DIR_NAME, config.start, sim_end)
+                    if isinstance(data_dir, (str, Path)) else None
+                ),
             )
             timing_ms["matrix_build"] = round((time.perf_counter() - t_matrix) * 1000, 1)
             del panel, sim_panel, sim_entry_mask, sim_exit_mask

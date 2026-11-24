@@ -282,6 +282,72 @@ def _at_locked_limit(
     return traded <= limit + _LIMIT_PRICE_TOLERANCE
 
 
+def _exit_due_at_open(
+    config: MatcherConfig,
+    matrix: MarketMatrix,
+    time_id: int,
+    asset_id: int,
+    hold_days: int,
+) -> bool:
+    """Whether a signal or max-hold exit fills at this session's open.
+
+    Such an exit precedes the session's intraday stop and take-profit; a gap through a line
+    fills at the same open and keeps the risk reason.
+    """
+    if config.exit_fill != "open_t+1":
+        return False
+    return bool(matrix.exit[time_id, asset_id]) or (
+        config.max_hold_days is not None and hold_days >= config.max_hold_days
+    )
+
+
+def _minute_exit_fill_index(minute_arr: np.ndarray | None, ref_price: float | None) -> int | None:
+    """Row whose open fills a sell confirmed by the first minute close below ``ref_price``."""
+    if minute_arr is None or len(minute_arr) < 2:
+        return None
+    if ref_price is None or not np.isfinite(ref_price) or ref_price <= 0:
+        return None
+    ncols = minute_arr.shape[1] if minute_arr.ndim == 2 else 1
+    if ncols < 4:
+        return None
+    opens = minute_arr[:, 0]
+    closes = minute_arr[:, 3]
+    below = np.isfinite(closes) & (closes < ref_price)
+    previous_above = np.empty(len(closes), dtype=bool)
+    previous_above[0] = True
+    previous_above[1:] = np.isfinite(closes[:-1]) & (closes[:-1] >= ref_price)
+    crossings = np.flatnonzero(below & previous_above)
+    if crossings.size == 0:
+        return None
+    next_idx = int(crossings[0]) + 1
+    if next_idx >= len(opens) or not np.isfinite(opens[next_idx]) or opens[next_idx] <= 0:
+        return None
+    return next_idx
+
+
+def _minute_exit_fills_first(
+    minute_arr: np.ndarray,
+    trigger_line: float,
+    stop_line: float | None,
+    take_profit: float | None,
+) -> bool:
+    """Whether a minute-replay sell on raw ``trigger_line`` fills before a raw risk line is touched.
+
+    A risk line touched before the fill minute fills first; one touched in the fill minute does not.
+    """
+    fill_idx = _minute_exit_fill_index(minute_arr, trigger_line)
+    if fill_idx is None:
+        return False
+    touched = np.zeros(fill_idx, dtype=bool)
+    if stop_line is not None:
+        lows = minute_arr[:fill_idx, 2]
+        touched |= np.isfinite(lows) & (lows <= stop_line)
+    if take_profit is not None:
+        highs = minute_arr[:fill_idx, 1]
+        touched |= np.isfinite(highs) & (highs >= take_profit)
+    return not touched.any()
+
+
 def _exit_signal_code(matrix: MarketMatrix, time_id: int, asset_id: int) -> int:
     """Daily exit signal code, else the code of the armed minute-replay line."""
     code = int(matrix.exit_signal_code[time_id, asset_id])
@@ -1390,6 +1456,28 @@ class BacktestEngine:
                 return False, "sell_limit_down"
             return True, ""
 
+        def _minute_exit_first(
+            time_id: int, asset_id: int, stop_line: float | None, take_profit: float | None,
+        ) -> bool:
+            if config.exit_fill != "signal_next_minute":
+                return False
+            armed = minute_exit_line is not None and _valid_price(minute_exit_line[time_id, asset_id])
+            if not (armed or matrix.exit[time_id, asset_id]):
+                return False
+            rows = minute_bars.get(time_id, asset_id)
+            reference = float(
+                minute_exit_line[time_id, asset_id] if armed else matrix.exit_reference_price[time_id, asset_id]
+            )
+            scale = float(matrix.raw_scale[time_id, asset_id])
+            if rows is None or not _valid_price(reference) or not _valid_price(scale):
+                return False
+            return _minute_exit_fills_first(
+                rows,
+                reference * scale,
+                stop_line * scale if stop_line is not None else None,
+                take_profit * scale if take_profit is not None else None,
+            )
+
         def _risk_exit(pos: dict, time_id: int, asset_id: int) -> tuple[str | None, float | None]:
             if pos.get("pending_exit_reason") or pos["entry_time"] == time_id:
                 return None, None
@@ -1409,17 +1497,23 @@ class BacktestEngine:
                 if peak_price / entry_price - 1 >= abs(float(activate)):
                     lines.append((peak_price * (1 - abs(float(drawdown))), "trailing_take_profit"))
             valid_lines = [(line, reason) for line, reason in lines if _valid_price(line)]
-            if valid_lines:
-                stop_price, reason = max(valid_lines, key=lambda item: item[0])
+            stop_price, stop_reason = max(valid_lines, key=lambda item: item[0]) if valid_lines else (None, "")
+            take_profit = (
+                entry_price * (1 + abs(float(config.take_profit_pct)))
+                if config.take_profit_pct is not None else None
+            )
+            intraday = not _exit_due_at_open(
+                config, matrix, time_id, asset_id, int(pos["hold_days"]),
+            ) and not _minute_exit_first(time_id, asset_id, stop_price, take_profit)
+            if stop_price is not None:
                 if _valid_price(open_price) and open_price <= stop_price:
-                    return reason, open_price
-                if _valid_price(low_price) and low_price <= stop_price:
-                    return reason, _trigger_fill(config, matrix, time_id, asset_id, stop_price, "floor")
-            if config.take_profit_pct is not None:
-                take_profit = entry_price * (1 + abs(float(config.take_profit_pct)))
+                    return stop_reason, open_price
+                if intraday and _valid_price(low_price) and low_price <= stop_price:
+                    return stop_reason, _trigger_fill(config, matrix, time_id, asset_id, stop_price, "floor")
+            if take_profit is not None:
                 if _valid_price(open_price) and open_price >= take_profit:
                     return "take_profit", open_price
-                if _valid_price(high_price) and high_price >= take_profit:
+                if intraday and _valid_price(high_price) and high_price >= take_profit:
                     return "take_profit", _trigger_fill(config, matrix, time_id, asset_id, take_profit, "ceil")
             return None, None
 
@@ -1804,27 +1898,8 @@ class BacktestEngine:
         ref_price: float | None,
     ) -> float | None:
         """分钟收盘确认向下穿越后，返回下一分钟开盘价。"""
-        if minute_arr is None or len(minute_arr) < 2:
-            return None
-        if ref_price is None or not np.isfinite(ref_price) or ref_price <= 0:
-            return None
-
-        ncols = minute_arr.shape[1] if minute_arr.ndim == 2 else 1
-        if ncols < 4:
-            return None
-        opens = minute_arr[:, 0]
-        closes = minute_arr[:, 3]
-        below = np.isfinite(closes) & (closes < ref_price)
-        previous_above = np.empty(len(closes), dtype=bool)
-        previous_above[0] = True
-        previous_above[1:] = np.isfinite(closes[:-1]) & (closes[:-1] >= ref_price)
-        crossings = np.flatnonzero(below & previous_above)
-        if crossings.size == 0:
-            return None
-        next_idx = int(crossings[0]) + 1
-        if next_idx >= len(opens) or not np.isfinite(opens[next_idx]) or opens[next_idx] <= 0:
-            return None
-        return float(opens[next_idx])
+        fill_idx = _minute_exit_fill_index(minute_arr, ref_price)
+        return float(minute_arr[fill_idx, 0]) if fill_idx is not None else None
 
     # 分钟K cache 存储的数值列及固定顺序 (_resolve_minute_fill 按此顺序整数索引)。
     _MINUTE_NUMERIC_COLS = ["open", "high", "low", "close", "volume", "amount"]
@@ -2076,6 +2151,28 @@ class BacktestEngine:
                 return None
             return _minute_trigger_price(time_id, asset_id)
 
+        def _minute_exit_first(
+            time_id: int, asset_id: int, stop_line: float | None, take_profit: float | None,
+        ) -> bool:
+            if config.exit_fill != "signal_next_minute":
+                return False
+            armed = minute_exit_line is not None and _valid_price(minute_exit_line[time_id, asset_id])
+            if not (armed or matrix.exit[time_id, asset_id]):
+                return False
+            minute_rows = minute_bars.get(time_id, asset_id)
+            reference = float(
+                minute_exit_line[time_id, asset_id] if armed else matrix.exit_reference_price[time_id, asset_id]
+            )
+            scale = float(matrix.raw_scale[time_id, asset_id])
+            if minute_rows is None or not _valid_price(reference) or not _valid_price(scale):
+                return False
+            return _minute_exit_fills_first(
+                minute_rows,
+                reference * scale,
+                stop_line * scale if stop_line is not None else None,
+                take_profit * scale if take_profit is not None else None,
+            )
+
         def _can_buy(time_id: int, asset_id: int) -> tuple[bool, str]:
             if not matrix.tradable[time_id, asset_id]:
                 return False, "buy_suspended"
@@ -2271,22 +2368,28 @@ class BacktestEngine:
                     if peak_price / entry_price - 1 >= abs(float(activate)):
                         risk_lines.append((peak_price * (1 - abs(float(drawdown))), "trailing_take_profit"))
                 valid_lines = [(line, reason) for line, reason in risk_lines if _valid_price(line)]
-                if valid_lines:
-                    stop_price, reason = max(valid_lines, key=lambda item: item[0])
+                stop_price, reason = max(valid_lines, key=lambda item: item[0]) if valid_lines else (None, "")
+                take_profit = (
+                    entry_price * (1 + abs(float(config.take_profit_pct)))
+                    if config.take_profit_pct is not None else None
+                )
+                intraday = not _exit_due_at_open(
+                    config, matrix, time_id, asset_id, int(pos["hold_days"]),
+                ) and not _minute_exit_first(time_id, asset_id, stop_price, take_profit)
+                if stop_price is not None:
                     override = None
                     gap_open = _valid_price(open_price) and open_price <= stop_price
                     if gap_open:
                         override = open_price
-                    elif _valid_price(low_price) and low_price <= stop_price:
+                    elif intraday and _valid_price(low_price) and low_price <= stop_price:
                         override = _trigger_fill(config, matrix, time_id, asset_id, stop_price, "floor")
                     if override is not None:
                         _try_sell(time_id, asset_id, reason, date_text, sold_today, override, gap_open)
                         continue
-                if config.take_profit_pct is not None:
-                    take_profit = entry_price * (1 + abs(float(config.take_profit_pct)))
+                if take_profit is not None:
                     if _valid_price(open_price) and open_price >= take_profit:
                         _try_sell(time_id, asset_id, "take_profit", date_text, sold_today, open_price, True)
-                    elif _valid_price(high_price) and high_price >= take_profit:
+                    elif intraday and _valid_price(high_price) and high_price >= take_profit:
                         _try_sell(
                             time_id,
                             asset_id,
