@@ -217,6 +217,29 @@ def test_full_mode_minute_replay_sells_on_an_intraday_false_breakdown():
     assert trade.exit_price == 9.7
 
 
+@pytest.mark.parametrize("method", ["simulate_portfolio", "simulate_independent_candidates"])
+@pytest.mark.parametrize(
+    ("stop_loss_pct", "expected"),
+    [
+        # The 9.75 stop is first touched at 09:33, the minute the replay sell fills at its open.
+        pytest.param(0.025, ("signal", 9.7), id="replay-fills-before-the-stop"),
+        # The 9.85 stop is touched at 09:32, before the 09:33 replay fill.
+        pytest.param(0.015, ("stop_loss", 9.85), id="stop-touched-before-the-replay"),
+    ],
+)
+def test_minute_replay_and_intraday_stop_fill_in_minute_order(method, stop_loss_pct, expected):
+    panel, entries, exits, minute = _false_breakdown_case()
+    result = getattr(BacktestEngine(repo=_MinuteRepo(minute)), method)(
+        panel, entries, exits, _config(exit_fill="signal_next_minute", minute_fill=True, stop_loss_pct=stop_loss_pct),
+        exit_signal_ids=["signal_ma20_breakdown"],
+    )
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.exit_date == "2024-01-03"
+    assert (trade.exit_reason, trade.exit_price) == expected
+
+
 def test_minute_replay_ignores_days_whose_line_is_not_armed_at_the_open():
     panel, entries, exits, minute = _false_breakdown_case()
     # The prior close sits below its MA20, so no fresh breakdown can fire on day 2.

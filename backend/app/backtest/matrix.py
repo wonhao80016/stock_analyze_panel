@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from types import MappingProxyType
@@ -777,7 +777,7 @@ def _build_market_data_matrix_from_dataset(
     )
     timestamps, session_ids = _matrix_time_axes(
         actual_dates,
-        _partition_dates(root, start, end),
+        partition_session_dates(root, start, end),
     )
     _make_read_only(
         timestamps,
@@ -1281,7 +1281,7 @@ def _matrix_time_axes(
     return timestamps, np.searchsorted(sessions, days).astype(np.int32)
 
 
-def _partition_dates(root: Path, start: date, end: date) -> list[date]:
+def partition_session_dates(root: Path, start: date, end: date) -> list[date]:
     dates: list[date] = []
     for partition in root.glob("date=*"):
         try:
@@ -2077,6 +2077,7 @@ def build_market_matrix_from_signals(
         signals.entry_signal_code,
         present,
         entry_delay_bars,
+        session_ids=market.session_ids,
     )
     exit_, exit_signal_time, exit_signal_code = _delay_signal_matrix(
         signals.exit,
@@ -2229,8 +2230,12 @@ def build_market_matrix(
     entry_signal_ids: list[str] | None = None,
     exit_signal_ids: list[str] | None = None,
     minute_exit_trigger: bool = False,
+    session_dates: list[date] | None = None,
 ) -> MarketMatrix:
-    """Backward-compatible long-panel boundary used by legacy/Polars strategies."""
+    """Backward-compatible long-panel boundary used by legacy/Polars strategies.
+
+    ``session_dates`` is the market's trading calendar; without it sessions are the panel's dates.
+    """
     if panel.is_empty():
         raise ValueError("cannot build MarketMatrix from an empty panel")
     market = build_market_data_matrix(
@@ -2238,6 +2243,12 @@ def build_market_matrix(
         field_columns={"score", "ma5", "ma10", "ma20"}
         | ({"raw_close"} if "raw_close" in panel.columns else set()),
     )
+    if session_dates:
+        bar_dates = [date.fromisoformat(label[:10]) for label in market.timestamp_labels]
+        if set(bar_dates) <= set(session_dates):
+            _, session_ids = _matrix_time_axes(bar_dates, sorted(set(session_dates)))
+            _make_read_only(session_ids)
+            market = replace(market, session_ids=session_ids)
     _, _, _, time_id, asset_id = _encode_axes(panel)
     shape = market.shape
 
@@ -2673,7 +2684,14 @@ def _delay_signal_matrix(
     codes: np.ndarray,
     present: np.ndarray,
     delay_bars: int,
+    *,
+    session_ids: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Move each signal to the asset's ``delay_bars``-th next bar.
+
+    With ``session_ids`` a signal whose next bar is more than ``delay_bars`` sessions away
+    (the asset had no bar on the next session) is dropped instead of carried over the gap.
+    """
     shape = raw.shape
     output = np.zeros(shape, dtype=np.uint8)
     signal_time = np.full(shape, -1, dtype=np.int32)
@@ -2689,6 +2707,9 @@ def _delay_signal_matrix(
             continue
         sources = source_rows[active]
         targets = target_rows[active]
+        if session_ids is not None and delay_bars:
+            on_time = session_ids[targets] - session_ids[sources] <= delay_bars
+            sources, targets = sources[on_time], targets[on_time]
         output[targets, asset_id] = 1
         signal_time[targets, asset_id] = sources.astype(np.int32)
         signal_code[targets, asset_id] = codes[sources, asset_id]
