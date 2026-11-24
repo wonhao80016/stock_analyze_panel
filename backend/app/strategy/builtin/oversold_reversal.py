@@ -47,7 +47,7 @@ META = {
         },
     ],
     "scoring": {"change_pct": 0.4, "rsi_14": 0.3, "vol_ratio_5d": 0.3},
-    "scoring_directions": {"rsi_14": "low", "momentum_5d": "low"},
+    "scoring_directions": {"rsi_14": "low"},
     "order_by": "score",
     "descending": True,
     "limit": 500,
