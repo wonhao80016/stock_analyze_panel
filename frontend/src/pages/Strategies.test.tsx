@@ -802,7 +802,7 @@ describe('策略庫 — 事後統計分頁', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '布林突破 的選股紀錄' }))
 
-    expect(await screen.findByText('這支策略沒有選股紀錄。')).toBeInTheDocument()
+    expect(await screen.findByText('這支策略沒有目前版本的選股紀錄。')).toBeInTheDocument()
   })
 
   it('顯示未計入筆數、持有期層級的排除與歷史資料不完整提示', async () => {
@@ -833,7 +833,7 @@ describe('策略庫 — 事後統計分頁', () => {
     fireEvent.click(screen.getByRole('button', { name: '布林突破 的選股紀錄' }))
 
     expect(await screen.findByText('台積電')).toBeInTheDocument()
-    expect(api.screenerPickPerformanceDetail).toHaveBeenCalledWith('boll_breakout', 200)
+    expect(api.screenerPickPerformanceDetail).toHaveBeenCalledWith('boll_breakout', 200, 'current')
     expect(screen.getAllByText('未滿期').length).toBe(3)
 
     fireEvent.click(screen.getByRole('button', { name: '查看 台積電 走勢' }))

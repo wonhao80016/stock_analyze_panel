@@ -56,8 +56,8 @@ export const QK = {
   screenerPickPerformance: ['screener-pick-performance', 'summary'] as const,
   screenerPickPerformanceAll: ['screener-pick-performance'] as const,
   screenerPickBackfill: (jobId: string) => ['screener-pick-backfill', jobId] as const,
-  screenerPickPerformanceDetail: (strategyId: string, limit: number) =>
-    ['screener-pick-performance', 'detail', strategyId, limit] as const,
+  screenerPickPerformanceDetail: (strategyId: string, limit: number, version: string) =>
+    ['screener-pick-performance', 'detail', strategyId, limit, version] as const,
   marketSnapshot:       ['market-snapshot'] as const,
 
   dimensionMembers:     (id: string, field: string, value: string, date?: string) => ['dimension-members', id, field, value, date] as const,

@@ -15,6 +15,7 @@ from typing import Any
 
 import polars as pl
 
+from app.services.strategy_pick_history import CURRENT_VERSION
 from app.taiwan.corporate_actions import (
     REF_LIMIT_UP,
     REF_PREV_CLOSE,
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 HORIZONS: tuple[int, ...] = (1, 5, 10, 20)
 LIMIT_TOLERANCE = 0.005
+BENCHMARK_SYMBOL = "0050.TWSE"
 CORPORATE_ACTION_SOURCES: tuple[str, ...] = tuple(adapter.SOURCE for adapter in default_adapters())
 
 PENDING_ENTRY = "pending_entry"
@@ -130,6 +132,7 @@ class PerformanceInputs:
     adjustment: AdjustmentState
     calendar: PriceCalendar
     limit_profile: pl.DataFrame
+    benchmark: pl.DataFrame | None = None
 
 
 def _exchange_expr() -> pl.Expr:
@@ -181,7 +184,8 @@ def load_inputs(
         market = pl.DataFrame(schema=_BAR_SCHEMA)
     calendar = PriceCalendar.from_market(stored, market)
     bars = market.filter(pl.col("symbol").is_in(symbols))
-    return PerformanceInputs(bars, events, adjustment, calendar, limit_profile(symbols))
+    benchmark = market.filter(pl.col("symbol") == BENCHMARK_SYMBOL)
+    return PerformanceInputs(bars, events, adjustment, calendar, limit_profile(symbols), benchmark)
 
 
 def _priced_bars(
@@ -206,6 +210,16 @@ def _priced_bars(
         )
     with_refs = attach_reference_prices(traded, events, with_limits=True)
     return forward_adjusted(with_refs, events, through)
+
+
+def _benchmark_prices(
+    benchmark: pl.DataFrame | None, events: pl.DataFrame, adjustment: AdjustmentState, through: date | None
+) -> pl.DataFrame:
+    """BENCHMARK_SYMBOL's traded (date, open, close) on the same forward-adjusted scale as the picks."""
+    if benchmark is None:
+        return pl.DataFrame(schema={"date": pl.Date, "open": pl.Float64, "close": pl.Float64})
+    bars = benchmark.filter(pl.col("symbol") == BENCHMARK_SYMBOL)
+    return _priced_bars(bars, events, adjustment, through).select("date", "open", "close")
 
 
 def _signal_windows(
@@ -378,10 +392,14 @@ def compute_outcomes(
     calendar: PriceCalendar,
     limit_profile: pl.DataFrame,
     horizons: tuple[int, ...] = HORIZONS,
+    *,
+    benchmark: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """One row per pick: its input columns plus status, limit check, excluded_reason and per-horizon results.
 
     *calendar* must come from the whole market, not from *bars*; ret_k is null exactly when reason_k is set.
+    bench_ret_k holds *benchmark* bars' return from the pick's entry open to the close its ret_k exits at;
+    it and excess_ret_k are null when ret_k is, or when the benchmark has no bar on either date.
     """
     adjustment = adjustment_state
     frame = (
@@ -390,9 +408,14 @@ def compute_outcomes(
         .with_columns(_exchange_expr().alias("_exchange"), _excluded_reason_expr().alias("excluded_reason"))
     )
     priced = _priced_bars(bars, events, adjustment, calendar.prices_through)
+    bench = _benchmark_prices(benchmark, events, adjustment, calendar.prices_through)
 
     windows = _signal_windows(frame.get_column("signal_date").unique().to_list(), calendar, adjustment, horizons)
-    frame = frame.join(windows, on="signal_date", how="left")
+    frame = frame.join(windows, on="signal_date", how="left").join(
+        bench.select(pl.col("date").alias("entry_date"), pl.col("open").alias("_bench_entry")),
+        on="entry_date",
+        how="left",
+    )
     entry_bars = priced.select(
         "symbol",
         pl.col("date").alias("_entry_bar_date"),
@@ -480,6 +503,15 @@ def compute_outcomes(
             .otherwise(0)
             .alias(f"stale_days_{k}"),
         )
+        frame = frame.join(
+            bench.select(pl.col("date").alias(f"_last_date_{k}"), pl.col("close").alias(f"_bench_exit_{k}")),
+            on=f"_last_date_{k}",
+            how="left",
+        ).with_columns(
+            pl.when(pl.col(f"ret_{k}").is_not_null())
+            .then(pl.col(f"_bench_exit_{k}") / pl.col("_bench_entry") - 1.0)
+            .alias(f"bench_ret_{k}")
+        ).with_columns((pl.col(f"ret_{k}") - pl.col(f"bench_ret_{k}")).alias(f"excess_ret_{k}"))
 
     frame = _absent_since(frame, bars, calendar)
     frame = frame.with_columns(pl.any_horizontal([pl.col(f"stale_{k}") for k in horizons]).alias("stale_exit"))
@@ -500,6 +532,20 @@ def _horizon_summary(kept: pl.DataFrame, k: int) -> dict[str, Any]:
         **{name: int((reasons == name).sum()) for name in _HORIZON_EXCLUSIONS},
         "stale_exit_count": int(kept.get_column(f"stale_{k}").sum()),
         "pending_count": int((reasons == PENDING).sum()),
+        **_benchmark_summary(kept, k),
+    }
+
+
+def _benchmark_summary(kept: pl.DataFrame, k: int) -> dict[str, Any]:
+    """Over picks whose return and benchmark return both exist; beat_benchmark_ratio counts excess > 0."""
+    paired = kept.filter(pl.col(f"excess_ret_{k}").is_not_null())
+    n = paired.height
+    excess = paired.get_column(f"excess_ret_{k}")
+    return {
+        "benchmark_sample_count": n,
+        "mean_benchmark_return": float(paired.get_column(f"bench_ret_{k}").mean()) if n else None,
+        "mean_excess_return": float(excess.mean()) if n else None,
+        "beat_benchmark_ratio": float((excess > 0).sum()) / n if n else None,
     }
 
 
@@ -547,6 +593,8 @@ def summarize(
     """Per-strategy statistics; only picks with a null excluded_reason enter counts and horizons.
 
     The excluded counts plus the per-status counts sum to signal_count; positive_ratio counts returns > 0.
+    strategies covers every strategy over its CURRENT_VERSION picks and runs, legacy_strategies only
+    those with other ones; without a version_status column everything counts as current.
     """
     signal_dates = outcomes.get_column("signal_date")
     ids = set(outcomes.get_column("strategy_id").unique().to_list())
@@ -554,15 +602,33 @@ def summarize(
     if runs is not None and "calculation_status" in runs.columns:
         issues = [
             {"strategy_id": row["strategy_id"], "date": _iso(row["signal_date"]),
-             "status": row["calculation_status"], "missing_fields": json.loads(row["missing_fields"] or "[]")}
+             "status": row["calculation_status"], "missing_fields": json.loads(row["missing_fields"] or "[]"),
+             "version_status": row.get("version_status", CURRENT_VERSION)}
             for row in runs.filter(pl.col("calculation_status") != "ok").iter_rows(named=True)
         ]
         ids.update(issue["strategy_id"] for issue in issues)
+    is_current = (
+        pl.col("version_status") == CURRENT_VERSION if "version_status" in outcomes.columns else pl.lit(True)
+    )
+    current_rows = outcomes.filter(is_current)
+    legacy_rows = outcomes.filter(~is_current)
     strategies = []
+    legacy_strategies = []
     for sid in sorted(ids):
-        stats = _strategy_summary(sid, outcomes.filter(pl.col("strategy_id") == sid))
-        stats["input_unavailable_days"] = sum(issue["strategy_id"] == sid and issue["status"] == "input_unavailable" for issue in issues)
-        strategies.append(stats)
+        for rows, wanted, target in (
+            (current_rows, True, strategies),
+            (legacy_rows, False, legacy_strategies),
+        ):
+            own_rows = rows.filter(pl.col("strategy_id") == sid)
+            own_issues = [
+                issue for issue in issues
+                if issue["strategy_id"] == sid and (issue["version_status"] == CURRENT_VERSION) == wanted
+            ]
+            if not wanted and own_rows.is_empty() and not own_issues:
+                continue
+            stats = _strategy_summary(sid, own_rows)
+            stats["input_unavailable_days"] = sum(issue["status"] == "input_unavailable" for issue in own_issues)
+            target.append(stats)
     return {
         "method": {
             "entry": "next_session_open",
@@ -572,6 +638,9 @@ def summarize(
             "slippage_included": False,
             "exit_fill_simulated": False,
             "return_unit": "decimal",
+            "benchmark": BENCHMARK_SYMBOL,
+            "benchmark_price_adjustment": "forward_adjusted_incl_dividends",
+            "benchmark_window": "pick_entry_open_to_pick_exit_close",
         },
         "adjustment": {
             "status": adjustment_state.status,
@@ -582,5 +651,7 @@ def summarize(
         "last_signal_date": _iso(signal_dates.max()) if not outcomes.is_empty() else None,
         "prices_through": _iso(prices_through),
         "strategies": strategies,
+        "legacy_strategies": legacy_strategies,
+        "version_counts": {"current": current_rows.height, "legacy": legacy_rows.height},
         "calculation_issues": issues,
     }

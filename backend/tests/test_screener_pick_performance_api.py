@@ -116,6 +116,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr("app.taiwan.data_root.taiwan_data_root", forbidden)
     monkeypatch.setattr("app.taiwan.universe.get_security_master", lambda: master)
     monkeypatch.setattr(screener_api, "_pick_limit_profile", _profile)
+    monkeypatch.setattr(
+        screener_api,
+        "_current_strategy_versions",
+        lambda _request, ids: {sid: sph.CurrentVersion(None, f"fp-{sid}", True) for sid in ids},
+    )
     app = FastAPI()
     app.include_router(screener_api.router)
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
@@ -172,7 +177,10 @@ def test_summary_chains_recorded_snapshots_into_decimal_statistics(client, popul
 
 
 def test_summary_counts_each_exclusion_without_sampling_it(client, populated):
-    stats = _by_id(client.get("/api/screener/pick-performance").json())
+    payload = client.get("/api/screener/pick-performance").json()
+    stats = _by_id(payload)
+    # A run without a readable manifest has no known version, so its pick is legacy.
+    stats["s_broken"] = {s["strategy_id"]: s for s in payload["legacy_strategies"]}["s_broken"]
 
     assert stats["s_half"]["excluded"]["universe_incomplete"] == 1
     assert stats["s_late"]["excluded"]["recorded_late"] == 1
@@ -197,10 +205,19 @@ def test_detail_lists_one_strategy_with_per_horizon_reasons(client, populated):
     assert first["signal_date"] == D[0].isoformat() and first["entry_date"] == D[1].isoformat()
     assert first["entry_price_raw"] == 100.0
     assert first["limit_check"] == "checked" and second["limit_check"] == "unknown"
-    assert first["returns"]["1"] == {"value": pytest.approx(0.01), "reason": None, "stale_exit": False, "stale_days": 0}
+    assert first["returns"]["1"] == {
+        "value": pytest.approx(0.01), "reason": None, "stale_exit": False, "stale_days": 0,
+        "benchmark_return": None, "excess_return": None,
+    }
     assert first["returns"]["1"]["value"] != pytest.approx(1.0)
-    assert first["returns"]["5"] == {"value": None, "reason": "data_incomplete", "stale_exit": False, "stale_days": 0}
-    assert second["returns"]["10"] == {"value": pytest.approx(0.0), "reason": None, "stale_exit": True, "stale_days": 1}
+    assert first["returns"]["5"] == {
+        "value": None, "reason": "data_incomplete", "stale_exit": False, "stale_days": 0,
+        "benchmark_return": None, "excess_return": None,
+    }
+    assert second["returns"]["10"] == {
+        "value": pytest.approx(0.0), "reason": None, "stale_exit": True, "stale_days": 1,
+        "benchmark_return": None, "excess_return": None,
+    }
     assert first["history_degraded"] is True
     assert first["excluded_reason"] is None and first["manifest_missing"] is False
 
@@ -287,3 +304,45 @@ def test_limit_profile_failure_leaves_limit_unknown(monkeypatch):
     monkeypatch.setattr("app.indicators.pipeline.taiwan_limit_profile", broken)
     profile = screener_api._pick_limit_profile([SYM])
     assert profile.to_dicts() == [{"symbol": SYM, "limit_pct": None, "is_etf_tick": False}]
+
+
+def test_summary_and_detail_keep_strategy_versions_apart(client, populated, monkeypatch):
+    def versions(_request, ids):
+        # s_main's stored fingerprint no longer matches, so its picks are legacy.
+        return {sid: sph.CurrentVersion(None, "fp-new" if sid == "s_main" else f"fp-{sid}", True) for sid in ids}
+
+    monkeypatch.setattr(screener_api, "_current_strategy_versions", versions)
+    payload = client.get("/api/screener/pick-performance").json()
+    assert payload["version_counts"] == {"current": 2, "legacy": 3}
+    current = _by_id(payload)["s_main"]
+    assert current["signal_count"] == 0 and current["horizons"]["1"]["sample_count"] == 0
+    legacy = {s["strategy_id"]: s for s in payload["legacy_strategies"]}
+    assert set(legacy) == {"s_main", "s_broken"}
+    assert legacy["s_main"]["signal_count"] == 2
+    assert legacy["s_main"]["horizons"]["1"]["mean_return"] == pytest.approx(0.005)
+    assert legacy["s_main"]["horizons"]["1"]["mean_excess_return"] is None
+
+    def rows(version):
+        return client.get("/api/screener/pick-performance/s_main", params={"version": version}).json()
+
+    assert rows("current")["total"] == 0
+    assert rows("legacy")["total"] == 2
+    assert {r["version_status"] for r in rows("all")["rows"]} == {"legacy"}
+    assert client.get("/api/screener/pick-performance/s_main", params={"version": "old"}).status_code == 422
+
+
+def test_detail_reports_the_benchmark_return_of_each_pick(client, populated):
+    rows = [_bar("0050.TWSE", d, 50.0 + i, 50.0 + i + 0.5) for i, d in enumerate(D)]
+    frame = pl.DataFrame(rows).with_columns(pl.lit(1.0).alias("amount"), pl.lit(None, dtype=pl.Int64).alias("quote_ts"))
+    TaiwanDailyStore(populated / "taiwan" / "daily").write_batch(frame)
+
+    first = client.get("/api/screener/pick-performance/s_main").json()["rows"][0]
+    assert first["version_status"] == "current" and first["strategy_version"] is None
+    # Entry is the D[1] open of 51.0; T+1 exits at the D[1] close of 51.5 and T+20 at the D[20] close of 70.5.
+    assert first["returns"]["1"]["benchmark_return"] == pytest.approx(51.5 / 51.0 - 1)
+    assert first["returns"]["1"]["excess_return"] == pytest.approx(0.01 - (51.5 / 51.0 - 1))
+    assert first["returns"]["20"]["benchmark_return"] == pytest.approx(70.5 / 51.0 - 1)
+
+    summary = _by_id(client.get("/api/screener/pick-performance").json())["s_main"]["horizons"]["20"]
+    assert summary["benchmark_sample_count"] == 2
+    assert summary["mean_benchmark_return"] == pytest.approx(70.5 / 51.0 - 1)

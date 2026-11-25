@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import asdict
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -23,7 +23,7 @@ from app.services import (
     strategy_pick_performance,
     strategy_realtime,
 )
-from app.services.screener import ScreenerService
+from app.services.screener import ScreenerService, taiwan_etf_symbols
 from app.strategy import config as strategy_config
 
 logger = logging.getLogger(__name__)
@@ -344,6 +344,24 @@ def _pick_limit_profile(symbols: list[str]):
         )
 
 
+def _current_strategy_versions(request: Request, ids: list[str]) -> dict[str, strategy_pick_history.CurrentVersion]:
+    """Identities of the strategies loaded now; without an engine no stored pick counts as current."""
+    engine = getattr(request.app.state, "strategy_engine", None)
+    if engine is None or not ids:
+        return {}
+    overrides = strategy_config.list_overrides(request.app.state.repo.store.data_dir)
+    return strategy_pick_history.current_versions(engine, overrides, ids)
+
+
+def _pick_etf_symbols() -> frozenset[str] | None:
+    """ETF symbols of the security master; None when it cannot be read, so no run is proven ETF-free."""
+    try:
+        return taiwan_etf_symbols()
+    except Exception as e:
+        logger.warning("pick performance: ETF symbols unavailable: %s", e)
+        return None
+
+
 def _pick_outcomes(request: Request, strategy_id: str | None = None):
     import polars as pl
 
@@ -360,6 +378,13 @@ def _pick_outcomes(request: Request, strategy_id: str | None = None):
     if strategy_id is not None:
         picks = picks.filter(pl.col("strategy_id") == strategy_id)
         runs = runs.filter(pl.col("strategy_id") == strategy_id)
+    ids = sorted(set(runs.get_column("strategy_id").to_list()) | set(picks.get_column("strategy_id").to_list()))
+    current = _current_strategy_versions(request, ids)
+    statuses = strategy_pick_history.run_version_status(
+        runs, current, strategy_pick_history.etf_runs(picks, _pick_etf_symbols())
+    )
+    picks = strategy_pick_history.with_version_status(picks, statuses)
+    runs = strategy_pick_history.with_version_status(runs, statuses)
     try:
         inputs = strategy_pick_performance.load_inputs(data_dir, picks, _pick_limit_profile)
     except OSError as e:
@@ -369,7 +394,8 @@ def _pick_outcomes(request: Request, strategy_id: str | None = None):
             detail={"code": PICK_PRICES_UNREADABLE, "message": "Daily prices could not be read."},
         ) from e
     outcomes = strategy_pick_performance.compute_outcomes(
-        picks, inputs.bars, inputs.events, inputs.adjustment, inputs.calendar, inputs.limit_profile
+        picks, inputs.bars, inputs.events, inputs.adjustment, inputs.calendar, inputs.limit_profile,
+        benchmark=inputs.benchmark,
     )
     return outcomes, inputs, runs
 
@@ -382,14 +408,20 @@ def _iso_or_none(value: Any) -> Any:
     return value.isoformat() if isinstance(value, (date, datetime)) else value
 
 
+_HORIZON_RATIOS = (
+    "mean_return", "median_return", "positive_ratio",
+    "mean_benchmark_return", "mean_excess_return", "beat_benchmark_ratio",
+)
+
+
 @router.get("/pick-performance")
 def get_pick_performance(request: Request):
     """Gross decimal returns of recorded picks per strategy; computed on every request."""
     outcomes, inputs, runs = _pick_outcomes(request)
     payload = strategy_pick_performance.summarize(outcomes, inputs.adjustment, inputs.calendar.prices_through, runs)
-    for stats in payload["strategies"]:
+    for stats in (*payload["strategies"], *payload["legacy_strategies"]):
         for horizon in stats["horizons"].values():
-            for name in ("mean_return", "median_return", "positive_ratio"):
+            for name in _HORIZON_RATIOS:
                 horizon[name] = _finite(horizon[name])
     return payload
 
@@ -422,9 +454,16 @@ def get_pick_performance_detail(
     strategy_id: str,
     request: Request,
     limit: int = Query(200, ge=1, le=2000),
+    version: Literal["current", "legacy", "all"] = Query("all"),
 ):
     """Most recent picks of one strategy, newest signal day first; an unknown id yields no rows."""
+    import polars as pl
+
     outcomes, inputs, runs = _pick_outcomes(request, strategy_id)
+    if version != "all":
+        wanted = pl.col("version_status") == version
+        outcomes = outcomes.filter(wanted)
+        runs = runs.filter(wanted)
     horizons = strategy_pick_performance.HORIZONS
     latest = outcomes.sort(["signal_date", "rank"], descending=[True, False]).head(limit)
     rows = []
@@ -445,6 +484,8 @@ def get_pick_performance_detail(
                     "reason": row[f"reason_{k}"],
                     "stale_exit": bool(row[f"stale_{k}"]),
                     "stale_days": int(row[f"stale_days_{k}"] or 0),
+                    "benchmark_return": _finite(row[f"bench_ret_{k}"]),
+                    "excess_return": _finite(row[f"excess_ret_{k}"]),
                 }
                 for k in horizons
             },
@@ -456,6 +497,8 @@ def get_pick_performance_detail(
             "provenance": row["provenance"],
             "calculation_status": row["calculation_status"],
             "missing_fields": json.loads(row["missing_fields"] or "[]"),
+            "strategy_version": row["strategy_version"],
+            "version_status": row["version_status"],
         })
     _attach_instrument_names(request.app.state.repo, {"results": {strategy_id: {"rows": rows}}})
     header = strategy_pick_performance.summarize(
@@ -565,6 +608,7 @@ def compute_and_cache_all(
     if run_report is not None:
         # Same overrides snapshot the strategies run with, so fingerprints describe this run.
         run_report.fingerprints = strategy_pick_history.strategy_fingerprints(engine, all_overrides, all_ids)
+        run_report.versions = strategy_pick_history.strategy_versions(engine, all_overrides, all_ids)
         run_report.input_groups = strategy_pick_history.strategy_input_groups(engine, all_ids)
 
     params_map = {

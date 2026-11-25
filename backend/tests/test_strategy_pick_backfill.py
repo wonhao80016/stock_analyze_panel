@@ -69,6 +69,8 @@ def test_previous_trading_days_provenance_and_idempotence(setup):
     assert saved.picks['provenance'].unique().to_list() == ['reconstructed']
     assert saved.picks['recorded_late'].all()
     assert saved.runs['first_recorded_at'].min().date() > DATES[-1]
+    version = history.strategy_versions(engine, {}, ['test'])['test']
+    assert version and saved.runs['strategy_version'].unique().to_list() == [version]
     run_ids = saved.runs['run_id'].to_list()
     again = backfill.run(repo, engine, 5)
     assert again['written_runs'] == 0 and again['existing_runs'] == 5

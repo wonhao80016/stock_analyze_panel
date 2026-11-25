@@ -359,6 +359,8 @@ def test_scheduled_refresh_records_every_executed_builtin_strategy(tmp_path, mon
     assert runs["universe_complete"].to_list() == [True] * len(executed)
     assert set(runs["run_label"].to_list()) == {"daily+institutional"}
     assert runs["strategy_fingerprint"].to_list() == [report.fingerprints[s] for s in runs["strategy_id"]]
+    assert all(report.versions[sid] for sid in executed)
+    assert runs["strategy_version"].to_list() == [report.versions[s] for s in runs["strategy_id"]]
 
 
 def test_fingerprints_use_the_overrides_snapshot_the_run_used(tmp_path, monkeypatch, builtin_engine):

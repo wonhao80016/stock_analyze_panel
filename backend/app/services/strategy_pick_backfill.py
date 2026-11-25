@@ -98,6 +98,7 @@ def run(repo, engine, days: int = 5, progress=None, *, dates: list[date] | None 
     ids = [m["id"] for m in metas]
     groups = history.strategy_input_groups(engine, ids)
     fingerprints = history.strategy_fingerprints(engine, overrides, ids)
+    versions = history.strategy_versions(engine, overrides, ids)
     saved = history.read_picks(data_dir, dates[0], dates[-1])
     retryable = set(saved.runs.filter(
         (pl.col("provenance") == "reconstructed") & (pl.col("calculation_status") == "input_unavailable")
@@ -144,7 +145,8 @@ def run(repo, engine, days: int = 5, progress=None, *, dates: list[date] | None 
                 status = context.input_status or {}
                 report = history.RunReport(
                     current=status.get(history.CURRENT) or history.InputStatus(),
-                    history=status.get(history.HISTORY), input_groups=groups, fingerprints=fingerprints)
+                    history=status.get(history.HISTORY), input_groups=groups, fingerprints=fingerprints,
+                    versions=versions)
                 native = [sid for sid in selected if engine.get(sid).execution_backend == "matrix_native"]
                 if native and context.history is not None and not context.history.is_empty():
                     from app.backtest.matrix import build_market_data_matrix

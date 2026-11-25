@@ -9,6 +9,7 @@ import {
   type PickPerformanceSummary,
   type PickRecord,
   type PickStrategyStats,
+  type PickVersionStatus,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -20,6 +21,7 @@ const DETAIL_LIMIT = 200
 // Same-day picks are highly correlated, so the effective sample size tracks signal days, not rows.
 const LOW_SAMPLE_SIGNAL_DAYS = 20
 const STALE_TIME = 300_000
+const BENCHMARK_LABEL = '大盤＝0050 含息'
 
 const ADJUSTMENT_REASONS: Record<string, string> = {
   events_missing: '除權息資料檔不存在',
@@ -92,6 +94,7 @@ interface Props {
 export function StrategyPickPerformance({ nameById, onPreview }: Props) {
   const [chosen, setChosen] = useState<PickHorizon | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [version, setVersion] = useState<PickVersionStatus>('current')
 
   const summary = useQuery({
     queryKey: QK.screenerPickPerformance,
@@ -100,10 +103,11 @@ export function StrategyPickPerformance({ nameById, onPreview }: Props) {
   })
 
   const strategies = useMemo(
-    () => [...(summary.data?.strategies ?? [])].sort((a, b) =>
-      (nameById.get(a.strategy_id) ?? a.strategy_id)
-        .localeCompare(nameById.get(b.strategy_id) ?? b.strategy_id, 'zh-Hant')),
-    [summary.data, nameById],
+    () => [...((version === 'current' ? summary.data?.strategies : summary.data?.legacy_strategies) ?? [])]
+      .sort((a, b) =>
+        (nameById.get(a.strategy_id) ?? a.strategy_id)
+          .localeCompare(nameById.get(b.strategy_id) ?? b.strategy_id, 'zh-Hant')),
+    [summary.data, nameById, version],
   )
 
   if (summary.isLoading) {
@@ -144,9 +148,17 @@ export function StrategyPickPerformance({ nameById, onPreview }: Props) {
         </div>
       )}
 
+      <VersionSwitch
+        version={version}
+        counts={data.version_counts}
+        onChange={next => { setVersion(next); setExpanded(null) }}
+      />
+
       {strategies.length === 0 ? (
         <p className="py-6 text-center text-xs text-muted">
-          尚無選股紀錄。每個交易日盤後的策略選股會記錄下來，T+1 開盤後才開始計算報酬。
+          {version === 'legacy'
+            ? '沒有舊版策略的選股紀錄。'
+            : '尚無選股紀錄。每個交易日盤後的策略選股會記錄下來，T+1 開盤後才開始計算報酬。'}
         </p>
       ) : (
         <section className="rounded-card border border-border bg-surface p-3">
@@ -180,7 +192,7 @@ export function StrategyPickPerformance({ nameById, onPreview }: Props) {
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[680px] text-[11px]">
+            <table className="w-full min-w-[920px] text-[11px]">
               <thead>
                 <tr className="border-b border-border text-left text-[10px] text-muted">
                   <th className="py-1 pr-2 font-normal">策略名稱</th>
@@ -189,7 +201,10 @@ export function StrategyPickPerformance({ nameById, onPreview }: Props) {
                   <th className="py-1 pr-2 text-right font-normal">樣本數</th>
                   <th className="py-1 pr-2 text-right font-normal">平均報酬</th>
                   <th className="py-1 pr-2 text-right font-normal">中位數報酬</th>
-                  <th className="py-1 text-right font-normal">報酬為正比例</th>
+                  <th className="py-1 pr-2 text-right font-normal">報酬為正比例</th>
+                  <th className="py-1 pr-2 text-right font-normal" title={BENCHMARK_LABEL}>大盤平均報酬</th>
+                  <th className="py-1 pr-2 text-right font-normal" title={BENCHMARK_LABEL}>平均超額報酬</th>
+                  <th className="py-1 text-right font-normal" title={BENCHMARK_LABEL}>勝過大盤比例</th>
                 </tr>
               </thead>
               <tbody>
@@ -199,6 +214,7 @@ export function StrategyPickPerformance({ nameById, onPreview }: Props) {
                     stats={s}
                     name={nameById.get(s.strategy_id) ?? s.strategy_id}
                     horizon={horizon}
+                    version={version}
                     open={expanded === s.strategy_id}
                     onToggle={() => setExpanded(prev => (prev === s.strategy_id ? null : s.strategy_id))}
                     onPreview={onPreview}
@@ -208,10 +224,44 @@ export function StrategyPickPerformance({ nameById, onPreview }: Props) {
             </table>
           </div>
           <p className="mt-2 text-[10px] leading-4 text-muted">
+            {BENCHMARK_LABEL}。超額報酬＝策略報酬 − 同期大盤報酬，只計兩者都有報酬的入選。
             訊號日數少於 {LOW_SAMPLE_SIGNAL_DAYS} 日的策略標為「樣本少」並以灰字顯示，因為同一天的選股彼此高度相關。連續多日入選的標的每天各算一筆。點一列可展開最近 {DETAIL_LIMIT} 筆紀錄。
           </p>
         </section>
       )}
+    </div>
+  )
+}
+
+const VERSION_LABELS: Record<PickVersionStatus, string> = { current: '目前版本', legacy: '舊版' }
+
+function VersionSwitch({ version, counts, onChange }: {
+  version: PickVersionStatus
+  counts: PickPerformanceSummary['version_counts']
+  onChange: (version: PickVersionStatus) => void
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[11px] text-secondary">
+      <span>策略版本</span>
+      <div className="flex gap-1" role="group" aria-label="策略版本">
+        {(['current', 'legacy'] as const).map(v => (
+          <button
+            key={v}
+            type="button"
+            aria-pressed={version === v}
+            onClick={() => onChange(v)}
+            className={cn(
+              'cursor-pointer rounded-md border px-2 py-0.5 text-[11px] transition-colors',
+              version === v ? 'border-accent/60 bg-accent/10 text-accent' : 'border-border text-muted hover:text-foreground',
+            )}
+          >
+            {VERSION_LABELS[v]}{counts ? `（${counts[v]} 筆）` : ''}
+          </button>
+        ))}
+      </div>
+      <span className="text-[10px] text-muted">
+        舊版是策略程式、META、參數或選股範圍與目前不同，或無法確認版本的紀錄，與目前版本分開統計。
+      </span>
     </div>
   )
 }
@@ -234,6 +284,7 @@ function MethodNote({ data }: { data: PickPerformanceSummary }) {
         成交是以訊號次一交易日開盤價模擬買入；開盤漲停或無成交會列為未成交，並非帳戶的實際成交。
         T+k 報酬＝訊號後第 k 個交易日的復權收盤價 ÷ 次日復權開盤價 − 1；T+1 是次日開盤到收盤。
         報酬為毛報酬：未扣交易成本、未計滑點、未模擬出場可成交性。
+        {BENCHMARK_LABEL}（0050 前復權價格）：每筆入選取同一個進場日開盤到同一個出場收盤日；未成交或 0050 當日無價格時不計。
         以下為過去選股紀錄的統計結果，計算方式固定；過去表現不代表未來。
         {INVESTMENT_DISCLAIMER}
       </p>
@@ -336,12 +387,13 @@ interface RowProps {
   stats: PickStrategyStats
   name: string
   horizon: PickHorizon
+  version: PickVersionStatus
   open: boolean
   onToggle: () => void
   onPreview: (preview: Preview) => void
 }
 
-function StrategyRow({ stats: s, name, horizon, open, onToggle, onPreview }: RowProps) {
+function StrategyRow({ stats: s, name, horizon, version, open, onToggle, onPreview }: RowProps) {
   const h = s.horizons[horizon]
   const faint = s.signal_days < LOW_SAMPLE_SIGNAL_DAYS
   const excluded = excludedTotal(s)
@@ -450,12 +502,24 @@ function StrategyRow({ stats: s, name, horizon, open, onToggle, onPreview }: Row
         <td className={cn('py-1.5 pr-2 text-right font-mono', faint ? 'text-muted' : priceColorClass(h?.median_return))}>
           {fmtPct(h?.median_return)}
         </td>
-        <td className="py-1.5 text-right font-mono">{fmtRatio(h?.positive_ratio)}</td>
+        <td className="py-1.5 pr-2 text-right font-mono">{fmtRatio(h?.positive_ratio)}</td>
+        <td className={cn('py-1.5 pr-2 text-right font-mono', faint ? 'text-muted' : priceColorClass(h?.mean_benchmark_return))}>
+          {fmtPct(h?.mean_benchmark_return)}
+        </td>
+        <td className={cn('py-1.5 pr-2 text-right font-mono', faint ? 'text-muted' : priceColorClass(h?.mean_excess_return))}>
+          {fmtPct(h?.mean_excess_return)}
+          {h && h.benchmark_sample_count != null && h.benchmark_sample_count < h.sample_count && (
+            <div className="text-[10px] text-muted" title="0050 在該期間缺價格的入選不計入大盤比較">
+              比較 {h.benchmark_sample_count} 筆
+            </div>
+          )}
+        </td>
+        <td className="py-1.5 text-right font-mono">{fmtRatio(h?.beat_benchmark_ratio)}</td>
       </tr>
       {open && (
         <tr className="border-b border-border/50">
-          <td colSpan={7} className="bg-base/40 px-2 py-2">
-            <PickRecords strategyId={s.strategy_id} horizon={horizon} onPreview={onPreview} />
+          <td colSpan={10} className="bg-base/40 px-2 py-2">
+            <PickRecords strategyId={s.strategy_id} horizon={horizon} version={version} onPreview={onPreview} />
           </td>
         </tr>
       )}
@@ -484,6 +548,10 @@ function ReturnCell({ ret, selected }: { ret: PickHorizonReturn | undefined; sel
   )
 }
 
+function BenchmarkCell({ value }: { value: number | null | undefined }) {
+  return <td className={cn('py-1 pr-2 text-right font-mono', priceColorClass(value))}>{fmtPct(value)}</td>
+}
+
 function recordNote(r: PickRecord) {
   if (r.excluded_reason) return `未計入：${EXCLUDED_LABELS[r.excluded_reason] ?? r.excluded_reason}`
   if (r.absent_since) return `${r.absent_since} 起無資料`
@@ -492,14 +560,15 @@ function recordNote(r: PickRecord) {
   return null
 }
 
-function PickRecords({ strategyId, horizon, onPreview }: {
+function PickRecords({ strategyId, horizon, version, onPreview }: {
   strategyId: string
   horizon: PickHorizon
+  version: PickVersionStatus
   onPreview: (preview: Preview) => void
 }) {
   const detail = useQuery({
-    queryKey: QK.screenerPickPerformanceDetail(strategyId, DETAIL_LIMIT),
-    queryFn: () => api.screenerPickPerformanceDetail(strategyId, DETAIL_LIMIT),
+    queryKey: QK.screenerPickPerformanceDetail(strategyId, DETAIL_LIMIT, version),
+    queryFn: () => api.screenerPickPerformanceDetail(strategyId, DETAIL_LIMIT, version),
     staleTime: STALE_TIME,
   })
 
@@ -519,7 +588,7 @@ function PickRecords({ strategyId, horizon, onPreview }: {
       {calculation_issues.filter(issue => issue.status === 'input_unavailable').map(issue => (
         <p key={issue.date}>{issue.date} 缺必要篩選資料（{fieldLabels(issue.missing_fields)}），未能計算，並非零訊號。</p>
       ))}
-      <p>這支策略沒有選股紀錄。</p>
+      <p>{version === 'legacy' ? '這支策略沒有舊版選股紀錄。' : '這支策略沒有目前版本的選股紀錄。'}</p>
     </div>
   }
 
@@ -532,7 +601,7 @@ function PickRecords({ strategyId, horizon, onPreview }: {
         最近 {rows.length} 筆，共 {total} 筆、{signal_days} 個訊號日。
       </p>
       <div className="max-h-96 overflow-auto">
-        <table className="w-full min-w-[640px] text-[11px]">
+        <table className="w-full min-w-[800px] text-[11px]">
           <thead>
             <tr className="border-b border-border text-left text-[10px] text-muted">
               <th className="py-1 pr-2 font-normal">訊號日</th>
@@ -547,6 +616,8 @@ function PickRecords({ strategyId, horizon, onPreview }: {
                   T+{h}
                 </th>
               ))}
+              <th className="py-1 pr-2 text-right font-normal" title={BENCHMARK_LABEL}>大盤報酬 T+{horizon}</th>
+              <th className="py-1 pr-2 text-right font-normal" title={BENCHMARK_LABEL}>超額報酬 T+{horizon}</th>
             </tr>
           </thead>
           <tbody>
@@ -577,6 +648,8 @@ function PickRecords({ strategyId, horizon, onPreview }: {
                   {HORIZONS.map(h => (
                     <ReturnCell key={h} ret={r.returns?.[h]} selected={h === horizon} />
                   ))}
+                  <BenchmarkCell value={r.returns?.[horizon]?.benchmark_return} />
+                  <BenchmarkCell value={r.returns?.[horizon]?.excess_return} />
                 </tr>
               )
             })}
@@ -584,7 +657,8 @@ function PickRecords({ strategyId, horizon, onPreview }: {
         </table>
       </div>
       <p className="mt-1 text-[10px] text-muted">
-        T+1 開盤價為未調整的原始價。標 * 的報酬表示該日無成交，沿用最近一筆收盤價。
+        T+1 開盤價為未調整的原始價。標 * 的報酬表示該日無成交，沿用最近一筆收盤價，大盤報酬也取同一日收盤。
+        {BENCHMARK_LABEL}；超額報酬＝報酬 − 大盤報酬，未成交或 0050 缺價時顯示 —。
       </p>
     </div>
   )
