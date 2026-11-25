@@ -194,6 +194,12 @@ def validate(rule: dict) -> None:
                 raise ValueError(f"{label}必須是 0 到 100 之間的數字")
         if score_min is not None and score_max is not None and score_min > score_max:
             raise ValueError("評分下限不能大於評分上限")
+        max_rank = rule.get("max_rank")
+        if max_rank is not None:
+            if isinstance(max_rank, bool) or not isinstance(max_rank, int) or max_rank < 1:
+                raise ValueError("排名門檻必須是大於等於 1 的整數")
+            if score_min is not None or score_max is not None:
+                raise ValueError("排名門檻不能與舊的評分範圍同時使用, 請先移除評分範圍")
     elif rule.get("type") == "sector":
         kind = rule.get("sector_kind")
         if kind not in SECTOR_KINDS:
@@ -307,6 +313,7 @@ def normalize(rule: dict) -> dict:
     if r.get("type") == "strategy":
         r.setdefault("score_min", None)
         r.setdefault("score_max", None)
+        r.setdefault("max_rank", None)
         if r.get("notify_events") is None:
             # 兼容统一监控上线后的旧规则: 当时实际行为是同时通知进入和移出。
             r["notify_events"] = ["pool_entry", "pool_exit"]
@@ -316,6 +323,7 @@ def normalize(rule: dict) -> dict:
         r.pop("notify_events", None)
         r.pop("score_min", None)
         r.pop("score_max", None)
+        r.pop("max_rank", None)
     r.setdefault("conditions", [])
     if r.get("type") == "sector":
         r["scope"] = "all"

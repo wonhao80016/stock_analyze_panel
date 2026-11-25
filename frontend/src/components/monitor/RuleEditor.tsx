@@ -118,6 +118,7 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
   strategy_id: null,
   score_min: null,
   score_max: null,
+  max_rank: null,
   direction: 'entry',
   conditions: [],
   logic: 'or',
@@ -158,6 +159,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     return initial
   })
   const assetType = draft.asset_type ?? 'stock'
+  const hasLegacyScoreRange = draft.score_min != null || draft.score_max != null
   // 監控情境(晶片層) — 純 UI 分類, 實際仍落到 draft.type/conditions。
   const [category, setCategory] = useState<MonitorCategory>(() => categoryForRule(draft))
   const [volUnit, setVolUnit] = useState<'lots' | 'shares'>('lots')
@@ -247,17 +249,13 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       if (d.type === 'strategy') {
         if (!d.strategy_id) throw new Error('策略監控必須選擇一個策略')
         if (!d.notify_events?.length) throw new Error('至少選擇一個通知事件')
-        for (const [label, value] of [['最低分', d.score_min], ['最高分', d.score_max]] as const) {
-          if (value != null && (!Number.isFinite(value) || value < 0 || value > 100)) {
-            throw new Error(`${label}必須在 0 到 100 之間`)
-          }
-        }
-        if (d.score_min != null && d.score_max != null && d.score_min > d.score_max) {
-          throw new Error('最低分不能高於最高分')
+        if (d.max_rank != null && (!Number.isInteger(d.max_rank) || d.max_rank < 1)) {
+          throw new Error('排名門檻必須是大於等於 1 的整數')
         }
       } else if (d.type === 'sector') {
         delete d.score_min
         delete d.score_max
+        delete d.max_rank
         d.scope = 'all'
         d.symbols = []
         d.conditions = []
@@ -267,6 +265,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       } else {
         delete d.score_min
         delete d.score_max
+        delete d.max_rank
         delete d.notify_events
         if (d.conditions.length === 0) throw new Error('至少選擇一個觸發條件')
         for (const c of d.conditions) {
@@ -1465,47 +1464,45 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           </div>
 
           <div className="border-t border-border/60 pt-3">
-            <div
-              className="mb-2 text-[11px] text-muted"
-              title="評分範圍僅過濾選股結果與買入訊號，賣出訊號不受限制"
-            >
-              評分範圍
-            </div>
-            <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-              <label className="space-y-1.5">
-                <span className="text-[10px] text-muted">最低分（含）</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step="any"
-                  value={draft.score_min ?? ''}
-                  onChange={event => setDraft(d => ({
-                    ...d,
-                    score_min: event.target.value === '' ? null : Number(event.target.value),
-                  }))}
-                  placeholder="不限"
-                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
-                />
-              </label>
-              <span className="mt-5 text-xs text-muted">至</span>
-              <label className="space-y-1.5">
-                <span className="text-[10px] text-muted">最高分（含）</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step="any"
-                  value={draft.score_max ?? ''}
-                  onChange={event => setDraft(d => ({
-                    ...d,
-                    score_max: event.target.value === '' ? null : Number(event.target.value),
-                  }))}
-                  placeholder="不限"
-                  className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none"
-                />
-              </label>
-            </div>
+            <div className="mb-2 text-[11px] text-muted">排名門檻</div>
+            <label className="flex items-center gap-2">
+              <span className="text-xs text-muted">排名前</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                aria-label="排名前 N 名"
+                value={draft.max_rank ?? ''}
+                disabled={hasLegacyScoreRange}
+                onChange={event => setDraft(d => ({
+                  ...d,
+                  max_rank: event.target.value === '' ? null : Number(event.target.value),
+                }))}
+                placeholder="不限"
+                className="h-9 w-24 rounded-btn border border-border bg-base px-3 text-xs font-mono text-foreground placeholder:text-muted/50 focus:border-accent/50 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <span className="text-xs text-muted">名</span>
+            </label>
+            <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
+              依當天策略排名：與選股頁相同的全市場排序，同分依代號排序。只有前 N 名算入選股結果並通知買入訊號，賣出訊號不受限制；缺評分的股票與沒有評分的策略不列入排名。留空表示不限。
+            </p>
+            {hasLegacyScoreRange && (
+              <div className="mt-2 rounded-btn border border-amber-400/30 bg-amber-400/10 p-2.5 text-[10px] leading-relaxed text-amber-400">
+                <div className="font-medium">
+                  評分範圍 {draft.score_min ?? '不限'} 至 {draft.score_max ?? '不限'}（相對分數，已不建議使用）
+                </div>
+                <div className="mt-1">
+                  分數是當天候選之間的相對分數，不同天不能比較。此條件仍照舊生效；移除後才能設定排名門檻。
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDraft(d => ({ ...d, score_min: null, score_max: null }))}
+                  className="mt-2 rounded-btn border border-amber-400/40 px-2 py-1 text-[10px] hover:bg-amber-400/15 cursor-pointer"
+                >
+                  移除評分範圍
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="border-t border-border/60 pt-3">

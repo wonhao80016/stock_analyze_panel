@@ -5,13 +5,16 @@ part.parquet holds pick rows; runs.parquet holds one manifest row per strategy.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
+import tokenize
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -63,10 +66,21 @@ RUN_SCHEMA: dict[str, pl.DataType] = {
     "provenance": pl.Utf8(),
     "calculation_status": pl.Utf8(),
     "missing_fields": pl.Utf8(),
+    "strategy_version": pl.Utf8(),
 }
+
+CURRENT_VERSION = "current"
+LEGACY_VERSION = "legacy"
+# The running backend loaded the stock-only universe at this time; earlier runs could also pick ETFs.
+STOCK_ONLY_CUTOVER = datetime(2026, 11, 24, 18, 45, tzinfo=TAIPEI_TZ)
+
+_SKIPPED_TOKENS = frozenset({"COMMENT", "NL", "ENCODING"})
+_SPLIT_STRING_TOKENS = {"FSTRING_START": "FSTRING_END", "TSTRING_START": "TSTRING_END"}
+_STRING_PREFIX = re.compile(r"([A-Za-z]*)(.*)", re.DOTALL)
 
 _MANIFEST_COLUMNS = (
     "strategy_fingerprint",
+    "strategy_version",
     "universe_complete",
     "history_degraded",
     "first_recorded_at",
@@ -95,6 +109,7 @@ class RunReport:
     history: InputStatus | None = None
     input_groups: dict[str, frozenset[str]] = field(default_factory=dict)
     fingerprints: dict[str, str | None] = field(default_factory=dict)
+    versions: dict[str, str | None] = field(default_factory=dict)
     calculation_statuses: dict[str, str] = field(default_factory=dict)
     missing_fields: dict[str, list[str]] = field(default_factory=dict)
 
@@ -103,6 +118,15 @@ class RunReport:
 class RecordOutcome:
     written: tuple[str, ...]
     rejected: dict[str, str]
+
+
+@dataclass(frozen=True)
+class CurrentVersion:
+    """A loaded strategy's identity; universe_unchanged: its recorded run picks every asset type in META."""
+
+    version: str | None
+    fingerprint: str | None
+    universe_unchanged: bool
 
 
 @dataclass(frozen=True)
@@ -194,6 +218,188 @@ def _fingerprint(
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _recorded_universe(strategy) -> list[str]:
+    """Asset types its recorded picks come from: the stock run, or the ETF run for an ETF-only strategy."""
+    from app.strategy.engine import StrategyEngine
+
+    asset_types = strategy.meta.get("asset_types", ["stock"])
+    return StrategyEngine.universe_asset_types(strategy, "stock" if "stock" in asset_types else "etf")
+
+
+def _normalized_string(text: str) -> str:
+    prefix, rest = _STRING_PREFIX.match(text).groups()
+    return "".join(sorted(prefix.lower())) + rest
+
+
+def _source_slice(lines: list[str], start: tuple[int, int], end: tuple[int, int]) -> str:
+    (first_row, first_col), (last_row, last_col) = start, end
+    if first_row == last_row:
+        return lines[first_row - 1][first_col:last_col]
+    middle = "".join(lines[first_row:last_row - 1])
+    return lines[first_row - 1][first_col:] + middle + lines[last_row - 1][:last_col]
+
+
+def _code_digest(path: Path) -> str:
+    """sha256 of the module's tokens without comments, blank lines and spacing; docstrings still count.
+
+    Token names and texts are stable across Python releases; f-strings, which 3.12+ split into several
+    tokens, are rejoined into the single STRING that 3.11 reports.
+    """
+    with tokenize.open(path) as stream:
+        source = stream.read()
+    lines = source.splitlines(keepends=True)
+    parts: list[tuple[str, str]] = []
+    depth = 0
+    start = (0, 0)
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        name = tokenize.tok_name[token.type]
+        if depth:
+            if name in _SPLIT_STRING_TOKENS:
+                depth += 1
+            elif name in _SPLIT_STRING_TOKENS.values():
+                depth -= 1
+                if not depth:
+                    parts.append(("STRING", _normalized_string(_source_slice(lines, start, token.end))))
+        elif name in _SPLIT_STRING_TOKENS:
+            depth, start = 1, token.start
+        elif name in ("INDENT", "DEDENT", "NEWLINE"):
+            parts.append((name, ""))
+        elif name not in _SKIPPED_TOKENS:
+            parts.append((name, _normalized_string(token.string) if name == "STRING" else token.string))
+    return hashlib.sha256(json.dumps(parts).encode("utf-8")).hexdigest()
+
+
+def strategy_versions(
+    engine, all_overrides: Mapping[str, Any], ids: Iterable[str]
+) -> dict[str, str | None]:
+    """sha256 over code digest, META, basic_filter, overrides, recorded universe and child versions; None on any failure.
+
+    Unlike strategy_fingerprints, comment, blank-line and spacing edits keep the version.
+    """
+    versions: dict[str, str | None] = {}
+    for sid in ids:
+        try:
+            versions[sid] = _version(engine, all_overrides, sid, frozenset())
+        except Exception:
+            logger.exception("strategy pick history: version failed for %s", sid)
+            versions[sid] = None
+    return versions
+
+
+def _version(
+    engine, all_overrides: Mapping[str, Any], sid: str, visiting: frozenset[str]
+) -> str | None:
+    if sid in visiting:
+        raise ValueError(f"composite cycle at {sid}")
+    strategy = engine.get(sid)
+    if strategy.file_path is None:
+        return None
+    children: dict[str, str] | None = None
+    if strategy.composite is not None:
+        children = {}
+        for child in strategy.composite.children:
+            child_version = _version(engine, all_overrides, child.strategy_id, visiting | {sid})
+            if child_version is None:
+                return None
+            children[child.strategy_id] = child_version
+    # Only the strategy file counts: edits to shared _*.py helpers, matrix or scoring code keep the version.
+    payload = {
+        "code": _code_digest(strategy.file_path),
+        "meta": strategy.meta,
+        "basic_filter": strategy.basic_filter,
+        "overrides": all_overrides.get(sid, {}),
+        "universe": _recorded_universe(strategy),
+        "children": children,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _universe_unchanged(engine, sid: str, visiting: frozenset[str]) -> bool:
+    if sid in visiting:
+        raise ValueError(f"composite cycle at {sid}")
+    strategy = engine.get(sid)
+    if set(_recorded_universe(strategy)) != set(strategy.meta.get("asset_types", ["stock"])):
+        return False
+    children = strategy.composite.children if strategy.composite is not None else ()
+    return all(_universe_unchanged(engine, child.strategy_id, visiting | {sid}) for child in children)
+
+
+def current_versions(
+    engine, all_overrides: Mapping[str, Any], ids: Iterable[str]
+) -> dict[str, CurrentVersion]:
+    """Identity of every id the engine loads now; unknown or unresolvable ids are omitted."""
+    ids = [sid for sid in ids if engine.has(sid)]
+    versions = strategy_versions(engine, all_overrides, ids)
+    fingerprints = strategy_fingerprints(engine, all_overrides, ids)
+    current: dict[str, CurrentVersion] = {}
+    for sid in ids:
+        try:
+            unchanged = _universe_unchanged(engine, sid, frozenset())
+        except Exception:
+            logger.exception("strategy pick history: universe check failed for %s", sid)
+            continue
+        current[sid] = CurrentVersion(versions[sid], fingerprints[sid], unchanged)
+    return current
+
+
+def etf_runs(picks: pl.DataFrame, etf_symbols: Collection[str] | None) -> pl.DataFrame | None:
+    """(signal_date, strategy_id) of every run that recorded an ETF pick; None when ETFs are unknown."""
+    if etf_symbols is None:
+        return None
+    return picks.filter(pl.col("symbol").is_in(list(etf_symbols))).select("signal_date", "strategy_id").unique()
+
+
+def run_version_status(
+    runs: pl.DataFrame, current: Mapping[str, CurrentVersion], recorded_etf: pl.DataFrame | None
+) -> pl.DataFrame:
+    """version_status per (signal_date, strategy_id): CURRENT when the stored strategy_version is the current one.
+
+    A run without strategy_version is CURRENT when its fingerprint matches and either its recorded universe
+    still has every META asset type, or it was last recorded at or after STOCK_ONLY_CUTOVER without an
+    ETF pick in *recorded_etf* (from etf_runs); with *recorded_etf* None that cannot be confirmed.
+    """
+    known = pl.DataFrame(
+        {
+            "strategy_id": list(current),
+            "_cur_version": [c.version for c in current.values()],
+            "_cur_fingerprint": [c.fingerprint for c in current.values()],
+            "_cur_universe": [c.universe_unchanged for c in current.values()],
+        },
+        schema={"strategy_id": pl.Utf8, "_cur_version": pl.Utf8, "_cur_fingerprint": pl.Utf8, "_cur_universe": pl.Boolean},
+    )
+    frame = runs.select(
+        "signal_date", "strategy_id", "strategy_version", "strategy_fingerprint", "last_recorded_at"
+    ).join(known, on="strategy_id", how="left")
+    if recorded_etf is None:
+        no_etf = pl.lit(False)
+    else:
+        flagged = recorded_etf.select("signal_date", "strategy_id").unique().with_columns(pl.lit(True).alias("_etf"))
+        frame = frame.join(flagged, on=["signal_date", "strategy_id"], how="left")
+        no_etf = ~pl.col("_etf").fill_null(False)
+    cutover = pl.lit(STOCK_ONLY_CUTOVER.astimezone(UTC), dtype=pl.Datetime("us", "UTC"))
+    stock_only = (pl.col("last_recorded_at") >= cutover) & no_etf
+    is_current = (
+        pl.when(pl.col("strategy_version").is_not_null())
+        .then(pl.col("strategy_version") == pl.col("_cur_version"))
+        .otherwise(
+            (pl.col("strategy_fingerprint") == pl.col("_cur_fingerprint")) & (pl.col("_cur_universe") | stock_only)
+        )
+        .fill_null(False)
+    )
+    return frame.select(
+        "signal_date",
+        "strategy_id",
+        pl.when(is_current).then(pl.lit(CURRENT_VERSION)).otherwise(pl.lit(LEGACY_VERSION)).alias("version_status"),
+    ).unique(subset=["signal_date", "strategy_id"], keep="first")
+
+
+def with_version_status(frame: pl.DataFrame, statuses: pl.DataFrame) -> pl.DataFrame:
+    """Join run_version_status onto runs or picks; rows without a run count as LEGACY."""
+    return frame.join(statuses, on=["signal_date", "strategy_id"], how="left").with_columns(
+        pl.col("version_status").fill_null(LEGACY_VERSION)
+    )
+
+
 def predicted_open(signal_date: date) -> datetime:
     """First weekday after the signal day at the regular open, Taipei time."""
     d = signal_date + timedelta(days=1)
@@ -222,7 +428,9 @@ def _read_frame(path: Path, schema: Mapping[str, pl.DataType]) -> pl.DataFrame:
         return _empty(schema)
     try:
         frame = pl.read_parquet(path)
-        for name, default in (("provenance", "recorded"), ("calculation_status", "ok"), ("missing_fields", "[]")):
+        for name, default in (
+            ("provenance", "recorded"), ("calculation_status", "ok"), ("missing_fields", "[]"), ("strategy_version", None),
+        ):
             if name in schema and name not in frame.columns:
                 frame = frame.with_columns(pl.lit(default).alias(name))
         missing = [name for name in schema if name not in frame.columns]
@@ -464,6 +672,7 @@ def record(
                 "provenance": provenance,
                 "calculation_status": run_report.calculation_statuses.get(sid, "ok"),
                 "missing_fields": json.dumps(run_report.missing_fields.get(sid, [])),
+                "strategy_version": run_report.versions.get(sid),
             })
             written.append(sid)
 
@@ -554,6 +763,7 @@ def read_picks(
     if not pick_frames:
         empty_picks = _empty(PICK_SCHEMA).with_columns(
             pl.lit(None, dtype=pl.Utf8).alias("strategy_fingerprint"),
+            pl.lit(None, dtype=pl.Utf8).alias("strategy_version"),
             pl.lit(None, dtype=pl.Boolean).alias("universe_complete"),
             pl.lit(None, dtype=pl.Boolean).alias("history_degraded"),
             pl.lit(None, dtype=pl.Datetime("us", "UTC")).alias("first_recorded_at"),

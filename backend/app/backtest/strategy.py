@@ -854,7 +854,7 @@ def _unsupported_asset_type_symbols(
     symbols: list[str] | tuple[str, ...],
     asset_types: list[str],
 ) -> set[str]:
-    """Taiwan symbols the security master types outside the strategy's asset_types.
+    """Taiwan symbols the security master types outside *asset_types*.
 
     Symbols missing from the master are left to taiwan_limit_rule_exclusions, which excludes them.
     """
@@ -1314,7 +1314,10 @@ class StrategyBacktestService:
             )
             try:
                 scope = (
-                    _asset_scope_mask(market_data.symbols, s.meta.get("asset_types", ["stock"]))
+                    _asset_scope_mask(
+                        market_data.symbols,
+                        StrategyEngine.universe_asset_types(s, config.asset_type),
+                    )
                     if entry_coverage_fields
                     else None
                 )
@@ -1398,13 +1401,13 @@ class StrategyBacktestService:
             excluded = {item["symbol"] for item in excluded_symbols}
             if excluded and excluded >= set(execution_symbols):
                 return _err(f"回测标的均缺少已确认的涨跌幅规则: {', '.join(sorted(excluded))}")
-            asset_types = s.meta.get("asset_types", ["stock"])
+            asset_types = StrategyEngine.universe_asset_types(s, config.asset_type)
             wrong_type = _unsupported_asset_type_symbols(execution_symbols, asset_types)
             excluded |= wrong_type
             if wrong_type and excluded >= set(execution_symbols):
                 listed = sorted(wrong_type)
                 shown = ", ".join(listed[:5]) + (f" 等 {len(listed)} 檔" if len(listed) > 5 else "")
-                return _err(f"策略僅支援 {'/'.join(asset_types)}, 以下標的類型不符: {shown}")
+                return _err(f"回測僅含 {'/'.join(asset_types)} 類型標的, 以下標的類型不符: {shown}")
             _configure_taiwan_matcher(matcher_config, [s for s in execution_symbols if s not in excluded])
         except ValueError as e:
             return _err(str(e))

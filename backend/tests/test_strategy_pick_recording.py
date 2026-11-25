@@ -308,9 +308,10 @@ def builtin_engine():
 def _stub_run_all(engine, monkeypatch, seen: dict):
     def run_all(context, *, params_map=None, overrides_map=None, strategy_ids=None, skip_failed=False,
                 failures=None):
-        seen["ids"] = list(strategy_ids)
-        seen["context"] = context
-        seen["overrides_map"] = overrides_map
+        if context.asset_type == "stock":
+            seen["ids"] = list(strategy_ids)
+            seen["context"] = context
+            seen["overrides_map"] = overrides_map
         return {
             sid: StrategyResult(
                 as_of=context.as_of,
@@ -358,6 +359,8 @@ def test_scheduled_refresh_records_every_executed_builtin_strategy(tmp_path, mon
     assert runs["universe_complete"].to_list() == [True] * len(executed)
     assert set(runs["run_label"].to_list()) == {"daily+institutional"}
     assert runs["strategy_fingerprint"].to_list() == [report.fingerprints[s] for s in runs["strategy_id"]]
+    assert all(report.versions[sid] for sid in executed)
+    assert runs["strategy_version"].to_list() == [report.versions[s] for s in runs["strategy_id"]]
 
 
 def test_fingerprints_use_the_overrides_snapshot_the_run_used(tmp_path, monkeypatch, builtin_engine):

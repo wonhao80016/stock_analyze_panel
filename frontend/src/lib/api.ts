@@ -317,6 +317,10 @@ export interface PickPerformanceMethod {
   slippage_included: boolean
   exit_fill_simulated: boolean
   return_unit: 'decimal'
+  /** Benchmark symbol (0050.TWSE), priced from each pick's entry open to the close its return exits at. */
+  benchmark?: string
+  benchmark_price_adjustment?: string
+  benchmark_window?: string
 }
 
 export interface PickAdjustmentState {
@@ -336,7 +340,15 @@ export interface PickHorizonStats {
   prices_incomplete: number
   stale_exit_count: number
   pending_count: number
+  /** Over picks whose return and benchmark return both exist; beat ratio counts excess > 0. */
+  benchmark_sample_count?: number
+  mean_benchmark_return?: number | null
+  mean_excess_return?: number | null
+  beat_benchmark_ratio?: number | null
 }
+
+/** legacy: recorded by another strategy version, or by one that can no longer be identified. */
+export type PickVersionStatus = 'current' | 'legacy'
 
 export interface PickStrategyStats {
   strategy_id: string
@@ -366,7 +378,10 @@ export interface PickPerformanceSummary {
   first_signal_date: string | null
   last_signal_date: string | null
   prices_through: string | null
+  /** Picks of the current strategy versions only. */
   strategies: PickStrategyStats[]
+  legacy_strategies?: PickStrategyStats[]
+  version_counts?: Record<PickVersionStatus, number>
   calculation_issues?: PickCalculationIssue[]
 }
 
@@ -375,6 +390,7 @@ export interface PickCalculationIssue {
   date: string
   status: 'input_unavailable' | 'scoring_unavailable'
   missing_fields: string[]
+  version_status?: PickVersionStatus
 }
 
 export interface PickHorizonReturn {
@@ -382,6 +398,8 @@ export interface PickHorizonReturn {
   reason: string | null
   stale_exit: boolean
   stale_days: number
+  benchmark_return?: number | null
+  excess_return?: number | null
 }
 
 export interface PickRecord {
@@ -402,6 +420,8 @@ export interface PickRecord {
   manifest_missing: boolean | null
   universe_complete: boolean | null
   history_degraded: boolean | null
+  strategy_version?: string | null
+  version_status?: PickVersionStatus
   returns: Record<PickHorizon, PickHorizonReturn>
 }
 
@@ -596,8 +616,11 @@ export interface MonitorRule {
   strategy_id?: string | null
   direction: 'entry' | 'exit' | 'both' | 'up' | 'down'
   notify_events?: StrategyNotifyEvent[]
+  /** Deprecated: relative to the day's candidates; the backend only keeps or removes a stored range. */
   score_min?: number | null
   score_max?: number | null
+  /** Alert only on symbols ranked 1..max_rank in the day's whole-market strategy ranking. */
+  max_rank?: number | null
   conditions: MonitorCondition[]
   logic: 'and' | 'or'
   /** edge=未命中轉命中才觸發(建議) | level=命中期間每 cooldown 重播 */
@@ -2525,9 +2548,9 @@ export const api = {
     }),
   screenerPickBackfillStatus: (jobId: string) =>
     request<PickBackfillJob>(`/api/screener/pick-performance/backfill/${encodeURIComponent(jobId)}`, { quiet: true }),
-  screenerPickPerformanceDetail: (strategyId: string, limit = 200) =>
+  screenerPickPerformanceDetail: (strategyId: string, limit = 200, version: PickVersionStatus | 'all' = 'all') =>
     request<PickPerformanceDetail>(
-      `/api/screener/pick-performance/${encodeURIComponent(strategyId)}?limit=${limit}`,
+      `/api/screener/pick-performance/${encodeURIComponent(strategyId)}?limit=${limit}&version=${version}`,
       { quiet: true },
     ),
   marketSnapshot: () =>

@@ -42,9 +42,10 @@ def refresh_enriched_cache(label: str) -> None:
         logger.exception("enriched cache refresh (%s) failed: %s", label, e)
 
 def refresh_strategy_cache(label: str) -> None:
-    """Recompute the dashboard strategy cache for the latest day, then record its pick snapshot.
+    """Recompute the dashboard strategy cache for the latest day, record its pick snapshot, then
+    recompute the ETF strategy cache.
 
-    A record failure is only logged and leaves the written cache intact.
+    A record or ETF failure is only logged and leaves the written stock cache intact.
     """
     app_state = _get_app_state()
     if app_state is None:
@@ -89,6 +90,14 @@ def refresh_strategy_cache(label: str) -> None:
         strategy_pick_history.record(data_dir, signal_date, results, report, label, input_mtime)
     except Exception:
         logger.exception("strategy picks record (%s) failed for %s", label, signal_date)
+    try:
+        _, etf_results = compute_and_cache_all(repo, engine, asset_type="etf", as_of=signal_date)
+        logger.info(
+            "ETF strategy cache refreshed (%s): as_of=%s, strategies=%d",
+            label, signal_date, len(etf_results),
+        )
+    except Exception as e:
+        logger.exception("ETF strategy cache refresh (%s) failed: %s", label, e)
 
 
 BENCHMARK_REFRESH_DAYS = 60

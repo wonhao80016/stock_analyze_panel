@@ -791,7 +791,16 @@ class StrategyEngine:
             )
 
     @staticmethod
+    def universe_asset_types(strategy: StrategyDef, asset_type: str) -> list[str]:
+        """Asset types a run for *asset_type* may pick: only that type, if the strategy supports it.
+
+        A stock run never picks ETFs even for a strategy that also supports ETFs.
+        """
+        return [kind for kind in strategy.meta.get("asset_types", ["stock"]) if kind == asset_type]
+
+    @classmethod
     def _supported_symbols(
+        cls,
         strategy: StrategyDef,
         context: StrategyDataContext,
         symbols: Iterable[str],
@@ -803,7 +812,7 @@ class StrategyEngine:
         """
         if context.symbol_asset_types is None:
             return None
-        asset_types = set(strategy.meta.get("asset_types", ["stock"]))
+        asset_types = set(cls.universe_asset_types(strategy, context.asset_type))
         return {
             symbol
             for symbol in symbols

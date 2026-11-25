@@ -11,7 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from app.indicators.pipeline import SIGNAL_DEPENDENCIES
-from app.services import pick_grades, strategy_realtime
+from app.services import pick_grades, strategy_cache, strategy_realtime
 from app.strategy import custom_signals
 from app.taiwan.benchmarks import get_benchmark
 from app.taiwan.enriched_reader import read_latest_enriched
@@ -170,9 +170,17 @@ def _score(value: Any) -> float | None:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
-def read_strategy_selections(symbol: str, app_state: Any) -> StrategySelectionsSection:
-    """Strategies picking *symbol*, graded over each strategy's whole list as /api/screener/cached grades them."""
-    cached = strategy_realtime.cached_with_realtime(app_state)
+def read_strategy_selections(
+    symbol: str, app_state: Any, asset_type: str = "stock"
+) -> StrategySelectionsSection:
+    """Strategies picking *symbol*, graded over each strategy's whole list as /api/screener/cached grades them.
+
+    ETFs come from the post-close ETF cache alone: realtime monitor results cover stock runs only.
+    """
+    if asset_type == "etf":
+        cached = strategy_cache.read_cache(app_state.repo.store.data_dir, asset_type="etf") or {}
+    else:
+        cached = strategy_realtime.cached_with_realtime(app_state)
     if not cached.get("results") and cached.get("as_of") is None:
         return StrategySelectionsSection(status="no_cache")
     engine = getattr(app_state, "strategy_engine", None)
@@ -235,7 +243,9 @@ class TaiwanCurrentSignalsService:
             **base,
             applicable=True,
             signals=read_signals(symbol.canonical, settings.data_dir),
-            strategies=read_strategy_selections(symbol.canonical, self.app_state),
+            strategies=read_strategy_selections(
+                symbol.canonical, self.app_state, instrument.instrument_type
+            ),
         )
 
 

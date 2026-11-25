@@ -141,10 +141,10 @@ def test_an_etf_backtest_trades_only_the_taiwan_etf(market, strategy_id):
 
 
 @pytest.mark.parametrize("strategy_id", ["etf_matrix", "etf_polars"])
-def test_a_stock_backtest_still_reads_every_supported_symbol(market, strategy_id):
+def test_a_stock_backtest_trades_only_stocks(market, strategy_id):
     engine, repo = market
 
-    assert _traded_symbols(engine, repo, strategy_id, "stock") == {ETF, *STOCKS}
+    assert _traded_symbols(engine, repo, strategy_id, "stock") == set(STOCKS)
 
 
 def test_the_etf_history_loader_returns_only_the_etf_rows(market):
