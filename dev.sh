@@ -179,7 +179,7 @@ echo
   # 比 --frozen 更徹底: 不校驗 lockfile, 避免鏡像源 403/網絡抖動導致後端起不來。
   # python -m uvicorn: 強制用 venv 的解釋器和 uvicorn 模塊, 防止 PATH 裡
   # 其他 Python(如 /usr/local/bin/uvicorn) 搶先, 導致用錯誤版本啟動後端。
-  uv run --no-sync python -m uvicorn app.main:app ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload \
+  uv run --no-sync python -m uvicorn app.main:app ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload --reload-dir app \
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${BLUE}[backend ]${NC} ")"
 ) &

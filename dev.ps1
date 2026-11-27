@@ -202,7 +202,7 @@ $backendJob = Start-Job -Name 'backend' -ScriptBlock {
     $env:PYTHONUNBUFFERED = '1'
     Set-Location $dir
     $envArgs = if (Test-Path $envFile) { @('--env-file', $envFile) } else { @() }
-    & .\.venv\Scripts\python.exe -m uvicorn app.main:app @envArgs --reload --host $bindAddress --port $port 2>&1
+    & .\.venv\Scripts\python.exe -m uvicorn app.main:app @envArgs --reload --reload-dir app --host $bindAddress --port $port 2>&1
 } -ArgumentList $backendPidFile, $BackendDir, $EnvFile, $BindAddress, $BackendPort
 
 $frontendJob = Start-Job -Name 'frontend' -ScriptBlock {
