@@ -154,21 +154,6 @@ def test_halted_sessions_are_excluded_from_the_five_session_volume_baseline():
     assert _signal(item, "TURNOVER_SPIKE") is None
 
 
-def test_previous_close_falls_back_to_the_last_traded_session_after_a_halt():
-    prior = _sessions(6)
-    rows = [(d, 10.0, 100.0) for d in prior]
-    rows[-1] = (prior[-1], None, 0.0)
-    rows.append((TARGET, 11.0, 100.0))
-    svc = _service(_daily_rows("A.TWSE", rows), ["A.TWSE"])
-
-    item = _item(svc.get_diagnostics(target_date=TARGET, include_all=True), "A.TWSE")
-
-    assert item.previous_close == 10.0
-    assert item.change_pct == 0.1
-    move = _signal(item, "PRICE_MOVE")
-    assert move is not None and move.subtype == "UP"
-
-
 # ── B041 / B042 ───────────────────────────────────────────────
 
 

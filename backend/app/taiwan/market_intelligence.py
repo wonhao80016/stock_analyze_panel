@@ -25,15 +25,19 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 import polars as pl
 
+from app.indicators.pipeline import _reference_prev_close
 from app.taiwan.corporate_actions import (
+    REF_LIMIT_DOWN,
+    REF_LIMIT_UP,
     TaiwanCorporateActionStore,
+    corporate_action_schema,
     forward_adjusted,
     read_events_or_empty,
-    reference_prices,
 )
 from app.taiwan.benchmarks import TAIEX, TPEX_INDEX, BenchmarkIndex
 from app.taiwan.daily_store import TaiwanDailyStore, listing_sessions
 from app.taiwan.data_root import taiwan_data_root
+from app.taiwan.enriched_refresh import with_published_bases
 from app.taiwan.daily_update import (
     DatasetFreshnessStatus,
     resolve_target_latest_trading_date,
@@ -132,6 +136,36 @@ def daily_coverage_complete(universe: pl.DataFrame, snapshot_symbols: set[str]) 
     )
 
 
+def one_day_base_start(available: list[date], session: date) -> date | None:
+    """First stored session of the window one_day_bases needs before *session*."""
+    earlier = sorted(d for d in available if d < session)[-ONE_DAY_BASE_LOOKBACK_SESSIONS:]
+    return earlier[0] if earlier else None
+
+
+def one_day_bases(earlier: pl.DataFrame, current: pl.DataFrame, session: date, events: pl.DataFrame) -> pl.DataFrame:
+    """Per symbol of *current*, its raw bars on *session*, the base the enriched publish measures the move from.
+
+    *earlier* holds the raw stored bars before *session* from one_day_base_start on. prev_close is null
+    where the symbol's last traded bar is not among them or the official base is unknown (ref_base_missing).
+    Columns: symbol, prev_close, ref_limit_up, ref_limit_down.
+    """
+    schema = {"symbol": pl.String, "prev_close": pl.Float64, REF_LIMIT_UP: pl.Float64, REF_LIMIT_DOWN: pl.Float64}
+    if current.is_empty():
+        return pl.DataFrame(schema=schema)
+    frames = [current.with_columns(pl.lit(session).alias("date"))]
+    if not earlier.is_empty():
+        frames.insert(0, earlier.filter(pl.col("date") < session))
+    if events.is_empty():
+        events = pl.DataFrame(schema=corporate_action_schema())
+    based = with_published_bases(pl.concat(frames, how="diagonal_relaxed"), events)
+    based = based.with_columns(pl.col("close").alias("raw_close"))
+    return (
+        based.with_columns(_reference_prev_close(based, pl.col("close").shift(1).over("symbol")).alias("prev_close"))
+        .filter(pl.col("date") == session)
+        .select([pl.col(c).cast(t) for c, t in schema.items()])
+    )
+
+
 def stored_partition_status(
     daily_store: TaiwanDailyStore, dates: list[date]
 ) -> Literal["complete", "provisional", "partial"]:
@@ -168,6 +202,8 @@ TREND_MA_WINDOWS: tuple[int, ...] = (5, 20, 60)
 TREND_EXTREME_WINDOW = 60
 # Longest rolling window above decides how many sessions the trend read must cover.
 TREND_LOOKBACK_SESSIONS = max(*TREND_MA_WINDOWS, TREND_EXTREME_WINDOW)
+# Sessions before a target searched for each symbol's last traded bar; a longer gap leaves the base unknown.
+ONE_DAY_BASE_LOOKBACK_SESSIONS = 60
 
 # The security master keeps terminated or halted symbols without daily bars, so 100% is unreachable.
 DAILY_COVERAGE_COMPLETE_RATIO = 0.98
@@ -411,21 +447,6 @@ class TaiwanMarketIntelligenceService:
             status="current",
         ), as_of
 
-    def _with_reference_prices(self, joined: pl.DataFrame, prev_d: date | None, target: date) -> pl.DataFrame:
-        """A corporate-action session is compared with the exchange reference price and its published limits."""
-        events = reference_prices(read_events_or_empty(self.corporate_actions, end=target), prev_d, target)
-        if events.is_empty():
-            return joined
-        return (
-            joined.join(
-                events.rename({"ref_price": "_ref_price", "limit_up": "_ref_limit_up", "limit_down": "_ref_limit_down"}),
-                on="symbol",
-                how="left",
-            )
-            .with_columns(pl.coalesce(pl.col("_ref_price"), pl.col("prev_close")).alias("prev_close"))
-            .drop("_ref_price")
-        )
-
     def _index_snapshot(self, bench: BenchmarkIndex, label: str, target: date) -> IndexSnapshot:
         """Latest stored close up to *target*, compared with the index's own previous stored close."""
         empty = IndexSnapshot(symbol=label, name=bench.name)
@@ -604,7 +625,6 @@ class TaiwanMarketIntelligenceService:
 
         # 2. Load DailyStore current date and previous date (NO look-ahead)
         curr_daily = self.daily_store.read_range(supported_symbols, target, target)
-        prev_daily = self.daily_store.read_range(supported_symbols, prev_d, prev_d) if prev_d else pl.DataFrame()
 
         daily_available = self.daily_store.available_dates()
         daily_as_of = max((d for d in daily_available if d <= target), default=None)
@@ -637,16 +657,15 @@ class TaiwanMarketIntelligenceService:
 
         # 3. Compute price limits and comparisons
         if not curr_daily.is_empty():
-            # Join previous close
-            if not prev_daily.is_empty():
-                prev_sub = prev_daily.select([
-                    pl.col("symbol"),
-                    pl.col("close").alias("prev_close"),
-                ])
-                joined = curr_daily.join(prev_sub, on="symbol", how="left")
-            else:
-                joined = curr_daily.with_columns(pl.lit(None).cast(pl.Float64).alias("prev_close"))
-            joined = self._with_reference_prices(joined, prev_d, target)
+            events = read_events_or_empty(self.corporate_actions, end=target)
+            trend_window = sorted(d for d in daily_available if d <= target)[-TREND_LOOKBACK_SESSIONS:]
+            # One read serves the trend and the one-day bases; the base window never starts later.
+            history_start = one_day_base_start(daily_available, target) or (trend_window[0] if trend_window else target)
+            history = self.daily_store.read_range(supported_symbols, history_start, target)
+            bases = one_day_bases(history, curr_daily, target, events).rename(
+                {REF_LIMIT_UP: "_ref_limit_up", REF_LIMIT_DOWN: "_ref_limit_down"}
+            )
+            joined = curr_daily.join(bases, on="symbol", how="left")
 
             # Join metadata
             meta_sub = universe_df.select(["symbol", "exchange", "instrument_type"])
@@ -720,13 +739,11 @@ class TaiwanMarketIntelligenceService:
 
             change_distribution = self._calc_change_distribution(joined)
 
-            # Second daily read: MA / extreme windows need history the target-date snapshot lacks.
-            trend_window = sorted(d for d in daily_available if d <= target)[-TREND_LOOKBACK_SESSIONS:]
             if trend_window:
                 trend = self._calc_trend(
                     forward_adjusted(
-                        self.daily_store.read_range(supported_symbols, trend_window[0], target),
-                        read_events_or_empty(self.corporate_actions, end=target),
+                        history if history.is_empty() else history.filter(pl.col("date") >= trend_window[0]),
+                        events,
                         target,
                     ),
                     target,

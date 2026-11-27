@@ -14,7 +14,7 @@ CORE RULES:
       (the last 5 traded sessions within the previous 20; halted rows with null OHLC or no volume are skipped)
     * TURNOVER_SPIKE: target_amount / mean(previous_5_traded_amounts) >= 2.0 (same traded-session baseline)
     * PRICE_MOVE: abs(change_pct) / abs(leverage_multiplier) >= 0.05
-      (previous_close is the latest traded session's close when the previous session was halted)
+      (previous_close is the enriched publish's base: the official one after an untraded session, null when unknown)
     * FOREIGN_FLOW_SPIKE: abs(foreign_net) >= 100,000 shares AND abs(foreign_net) / mean(abs(previous_20_foreign_net)) >= 3.0
       (a published session without a row for the symbol counts as 0, its halted sessions are skipped;
       needs 15 such sessions since listing, and that mean itself >= 10,000 shares)
@@ -73,7 +73,6 @@ from app.taiwan.corporate_actions import (
     TaiwanCorporateActionStore,
     forward_adjusted,
     read_events_or_empty,
-    reference_prices,
 )
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import DatasetFreshnessStatus, resolve_target_latest_trading_date
@@ -85,6 +84,8 @@ from app.taiwan.market_intelligence import (
     daily_coverage_complete,
     delisted_after,
     listed_by,
+    one_day_base_start,
+    one_day_bases,
     stored_partition_status,
 )
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
@@ -318,7 +319,13 @@ class TaiwanAbnormalDiagnosticsService:
         # 3. Batch Read: DailyStore
         df_target_daily = self.daily_store.read_range(stock_symbols, target, target)
         prev_date = prior_5_dates[-1] if prior_5_dates else None
-        df_prev_daily = self.daily_store.read_range(stock_symbols, prev_date, prev_date) if prev_date else pl.DataFrame()
+        df_earlier_daily = (
+            self.daily_store.read_range(
+                stock_symbols, one_day_base_start(self.daily_store.available_dates(), target), prev_date
+            )
+            if prev_date
+            else pl.DataFrame()
+        )
 
         # 20-session history: the traded-session volume baseline and the 5D return base
         df_p20_daily = self.daily_store.read_range(stock_symbols, prior_20_dates[0], prior_20_dates[-1]) if prior_20_dates else pl.DataFrame()
@@ -368,10 +375,6 @@ class TaiwanAbnormalDiagnosticsService:
             pl.col("amount").mean().alias("mean_amt_5d"),
             pl.col("amount").count().alias("count_amt_5d"),
         ]) if not df_p5_traded.is_empty() else pl.DataFrame()
-        last_traded_close_map = {
-            r["symbol"]: float(r["close"])
-            for r in df_p20_traded.group_by("symbol", maintain_order=True).tail(1).iter_rows(named=True)
-        } if not df_p20_traded.is_empty() and "close" in df_p20_traded.columns else {}
 
         # T86 and TPEx list only securities the institutions traded, so a published session
         # without a row for the symbol is a zero-flow day rather than a missing one.
@@ -415,11 +418,9 @@ class TaiwanAbnormalDiagnosticsService:
 
         # Construct lookup maps for fast row generation
         target_daily_map = {r["symbol"]: r for r in df_target_daily.iter_rows(named=True)} if not df_target_daily.is_empty() else {}
-        prev_daily_map = {r["symbol"]: r for r in df_prev_daily.iter_rows(named=True)} if not df_prev_daily.is_empty() else {}
-        # A corporate-action session moves from the exchange reference price, not the previous close.
-        ref_price_map = {
-            r["symbol"]: r["ref_price"]
-            for r in reference_prices(events, prev_date, target).iter_rows(named=True)
+        prev_close_map = {
+            r["symbol"]: r["prev_close"]
+            for r in one_day_bases(df_earlier_daily, df_target_daily, target, events).iter_rows(named=True)
         }
         p5_vol_map = {r["symbol"]: r for r in p5_vol_stats.iter_rows(named=True)} if not p5_vol_stats.is_empty() else {}
         target_inst_map = {r["symbol"]: r for r in df_target_inst.iter_rows(named=True)} if not df_target_inst.is_empty() else {}
@@ -448,7 +449,6 @@ class TaiwanAbnormalDiagnosticsService:
             if not t_daily:
                 continue  # untraded / missing in daily snapshot
 
-            p_daily = prev_daily_map.get(sym)
             t_inst = target_inst_map.get(sym)
             t_margin = target_margin_map.get(sym)
             v_stat = p5_vol_map.get(sym)
@@ -456,11 +456,7 @@ class TaiwanAbnormalDiagnosticsService:
             m_stat = p20_margin_map.get(sym)
 
             close_p = float(t_daily["close"]) if t_daily["close"] is not None else None
-            prev_close_p = float(p_daily["close"]) if (p_daily and p_daily["close"] is not None) else None
-            if prev_close_p is None:
-                prev_close_p = last_traded_close_map.get(sym)
-            if sym in ref_price_map:
-                prev_close_p = float(ref_price_map[sym])
+            prev_close_p = prev_close_map.get(sym)
             vol = float(t_daily["volume"]) if t_daily["volume"] is not None else None
             amt = float(t_daily["amount"]) if t_daily["amount"] is not None else None
 

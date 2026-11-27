@@ -11,7 +11,9 @@ from unittest.mock import MagicMock
 import polars as pl
 import pytest
 
+from app.taiwan import enriched_refresh
 from app.taiwan.industry_intelligence import IndustryMetrics, TaiwanIndustryIntelligenceService
+from app.taiwan.market_rules import ListingSessions
 
 TARGET = date(2026, 8, 28)
 
@@ -77,7 +79,7 @@ def test_member_returns_stay_out_of_the_api_payload(industry):
     assert "_return_5d_by_symbol" not in industry.model_dump_json()
 
 
-def test_industry_breadth_uses_the_market_traded_basis():
+def test_industry_breadth_uses_the_market_traded_basis(monkeypatch):
     """Advance/decline/flat count traded rows only, as the market totals do, so industries add up."""
     dates = [TARGET - timedelta(days=i) for i in range(30, -1, -1)]
     prev = dates[-2]
@@ -91,18 +93,28 @@ def test_industry_breadth_uses_the_market_traded_basis():
     }
     daily = MagicMock()
     daily.available_dates.return_value = dates
+    calendar = ListingSessions(tuple(dates), {symbol: dates[0] for symbol in rows})
+    monkeypatch.setattr(enriched_refresh, "listing_sessions", lambda _store=None: calendar)
 
     def read_range(_symbols, start, _end):
         if start == TARGET:
             return pl.DataFrame({
                 "symbol": list(rows),
+                "open": [v[0] for v in rows.values()],
+                "high": [v[0] for v in rows.values()],
+                "low": [v[0] for v in rows.values()],
                 "close": [v[0] for v in rows.values()],
                 "amount": [1.0] * len(rows),
                 "volume": [v[1] for v in rows.values()],
-            }, schema_overrides={"close": pl.Float64})
-        if start == prev:
-            picked = {s: v for s, v in rows.items() if v[2] is not None}
-            return pl.DataFrame({"symbol": list(picked), "close": [v[2] for v in picked.values()]})
+            }, schema_overrides={c: pl.Float64 for c in ("open", "high", "low", "close")})
+        if _end == prev:
+            picked = {s: v[2] for s, v in rows.items() if v[2] is not None}
+            closes = list(picked.values())
+            return pl.DataFrame({
+                "symbol": list(picked), "date": [prev] * len(picked),
+                "open": closes, "high": closes, "low": closes, "close": closes,
+                "volume": [10.0] * len(picked), "amount": [1.0] * len(picked),
+            })
         return pl.DataFrame()
 
     daily.read_range.side_effect = read_range
