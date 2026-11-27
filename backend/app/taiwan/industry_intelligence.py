@@ -28,7 +28,6 @@ from app.taiwan.corporate_actions import (
     TaiwanCorporateActionStore,
     factors_between,
     read_events_or_empty,
-    reference_prices,
 )
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.daily_update import (
@@ -41,6 +40,8 @@ from app.taiwan.market_intelligence import (
     daily_coverage_complete,
     delisted_after,
     listed_by,
+    one_day_base_start,
+    one_day_bases,
     stored_partition_status,
     traded_expr,
 )
@@ -250,7 +251,8 @@ class TaiwanIndustryIntelligenceService:
 
         # 2. Batch Read Daily Store Data (NO look-ahead)
         curr_daily = self.daily_store.read_range(symbols, target, target)
-        prev_daily = self.daily_store.read_range(symbols, d_prev, d_prev) if d_prev else pl.DataFrame()
+        base_start = one_day_base_start(self.daily_store.available_dates(), target)
+        earlier_daily = self.daily_store.read_range(symbols, base_start, d_prev) if d_prev else pl.DataFrame()
         hist_5d = self.daily_store.read_range(symbols, d_5d, d_5d) if d_5d else pl.DataFrame()
         hist_20d = self.daily_store.read_range(symbols, d_20d, d_20d) if d_20d else pl.DataFrame()
 
@@ -318,21 +320,9 @@ class TaiwanIndustryIntelligenceService:
                 pl.lit(0.0).alias("volume"),
             ])
 
-        # Join Previous Close
-        if not prev_daily.is_empty():
-            prev_sub = prev_daily.select(["symbol", pl.col("close").alias("close_prev")])
-            base = base.join(prev_sub, on="symbol", how="left")
-        else:
-            base = base.with_columns(pl.lit(None).cast(pl.Float64).alias("close_prev"))
-        # A corporate-action session's one-day return is measured from the exchange reference price.
         events = read_events_or_empty(self.corporate_actions, end=target)
-        ref = reference_prices(events, d_prev, target)
-        if not ref.is_empty():
-            base = (
-                base.join(ref.select(["symbol", pl.col("ref_price").alias("_ref_price")]), on="symbol", how="left")
-                .with_columns(pl.coalesce(pl.col("_ref_price"), pl.col("close_prev")).alias("close_prev"))
-                .drop("_ref_price")
-            )
+        bases = one_day_bases(earlier_daily, curr_daily, target, events)
+        base = base.join(bases.select("symbol", pl.col("prev_close").alias("close_prev")), on="symbol", how="left")
 
         # Join 5D Lookback Close
         if not hist_5d.is_empty():

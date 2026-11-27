@@ -158,6 +158,7 @@ def test_turnover_share_calculation():
     mock_daily.available_dates.return_value = [date(2026, 8, 27), d]
     mock_daily.read_range.return_value = pl.DataFrame({
         "symbol": ["A.TWSE", "B.TWSE"],
+        "date": [d, d],
         "close": [10.0, 30.0],
         "amount": [100.0, 300.0],
         "volume": [10.0, 10.0],

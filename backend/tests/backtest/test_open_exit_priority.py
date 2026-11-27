@@ -1,7 +1,7 @@
 """An exit due at the session open fills before the session's intraday stop or take-profit.
 
-A prior-day exit signal, a reached max-hold and a pending exit all fill at the open; a gap
-through a risk line fills at the same open and keeps the risk reason.
+A prior-day exit signal, a reached max-hold, a pending exit and the end-of-data exit all fill
+at the open; a gap through a risk line fills at the same open and keeps the risk reason.
 """
 from __future__ import annotations
 
@@ -128,5 +128,46 @@ def test_close_fill_exit_signal_still_follows_an_intraday_stop(method):
     panel = _panel([FLAT, FLAT, FLAT, (9.6, 9.7, 8.5, 8.8), FLAT])
 
     trade = _trade(method, panel, {3}, matching="close_t", stop_loss_pct=0.10)
+
+    assert (trade.exit_date, trade.exit_price, trade.exit_reason) == ("2024-01-04", 9.0, "stop_loss")
+
+
+@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize(
+    ("last_bar", "risk"),
+    [
+        pytest.param((10.5, 11.5, 10.4, 11.2), {"take_profit_pct": 0.10}, id="take-profit-touched"),
+        pytest.param((9.5, 9.6, 8.6, 8.9), {"stop_loss_pct": 0.10}, id="stop-loss-touched"),
+    ],
+)
+def test_end_of_data_exit_fills_at_the_open_before_an_intraday_risk_line(method, last_bar, risk):
+    panel = _panel([FLAT, FLAT, FLAT, last_bar])
+
+    trade = _trade(method, panel, set(), **risk)
+
+    assert (trade.exit_date, trade.exit_price, trade.exit_reason) == ("2024-01-04", last_bar[0], "end")
+
+
+@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize(
+    ("last_bar", "risk", "reason"),
+    [
+        pytest.param((8.8, 9.0, 8.5, 8.7), {"stop_loss_pct": 0.10}, "stop_loss", id="gap-below-stop"),
+        pytest.param((11.2, 11.5, 11.1, 11.3), {"take_profit_pct": 0.10}, "take_profit", id="gap-above-take-profit"),
+    ],
+)
+def test_gap_through_a_risk_line_on_the_last_bar_keeps_the_risk_reason(method, last_bar, risk, reason):
+    panel = _panel([FLAT, FLAT, FLAT, last_bar])
+
+    trade = _trade(method, panel, set(), **risk)
+
+    assert (trade.exit_date, trade.exit_price, trade.exit_reason) == ("2024-01-04", last_bar[0], reason)
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_close_fill_end_of_data_exit_still_follows_an_intraday_stop(method):
+    panel = _panel([FLAT, FLAT, FLAT, (9.6, 9.7, 8.5, 8.8)])
+
+    trade = _trade(method, panel, set(), matching="close_t", stop_loss_pct=0.10)
 
     assert (trade.exit_date, trade.exit_price, trade.exit_reason) == ("2024-01-04", 9.0, "stop_loss")

@@ -32,10 +32,11 @@ from pydantic import BaseModel, Field
 import polars as pl
 
 from app.taiwan.corporate_actions import (
+    REF_LIMIT_DOWN,
+    REF_LIMIT_UP,
     TaiwanCorporateActionStore,
     forward_adjusted,
     read_events_or_empty,
-    reference_prices,
 )
 from app.taiwan.daily_store import TaiwanDailyStore
 from app.taiwan.detail_service import _has_exchange
@@ -51,6 +52,8 @@ from app.taiwan.institutional_store import TaiwanInstitutionalStore
 from app.taiwan.margin_store import TaiwanMarginStore
 from app.taiwan.market_intelligence import (
     TaiwanMarketIntelligenceService,
+    one_day_base_start,
+    one_day_bases,
 )
 from app.taiwan.market_rules import TickSizeModel
 from app.taiwan.realtime.calendar import TaiwanTradingCalendar, taipei_now
@@ -403,13 +406,21 @@ class TaiwanStockResearchContextService:
         window_dates = available_dates[-65:] if len(available_dates) >= 65 else available_dates
         hist_df = self.daily_store.read_range([canonical], window_dates[0] if window_dates else target, target) if window_dates else pl.DataFrame()
         events = read_events_or_empty(self.corporate_actions, end=price_date, symbols=[canonical])
+        base_start = one_day_base_start(available_dates, price_date)
+        base_row = None
+        if base_start is not None and not hist_df.is_empty():
+            bases = one_day_bases(
+                hist_df.filter(pl.col("date") >= base_start),
+                hist_df.filter(pl.col("date") == price_date),
+                price_date,
+                events,
+            )
+            base_row = bases.row(0, named=True) if not bases.is_empty() else None
         # Multi-day returns and extremes compare the priced session with earlier ones on its scale.
         hist_df = forward_adjusted(hist_df, events, price_date)
 
         # Price Context & Technical Metrics
         curr_row = hist_df.filter(pl.col("date") == price_date).tail(1) if not hist_df.is_empty() else pl.DataFrame()
-        prev_date = available_dates[-2] if len(available_dates) >= 2 else None
-        prev_row = hist_df.filter(pl.col("date") == prev_date).tail(1) if (prev_date and not hist_df.is_empty()) else pl.DataFrame()
 
         c_price = float(curr_row["close"][0]) if not curr_row.is_empty() and curr_row["close"][0] is not None else None
         o_price = float(curr_row["open"][0]) if not curr_row.is_empty() and curr_row["open"][0] is not None else None
@@ -417,14 +428,7 @@ class TaiwanStockResearchContextService:
         l_price = float(curr_row["low"][0]) if not curr_row.is_empty() and curr_row["low"][0] is not None else None
         vol = float(curr_row["volume"][0]) if not curr_row.is_empty() and curr_row["volume"][0] is not None else None
         amt = float(curr_row["amount"][0]) if not curr_row.is_empty() and curr_row["amount"][0] is not None else None
-        p_close = float(prev_row["close"][0]) if not prev_row.is_empty() and prev_row["close"][0] is not None else None
-        # A corporate-action session moves from the exchange reference price and has published limits.
-        ref_row = None
-        if daily_as_of is not None:
-            ref = reference_prices(events, prev_date, price_date)
-            ref_row = ref.row(0, named=True) if not ref.is_empty() else None
-        if ref_row is not None:
-            p_close = float(ref_row["ref_price"])
+        p_close = base_row["prev_close"] if base_row is not None else None
 
         chg = round(c_price - p_close, 4) if (c_price is not None and p_close is not None) else None
         chg_pct = round((c_price / p_close) - 1.0, 6) if (c_price is not None and p_close is not None and p_close > 0) else None
@@ -766,8 +770,8 @@ class TaiwanStockResearchContextService:
         if p_close is not None and p_close > 0:
             if not is_no_lim and limit_pct is not None:
                 upper_l, lower_l = MarketProfileBridge.calc_limits(p_close, inst, price_date)
-                if ref_row is not None and ref_row["limit_up"] is not None and ref_row["limit_down"] is not None:
-                    upper_l, lower_l = ref_row["limit_up"], ref_row["limit_down"]
+                if base_row is not None and base_row[REF_LIMIT_UP] is not None and base_row[REF_LIMIT_DOWN] is not None:
+                    upper_l, lower_l = base_row[REF_LIMIT_UP], base_row[REF_LIMIT_DOWN]
             tick_sz = TickSizeModel.get_tick_size(p_close, MarketProfileBridge.get_tick_size_class(inst))
 
         market_rules_evidence = MarketRulesContextEvidence(

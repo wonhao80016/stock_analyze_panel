@@ -5,7 +5,9 @@ events: the stored history before today plus today's live bar, run through
 compute_taiwan_enriched. Like the published newest row it is on today's traded price scale, so a
 corporate action on today needs no conversion. The exchange lists today's corporate actions only
 after the session, so until then a quoted previous close that differs from the stored close
-stands in for the event's reference price, provided the store holds the previous session. Only
+stands in for the event's reference price, provided the store holds the previous session. A
+session the calendar expects but the store lacks is an unscheduled closure, not a store behind,
+when most quoted previous closes are the stored closes of the session before it. Only
 a stand-in presumed_kind takes for a par-value change gets the publish's official_ratio; any other
 uses pre_close / reference and can differ from the published row by the tick rounding of the
 reference price.
@@ -54,6 +56,8 @@ PREPARE_RETRY_SECONDS = 60.0
 SAME_PRICE_TOLERANCE = 0.005
 # Sessions whose exchanges are recorded, enough to find the previous session after a holiday.
 RECENT_SESSIONS = 5
+# Fewest quoted symbols that can show the market has not traded since the newest stored session.
+MIN_CLOSURE_QUOTES = 20
 
 BAR_SCHEMA: dict[str, pl.DataType] = {
     "symbol": pl.Utf8,
@@ -81,6 +85,8 @@ class _History:
     events: pl.DataFrame
     instruments: pl.DataFrame
     exchanges: dict[date, frozenset[str]]
+    # Regular closes of the newest stored session: symbol and close.
+    newest_closes: pl.DataFrame
     # Stored official bases of the session after the newest stored one: symbol and BASE_COLUMNS.
     bases: pl.DataFrame
     # official_bases_of the stored sessions with_official_bases looks up, read once per history.
@@ -149,13 +155,47 @@ def _previous_session(today: date) -> date | None:
     return None
 
 
-def _current_exchanges(history: _History, today: date) -> frozenset[str]:
-    """Exchanges the store holds rows of for the session before *today*; none when it lacks it."""
+def _traded(frame: pl.DataFrame) -> pl.DataFrame:
+    """The rows of *frame* with a regular close."""
+    return frame.filter(
+        pl.col("close").is_not_null()
+        & ~((pl.col("open") == 0) & (pl.col("high") == 0)).fill_null(False)
+    )
+
+
+def _untraded_since(history: _History, live: pl.DataFrame, session: date) -> bool:
+    """Whether the quoted previous closes of *live* show no session after the stored *session*.
+
+    After a traded session at most about one symbol in seven closes unchanged, so more than half
+    of MIN_CLOSURE_QUOTES or more quoting the stored close means the market has not traded since.
+    """
+    if history.trading_days[-1:] != (session,):
+        return False
+    quoted = (
+        live.select("symbol", "prev_close")
+        .join(history.newest_closes, on="symbol")
+        .filter(pl.col("prev_close") > 0)
+    )
+    if quoted.height < MIN_CLOSURE_QUOTES:
+        return False
+    same = ((quoted["prev_close"] - quoted["close"]).abs() < SAME_PRICE_TOLERANCE).sum()
+    return 2 * same > quoted.height
+
+
+def _current_exchanges(history: _History, live: pl.DataFrame, today: date) -> frozenset[str]:
+    """Exchanges the store holds rows of for the session before *today*; none when it lacks it.
+
+    A session the calendar expects after the newest stored one is passed over when the quotes of
+    *live* show it untraded, as an unscheduled closure the holiday schedule does not list.
+    """
     previous = _previous_session(today)
     stored = [d for d in history.trading_days if d < today]
-    if previous is None or not stored or stored[-1] != previous:
+    if previous is None or not stored:
         return frozenset()
-    return history.exchanges.get(previous, frozenset())
+    newest = stored[-1]
+    if newest != previous and not (newest < previous and _untraded_since(history, live, newest)):
+        return frozenset()
+    return history.exchanges.get(newest, frozenset())
 
 
 def _quoted_events(
@@ -189,11 +229,7 @@ def _quoted_events(
             continue
         if _exchange(symbol) not in exchanges:
             continue
-        traded = stored.filter(
-            (pl.col("date") < today)
-            & pl.col("close").is_not_null()
-            & ~((pl.col("open") == 0) & (pl.col("high") == 0)).fill_null(False)
-        )
+        traded = _traded(stored.filter(pl.col("date") < today))
         if traded.is_empty():
             continue
         last_session, last_close = traded["date"][-1], traded["close"][-1]
@@ -382,6 +418,7 @@ class TaiwanLiveEnriched:
         trading_days: tuple[date, ...] = ()
         first_sessions: dict[str, date] = {}
         exchanges: dict[date, frozenset[str]] = {}
+        newest_closes = pl.DataFrame(schema={"symbol": pl.Utf8, "close": pl.Float64})
         session_bases = TaiwanSessionBaseStore(self._taiwan_dir / "session_bases")
         past_bases = official_bases_of(
             pl.DataFrame(schema={"symbol": pl.String, "trade_date": pl.Date}), store=session_bases
@@ -401,6 +438,9 @@ class TaiwanLiveEnriched:
                 recent = raw.filter(pl.col("date") >= trading_days[-RECENT_SESSIONS:][0])
                 for (day,), frame in recent.partition_by("date", as_dict=True).items():
                     exchanges[day] = frozenset(_exchange(s) for s in frame["symbol"].unique())
+                newest_closes = _traded(recent.filter(pl.col("date") == trading_days[-1])).select(
+                    "symbol", "close"
+                )
                 past_bases = _gap_session_bases(raw, trading_days, session_bases)
                 turnover = with_session_turnover(
                     filter_halt_days(raw).select(
@@ -426,6 +466,7 @@ class TaiwanLiveEnriched:
             events,
             instruments,
             exchanges,
+            newest_closes,
             bases,
             past_bases,
             turnover,
@@ -449,11 +490,23 @@ class TaiwanLiveEnriched:
 
         from app.indicators.pipeline import _get_custom_signal_exprs
 
+        today = bars["date"].max()
+        exchanges = _current_exchanges(history, bars, today)
+        missing = {_exchange(s) for s in bars["symbol"].to_list()} - exchanges
+        if missing and self._behind_logged != today:
+            self._behind_logged = today
+            logger.warning(
+                "taiwan daily store is behind the session before %s for %s; quoted reference "
+                "prices and official bases are not applied, so live rows of a corporate-action "
+                "day or after an untraded session keep the last stored close as their base",
+                today,
+                ", ".join(sorted(missing)),
+            )
         signals = id(_get_custom_signal_exprs())
         cached: list[pl.DataFrame] = []
         changed: dict[str, tuple] = {}
         for bar in bars.iter_rows():
-            cache_key = (history.key, signals, bar, _volume_time_factor(bar[QUOTE_TS_AT]))
+            cache_key = (history.key, signals, bar, _volume_time_factor(bar[QUOTE_TS_AT]), exchanges)
             with self._lock:
                 hit = self._rows.get(bar[0])
             if hit is not None and hit[0] == cache_key:
@@ -462,7 +515,9 @@ class TaiwanLiveEnriched:
                 changed[bar[0]] = cache_key
 
         if changed:
-            computed = self._compute(history, bars.filter(pl.col("symbol").is_in(list(changed))))
+            computed = self._compute(
+                history, bars.filter(pl.col("symbol").is_in(list(changed))), exchanges
+            )
             with self._lock:
                 for symbol, cache_key in changed.items():
                     self._rows[symbol] = (cache_key, computed.filter(pl.col("symbol") == symbol))
@@ -470,7 +525,9 @@ class TaiwanLiveEnriched:
         frames = [frame for frame in cached if not frame.is_empty()]
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
-    def _compute(self, history: _History, live: pl.DataFrame) -> pl.DataFrame:
+    def _compute(
+        self, history: _History, live: pl.DataFrame, exchanges: frozenset[str]
+    ) -> pl.DataFrame:
         from app.indicators.pipeline import add_limit_distance_columns
 
         today = live["date"].max()
@@ -492,17 +549,6 @@ class TaiwanLiveEnriched:
             first_sessions[symbol] = min(first_sessions.get(symbol, today), today)
         limits = limit_profile(symbols, ListingSessions(calendar, first_sessions))
         events = history.events.filter(pl.col("symbol").is_in(symbols))
-        exchanges = _current_exchanges(history, today)
-        missing = {_exchange(s) for s in symbols} - exchanges
-        if missing and self._behind_logged != today:
-            self._behind_logged = today
-            logger.warning(
-                "taiwan daily store is behind the session before %s for %s; quoted reference "
-                "prices and official bases are not applied, so live rows of a corporate-action "
-                "day or after an untraded session keep the last stored close as their base",
-                today,
-                ", ".join(sorted(missing)),
-            )
         quoted = _quoted_events(history, live, events, today, exchanges)
         events = pl.concat([events, quoted], how="vertical_relaxed")
         enriched = compute_taiwan_enriched(

@@ -134,8 +134,13 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     if req.provider == "codex_cli":
         try:
             codex_model = validate_codex_model(normalize_codex_model(req.model))
+            codex_command = normalize_codex_command(req.codex_command)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if req.max_output_tokens is not None and req.max_output_tokens <= 0:
+        raise HTTPException(status_code=400, detail="输出上限必须为正整数")
+    if req.context_window is not None and req.context_window <= 0:
+        raise HTTPException(status_code=400, detail="上下文窗口必须为正整数")
 
     updates: dict = {}
     if req.provider:
@@ -143,10 +148,6 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         settings.ai_provider = req.provider
     if req.provider == "codex_cli":
         updates["ai_codex_model"] = codex_model
-        try:
-            codex_command = normalize_codex_command(req.codex_command)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         codex_reasoning_effort = normalize_codex_reasoning_effort(req.codex_reasoning_effort)
         updates["ai_codex_command"] = codex_command
         updates["ai_codex_reasoning_effort"] = codex_reasoning_effort
@@ -174,13 +175,9 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
 
     # 输出上限 / 输入上下文窗口 (数值配置, 缺省保持原值)
     if req.max_output_tokens is not None:
-        if req.max_output_tokens <= 0:
-            raise HTTPException(status_code=400, detail="输出上限必须为正整数")
         updates["ai_max_output_tokens"] = req.max_output_tokens
         settings.ai_max_output_tokens = req.max_output_tokens
     if req.context_window is not None:
-        if req.context_window <= 0:
-            raise HTTPException(status_code=400, detail="上下文窗口必须为正整数")
         updates["ai_context_window"] = req.context_window
         settings.ai_context_window = req.context_window
 

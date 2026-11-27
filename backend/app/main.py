@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
+import time
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -52,6 +55,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+class _AppendOnRotateFailureHandler(RotatingFileHandler):
+    """Size-rotating file handler that keeps appending to the live file when rotation fails.
+
+    Windows refuses to rename a file another process holds open, and uvicorn --reload
+    imports this module in both the reloader and the worker, so each blocks the other.
+    """
+
+    rollover_retry_seconds = 60.0
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._rollover_retry_at = 0.0
+        self._rollover_failing = False
+
+    def shouldRollover(self, record):  # noqa: N802
+        if time.monotonic() < self._rollover_retry_at:
+            return False
+        return super().shouldRollover(record)
+
+    def doRollover(self):  # noqa: N802
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        # The live file is staged first so a refused rename leaves the backups untouched.
+        staged = f"{self.baseFilename}.rotating"
+        try:
+            if not os.path.exists(staged):
+                os.replace(self.baseFilename, staged)
+            for index in range(self.backupCount - 1, 0, -1):
+                source = f"{self.baseFilename}.{index}"
+                if os.path.exists(source):
+                    os.replace(source, f"{self.baseFilename}.{index + 1}")
+            os.replace(staged, f"{self.baseFilename}.1")
+        except OSError as exc:
+            self._rollover_retry_at = time.monotonic() + self.rollover_retry_seconds
+            if not self._rollover_failing:
+                self._rollover_failing = True
+                print(
+                    f"log rotation of {self.baseFilename} failed, still appending to it: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        else:
+            self._rollover_failing = False
+
+
 # 追加文件日志: uvicorn (含 --reload 开发模式) 默认只有 StreamHandler, 同步/管道等
 # 运行时日志仅出现在 dev 终端, 关掉或滚屏后即丢失, 排查「同步后日志没落」时无处可查。
 # 落盘到 data/backend.log 与桌面版 (desktop.py:_setup_logging → desktop.log) 行为对齐,
@@ -59,11 +109,9 @@ logger = logging.getLogger(__name__)
 # RotatingFileHandler 防止长期运行/频繁 reload 导致文件无限增长。
 if not getattr(sys, "frozen", False):
     try:
-        from logging.handlers import RotatingFileHandler
-
         _log_path = settings.data_dir / "backend.log"
         _log_path.parent.mkdir(parents=True, exist_ok=True)
-        _file_handler = RotatingFileHandler(
+        _file_handler = _AppendOnRotateFailureHandler(
             _log_path, maxBytes=10 * 1024 * 1024, backupCount=3,
             mode="a", encoding="utf-8", errors="replace",
         )
