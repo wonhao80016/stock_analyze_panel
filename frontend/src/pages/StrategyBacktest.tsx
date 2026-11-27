@@ -591,7 +591,7 @@ export function StrategyBacktest() {
 
             <label className="block text-[11px] text-secondary">
               無風險利率（年）
-              <input aria-label="無風險利率（年）" type="number" min={RISK_FREE_RATE_MIN} max={RISK_FREE_RATE_MAX} step="0.005" value={riskFreeRate} onChange={event => setRiskFreeRate(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} />
+              <input aria-label="無風險利率（年）" type="number" min={RISK_FREE_RATE_MIN} max={RISK_FREE_RATE_MAX} step="0.0001" value={riskFreeRate} onChange={event => setRiskFreeRate(Number(event.target.value))} disabled={isBusy} className={`${inputClass} mt-1 font-mono`} />
               <span className="mt-1 block text-[10px] text-muted">以小數輸入，例如 0.015 代表 1.5%；用於 Sharpe 與 Sortino。</span>
             </label>
 
