@@ -148,7 +148,7 @@ def test_trigger_fill_is_rounded_to_the_tick_in_the_trigger_direction(
     tmp_path, method, fill, symbol, instrument_type, entry, risk, hold_bar, trigger_bar, expected, reason,
 ) -> None:
     config = _config(tmp_path, symbol, instrument_type, fill, **risk)
-    panel = _panel(symbol, [_flat(entry), hold_bar, trigger_bar])
+    panel = _panel(symbol, [_flat(entry), hold_bar, trigger_bar, _flat(trigger_bar[3])])
 
     trade = _run(method, config, panel)
 

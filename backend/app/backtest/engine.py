@@ -288,15 +288,16 @@ def _exit_due_at_open(
     time_id: int,
     asset_id: int,
     hold_days: int,
+    last_bar: bool,
 ) -> bool:
-    """Whether a signal or max-hold exit fills at this session's open.
+    """Whether a signal, max-hold or end-of-data exit fills at this session's open.
 
     Such an exit precedes the session's intraday stop and take-profit; a gap through a line
     fills at the same open and keeps the risk reason.
     """
     if config.exit_fill != "open_t+1":
         return False
-    return bool(matrix.exit[time_id, asset_id]) or (
+    return last_bar or bool(matrix.exit[time_id, asset_id]) or (
         config.max_hold_days is not None and hold_days >= config.max_hold_days
     )
 
@@ -1478,7 +1479,9 @@ class BacktestEngine:
                 take_profit * scale if take_profit is not None else None,
             )
 
-        def _risk_exit(pos: dict, time_id: int, asset_id: int) -> tuple[str | None, float | None]:
+        def _risk_exit(
+            pos: dict, time_id: int, asset_id: int, last_bar: bool,
+        ) -> tuple[str | None, float | None]:
             if pos.get("pending_exit_reason") or pos["entry_time"] == time_id:
                 return None, None
             entry_price = float(pos["entry_price"])
@@ -1503,7 +1506,7 @@ class BacktestEngine:
                 if config.take_profit_pct is not None else None
             )
             intraday = not _exit_due_at_open(
-                config, matrix, time_id, asset_id, int(pos["hold_days"]),
+                config, matrix, time_id, asset_id, int(pos["hold_days"]), last_bar,
             ) and not _minute_exit_first(time_id, asset_id, stop_price, take_profit)
             if stop_price is not None:
                 if _valid_price(open_price) and open_price <= stop_price:
@@ -1726,7 +1729,7 @@ class BacktestEngine:
                 future = int(future)
                 pos["hold_days"] += 1
                 date_text = matrix.timestamp_labels[future][:10]
-                reason, override = _risk_exit(pos, future, asset_id)
+                reason, override = _risk_exit(pos, future, asset_id, future == last_time)
                 if reason and _try_close(pos, future, asset_id, reason, date_text, override):
                     closed = True
                     break
@@ -2340,6 +2343,7 @@ class BacktestEngine:
                         pass
 
             sold_today: set[int] = set()
+            last_bar = time_id == time_count - 1
             late_release.update(slots=0, cash=0.0, value=0.0)
             minute_bars.release()
             minute_bars.load(time_id, positions)
@@ -2374,7 +2378,7 @@ class BacktestEngine:
                     if config.take_profit_pct is not None else None
                 )
                 intraday = not _exit_due_at_open(
-                    config, matrix, time_id, asset_id, int(pos["hold_days"]),
+                    config, matrix, time_id, asset_id, int(pos["hold_days"]), last_bar,
                 ) and not _minute_exit_first(time_id, asset_id, stop_price, take_profit)
                 if stop_price is not None:
                     override = None
@@ -2417,7 +2421,7 @@ class BacktestEngine:
                     signal_date = _signal_date(int(matrix.exit_signal_time[time_id, asset_id]), date_text)
                 elif config.max_hold_days is not None and pos["hold_days"] >= config.max_hold_days:
                     reason = "max_hold"
-                elif time_id == time_count - 1:
+                elif last_bar:
                     reason = "end"
                 if reason:
                     _try_sell(time_id, asset_id, reason, signal_date, sold_today, override)
